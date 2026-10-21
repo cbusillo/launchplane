@@ -61,6 +61,36 @@ credentials or missing attribution. Inspecting a currently clean application
 record is not historical execution proof. Missing historical evidence remains
 unknown and keeps the original key and hold.
 
+An addressed original may be unhealthy, exited or awaiting a replacement task.
+Its current service template must still positively identify an admitted original
+image and deployment, attach to the proxy's actual network, and uniquely own the
+service-name backend. The first positive route admission saves the service ID,
+full canonical TaskTemplate digest and runtime identity before capability or
+candidate effects. Every later old-role read and native forward/inverse dispatch
+rechecks that witness; a recreated service or changed template cannot become the
+original. Task replacement between complete observations is allowed; changing
+inventory during a snapshot remains unknown and uses the same key to retry.
+
+The retained inspector checks prospective immutable TaskSpec environment and
+mounts even when no ContainerID exists, including a rejected task. It also checks
+all extant service-labelled containers for capability and mount hazards, and
+requires actual image evidence for attributed task/container branches. This is
+captured-input capability proof, not proof that execution never started or
+ceased. Node-local container inventory is accepted only after a complete, stable
+manager-side node enumeration positively establishes one local Swarm node, with
+any supplied task NodeID agreeing. Multi-node, unavailable or changing scope
+requires additional inventory evidence and remains unknown; it never treats a
+remote container as removed. Existing Compose paths do not require this Swarm
+scope proof.
+
+The candidate still needs an exact running task/container, actual immutable image,
+private readiness and the selected edge identity before publication. After
+publication, ordinary private monitoring proves the canonical selected file and
+applied route without depending on the superseded original's continued physical
+existence. Unpublished route work and inverse recovery retain the original
+service/template and native writer custody. Monitoring does not release the
+original unknown operation or its hold.
+
 The new application's image, registry settings, mounts, effective runtime
 environment, single Swarm task and private runtime identity are read back.
 

@@ -2,12 +2,9 @@
 
 import base64
 from copy import deepcopy
-import hashlib
 from io import StringIO
 import json
 import os
-from pathlib import Path
-import re
 import subprocess
 import sys
 from typing import Any
@@ -88,13 +85,22 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                 {"Type": "volume", "Source": "retained-state", "Target": "/var/lib/example"}
             ],
         }
-        self.service = {"ID": "retained-service", "Spec": {"Name": "retained-app"}}
+        self.nodes = [{"ID": "retained-node", "Self": True}]
+        self.service = {
+            "ID": "retained-service",
+            "Spec": {
+                "Name": "retained-app",
+                "TaskTemplate": {"ContainerSpec": deepcopy(self.configuration)},
+            },
+        }
         self.task = {
             "ID": "original-task",
             "ServiceID": "retained-service",
+            "NodeID": self.nodes[0]["ID"],
             "Spec": {"ContainerSpec": deepcopy(self.configuration)},
             "Status": {"ContainerStatus": {"ContainerID": "original-container"}},
         }
+        self.tasks = {self.task["ID"]: self.task}
         self.containers = {
             "original-container": {
                 "Id": "original-container",
@@ -121,10 +127,12 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
 
     def docker(self, arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         values = arguments[1:]
-        if values == ["service", "inspect", "retained-app"]:
+        if values[:2] == ["node", "ls"]:
+            result = "\n".join(json.dumps(node) for node in self.nodes)
+        elif values == ["service", "inspect", "retained-app"]:
             result = json.dumps([self.service])
         elif values == ["service", "ps", "--no-trunc", "-q", "retained-app"]:
-            result = "original-task\n"
+            result = "\n".join(self.tasks)
         elif values == [
             "ps",
             "-aq",
@@ -132,18 +140,23 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             "--filter",
             "label=com.docker.swarm.service.name=retained-app",
         ]:
-            result = "original-container\n"
-        elif values == ["image", "inspect", self.containers["original-container"]["Image"]]:
+            result = "\n".join(
+                key
+                for key, container in self.containers.items()
+                if (container["Config"].get("Labels") or {}).get("com.docker.swarm.service.name")
+                == "retained-app"
+            )
+        elif values[:2] == ["image", "inspect"]:
             result = json.dumps(
                 [
                     {
-                        "Id": self.containers["original-container"]["Image"],
+                        "Id": values[2],
                         "RepoDigests": [self.identity["artifact_id"]],
                     }
                 ]
             )
-        elif values == ["inspect", "--type", "task", "original-task"]:
-            result = json.dumps([self.task])
+        elif values[:3] == ["inspect", "--type", "task"]:
+            result = json.dumps([self.tasks[values[3]]])
         elif len(values) == 2 and values[0] == "inspect" and values[1] in self.containers:
             result = json.dumps([self.containers[values[1]]])
         else:
@@ -152,27 +165,13 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
 
     def observe(self) -> str:
         from control_plane.testing_application_capabilities import (
-            RETAINED_APPLICATION_CAPABILITY_PROGRAM,
-        )
-        from control_plane.runtime_platform_credentials import find_platform_credentials
-        from control_plane.contracts.deploy_reference import (
-            docker_image_repository,
-            docker_image_digest,
+            retained_application_capability_program,
         )
 
+        script = retained_application_capability_program(self.spec)
+        delimiter = "LP_RETAINED_CAPABILITY"
+        header = script.split("<<'" + delimiter + "'\n", 1)[1].rsplit("\n" + delimiter, 1)[0]
         output = StringIO()
-        values = {
-            "base64": base64,
-            "hashlib": hashlib,
-            "json": json,
-            "re": re,
-            "subprocess": subprocess,
-            "sys": sys,
-            "Path": Path,
-            "find_platform_credentials": find_platform_credentials,
-            "docker_image_repository": docker_image_repository,
-            "docker_image_digest": docker_image_digest,
-        }
         with (
             patch.object(
                 sys, "argv", ["program", base64.b64encode(json.dumps(self.spec).encode()).decode()]
@@ -180,7 +179,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             patch.object(subprocess, "run", side_effect=self.docker),
             patch("sys.stdout", output),
         ):
-            exec(RETAINED_APPLICATION_CAPABILITY_PROGRAM, values)
+            exec(header, {})
         return output.getvalue()
 
     def test_attributable_named_volume_original_ignores_provider_manager_authority(self) -> None:
@@ -201,6 +200,49 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
     def test_current_clean_task_cannot_substitute_an_unrelated_deployment(self) -> None:
         self.spec["deployments"] = {
             "different-original-deployment": self.spec["deployments"]["original-deployment"]
+        }
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def test_prospective_and_removed_immutable_tasks_keep_capability_custody(self) -> None:
+        original = deepcopy(self.task)
+        self.containers.pop("original-container")
+        for status in (
+            {"State": "preparing", "ContainerStatus": {}},
+            {"State": "rejected", "ContainerStatus": {}},
+            original["Status"],
+        ):
+            with self.subTest(status=status):
+                self.task["Status"] = status
+                self.assertIn("testing_resources_ok=true", self.observe())
+        self.task["Spec"]["ContainerSpec"]["Image"] = self.spec["deployments"][
+            "original-deployment"
+        ]["provider_reference"]
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.task.update(deepcopy(original))
+        self.task["Status"] = {"ContainerStatus": {}}
+        self.task["Spec"]["ContainerSpec"]["Env"].append("DOKPLOY_TOKEN=unsafe")
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def test_complete_local_inventory_and_extant_capability_scan_remain_required(self) -> None:
+        for nodes in (
+            [],
+            [{"ID": "remote", "Self": False}],
+            [*self.nodes, {"ID": "remote", "Self": False}],
+        ):
+            with self.subTest(nodes=nodes):
+                with patch.object(self, "nodes", nodes), self.assertRaises(SystemExit):
+                    self.observe()
+        self.task["NodeID"] = "remote"
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.task["NodeID"] = self.nodes[0]["ID"]
+        self.containers["extra-retained"] = {
+            "Id": "extra-retained",
+            "Config": {"Env": [], "Labels": {"com.docker.swarm.service.name": "retained-app"}},
+            "Mounts": [{"Type": "bind", "Source": "/var/run/docker.sock"}],
         }
         with self.assertRaises(SystemExit):
             self.observe()

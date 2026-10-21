@@ -12,6 +12,7 @@ import yaml
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_activation import (
     TestingActivationRecord,
+    TestingApplicationPredecessor,
     TestingActivationRefusal,
     TestingActivationRefusalCode,
     TestingActivationFailure,
@@ -1156,6 +1157,19 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             self.store, self.root, record.product, record.context
         )
         old_spec.update(name=old_spec["application"], port=specification.runtime_port)
+        predecessor = record.predecessor
+        if predecessor is not None:
+            identity = predecessor.runtime_identity
+            old_spec.update(
+                service_id=predecessor.service_id,
+                task_template_sha256=predecessor.task_template_sha256,
+                deployments={
+                    identity.deployment_record_id: {
+                        "artifact": identity.artifact_id,
+                        "source": identity.source_git_ref,
+                    }
+                },
+            )
         previous_route = None
         previous_key = (
             record.retained_route_binding.source.source_versions.get("testing_activation")
@@ -1217,7 +1231,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             context=record.context,
             public_host=hostname,
             entrypoints=readiness.route.public_entrypoints if readiness and readiness.route else (),
-            old_runtime_identity=readiness.old_runtime_identity if readiness else None,
+            old_runtime_identity=predecessor.runtime_identity if predecessor else None,
             old_application=old_spec,
             new_application={
                 "name": record.app_name,
@@ -1321,15 +1335,34 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         except (ValueError, OSError, RuntimeError):
             return HealthcheckEvidence(status="pending", urls=(address,))
 
-    def preflight_application_route(self, record: TestingActivationRecord) -> None:
-        readiness = record.application_readiness
-        if readiness and readiness.route:
-            return
+    def preflight_application_route(
+        self, record: TestingActivationRecord
+    ) -> TestingApplicationPredecessor | None:
+        from control_plane.testing_application_private_route import application_route_transport
+
+        if record.application_readiness and record.application_readiness.route:
+            if record.predecessor is None:
+                raise ValueError("The captured predecessor service witness is unavailable.")
+            application_route_transport(self.root, record).read()
+            return record.predecessor
         admission = self.route_admission(record)
-        if admission is not None and admission[0].old_runtime_identity is None:
+        if admission is None:
+            return None
+        transport, _ = admission
+        if transport.old_runtime_identity is None:
             raise ApplicationRouteAdmissionContradiction(
                 "The retained runtime identity is unavailable."
             )
+        binding = transport.payload["old_application"]
+        assert isinstance(binding, dict)
+        observed = TestingApplicationPredecessor(
+            runtime_identity=transport.old_runtime_identity,
+            service_id=binding["service_id"],
+            task_template_sha256=binding["task_template_sha256"],
+        )
+        if record.predecessor is not None and record.predecessor != observed:
+            raise ValueError("The original retained service witness changed.")
+        return observed
 
     def switch_application_route(
         self,
@@ -1369,7 +1402,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     "route_execution": transport.execution_intent(
                         route, route.new_backend, operation_id=record.plan_sha256
                     ),
-                    "old_runtime_identity": transport.old_runtime_identity,
+                    "old_runtime_identity": record.predecessor.runtime_identity
+                    if record.predecessor
+                    else None,
                     "predecessor_health": baseline,
                 }
             )
@@ -1566,55 +1601,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         check: Callable[[], None],
     ) -> None:
         """Settle the original forward writer before restoring its captured predecessor."""
-        from urllib.parse import urlsplit
-        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+        from control_plane.testing_application_private_route import application_route_transport
 
         assert isinstance(lease, ProviderEvidenceLease)
         readiness = record.application_readiness
         assert readiness is not None and readiness.route is not None
-        assert record.request.application is not None
-        route, execution, identity = (
-            readiness.route,
-            readiness.route_execution,
-            readiness.old_runtime_identity,
-        )
-        if execution is None or identity is None:
-            raise TestingActivationRefusal(
-                "The original route and runtime custody are unavailable."
-            )
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        old = urlsplit(route.old_backend)
-        transport = DokployTestingRouteTransport(
-            host=host,
-            token=token,
-            server_id=execution.server_id,
-            old_project="",
-            product=record.product,
-            context=record.context,
-            public_host=route.host,
-            entrypoints=route.public_entrypoints,
-            old_runtime_identity=identity,
-            old_application={
-                "name": old.hostname,
-                "port": old.port,
-                "product": record.product,
-                "context": record.context,
-                "deployments": {
-                    identity.deployment_record_id: {
-                        "artifact": identity.artifact_id,
-                        "source": identity.source_git_ref,
-                    }
-                },
-                "route_file_name": route.application_file_name,
-            },
-            new_application={
-                "name": record.app_name,
-                "port": record.request.application.runtime_port,
-                "service_id": readiness.service_id,
-                "task_id": readiness.task_id,
-            },
-        )
-        transport.payload["expected_application_file_sha256"] = route.application_file_sha256
+        transport = application_route_transport(self.root, record)
 
         def checkpoint(phase: str) -> None:
             check()
@@ -2110,7 +2102,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                                         }
                                     ),
                                 )
-                        self.preflight_application_route(record)
+                        predecessor = self.preflight_application_route(record)
+                        if record.predecessor is None and predecessor is not None:
+                            record = self.save(record, predecessor=predecessor)
                         inspect_retained_application_capabilities(
                             store=self.store,
                             root=self.root,

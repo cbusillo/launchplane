@@ -19,6 +19,16 @@ from control_plane.dokploy.testing_route_execution import TestingRouteExecutionI
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 
 
+class TestingApplicationPredecessor(BaseModel):
+    """The original service contract captured before candidate effects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_identity: RuntimeIdentity
+    service_id: str = Field(min_length=1)
+    task_template_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class TestingApplicationReadiness(BaseModel):
     """Evidence attached to the original activation, never a product verdict."""
 
@@ -148,6 +158,9 @@ class TestingActivationRecord(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     application_readiness: TestingApplicationReadiness | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    predecessor: TestingApplicationPredecessor | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     retained_private_ingress: dict[str, str] = Field(

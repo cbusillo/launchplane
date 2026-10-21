@@ -12425,11 +12425,24 @@ class PostgresRecordStore(HumanSessionStore):
                     "generated_configuration_sha256",
                     "state_recipient",
                     "application_readiness",
+                    "predecessor",
                     "published_route_binding",
                     "failure",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
+                if previous.predecessor is not None and previous.predecessor != record.predecessor:
+                    raise ValueError("The captured predecessor service contract is immutable.")
+                if (
+                    record.application_readiness is not None
+                    and record.application_readiness.old_runtime_identity is not None
+                    and (
+                        record.predecessor is None
+                        or record.application_readiness.old_runtime_identity
+                        != record.predecessor.runtime_identity
+                    )
+                ):
+                    raise ValueError("The route must project the captured predecessor identity.")
                 if (
                     previous.generated_configuration_sha256 != record.generated_configuration_sha256
                     and (

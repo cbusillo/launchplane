@@ -28,6 +28,7 @@ from control_plane.dokploy.testing_route_execution import (
     TestingRouteWriterAttempt,
     parse_testing_route_fence,
 )
+from control_plane.testing_application_capabilities import retained_application_inventory_header
 from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
@@ -68,6 +69,7 @@ def testing_route_host_program() -> str:
     return (
         "import base64,hashlib,json,os,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.parse import urlsplit\n"
+        + retained_application_inventory_header()
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
@@ -206,6 +208,136 @@ def application_container(containers, binding, proxy_networks):
         raise RuntimeError('Application service changed during route observation')
     return container,identity,shared
 
+def retained_application_backend(containers, binding, proxy_networks):
+    local_nodes=single_local_swarm_node(docker)
+    service=json.loads(docker('service','inspect',binding['name']))
+    if not isinstance(service,list) or len(service)!=1 or not isinstance(service[0],dict):
+        raise RuntimeError('Retained service is unavailable')
+    service=service[0]
+    specification=service.get('Spec',{})
+    if (not isinstance(service.get('ID'),str) or not service['ID'] or specification.get('Name')!=binding['name']
+        or specification.get('Mode',{}).get('Replicated',{}).get('Replicas')!=1 or service.get('Endpoint',{}).get('Ports')):
+        raise RuntimeError('Retained service ownership or topology changed')
+    template=specification.get('TaskTemplate')
+    configuration=template.get('ContainerSpec') if isinstance(template,dict) else None
+    if not isinstance(configuration,dict) or not isinstance(configuration.get('Env'),list):
+        raise RuntimeError('Retained service template is unavailable')
+    template_sha256=canonical_json_sha256(template)
+    if ((binding.get('service_id') and service['ID']!=binding['service_id'])
+        or (binding.get('task_template_sha256') and template_sha256!=binding['task_template_sha256'])):
+        raise RuntimeError('The admitted retained service template changed')
+    def environment(items):
+        if not isinstance(items,list): raise RuntimeError('Retained environment is unavailable')
+        values={}
+        for item in items:
+            if not isinstance(item,str) or '=' not in item or item.split('=',1)[0] in values:
+                raise RuntimeError('Retained service environment is incomplete')
+            key,value=item.split('=',1)
+            values[key]=value
+        return values
+    values=environment(configuration['Env'])
+    identity=json.loads(values.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+    if not isinstance(identity,dict): raise RuntimeError('Retained service identity is unavailable')
+    original=binding['deployments'].get(identity.get('deployment_record_id'))
+    if (not isinstance(original,dict) or (identity.get('product'),identity.get('context'),identity.get('instance'))
+        !=(binding['product'],binding['context'],'testing') or identity.get('artifact_id')!=original['artifact']
+        or identity.get('source_git_ref')!=original['source']):
+        raise RuntimeError('The current template does not identify the retained original')
+    artifact=original['artifact']
+    reference=configuration.get('Image')
+    def repository(value):
+        return docker_image_repository(value.split('@',1)[0])
+    if not isinstance(reference,str) or not docker_image_digest(artifact) or repository(reference)!=repository(artifact):
+        raise RuntimeError('Retained template image is unavailable')
+    pinned=bool(docker_image_digest(reference))
+    if pinned and docker_image_digest(reference)!=docker_image_digest(artifact):
+        raise RuntimeError('Retained template image differs from the admitted artifact')
+    proxy_ids={value.get('NetworkID') for value in proxy_networks.values() if value.get('NetworkID')}
+    attachments=template.get('Networks')
+    if not isinstance(attachments,list) or any(not isinstance(item,dict) for item in attachments):
+        raise RuntimeError('Retained service networks are unavailable')
+    network_ids={item.get('Target') for item in attachments if item.get('Target') in proxy_ids}
+    if not network_ids or not isinstance(binding.get('port'),int) or not 0<binding['port']<65536:
+        raise RuntimeError('Retained service is not attached to the managed proxy')
+    identifiers=docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()
+    if len(identifiers)>10000 or len(identifiers)!=len(set(identifiers)) or any(not item for item in identifiers):
+        raise RuntimeError('Retained task inventory is incomplete')
+    tasks={}
+    for identifier in identifiers:
+        found=json.loads(docker('inspect','--type','task',identifier))
+        if (not isinstance(found,list) or len(found)!=1 or found[0].get('ID')!=identifier
+            or found[0].get('ServiceID')!=service['ID']):
+            raise RuntimeError('Retained task ownership is unavailable')
+        task=found[0]
+        if task.get('NodeID') and task['NodeID']!=local_nodes[0]['ID']:
+            raise RuntimeError('Retained task is outside the local inventory')
+        if task.get('DesiredState') not in {'shutdown','remove'} and task.get('Spec',{}).get('ContainerSpec')!=configuration:
+            raise RuntimeError('Retained task inputs differ from the current template')
+        tasks[identifier]=task
+    owned=[]
+    actual_image=False
+    exact_endpoints=[]
+    for container in containers:
+        labels=container.get('Config',{}).get('Labels') or {}
+        if labels.get('com.docker.swarm.service.id')!=service['ID'] and labels.get('com.docker.swarm.service.name')!=binding['name']:
+            continue
+        if labels.get('com.docker.swarm.service.id')!=service['ID'] or labels.get('com.docker.swarm.service.name')!=binding['name']:
+            raise RuntimeError('Retained container belongs to another service object')
+        owned.append(container)
+        task=tasks.get(labels.get('com.docker.swarm.task.id'))
+        matches=(task is not None and task.get('Spec',{}).get('ContainerSpec')==configuration
+            and task.get('Status',{}).get('ContainerStatus',{}).get('ContainerID')==container['Id'])
+        image_reference=container.get('Config',{}).get('Image')
+        if matches:
+            if not isinstance(container.get('Image'),str) or not _SHA256_DIGEST_RE.fullmatch(container['Image']):
+                raise RuntimeError('Retained actual image identity is unavailable')
+            if image_reference!=reference:
+                raise RuntimeError('Retained actual container image differs from its captured task')
+            image=json.loads(docker('image','inspect',container.get('Image','')))
+            if (not isinstance(image,list) or len(image)!=1 or image[0].get('Id')!=container.get('Image')
+                or not isinstance(image[0].get('RepoDigests'),list) or not any(isinstance(value,str)
+                    and repository(value)==repository(artifact) and docker_image_digest(value)==docker_image_digest(artifact)
+                    for value in image[0]['RepoDigests'])):
+                raise RuntimeError('Retained actual image proof is unavailable')
+            merged=environment(image[0].get('Config',{}).get('Env') or [])
+            merged.update(values)
+            if environment(container.get('Config',{}).get('Env'))!=merged:
+                raise RuntimeError('Retained actual container inputs differ from image and task')
+            actual_image=True
+        elif container.get('State',{}).get('Status')=='running':
+            raise RuntimeError('A running retained container differs from the current template')
+        if container.get('State',{}).get('Status')=='running':
+            attached=container.get('NetworkSettings',{}).get('Networks',{})
+            for name,endpoint in attached.items():
+                if name in proxy_networks and endpoint.get('NetworkID') in network_ids:
+                    if endpoint.get('IPAddress'): exact_endpoints.append('http://'+endpoint['IPAddress']+':'+str(binding['port']))
+            exact_endpoints.extend('http://'+alias+':'+str(binding['port']) for alias in proxy_dns_names(container,proxy_networks))
+    if not pinned and not actual_image:
+        raise RuntimeError('A tag-only retained template has no actual immutable image proof')
+    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
+    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+        raise RuntimeError('Application service inventory is incomplete')
+    for identifier in service_ids:
+        if identifier==service['ID']: continue
+        metadata=json.loads(docker('service','inspect','--format','{"name":{{json .Spec.Name}},"networks":{{json .Spec.TaskTemplate.Networks}}}',identifier))
+        networks=metadata.get('networks')
+        if networks is None and 'networks' in metadata: networks=[]
+        if not isinstance(networks,list): raise RuntimeError('Application network aliases are unavailable')
+        for attachment in networks:
+            if attachment.get('Target') in network_ids and binding['name'].casefold() in {value.casefold() for value in attachment.get('Aliases') or []}:
+                raise RuntimeError('Application private name aliases another service')
+    for container in containers:
+        if container not in owned and binding['name'].casefold() in proxy_dns_names(container,proxy_networks):
+            raise RuntimeError('Application private name is shared')
+    if (json.loads(docker('service','inspect',binding['name']))[0]!=service
+        or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
+        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids
+        or sorted(docker('ps','-aq').decode().splitlines())!=sorted(item['Id'] for item in containers)
+        or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
+        or single_local_swarm_node(docker)!=local_nodes):
+        raise RuntimeError('Retained inventory changed during route observation')
+    return identity,sorted(set(['http://'+binding['name']+':'+str(binding['port']),*exact_endpoints])),service['ID'],template_sha256
+
 def read_fence(proxy_id, name, filesystem):
     return parse_testing_route_fence(docker('exec',proxy_id,'sh','-c',FENCE_READER,'_',DIRECTORY,name,filesystem).decode())
 
@@ -334,13 +466,11 @@ def main(spec):
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
     endpoints=[]
     old_identity=None
+    old_service_id=''
+    old_task_template_sha256=''
     application=spec.get('old_application')
     if application is not None:
-        old_container,old_identity,shared=application_container(containers,application,proxy_networks)
-        port=str(application['port'])
-        endpoints=['http://'+endpoint['IPAddress']+':'+port for endpoint in shared.values() if endpoint.get('IPAddress')]
-        endpoints.append('http://'+application['name']+':'+port)
-        endpoints.extend('http://'+alias+':'+port for alias in proxy_dns_names(old_container,proxy_networks))
+        old_identity,endpoints,old_service_id,old_task_template_sha256=retained_application_backend(containers,application,proxy_networks)
     elif len(old)==1 and old[0].get('State',{}).get('Status')=='running':
         environment=dict(item.split('=',1) for item in old[0]['Config'].get('Env',[]) if '=' in item)
         if environment.get('PLATFORM_INSTANCE')!='testing':
@@ -423,7 +553,7 @@ def main(spec):
         return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
 
 if __name__=='__main__':
     payload={}
@@ -537,6 +667,18 @@ class DokployTestingRouteTransport:
                     "The retained application runtime is unavailable.",
                 )
             self.old_runtime_identity = observed_identity
+        application = self.payload.get("old_application")
+        if isinstance(application, dict):
+            for key, field in (
+                ("service_id", "old_service_id"),
+                ("task_template_sha256", "old_task_template_sha256"),
+            ):
+                value = frame.get(field)
+                if not value or application.get(key) and application[key] != value:
+                    raise TestingRouteObservationRefused(
+                        "testing_route_identity_changed", "The retained service witness changed."
+                    )
+                application[key] = value
         if (
             self.old_runtime_identity is not None
             and observed_identity is not None
@@ -788,6 +930,20 @@ class DokployTestingRouteTransport:
             or frame["file_sha256"] != writer_attempt.expected_file_sha256
         ):
             raise TestingRouteWriteNotStarted("The original route attempt is no longer current.")
+        desired_identity = desired_runtime_identity.model_dump(mode="json", exclude={"deployed_at"})
+        if backend == plan.old_backend:
+            observed_identity = parse_runtime_identity_payload(frame["old_identity"])
+            if (
+                observed_identity is None
+                or observed_identity.model_dump(mode="json", exclude={"deployed_at"})
+                != desired_identity
+            ):
+                raise ValueError("The inverse desired identity differs from its captured original.")
+            # Bind the native comparison to the same observed representation.
+            # Accepted omitted defaults are already normalized by the host model.
+            desired_identity = {
+                key: value for key, value in frame["old_identity"].items() if key != "deployed_at"
+            }
         receipt = self._run(
             {
                 "mode": "publish_v2",
@@ -798,9 +954,7 @@ class DokployTestingRouteTransport:
                 "desired_backend": backend,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
                 "expected_old_identity_sha256": canonical_json_sha256(frame["old_identity"]),
-                "expected_desired_identity_sha256": canonical_json_sha256(
-                    desired_runtime_identity.model_dump(mode="json", exclude={"deployed_at"})
-                ),
+                "expected_desired_identity_sha256": canonical_json_sha256(desired_identity),
                 "expected_file_sha256": frame["file_sha256"],
                 "expected_static_sha256": hashlib.sha256(
                     frame["static_configuration"].encode()

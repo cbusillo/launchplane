@@ -96,7 +96,14 @@ def application_route_transport(
         readiness.old_runtime_identity,
         readiness.route_execution,
     )
-    if identity is None or execution is None or record.request.application is None:
+    predecessor = record.predecessor
+    if (
+        identity is None
+        or execution is None
+        or record.request.application is None
+        or predecessor is None
+        or predecessor.runtime_identity != identity
+    ):
         raise ValueError("The original private native route custody is unavailable.")
     backend = urlsplit(route.old_backend)
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -110,7 +117,9 @@ def application_route_transport(
         public_host=route.host,
         entrypoints=route.public_entrypoints,
         old_runtime_identity=identity,
-        old_application={
+        old_application=None
+        if record.published
+        else {
             "name": backend.hostname,
             "port": backend.port,
             "product": record.product,
@@ -122,6 +131,8 @@ def application_route_transport(
                 }
             },
             "route_file_name": route.application_file_name,
+            "service_id": predecessor.service_id,
+            "task_template_sha256": predecessor.task_template_sha256,
         },
         new_application={
             "name": record.app_name,

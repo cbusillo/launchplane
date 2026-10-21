@@ -5,6 +5,7 @@ import inspect
 import json
 from pathlib import Path
 from collections.abc import Callable
+from typing import Any
 
 from control_plane import runtime_platform_credentials as credentials
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -133,7 +134,7 @@ def runtime_capability_program_header() -> str:
     """Fixed host programs use the same credential classifiers as ordinary delivery."""
     return (
         "import re\nfrom dataclasses import dataclass\nfrom urllib.parse import urlparse\n"
-        "from typing import Literal\nfrom collections.abc import Mapping\n"
+        "from typing import Literal, Any\nfrom collections.abc import Mapping\n"
         + "PLATFORM_CREDENTIAL_KEYS="
         + repr(credentials.PLATFORM_CREDENTIAL_KEYS)
         + "\n"
@@ -155,15 +156,55 @@ def runtime_capability_program_header() -> str:
     )
 
 
-def retained_application_capability_program(spec: dict[str, object]) -> str:
-    header = (
-        "import base64,hashlib,json,re,subprocess,sys\nfrom pathlib import Path\n"
-        + runtime_capability_program_header()
+def single_local_swarm_node(docker: Callable[..., Any]) -> list[dict[str, Any]]:
+    """A node-local inventory is complete only for a positively enumerated local Swarm."""
+    rows = [json.loads(line) for line in docker("node", "ls", "--format", "json").splitlines()]
+    if (
+        len(rows) != 1
+        or not isinstance(rows[0], dict)
+        or rows[0].get("Self") is not True
+        or not isinstance(rows[0].get("ID"), str)
+        or not rows[0]["ID"]
+    ):
+        raise ValueError("Retained application inventory requires one positively local Swarm node")
+    return rows
+
+
+def retained_application_inventory_header() -> str:
+    from control_plane.contracts.canonical_json import (
+        _validate_canonical_json_value,
+        canonical_json_bytes,
+        CANONICAL_JSON_INTEGER_MIN,
+        CANONICAL_JSON_INTEGER_MAX,
+    )
+
+    return (
+        "from collections.abc import Callable\nfrom typing import Any\n"
         + "_SHA256_DIGEST_RE=re.compile(r'^sha256:[0-9a-f]{64}$')\n"
         + inspect.getsource(docker_image_repository)
         + "\n"
         + inspect.getsource(docker_image_digest)
+        + "\nCANONICAL_JSON_INTEGER_MIN="
+        + repr(CANONICAL_JSON_INTEGER_MIN)
+        + "\nCANONICAL_JSON_INTEGER_MAX="
+        + repr(CANONICAL_JSON_INTEGER_MAX)
         + "\n"
+        + inspect.getsource(_validate_canonical_json_value)
+        + "\n"
+        + inspect.getsource(canonical_json_bytes)
+        + "\n"
+        + inspect.getsource(canonical_json_sha256)
+        + "\n"
+        + inspect.getsource(single_local_swarm_node)
+        + "\n"
+    )
+
+
+def retained_application_capability_program(spec: dict[str, object]) -> str:
+    header = (
+        "import base64,hashlib,json,re,subprocess,sys\nfrom pathlib import Path\n"
+        + runtime_capability_program_header()
+        + retained_application_inventory_header()
     )
     encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
     return (
@@ -258,6 +299,10 @@ try:
     service = json.loads(docker("service", "inspect", spec["application"]))
     if not isinstance(service, list) or len(service) != 1 or service[0].get("Spec", {}).get("Name") != spec["application"]:
         raise ValueError("retained service unavailable")
+    template = service[0].get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec")
+    capability(template)
+    mounts(template.get("Mounts", []))
+    local_nodes = single_local_swarm_node(docker)
     task_ids = rows("service", "ps", "--no-trunc", "-q", spec["application"])
     container_filter = "label=com.docker.swarm.service.name=" + spec["application"]
     container_ids = rows("ps", "-aq", "--no-trunc", "--filter", container_filter)
@@ -266,6 +311,8 @@ try:
         task = json.loads(docker("inspect", "--type", "task", identifier))
         if not isinstance(task, list) or len(task) != 1 or task[0].get("ID") != identifier or task[0].get("ServiceID") != service[0]["ID"]:
             raise ValueError("retained task unavailable")
+        if task[0].get("NodeID") and task[0]["NodeID"] != local_nodes[0]["ID"]:
+            raise ValueError("retained task is outside the local inventory")
         configuration = task[0].get("Spec", {}).get("ContainerSpec")
         values = capability(configuration)
         mounts(configuration.get("Mounts", []))
@@ -279,9 +326,7 @@ try:
                 or not docker_image_digest(artifact) or not image_matches(configuration.get("Image", ""), artifact, provider)):
                 raise ValueError("retained immutable image unavailable")
             container_id = task[0].get("Status", {}).get("ContainerStatus", {}).get("ContainerID")
-            if not container_id:
-                raise ValueError("retained execution identity unavailable")
-            if container_id in container_ids:
+            if container_id and container_id in container_ids:
                 container = json.loads(docker("inspect", container_id))[0]
                 image_id = container.get("Image")
                 if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
@@ -311,7 +356,8 @@ try:
         mounts(container[0].get("Mounts"))
     if (not attributable or rows("service", "ps", "--no-trunc", "-q", spec["application"]) != task_ids
         or rows("ps", "-aq", "--no-trunc", "--filter", container_filter) != container_ids
-        or json.loads(docker("service", "inspect", spec["application"])) != service):
+        or json.loads(docker("service", "inspect", spec["application"])) != service
+        or single_local_swarm_node(docker) != local_nodes):
         raise ValueError("retained attribution changed")
     print("testing_resources_binding_sha256=" + hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("testing_resources_ok=true")

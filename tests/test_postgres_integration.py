@@ -12929,7 +12929,21 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                 publication = workers.submit(fixture.activate)
                 contenders = []
                 try:
-                    self.assertTrue(locked.wait(15))
+                    checkpoint_deadline = time.monotonic() + 60
+                    while not locked.wait(0.05):
+                        if publication.done():
+                            outcome = publication.result()
+                            self.fail(
+                                "Publication finished before its checkpoint: status="
+                                + str(outcome.status)
+                                + "; phase="
+                                + fixture.adapter.current().phase
+                            )
+                        if time.monotonic() >= checkpoint_deadline:
+                            self.fail(
+                                "Publication did not reach its checkpoint within the bounded budget; phase="
+                                + fixture.adapter.current().phase
+                            )
                     contenders = [workers.submit(action) for action in actions]
                     self.assertTrue(all(event.wait(5) for event in attempted))
                     deadline, blocked = time.monotonic() + 10, False

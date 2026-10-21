@@ -164,10 +164,12 @@ class ApplicationFlowTests(unittest.TestCase):
         }
         self.projects: list[dict[str, Any]] = []
         self.schedules: dict[str, dict[str, Any]] = {}
+        self.nodes = [{"ID": "fixture-node", "Self": True}]
         self.services: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
         self.images: dict[str, str] = {}
+        self.image_environment: list[str] = []
         self.writes: list[tuple[str, Any]] = []
         self.deployments: dict[str, list[dict[str, Any]]] = {}
         from tests.test_odoo_testing_resources import TestingResourceProgramTests
@@ -437,13 +439,17 @@ class ApplicationFlowTests(unittest.TestCase):
             "Spec": {
                 "Name": name,
                 "Mode": {"Replicated": {"Replicas": 1}},
-                "TaskTemplate": {"Networks": [{"Target": "fixture-network-id", "Aliases": [name]}]},
+                "TaskTemplate": {
+                    "ContainerSpec": deepcopy(configuration),
+                    "Networks": [{"Target": "fixture-network-id", "Aliases": [name]}],
+                },
             },
             "Endpoint": {},
         }
         self.tasks[task] = {
             "ID": task,
             "ServiceID": service,
+            "NodeID": self.nodes[0]["ID"],
             "DesiredState": "running",
             "Spec": {"ContainerSpec": configuration},
             "Status": {"State": "running", "ContainerStatus": {"ContainerID": container}},
@@ -456,7 +462,7 @@ class ApplicationFlowTests(unittest.TestCase):
             "State": {"Status": "running"},
             "Config": {
                 "Image": identity["artifact_id"],
-                "Env": values,
+                "Env": list(values),
                 "Labels": {
                     "com.docker.swarm.service.name": name,
                     "com.docker.swarm.service.id": service,
@@ -606,8 +612,10 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def docker(self, arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
         args = arguments[1:]
-        if args[:2] == ["service", "inspect"]:
-            value: Any = [self.services[args[2]]]
+        if args[:2] == ["node", "ls"]:
+            value: Any = "\n".join(json.dumps(node) for node in self.nodes)
+        elif args[:2] == ["service", "inspect"]:
+            value = [self.services[args[2]]]
         elif args[:2] == ["volume", "inspect"]:
             value = [self.storage.volumes[args[2]]]
         elif args[:2] == ["service", "ps"]:
@@ -624,7 +632,13 @@ class ApplicationFlowTests(unittest.TestCase):
                 if (row["Config"].get("Labels") or {}).get("com.docker.swarm.service.name") == name
             )
         elif args[:2] == ["image", "inspect"]:
-            value = [{"Id": args[2], "RepoDigests": [self.images[args[2]]]}]
+            value = [
+                {
+                    "Id": args[2],
+                    "RepoDigests": [self.images[args[2]]],
+                    "Config": {"Env": self.image_environment},
+                }
+            ]
         elif args[:3] == ["inspect", "--type", "task"]:
             value = [self.tasks[args[3]]]
         elif args[0] == "inspect" and args[1] in self.containers:
@@ -1175,11 +1189,305 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.adapter.current().phase, "configure_application")
         self.assertFalse(self.deployments.get(self.adapter.current().target_id))
 
+    def unhealthy_retained_runtime(self, *, omit_identity_default: bool = False) -> None:
+        """Exact exited original plus same-template prospective replacement."""
+        name = self.payloads[self.old_id]["appName"]
+        task = self.tasks[name + "-task"]
+        task["DesiredState"] = "shutdown"
+        task["Status"]["State"] = "failed"
+        container = self.containers[name + "-container"]
+        container["State"]["Status"] = "exited"
+        container["NetworkSettings"]["Networks"] = {}
+        prospective = deepcopy(task)
+        prospective.update(ID=name + "-prospective", DesiredState="running")
+        prospective["Status"] = {"State": "preparing", "ContainerStatus": {}}
+        self.tasks[prospective["ID"]] = prospective
+        if omit_identity_default:
+            configs = [
+                self.services[name]["Spec"]["TaskTemplate"]["ContainerSpec"],
+                *(
+                    row["Spec"]["ContainerSpec"]
+                    for row in self.tasks.values()
+                    if row["ServiceID"] == name + "-service"
+                ),
+                container["Config"],
+            ]
+            for configuration in configs:
+                environment = dict(item.split("=", 1) for item in configuration["Env"])
+                identity = json.loads(environment["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
+                identity.pop("release_tuple_id", None)
+                environment["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = json.dumps(identity)
+                configuration["Env"] = [key + "=" + value for key, value in environment.items()]
+
+    def test_retained_native_template_scope_and_execution_controls(self) -> None:
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        witness = self.adapter.preflight_application_route(self.planned)
+        assert witness is not None
+        record = self.planned.model_copy(update={"predecessor": witness})
+        original_service = deepcopy(self.services["old-app"])
+        original_tasks = deepcopy(self.tasks)
+        original_containers = deepcopy(self.containers)
+        original_nodes = deepcopy(self.nodes)
+        original_images = deepcopy(self.images)
+
+        def reset() -> None:
+            self.services = {"old-app": deepcopy(original_service)}
+            self.tasks = deepcopy(original_tasks)
+            self.containers.clear()
+            self.containers.update(deepcopy(original_containers))
+            self.nodes = deepcopy(original_nodes)
+            self.images = deepcopy(original_images)
+            self.image_environment = []
+
+        # Immutable image defaults are real merged container inputs, not a
+        # change to TaskSpec. Order is irrelevant; overriding a task key is not.
+        self.image_environment = ["PATH=/usr/local/bin:/usr/bin"]
+        self.containers["old-app-container"]["Config"]["Env"].append(self.image_environment[0])
+        self.containers["old-app-container"]["Config"]["Env"].reverse()
+        self.adapter.route_admission(record)
+        self.containers["old-app-container"]["Config"]["Env"].append("UNPROVEN_DEFAULT=foreign")
+        with self.assertRaises(ValueError):
+            self.adapter.route_admission(record)
+        reset()
+        self.unhealthy_retained_runtime()
+        admission = self.adapter.route_admission(record)
+        assert admission is not None
+        transport, args = admission
+        self.assertEqual(set(args["old_backend_addresses"]), {args["old_backend"]})
+        self.assertEqual(transport.old_runtime_identity, witness.runtime_identity)
+        # Replacement between complete observations is ordinary progress.
+        pending = self.tasks.pop("old-app-prospective")
+        pending["ID"] += "-replacement"
+        self.tasks[pending["ID"]] = pending
+        self.adapter.route_admission(record)
+
+        for problem in (
+            "recreated-service",
+            "template-mounts",
+            "template-env",
+            "template-command",
+            "template-network",
+            "missing-template",
+            "unmapped-identity",
+            "mixed-task",
+            "image",
+            "foreign-alias",
+            "foreign-service-alias",
+            "no-shared-network",
+            "multi-node",
+            "nonlocal-node",
+            "foreign-task-node",
+            "actual-image",
+            "tag-only-prospective",
+        ):
+            with self.subTest(problem=problem):
+                reset()
+                service = self.services["old-app"]
+                template = service["Spec"]["TaskTemplate"]
+                if problem == "recreated-service":
+                    service["ID"] = "recreated-service"
+                elif problem.startswith("template-"):
+                    key = problem.removeprefix("template-")
+                    if key == "network":
+                        template["Networks"] = [{"Target": "foreign-network"}]
+                    elif key == "mounts":
+                        template["ContainerSpec"]["Mounts"] = []
+                    elif key == "env":
+                        template["ContainerSpec"]["Env"].append("EXTRA_INPUT=changed")
+                    else:
+                        template["ContainerSpec"]["Command"] = ["different-entrypoint"]
+                elif problem == "missing-template":
+                    service["Spec"].pop("TaskTemplate")
+                elif problem == "unmapped-identity":
+                    template["ContainerSpec"]["Env"] = [
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                        + json.dumps({"deployment_record_id": "foreign"})
+                    ]
+                elif problem == "mixed-task":
+                    self.tasks["old-app-task"]["Spec"]["ContainerSpec"]["Mounts"] = []
+                elif problem == "image":
+                    template["ContainerSpec"]["Image"] = "foreign/app@sha256:" + "c" * 64
+                elif problem == "foreign-alias":
+                    container = deepcopy(self.containers["old-app-container"])
+                    container["Id"] = "foreign-container"
+                    container["Config"]["Labels"] = {}
+                    self.containers[container["Id"]] = container
+                elif problem == "foreign-service-alias":
+                    other = deepcopy(service)
+                    other["ID"], other["Spec"]["Name"] = "foreign-service", "other"
+                    self.services["other"] = other
+                elif problem == "no-shared-network":
+                    self.containers["proxy"]["NetworkSettings"]["Networks"]["dokploy-network"][
+                        "NetworkID"
+                    ] = "other"
+                elif problem == "multi-node":
+                    self.nodes.append({"ID": "other", "Self": False})
+                elif problem == "nonlocal-node":
+                    self.nodes[0]["Self"] = False
+                elif problem == "foreign-task-node":
+                    self.tasks["old-app-task"]["NodeID"] = "other"
+                elif problem == "tag-only-prospective":
+                    template["ContainerSpec"]["Image"] = "ghcr.io/example/site:immutable-tag"
+                    self.tasks["old-app-task"]["Spec"]["ContainerSpec"] = deepcopy(
+                        template["ContainerSpec"]
+                    )
+                    self.tasks["old-app-task"]["Status"] = {"ContainerStatus": {}}
+                    self.containers.pop("old-app-container")
+                else:
+                    self.unhealthy_retained_runtime()
+                    self.images[self.containers["old-app-container"]["Image"]] = (
+                        "example/other@sha256:" + "c" * 64
+                    )
+                observation = (
+                    self.planned
+                    if problem
+                    in {"unmapped-identity", "image", "missing-template", "tag-only-prospective"}
+                    else record
+                )
+                with self.assertRaises(ValueError):
+                    self.adapter.route_admission(observation)
+                self.assertFalse(routing.route_file.exists())
+                self.assertFalse(self.projects)
+        reset()
+        docker = self.docker
+        inserted = False
+
+        def insert_during_snapshot(arguments: list[str], **kwargs: Any) -> Any:
+            nonlocal inserted
+            result = docker(arguments, **kwargs)
+            if arguments[1:3] == ["image", "inspect"] and not inserted:
+                inserted = True
+                task = deepcopy(self.tasks["old-app-task"])
+                task["ID"] = "foreign-input-task"
+                task["Spec"]["ContainerSpec"]["Mounts"] = []
+                self.tasks[task["ID"]] = task
+            return result
+
+        with (
+            patch.object(self, "docker", side_effect=insert_during_snapshot),
+            self.assertRaises(ValueError),
+        ):
+            self.adapter.route_admission(record)
+        self.assertTrue(inserted)
+        reset()
+        node_reads = 0
+
+        def change_scope(arguments: list[str], **kwargs: Any) -> Any:
+            nonlocal node_reads
+            if arguments[1:3] == ["node", "ls"]:
+                node_reads += 1
+                if node_reads > 1:
+                    self.nodes.append({"ID": "new-node", "Self": False})
+            return docker(arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=change_scope), self.assertRaises(ValueError):
+            self.adapter.route_admission(record)
+
+    def test_private_candidate_must_remain_running_at_native_dispatch(self) -> None:
+        for problem in ("no-container", "exited-container"):
+            with self.subTest(problem=problem):
+                fixture = ApplicationFlowTests()
+                fixture.setUp()
+                try:
+                    routing, _, _ = fixture.private_addressed()
+                    fixture.unhealthy_retained_runtime()
+                    fixture.prepare()
+                    changed = []
+
+                    def change_candidate() -> None:
+                        record = fixture.adapter.current()
+                        name = record.app_name
+                        changed.append(name)
+                        if problem == "no-container":
+                            fixture.tasks[name + "-task"]["Status"] = {
+                                "State": "preparing",
+                                "ContainerStatus": {},
+                            }
+                        else:
+                            fixture.containers[name + "-container"]["State"]["Status"] = "exited"
+
+                    routing.before_publish = change_candidate
+                    self.assertEqual(fixture.activate().status, "reconcile_required")
+                    self.assertTrue(changed)
+                    self.assertFalse(fixture.adapter.current().published)
+                    self.assertFalse(routing.route_file.exists())
+                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
+                    self.assertEqual(
+                        fixture.store.read_idempotency_record(
+                            scope=fixture.original.scope,
+                            route_path=fixture.original.route_path,
+                            idempotency_key=fixture.original.idempotency_key,
+                        ),
+                        fixture.original,
+                    )
+                finally:
+                    fixture.doCleanups()
+
+    def test_predecessor_is_captured_before_effects_and_cannot_be_rebound(self) -> None:
+        self.private_addressed()
+        self.prepare()
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        from control_plane.dokploy import api
+
+        provider = api.dokploy_request
+
+        def lose_first_create(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/project.create":
+                current = self.adapter.current()
+                self.assertIsNotNone(current.predecessor)
+                self.assertIsNone(current.application_readiness)
+                self.assertFalse(self.projects)
+                provider(**kwargs)
+                raise OSError("Lost the actual first create reply after original witness capture")
+            return provider(**kwargs)
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=lose_first_create):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        captured = self.adapter.current()
+        witness = captured.predecessor
+        assert witness is not None
+        self.assertEqual(witness.service_id, self.services["old-app"]["ID"])
+        self.assertEqual(
+            witness.task_template_sha256,
+            canonical_json_sha256(self.services["old-app"]["Spec"]["TaskTemplate"]),
+        )
+        projects_before = deepcopy(self.projects)
+        for problem in ("service-id", "template"):
+            original = deepcopy(self.services["old-app"])
+            try:
+                with self.subTest(problem=problem):
+                    if problem == "service-id":
+                        self.services["old-app"]["ID"] += "-recreated"
+                    else:
+                        self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"][
+                            "Mounts"
+                        ] = []
+                    self.assertEqual(self.activate().status, "reconcile_required")
+                    self.assertEqual(self.adapter.current().predecessor, witness)
+                    self.assertEqual(self.projects, projects_before)
+            finally:
+                self.services["old-app"] = original
+        current = self.adapter.current()
+        with self.assertRaises(ValueError):
+            self.store.write_testing_activation(
+                expected=current.model_dump(mode="json"),
+                replacement=current.model_copy(update={"predecessor": None}).model_dump(
+                    mode="json"
+                ),
+            )
+        self.assertEqual(self.activate().status, "completed")
+        readiness = self.adapter.current().application_readiness
+        assert readiness is not None
+        self.assertEqual(readiness.old_runtime_identity, witness.runtime_identity)
+
     def assert_private_unhealthy_origin(self, kind: str, *, pending: bool = False) -> None:
         import control_plane.testing_private_health as private
         from control_plane.outbound_http import PublicHttpResponse
 
         route, _, endpoint = self.private_addressed()
+        self.unhealthy_retained_runtime()
         self.prepare()
         original = getattr(private, "request_private_edge_health")
         corrected = [not pending]
@@ -1419,6 +1727,7 @@ class ApplicationFlowTests(unittest.TestCase):
         origin_id = self.old_id
         original_domain = deepcopy(self.payloads[origin_id]["domains"])
         edge_before = deepcopy(ingress.client.proxy_hosts)
+        self.unhealthy_retained_runtime()
         self.prepare()
         self.assertEqual(self.activate().status, "completed")
         first = self.adapter.current()
@@ -1441,6 +1750,15 @@ class ApplicationFlowTests(unittest.TestCase):
                 timeout_seconds=3,
             )
 
+        # Superseded actual Swarm resources may be retired independently; the
+        # completed lineage still owns the exact selected file/raw route.
+        self.services.pop("old-app")
+        self.tasks = {
+            key: value
+            for key, value in self.tasks.items()
+            if value["ServiceID"] != "old-app-service"
+        }
+        self.containers.pop("old-app-container")
         observed = fetch()
         self.assertEqual(
             json.loads(observed.body)["runtime_identity"]["deployment_record_id"],
@@ -2775,7 +3093,12 @@ class ApplicationFlowTests(unittest.TestCase):
                     ).encode(),
                     stderr=b"",
                 )
-            if arguments[1:3] in (["service", "inspect"], ["service", "ps"]) or arguments[1:4] == [
+            if arguments[1:3] in (
+                ["service", "inspect"],
+                ["service", "ps"],
+                ["node", "ls"],
+                ["image", "inspect"],
+            ) or arguments[1:4] == [
                 "inspect",
                 "--type",
                 "task",
@@ -2950,7 +3273,8 @@ class ApplicationFlowTests(unittest.TestCase):
     def assert_lost_inverse_reentry(self, *, restart: bool = False) -> None:
         from control_plane.dokploy.testing_route import observe_testing_route
 
-        routing = self.addressed()
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime(omit_identity_default=True)
         self.prepare()
         native = routing.command
         lost = False
@@ -3018,7 +3342,8 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(completed.failure.kind, "publication_refused")
 
     def test_persisted_inverse_pauses_for_staff_use_then_restores_original(self) -> None:
-        routing = self.addressed()
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime()
         self.prepare()
         restore = self.adapter.restore_application_route
 
@@ -3053,6 +3378,22 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.activate().status, "reconcile_required")
         self.assertEqual((routing.route_file.read_bytes(), routing.effect_count), before)
         self.record_staff_usage("unused")
+        original_service = deepcopy(self.services["old-app"])
+        for problem in ("service-id", "template"):
+            try:
+                with self.subTest(problem=problem):
+                    if problem == "service-id":
+                        self.services["old-app"]["ID"] += "-recreated"
+                    else:
+                        self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"][
+                            "Mounts"
+                        ] = []
+                    self.assertEqual(self.activate().status, "reconcile_required")
+                    self.assertEqual(
+                        (routing.route_file.read_bytes(), routing.effect_count), before
+                    )
+            finally:
+                self.services["old-app"] = deepcopy(original_service)
         self.assertIn(self.activate().status, {"completed", "adopted"})
         completed = self.adapter.current()
         assert completed.failure is not None
@@ -3170,7 +3511,8 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(routing.effect_count, effects)
 
     def test_addressed_lost_writer_reply_settles_original_without_a_second_write(self) -> None:
-        routing = self.addressed()
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime()
         self.prepare()
         native = routing.command
         lost = False
