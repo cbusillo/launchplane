@@ -61,6 +61,7 @@ import {
 } from "./router";
 import { safeExternalUrl } from "./url";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
+import { TestingHoldPanel } from "./TestingHoldPanel";
 
 import type {
   ProductEnvironmentConfigStatus,
@@ -487,7 +488,11 @@ function EnvironmentPage({
       />
 
       {view === "overview" ? (
-        <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} capacityAvailable={capacityAvailable} />
+        <>
+          {detail.environment === "testing" ? <TestingHoldPanel detail={detail} fixtureMode={Boolean(fixtureMode)}
+            refreshToken={readinessRefreshToken} onRefresh={onConfigApplied} /> : null}
+          <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} capacityAvailable={capacityAvailable} />
+        </>
       ) : null}
       {view === "actions" ? (
         <EnvironmentActionsView

@@ -143,6 +143,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}": "read_testing_rebuild",
@@ -210,6 +211,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",

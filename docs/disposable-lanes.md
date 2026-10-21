@@ -119,7 +119,12 @@ candidate custody before this component is activated as a rebuild control.
 ## Repair usage rule
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
-A current staff-testing hold always protects the lane. Without a hold,
+A current staff-testing hold always protects the lane. An administrator may
+resume testing through the product's testing overview;
+the [audited hold control](authorization-authority.md#preparing-agent-product-setup) uses the
+existing reviewed lift and can request a new testing deployment. Agents do not
+use that browser control or lift ordinary staff holds themselves.
+Without a hold,
 UNKNOWN occupancy alone does not require downtime or a declaration of non-use
 for a disposable non-production lane. It remains UNKNOWN, never `unused`.
 Positive usage, including recent login/session reports, protects a serving or

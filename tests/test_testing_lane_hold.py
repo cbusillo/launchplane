@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,6 +22,13 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+)
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
     TESTING_HOLD_ROUTE,
@@ -128,6 +136,9 @@ class StaffTestingHoldContractTests(unittest.TestCase):
                 DokployTargetStaffTestingHold(reason=reason)
         with self.assertRaises(ValidationError):
             DokployTargetStaffTestingHold.model_validate({"reason": "r", "until": _TIMESTAMP})
+        for issue_url in ("javascript:alert(1)", "https://user:password@issues.example/42"):
+            with self.subTest(issue_url=issue_url), self.assertRaises(ValidationError):
+                DokployTargetStaffTestingHold(reason="Diagnosis", issue_url=issue_url)
 
     def test_records_without_a_hold_still_load(self) -> None:
         record = DokployTargetRecord.model_validate(
@@ -138,6 +149,30 @@ class StaffTestingHoldContractTests(unittest.TestCase):
 
 
 class TestingHoldPlanTests(unittest.TestCase):
+    def test_issue_link_round_trips_and_is_bound_to_the_review(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            request = TestingHoldApplyRequest.model_validate(
+                _payload() | {"issue_url": "https://issues.example/diagnosis/42"}
+            )
+            plan, _ = build_testing_hold_plan(record_store=store, request=request, actor="agent")
+            changed = request.model_copy(
+                update={"issue_url": "https://issues.example/diagnosis/43"}
+            )
+            other, _ = build_testing_hold_plan(record_store=store, request=changed, actor="agent")
+            self.assertNotEqual(plan.plan_sha256, other.plan_sha256)
+            applied = apply_testing_hold_plan(
+                record_store=store,
+                request=request.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+                ),
+                actor="agent",
+            )
+            self.assertIsNotNone(applied.read_back)
+            assert applied.read_back is not None
+            self.assertEqual(applied.read_back.issue_url, request.issue_url)
+
     def test_dry_run_plans_the_hold_without_writing(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -400,6 +435,143 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lifted.json()["result"]["reconcile_requested"])
         self.assertEqual([request.target_key for request in requests], [f"{_PRODUCT}:testing"])
 
+    async def test_browser_administrator_lift_preserves_audited_hold_and_replays(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            original = DokployTargetStaffTestingHold(
+                reason=_HOLD_REASON,
+                issue_url="https://issues.example/diagnosis/42",
+                recorded_by="diagnosis-agent",
+                recorded_at=_TIMESTAMP,
+            )
+            _seed_target(store, hold=original)
+            manager = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            admin = _github_human_identity()
+            session = manager.issue(admin)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_humans": [
+                            {
+                                "github_ids": [admin.github_id],
+                                "roles": ["admin"],
+                                "products": ["launchplane"],
+                                "contexts": ["launchplane"],
+                                "actions": ["authz_policy_grant.write"],
+                            }
+                        ]
+                    }
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                human_session_manager=manager,
+            )
+            draft = _payload(hold=False, reason="Diagnosis complete; resume testing deploys.")
+            read = await http_request(
+                app,
+                "GET",
+                f"{TESTING_HOLD_ROUTE}?product={_PRODUCT}&context={_CONTEXT}&instance=testing",
+                headers={"Cookie": manager.session_cookie_header(session)},
+            )
+            self.assertEqual(read.status_code, 200, read.text)
+            self.assertEqual(read.json()["result"]["hold"], original.model_dump(mode="json"))
+
+            async def post(payload: dict[str, object], *, protected: bool = True) -> Response:
+                headers = (
+                    _browser_mutation_headers(manager, session)
+                    if protected
+                    else {"Cookie": manager.session_cookie_header(session)}
+                )
+                return await http_request(
+                    app,
+                    "POST",
+                    TESTING_HOLD_APPLY_ROUTE,
+                    payload=payload,
+                    headers=headers | {"Idempotency-Key": "admin-lift"},
+                )
+
+            unprotected = await post(draft, protected=False)
+            self.assertEqual(unprotected.status_code, 403, unprotected.text)
+            self.assertEqual(_read_hold(store), original)
+            review = await post(draft)
+            self.assertEqual(review.status_code, 202, review.text)
+            self.assertEqual(_read_hold(store), original)
+            payload = draft | {
+                "mode": "apply",
+                "reviewed_plan_sha256": review.json()["result"]["plan_sha256"],
+            }
+            lifted = await post(payload)
+            self.assertEqual(lifted.status_code, 202, lifted.text)
+            self.assertIsNone(_read_hold(store))
+            receipt = store.read_idempotency_record(
+                scope=idempotency_scope(admin),
+                route_path=TESTING_HOLD_APPLY_ROUTE,
+                idempotency_key="admin-lift",
+            )
+            self.assertIsNotNone(receipt)
+            assert receipt is not None
+            self.assertTrue(receipt.recorded_at)
+            self.assertEqual(receipt.response_trace_id, lifted.json()["trace_id"])
+            self.assertEqual(
+                receipt.response_payload["result"]["before"], original.model_dump(mode="json")
+            )
+            self.assertEqual(receipt.response_payload["result"]["reason"], draft["reason"])
+            self.assertTrue(receipt.response_payload["result"]["applied"])
+            replay = await post(payload)
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(len(store.list_product_reconcile_requests()), 1)
+
+    async def test_client_and_read_only_browser_cannot_lift(self) -> None:
+        for role in ("owner", "read_only", "admin"):
+            with self.subTest(role=role), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = self._store(root)
+                original = DokployTargetStaffTestingHold(reason=_HOLD_REASON)
+                _seed_target(store, hold=original)
+                manager = HumanSessionManager(
+                    config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                )
+                human = replace(_github_human_identity(), role=role)
+                session = manager.issue(human)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "github_humans": [
+                                {
+                                    "github_ids": [human.github_id],
+                                    "roles": [role],
+                                    "products": [_PRODUCT],
+                                    "contexts": [_CONTEXT],
+                                    "actions": ["product_config.plan", "product_config.apply"],
+                                }
+                            ]
+                        }
+                    )
+                    if role != "owner"
+                    else LaunchplaneAuthzPolicy(),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                    human_session_manager=manager,
+                )
+                for mode in ("dry-run", "apply"):
+                    response = await http_request(
+                        app,
+                        "POST",
+                        TESTING_HOLD_APPLY_ROUTE,
+                        headers=_browser_mutation_headers(manager, session)
+                        | {"Idempotency-Key": "client-lift"},
+                        payload=_payload(hold=False, mode=mode, reviewed_plan_sha256="a" * 64),
+                    )
+                    self.assertIn(response.status_code, (401, 403), response.text)
+                    self.assertEqual(_read_hold(store), original)
+                self.assertEqual(store.list_product_reconcile_requests(), ())
+
     async def test_non_director_cannot_use_an_unverified_activation_to_lift_staging(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -427,6 +599,10 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = self._store(root)
+            original = DokployTargetStaffTestingHold(
+                reason=_HOLD_REASON, recorded_by="operator-agent", recorded_at=_TIMESTAMP
+            )
+            _seed_target(store, hold=original)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(self._identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate(
@@ -481,7 +657,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                     reviewed_plan_sha256=lift.json()["result"]["plan_sha256"],
                 ),
             )
-            self.assertIsNone(_read_hold(store))
+            self.assertEqual(_read_hold(store), original)
             self.assertEqual(store.list_product_reconcile_requests(), ())
 
         self.assertEqual(read.status_code, 200, read.text)

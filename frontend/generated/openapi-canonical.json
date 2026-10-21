@@ -6958,6 +6958,13 @@
         "additionalProperties": false,
         "description": "A deployment interlock for staff testing or resource-isolation staging.",
         "properties": {
+          "issue_url": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Issue Url",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "purpose": {
             "default": "staff_testing",
             "enum": [
@@ -83918,6 +83925,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -84018,6 +84035,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -84043,6 +84070,18 @@
                   "instance": {
                     "title": "Instance",
                     "type": "string"
+                  },
+                  "issue_url": {
+                    "anyOf": [
+                      {
+                        "maxLength": 2048,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Issue Url"
                   },
                   "mode": {
                     "default": "dry-run",
@@ -103325,6 +103364,7 @@
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
+    "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
@@ -103369,6 +103409,7 @@
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",

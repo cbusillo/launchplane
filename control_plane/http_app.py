@@ -9065,7 +9065,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
     async def read_testing_hold(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         product: Annotated[str, Query()] = "",
         context: Annotated[str, Query()] = "",
@@ -9119,9 +9119,23 @@ def create_launchplane_fastapi_app(
             result=result.model_dump(mode="json"),
         )
 
+    def read_testing_hold_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, GitHubHumanIdentity) and not (
+            resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Testing hold controls require the signed-in administrator.",
+            )
+        return identity
+
     async def apply_testing_hold(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_testing_hold_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
