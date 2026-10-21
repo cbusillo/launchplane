@@ -3193,8 +3193,10 @@ carriers, clears their known stored credential columns (including USPS REST),
 and disables their production mode. Fixed-price/rule-based delivery remains
 available. `database.is_neutralized` makes Odoo disable freshly created IAP
 accounts; invalid-scheme SMS/IAP endpoints also reject synchronous sends before
-opening a network connection. Existing Shopify development-store settings are
-preserved. Neither a carrier nor an IAP allowance exempts these checks.
+opening a network connection. Readback accepts the neutralization flag as written
+(`true`) or as the shared settings add-on stores it at web startup (`True`); any
+other value, a missing flag, or a changed endpoint refuses. Existing Shopify
+development-store settings are preserved. Neither a carrier nor an IAP allowance exempts these checks.
 
 The independent integration readback now checks that state on every
 non-production deploy/bootstrap/restore. Ordinary maintenance reapplies isolation
