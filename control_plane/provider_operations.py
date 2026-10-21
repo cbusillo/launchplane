@@ -20,7 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 from threading import Event, Lock, Thread
-from typing import Callable, Literal, NamedTuple, Protocol, runtime_checkable
+from typing import Callable, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
+from pydantic import BaseModel
 
 from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.idempotency_record import (
@@ -117,6 +118,7 @@ class ProviderObservation:
     response_payload: dict[str, object] = field(default_factory=dict)
     retry_safe: bool = False
     preserve_effect_checkpoint: bool = False
+    expected_binding_evidence: tuple[BaseModel, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,7 @@ class DurableProviderOperationStore(Protocol):
         response_trace_id: str,
         response_payload: dict[str, object],
         expected_original_intent: dict[str, object] | None = None,
+        expected_binding_evidence: tuple[BaseModel, ...] = (),
     ) -> MutationReservationAdoptionResult: ...
 
     def supersede_expired_reconciled_mutation_and_reserve(
@@ -770,6 +773,11 @@ def _apply_acquired(
     )
 
 
+class _AdoptionEvidenceOptions(TypedDict, total=False):
+    expected_original_intent: dict[str, object]
+    expected_binding_evidence: tuple[BaseModel, ...]
+
+
 def _adopt_reconciled_result(
     *,
     store: DurableProviderOperationStore,
@@ -778,13 +786,19 @@ def _adopt_reconciled_result(
     response_trace_id: str,
     response_payload: dict[str, object],
     original_intent: dict[str, object] | None = None,
+    expected_binding_evidence: tuple[BaseModel, ...] = (),
 ) -> tuple[DurableProviderOperationResult | None, LaunchplaneIdempotencyRecord | None]:
+    options: _AdoptionEvidenceOptions = {}
+    if original_intent is not None:
+        options["expected_original_intent"] = original_intent
+    if expected_binding_evidence:
+        options["expected_binding_evidence"] = expected_binding_evidence
     adoption = store.adopt_reconciled_mutation(
         reservation=reservation,
         response_status_code=response_status_code,
         response_trace_id=response_trace_id,
         response_payload=response_payload,
-        **({"expected_original_intent": original_intent} if original_intent is not None else {}),
+        **options,
     )
     if adoption.status == "adopted":
         return (
@@ -946,6 +960,7 @@ def _reconcile(
         response_trace_id=response_trace_id,
         response_payload=observation.response_payload,
         original_intent=original_intent,
+        expected_binding_evidence=observation.expected_binding_evidence,
     )
     if adoption_result is not None:
         return adoption_result

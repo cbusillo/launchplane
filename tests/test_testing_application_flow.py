@@ -14,8 +14,11 @@ from typing import Any, Literal
 from typing import cast
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
 
 from control_plane import secrets
+from control_plane.dokploy import api
+from control_plane.dokploy.api import dokploy_request as schedule_transport
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -88,6 +91,13 @@ class ApplicationProvider(_FakeGenericWebDeployProvider):
         target.deployed_target.provider_target_type = "application"
         return target
 
+    def application_execution_history(self, **kwargs: Any) -> Any:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+        )
+
+        return DokployGenericWebDeployProvider().application_execution_history(**kwargs)
+
     def execute_artifact_deploy(self, **kwargs: Any) -> None:
         super().execute_artifact_deploy(**kwargs)
         target = kwargs["resolved_deploy_target"]
@@ -104,6 +114,7 @@ class ApplicationProvider(_FakeGenericWebDeployProvider):
 class ApplicationFlowTests(unittest.TestCase):
     database_url = ""
     pre_image_unknown = False
+    direct_original = False
     adapter: ApplicationActivationAdapter
     planned: TestingActivationRecord
 
@@ -130,9 +141,10 @@ class ApplicationFlowTests(unittest.TestCase):
         from control_plane.http_app import launchplane_identity_actor
         from control_plane.service_auth import LocalOperatorIdentity
 
-        self.actor = launchplane_identity_actor(
-            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        self.caller_identity = LocalOperatorIdentity(
+            subject="local-owner-agent", token_label="local-owner-write"
         )
+        self.actor = launchplane_identity_actor(self.caller_identity)
         self.scope = legacy.ActivationTests.caller_scope()
         profile = self.old.profile.model_copy(deep=True)
         profile.public_website = "none"
@@ -164,6 +176,8 @@ class ApplicationFlowTests(unittest.TestCase):
         }
         self.projects: list[dict[str, Any]] = []
         self.schedules: dict[str, dict[str, Any]] = {}
+        self.schedule_history: dict[str, list[dict[str, Any]]] = {}
+        self.schedule_runs: list[str] = []
         self.nodes = [{"ID": "fixture-node", "Self": True}]
         self.services: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
@@ -231,6 +245,7 @@ class ApplicationFlowTests(unittest.TestCase):
                 side_effect=lambda **kw: self.deployments[kw["target_id"]][-1]["deploymentId"],
             )
         )
+        self.schedule_runner = api.run_dokploy_schedule
         self.enterContext(
             patch("control_plane.dokploy.api.run_dokploy_schedule", side_effect=self.command)
         )
@@ -295,13 +310,10 @@ class ApplicationFlowTests(unittest.TestCase):
             }
         self.store.write_product_profile_record(profile)
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("original")
+            self.assertEqual(self.normal("original").status, "reconcile_required")
         self.lose_command = False
         self.original = next(
             row
@@ -310,7 +322,7 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             self.original.provider_effect_phase,
-            "application_schedule_quiesce"
+            "application_schedule_restore"
             if self.pre_image_unknown
             else "application_maintenance_execute",
         )
@@ -385,7 +397,11 @@ class ApplicationFlowTests(unittest.TestCase):
         profile = self.store.read_product_profile_record(self.product)
         request = event_testing_deploy_request(
             product=self.product,
-            image_reference="ghcr.io/example/site@sha256:" + "a" * 64,
+            image_reference=(
+                profile.image.repository if self.direct_original else "ghcr.io/example/site"
+            )
+            + "@sha256:"
+            + "a" * 64,
             source_commit="a" * 40,
         )
         adapter = GenericWebDeployProviderMutationAdapter(
@@ -396,24 +412,35 @@ class ApplicationFlowTests(unittest.TestCase):
             lane=next(lane for lane in profile.lanes if lane.instance == "testing"),
             trace_id="normal-" + suffix,
             deploy_provider=self.deploy_provider,
-            recorded_artifact=True,
-            retain_event_request=True,
+            recorded_artifact=not self.direct_original,
+            retain_event_request=not self.direct_original,
         )
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.http_app import idempotency_request_fingerprint
+
+        self.normal_payload = request.model_dump(mode="json")
         return run_durable_provider_operation(
             store=self.store,
-            scope=reconcile_reservation_scope(self.product),
+            scope=idempotency_scope(self.caller_identity)
+            if self.direct_original
+            else reconcile_reservation_scope(self.product),
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=f"{RECONCILE_SOURCE}:{self.product}:{self.context}:testing:{suffix}",
-            request_fingerprint=hashlib.sha256(suffix.encode()).hexdigest(),
+            idempotency_key="native-" + suffix
+            if self.direct_original
+            else f"{RECONCILE_SOURCE}:{self.product}:{self.context}:testing:{suffix}",
+            request_fingerprint=idempotency_request_fingerprint(
+                route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=self.normal_payload
+            )
+            if self.direct_original
+            else hashlib.sha256(suffix.encode()).hexdigest(),
             lease_owner="normal-worker",
             response_trace_id="normal-" + suffix,
             adapter=adapter,
         )
 
-    def command(self, **kwargs: Any) -> None:
-        kwargs["before_trigger"]()
-        if self.lose_command:
-            raise OSError("Lost the original local-command execution reply")
+    def command(self, **kwargs: Any) -> str:
+        # The real helper owns guard, persisted intent, acknowledgement and history order.
+        return self.schedule_runner(**kwargs)
 
     def install_runtime(self, payload: dict[str, Any], identity: dict[str, Any]) -> None:
         name = payload["appName"]
@@ -493,6 +520,10 @@ class ApplicationFlowTests(unittest.TestCase):
             },
         }
 
+    def lost_schedule_reply(self, **kwargs: Any) -> Any:
+        with patch.object(api, "urlopen", side_effect=URLError("Lost provider execution reply")):
+            return schedule_transport(**kwargs)
+
     def provider(self, **kwargs: Any) -> Any:
         path, body = kwargs["path"], kwargs.get("payload", {})
         if kwargs.get("method", "GET") == "GET":
@@ -512,9 +543,30 @@ class ApplicationFlowTests(unittest.TestCase):
             if path == "/api/deployment.queueList":
                 return []
             if path == "/api/deployment.allByType":
-                return []
+                query = kwargs["query"]
+                return (
+                    deepcopy(self.schedule_history.get(query["id"], []))
+                    if query["type"] == "schedule"
+                    else []
+                )
             raise AssertionError(kwargs)
         self.writes.append((path, deepcopy(body)))
+        if path == "/api/schedule.runManually":
+            identifier = body["scheduleId"]
+            schedule = self.schedules[identifier]
+            self.schedule_runs.append(identifier)
+            row = {
+                "deploymentId": "schedule-execution-" + str(len(self.schedule_runs)),
+                "scheduleId": identifier,
+                "applicationId": schedule["applicationId"],
+                "status": "running" if self.lose_command else "done",
+                "startedAt": self.old.now(-1),
+                "finishedAt": "" if self.lose_command else self.old.now(),
+            }
+            self.schedule_history.setdefault(identifier, []).append(row)
+            if self.lose_command:
+                return self.lost_schedule_reply(**kwargs)
+            return True
         if path == "/api/schedule.create":
             identifier = "schedule-" + str(len(self.schedules))
             self.schedules[identifier] = {**body, "scheduleId": identifier}
@@ -522,7 +574,7 @@ class ApplicationFlowTests(unittest.TestCase):
         if path == "/api/schedule.update":
             self.schedules[body["scheduleId"]].update(body)
             if self.pre_image_unknown and self.lose_command and body.get("enabled") is False:
-                raise OSError("Lost original schedule quiesce reply before image dispatch")
+                return self.lost_schedule_reply(**kwargs)
             return deepcopy(self.schedules[body["scheduleId"]])
         if path == "/api/schedule.delete":
             self.schedules.pop(body["scheduleId"])
@@ -1531,12 +1583,15 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_unfinished_private_forward_recovery_and_fresh_successor(self) -> None:
         for problem in ("empty", "preparing", "busy"):
             with self.subTest(problem=problem):
+                outer_runs, outer_writes = list(self.schedule_runs), list(self.writes)
                 fixture = ApplicationFlowTests()
                 fixture.setUp()
                 try:
                     fixture.assert_unfinished_private_forward_recovers_and_successor(problem)
                 finally:
                     fixture.doCleanups()
+                self.assertEqual(self.schedule_runs, outer_runs)
+                self.assertEqual(self.writes, outer_writes)
 
     def test_unfinished_forward_adoption_loses_to_actual_new_writing_attempt(self) -> None:
         from control_plane.testing_route_effects import ROUTE_WRITING
@@ -2348,13 +2403,10 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(ingress.client.proxy_hosts, edge_before)
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("second-private-original")
+            self.assertEqual(self.normal("second-private-original").status, "reconcile_required")
         self.lose_command = False
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -2487,7 +2539,130 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertIn(self.activate().status, {"completed", "adopted"})
         self.assertEqual(len(self.deployments[self.adapter.current().target_id]), 1)
 
+    def assert_direct_http_original_replay(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": [self.caller_identity.subject],
+                        "token_labels": [self.caller_identity.token_label],
+                        "products": [self.product],
+                        "contexts": [self.context],
+                        "instances": ["testing"],
+                        "actions": [
+                            "generic_web_deploy.execute",
+                            "product_config.plan",
+                            "product_config.apply",
+                        ],
+                    }
+                ],
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=policy,
+            bearer_identity_config=_local_operator_bearer_config(
+                token_label=self.caller_identity.token_label
+            ),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        reserve = self.store.reserve_mutation
+        captured = []
+
+        def capture(**kwargs: Any) -> Any:
+            if kwargs["route_path"] == self.original.route_path:
+                captured.append(kwargs)
+            return reserve(**kwargs)
+
+        runs = list(self.schedule_runs)
+        original = self.normal_execution_record(self.original)
+        with (
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.deploy_provider,
+            ),
+            patch.object(self.store, "reserve_mutation", side_effect=capture),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    self.original.route_path,
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": self.original.idempotency_key,
+                    },
+                    payload=self.normal_payload,
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertTrue(captured)
+        for actual in captured:
+            self.assertEqual(actual["scope"], idempotency_scope(self.caller_identity))
+            self.assertEqual(actual["scope"], self.original.scope)
+            self.assertEqual(actual["idempotency_key"], self.original.idempotency_key)
+            self.assertEqual(actual["request_fingerprint"], self.original.request_fingerprint)
+        self.assertEqual(self.schedule_runs, runs)
+        self.assertEqual(self.normal_execution_record(self.original), original)
+
+    def normal_execution_record(self, reservation: Any) -> Any:
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.workflows.generic_web_application_snapshot import (
+            generic_web_provider_deployment_record_id,
+        )
+
+        operation = build_provider_operation_key(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            reconciliation_key=reservation.reconciliation_key,
+        )
+        return self.store.read_deployment_record(
+            generic_web_provider_deployment_record_id(
+                operation, context=self.context, instance="testing"
+            )
+        )
+
     def test_normal_lost_maintenance_native_activation_and_ordinary_successor(self) -> None:
+        from control_plane.workflows.generic_web_execution import execution_receipt
+
+        original_deployment = self.normal_execution_record(self.original)
+        original_receipt = execution_receipt(original_deployment)
+        assert original_receipt is not None
+        if not self.pre_image_unknown:
+            unknown_runs = [
+                entry for entry in original_receipt.entries if entry.kind == "schedule_run"
+            ]
+            self.assertTrue(
+                unknown_runs, "Actual original schedule dispatch must retain its run intent"
+            )
+            self.assertTrue(
+                all(
+                    not entry.terminal and entry.acknowledgement == "none" for entry in unknown_runs
+                )
+            )
+        else:
+            quiesce, restore = original_receipt.entries
+            self.assertEqual(quiesce.kind, "schedule_write")
+            self.assertFalse(quiesce.terminal)
+            self.assertEqual(restore.kind, "schedule_write")
+            self.assertEqual(restore.terminal, "write_completed")
+            self.assertEqual(quiesce.name, restore.name)
+        before_runs = list(self.schedule_runs)
+        self.assertEqual(self.normal("original").status, "reconcile_required")
+        self.assertEqual(self.normal("same-target-before-separation").status, "target_busy")
+        self.assertEqual(self.schedule_runs, before_runs)
         self.prepare()
         publish = self.adapter.publish_application
 
@@ -2568,15 +2743,30 @@ class ApplicationFlowTests(unittest.TestCase):
         inventory = self.store.read_environment_inventory(
             context_name=self.context, instance_name="testing"
         )
-        receipt = recorded_application_lifecycle(
-            self.store.read_deployment_record(inventory.deployment_record_id)
+        successor_deployment = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.assertEqual(successor_deployment, self.normal_execution_record(successor.record))
+        successor_receipt = execution_receipt(successor_deployment)
+        assert successor_receipt is not None
+        runs = [entry for entry in successor_receipt.entries if entry.kind == "schedule_run"]
+        self.assertTrue(
+            runs, "Successor qualification must have its own actual schedule-run receipt"
         )
+        self.assertTrue(all(entry.terminal == "done" for entry in runs))
+        for entry in runs:
+            self.assertEqual(self.schedules[entry.target_id]["applicationId"], record.target_id)
+        self.assertEqual(self.normal_execution_record(self.original), original_deployment)
+        receipt = recorded_application_lifecycle(successor_deployment)
         assert receipt is not None
         self.assertEqual(receipt.target_id, record.target_id)
         self.assertFalse(receipt.resume_from_hold)
         self.assertFalse(receipt.previous_artifact_id)
         self.assertFalse(receipt.previous_source_git_ref)
         self.assertTrue(all(value is None for value in receipt.originals.values()))
+        completed_runs = list(self.schedule_runs)
+        self.assertEqual(self.normal("successor").status, "replayed")
+        self.assertEqual(self.normal("original").status, "reconcile_required")
+        self.assertEqual(self.schedule_runs, completed_runs)
+        self.assertEqual(self.normal_execution_record(self.original), original_deployment)
         self.assertEqual(
             self.store.read_idempotency_record(
                 scope=self.original.scope,
@@ -4131,13 +4321,10 @@ class ApplicationFlowTests(unittest.TestCase):
             product=self.product, context=self.context, scope=self.scope, preparation_key="prepare"
         )
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("second-original")
+            self.assertEqual(self.normal("second-original").status, "reconcile_required")
         self.lose_command = False
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -4171,6 +4358,165 @@ class ApplicationFlowTests(unittest.TestCase):
             ),
             self.original,
         )
+
+
+class DirectApplicationContinuationTests(unittest.TestCase):
+    def test_direct_original_post_and_pre_image_continue_with_own_successor_receipts(self) -> None:
+        for pre_image in (False, True):
+            with self.subTest(pre_image=pre_image):
+                fixture = ApplicationFlowTests()
+                fixture.direct_original = True
+                fixture.pre_image_unknown = pre_image
+                fixture.setUp()
+                try:
+                    fixture.assert_direct_http_original_replay()
+                    fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+                finally:
+                    fixture.doCleanups()
+
+    def test_direct_custody_requires_exact_original_receipt_bindings_and_fenced_row(self) -> None:
+        from control_plane.generic_web_testing_exclusion import (
+            require_retained_application_custody,
+            TestingExclusionRefused,
+        )
+        from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+        from control_plane.workflows.generic_web_execution import EXECUTION_EVIDENCE_KEY
+        from control_plane.workflows.generic_web_application_snapshot import (
+            APPLICATION_LIFECYCLE_EVIDENCE_KEY,
+        )
+
+        fixture = ApplicationFlowTests()
+        fixture.direct_original = True
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        original = fixture.original
+        retained_data = (fixture.old_backing / "keep").read_bytes()
+        record = fixture.normal_execution_record(original)
+        read = fixture.store.read_deployment_record
+        lifecycle = json.loads(
+            record.post_deploy_update.evidence[APPLICATION_LIFECYCLE_EVIDENCE_KEY]
+        )
+        lifecycle["product"] = "foreign-product"
+        variants = {
+            "foreign-operation": record.model_copy(update={"record_id": "foreign-operation"}),
+            "missing-receipt": record.model_copy(
+                update={
+                    "post_deploy_update": record.post_deploy_update.model_copy(
+                        update={
+                            "evidence": {
+                                key: value
+                                for key, value in record.post_deploy_update.evidence.items()
+                                if key != EXECUTION_EVIDENCE_KEY
+                            }
+                        }
+                    )
+                }
+            ),
+            "malformed-receipt": record.model_copy(
+                update={
+                    "post_deploy_update": record.post_deploy_update.model_copy(
+                        update={
+                            "evidence": {
+                                **record.post_deploy_update.evidence,
+                                EXECUTION_EVIDENCE_KEY: "{",
+                            }
+                        }
+                    )
+                }
+            ),
+            "foreign-context": record.model_copy(update={"context": "foreign-context"}),
+            "missing-artifact": record.model_copy(update={"artifact_identity": None}),
+            "foreign-resolved-target": record.model_copy(
+                update={
+                    "resolved_target": record.resolved_target.model_copy(
+                        update={"target_id": "foreign-target"}
+                    )
+                }
+            ),
+            "foreign-provider": record.model_copy(
+                update={
+                    "deployed_target": record.deployed_target.model_copy(
+                        update={"provider_id": "foreign-provider"}
+                    )
+                }
+            ),
+            "foreign-runtime": record.model_copy(
+                update={
+                    "runtime_identity": record.runtime_identity.model_copy(
+                        update={"product": "foreign-product"}
+                    )
+                }
+            ),
+            "foreign-lifecycle": record.model_copy(
+                update={
+                    "post_deploy_update": record.post_deploy_update.model_copy(
+                        update={
+                            "evidence": {
+                                **record.post_deploy_update.evidence,
+                                APPLICATION_LIFECYCLE_EVIDENCE_KEY: json.dumps(lifecycle),
+                            }
+                        }
+                    )
+                }
+            ),
+        }
+        with fixture.store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(original.provider_target_key)
+        ) as check:
+            assert check is not None
+
+            def custody() -> Any:
+                return require_retained_application_custody(
+                    fixture.store, product=fixture.product, context=fixture.context, check=check
+                )
+
+            self.assertEqual(custody(), (original,))
+            with (
+                patch.object(
+                    fixture.store,
+                    "read_deployment_record",
+                    side_effect=FileNotFoundError(record.record_id),
+                ),
+                self.assertRaises(TestingExclusionRefused),
+            ):
+                custody()
+            for problem, variant in variants.items():
+                with self.subTest(problem=problem):
+
+                    def changed(record_id: str) -> Any:
+                        return variant if record_id == record.record_id else read(record_id)
+
+                    with (
+                        patch.object(fixture.store, "read_deployment_record", side_effect=changed),
+                        self.assertRaises(TestingExclusionRefused),
+                    ):
+                        custody()
+            retried = fixture.store.retry_reconciled_mutation(
+                reservation=original, lease_owner="competing-worker"
+            )
+            self.assertEqual(retried.status, "acquired")
+            assert retried.record is not None
+            # A captured old list cannot hide the actual row's changed attempt.
+            with (
+                patch.object(
+                    fixture.store,
+                    "list_held_provider_target_reservations",
+                    return_value=(original,),
+                ),
+                self.assertRaises(TestingExclusionRefused),
+            ):
+                custody()
+            with self.assertRaises(TestingExclusionRefused):
+                custody()
+            fenced = fixture.store.mark_mutation_reconcile_required(
+                reservation=retried.record, reconciliation_key=retried.record.reconciliation_key
+            )
+            self.assertEqual(fenced.status, "updated")
+            # Reconcile-required does not replace the real unexpired-lease check.
+            with self.assertRaises(TestingExclusionRefused):
+                custody()
+        self.assertEqual(fixture.normal_execution_record(original), record)
+        self.assertEqual((fixture.old_backing / "keep").read_bytes(), retained_data)
 
 
 class PreImageApplicationFlowTests(unittest.TestCase):

@@ -194,6 +194,8 @@ def application_snapshot_for_deploy(
         if (same_attempt.artifact_id, same_attempt.source_git_ref) != (artifact_id, source_git_ref):
             raise click.ClickException("Application lifecycle attempt identity changed.")
         prior = same_attempt
+        if proved_pre_image_retry:
+            return same_attempt.model_copy(deep=True)
 
     source = read_snapshot(rollback_source_deployment_record_id) or prior
     if rollback:

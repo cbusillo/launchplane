@@ -169,6 +169,41 @@ may restore and settle an obsolete pre-image attempt as failed instead of
 deploying it. The reviewed recovery digest binds current input authority and
 that disposition; changes between dry-run and apply require a fresh review.
 The ordinary testing reconciler uses the same settlement automatically.
+For in-place applications, image completion alone does not prove maintenance,
+canary, activation or product-executor completion. Original execution receipts
+must prove every dispatched effect terminal before a reservation can finish or
+become eligible for another deployment. Lost replies, active or ambiguous
+history, generic provider error rows and a later disabled schedule readback
+leave the original operation fenced. A hold cannot prove that an earlier lost
+enable request has stopped.
+
+The native deploy-recovery API offers `settle_testing_failure` for attributable
+terminal work that did not qualify, including a healthy image. After a fresh
+digest review it reacquires the original lease, rechecks the captured evidence,
+runs only the captured schedule hold and stores the original failed result.
+The recovery envelope returns HTTP 202; the original deploy result remains
+HTTP 502. Replay runs no effects. A deliberate normal request with a new key
+can then proceed and inherits held originals. Unknown original work remains
+held; neither commands nor product data cleanup are retried through settlement.
+
+Schedule completion accepts an exact acknowledged job identifier with complete
+matching history marked done, or an original successful synchronous reply with
+nonempty complete new history all marked done. A lost reply plus a unique new
+row is insufficient. This contract makes no claim about a live provider's
+version or capabilities. Product verification records one executor-level
+intent and completion. Its synchronous boundary waits for known dynamic page,
+signup, server-action and maintenance responses, including response completion
+and product assertions. Interrupted dispatched exchanges remain unknown and
+skip data cleanup; browser teardown does not prove remote completion. These
+boundaries do not promise termination of arbitrary asynchronous product jobs.
+Actual browser request events open exchanges, so a local click failure that
+dispatches nothing can remain a truthful failure. An observed QR server action
+still requires its product success evidence; HTTP 200 alone is insufficient.
+Production source admission during an unknown testing attempt is a separate
+gate tracked in [#4259](https://github.com/cbusillo/launchplane/issues/4259).
+It must account for the current original-operation fence before a fresh
+production release; retaining old inventory does not qualify unknown work.
+
 An exact original reservation with no effect checkpoint may settle before any
 lifecycle receipt was captured. Its renewed lease verifies that no-effect
 evidence again; it restores nothing and keeps the effect journal empty, even

@@ -1379,9 +1379,11 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         executed: list[tuple[str, str]] = []
 
         def upsert(**kwargs: object) -> api.JsonObject:
-            payload = cast(api.JsonObject, kwargs["schedule_payload"])
-            schedules[str(payload["name"])] = dict(payload)
-            return {**payload, "scheduleId": payload["name"]}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = cast(api.JsonObject, kwargs["schedule_payload"])
+                schedules[str(payload["name"])] = dict(payload)
+                return {**payload, "scheduleId": payload["name"]}
 
         def read(**kwargs: object) -> api.JsonObject | None:
             name = str(kwargs["schedule_name"])

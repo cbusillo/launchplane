@@ -84,11 +84,19 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         return dict(value) if value is not None else None
 
     def _upsert(self, **kwargs: object) -> api.JsonObject:
-        payload = cast(api.JsonObject, kwargs["schedule_payload"])
-        self.assertEqual(payload["applicationId"], kwargs["application_id"])
-        name = str(payload["name"])
-        self.schedules[name] = dict(payload)
-        return {**payload, "scheduleId": name}
+        guard = kwargs.get("provider_mutation_guard")
+        with guard() if callable(guard) else nullcontext():
+            payload = cast(api.JsonObject, kwargs["schedule_payload"])
+            self.assertEqual(payload["applicationId"], kwargs["application_id"])
+            name = str(payload["name"])
+            self.schedules[name] = dict(payload)
+            return {**payload, "scheduleId": name}
+
+    def _delete(self, **kwargs: object) -> None:
+        guard = kwargs.get("provider_mutation_guard")
+        with guard() if callable(guard) else nullcontext():
+            payload = cast(api.JsonObject, kwargs["schedule_payload"])
+            self.schedules.pop(str(payload["name"]), None)
 
     def _run(self, **kwargs: object) -> None:
         before_trigger = kwargs.get("before_trigger")
@@ -382,9 +390,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             patch.object(
                 api,
                 "delete_dokploy_application_schedule",
-                side_effect=lambda **kwargs: self.schedules.pop(
-                    str(cast(api.JsonObject, kwargs["schedule_payload"])["name"]), None
-                ),
+                side_effect=self._delete,
             )
         )
 
@@ -705,7 +711,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                     patch.object(
                         api,
                         "upsert_dokploy_application_schedule",
-                        return_value={"scheduleId": "fixture"},
+                        side_effect=self._upsert,
                     ),
                     patch.object(api, "dokploy_request", return_value=None) as provider,
                 ):
@@ -753,10 +759,16 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             lost_fence,
             lambda: None,
         )
-        with patch.object(api, "upsert_dokploy_application_schedule") as upsert:
+        with patch.object(
+            api, "dokploy_request", return_value=[{**self.original, "scheduleId": "captured"}]
+        ) as provider:
             with self.assertRaisesRegex(RuntimeError, "lost lease"):
                 lifecycle.restore()
-        upsert.assert_not_called()
+        self.assertTrue(provider.call_args_list)
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in provider.call_args_list)
+        )
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
 
     def test_recovery_does_not_adopt_image_success_without_lifecycle_receipt(self) -> None:
         profile = _profile()

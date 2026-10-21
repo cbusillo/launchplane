@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
+from control_plane.provider_operations import ProviderMutationUnknownError
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -335,11 +336,17 @@ def _resolve_preview_smoke_maintenance_target(
     return application_name, application_id, base_url, secret
 
 
+class MaintenanceExchangeGuard(Protocol):
+    def begin_exchange(self, name: str) -> None: ...
+    def complete_exchange(self, name: str) -> None: ...
+
+
 def _request_internal_smoke_maintenance_api(
     *,
     base_url: str,
     secret: str,
     request: VeriReelAppMaintenanceRequest,
+    execution_guard: MaintenanceExchangeGuard | None = None,
 ) -> None:
     endpoint = f"{_validate_base_url(base_url, label='VeriReel smoke maintenance')}{SMOKE_MAINTENANCE_PATH}"
     body = json.dumps(
@@ -359,16 +366,52 @@ def _request_internal_smoke_maintenance_api(
         },
     )
     try:
+        if execution_guard is not None:
+            execution_guard.begin_exchange(f"maintenance:{request.action}")
         with urlopen(http_request, timeout=request.timeout_seconds) as response:
-            response.read()
+            raw = response.read()
+            if execution_guard is not None:
+                payload = json.loads(raw)
+                if (
+                    response.status != 200
+                    or not isinstance(payload, dict)
+                    or payload.get("ok") is not True
+                ):
+                    raise ProviderMutationUnknownError(
+                        "Testing maintenance returned no synchronous success proof."
+                    )
+                execution_guard.complete_exchange(f"maintenance:{request.action}")
     except HTTPError as error:
+        if execution_guard is not None:
+            try:
+                error.read()
+            except Exception as read_error:
+                raise ProviderMutationUnknownError(
+                    "Testing maintenance response was lost."
+                ) from read_error
+            if error.code in {400, 401, 404}:
+                execution_guard.complete_exchange(f"maintenance:{request.action}")
+            else:
+                raise ProviderMutationUnknownError(
+                    "Testing maintenance server outcome is unknown."
+                ) from error
         raise click.ClickException(
             f"VeriReel smoke maintenance API returned HTTP {error.code}."
         ) from error
     except URLError as error:
+        if execution_guard is not None:
+            raise ProviderMutationUnknownError(
+                "Testing maintenance transport outcome is unknown."
+            ) from error
         raise click.ClickException(
             f"VeriReel smoke maintenance API request failed: {error.reason}"
         ) from error
+    except Exception as error:
+        if execution_guard is not None:
+            raise ProviderMutationUnknownError(
+                "Testing maintenance response completion is unknown."
+            ) from error
+        raise
 
 
 @dataclass(frozen=True)
@@ -401,6 +444,7 @@ def execute_verireel_app_maintenance(
     control_plane_root: Path,
     request: VeriReelAppMaintenanceRequest,
     testing_target: RecordedTestingMaintenanceTarget | None = None,
+    execution_guard: MaintenanceExchangeGuard | None = None,
 ) -> VeriReelAppMaintenanceResult:
     started_at = utc_now_timestamp()
     application_name = ""
@@ -449,7 +493,10 @@ def execute_verireel_app_maintenance(
                 base_url=base_url,
                 secret=secret,
                 request=request,
+                **({"execution_guard": execution_guard} if execution_guard is not None else {}),
             )
+    except ProviderMutationUnknownError:
+        raise
     except Exception as error:
         return VeriReelAppMaintenanceResult(
             maintenance_status="fail",
