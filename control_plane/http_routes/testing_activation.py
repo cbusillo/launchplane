@@ -28,7 +28,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_activation import ROUTE, TestingActivationAdapter, plan
+from control_plane.testing_activation import ROUTE, activation_adapter, plan
 
 
 def register_testing_activation_routes(
@@ -63,7 +63,7 @@ def register_testing_activation_routes(
                 message="Testing activation requires service-owned records.",
             )
         scope = idempotency_scope(identity)
-        adapter = TestingActivationAdapter(
+        adapter = activation_adapter(
             root, record_store, product, body, actor(identity), scope, trace
         )
         try:
@@ -128,6 +128,14 @@ def register_testing_activation_routes(
                         code="review_required",
                         message="Apply requires the original key and reviewed plan.",
                     )
+                if body.application is not None:
+                    original = record_store.read_testing_application_activation_operation(
+                        product, body.context, scope, body.preparation_key
+                    )
+                    if original is not None and original.idempotency_key != idempotency_key.strip():
+                        raise TestingActivationRefusal(
+                            "Continue this generation using its original activation key."
+                        )
                 return await run_provider_mutation(
                     record_store=record_store,
                     identity=identity,
@@ -140,6 +148,15 @@ def register_testing_activation_routes(
                     adapter=adapter,
                     in_progress_message="Testing activation is running under its original key.",
                     reconcile_message="Testing activation outcome is unknown; preserve original placement, holds and fences.",
+                    **(
+                        {
+                            "original_intent": {
+                                "testing_activation": adapter.current().model_dump(mode="json")
+                            }
+                        }
+                        if body.application is not None
+                        else {}
+                    ),
                 )
         except BridgeNetworkCapacityRefused as error:
             raise dependencies.http_error(

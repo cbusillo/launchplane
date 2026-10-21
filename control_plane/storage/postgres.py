@@ -12049,17 +12049,193 @@ class PostgresRecordStore(HumanSessionStore):
 
         record = TestingActivationRecord.model_validate(replacement)
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            before = TestingActivationRecord.model_validate(expected) if expected else None
+            if before is None or not before.published:
+                safety_row = session.get(
+                    LaunchplaneDisposableLaneSafetyRow,
+                    (record.product, record.context, "testing"),
+                    with_for_update=True,
+                )
+                if (
+                    safety_row is not None
+                    and DisposableLaneSafety.model_validate(safety_row.payload).usage == "in_use"
+                ):
+                    raise ValueError("Known staff use protects the retained testing recipient.")
+            application = record.request.application is not None
+            if application:
+                from control_plane.testing_activation import configuration_digest
+
+                if before is None:
+                    raise ValueError("Application custody starts in its real original intent.")
+                if not before.published:
+                    target_row = session.get(
+                        LaunchplaneDokployTargetRow,
+                        (record.context, "testing"),
+                        with_for_update=True,
+                    )
+                    target_id_row = session.get(
+                        LaunchplaneDokployTargetIdRow,
+                        (record.context, "testing"),
+                        with_for_update=True,
+                    )
+                    if (
+                        target_row is None
+                        or self._read_payload(
+                            model_type=DokployTargetRecord,
+                            payload=_payload_from_row(target_row),
+                        )
+                        != before.retained_target
+                        or target_id_row is None
+                        or self._read_payload(
+                            model_type=DokployTargetIdRecord,
+                            payload=_payload_from_row(target_id_row),
+                        )
+                        != before.retained_target_id
+                    ):
+                        raise ValueError("The retained application target authority changed.")
+                if configuration_digest(
+                    self, record.product, record.context, version=record.configuration_version
+                ) != (before.generated_configuration_sha256 or before.configuration_sha256):
+                    raise ValueError("Application configuration changed before custody committed.")
+                profile = self.read_product_profile_record(record.product)
+                assert record.request.application is not None
+                if (profile.runtime_port, profile.health_path) != (
+                    record.request.application.runtime_port,
+                    record.request.application.health_path,
+                ):
+                    raise ValueError("The application runtime contract changed.")
             if bundle is not None:
-                self._write_product_authority_bundle(bundle, write_session=session, commit=False)
+                self._write_product_authority_bundle(
+                    bundle, write_session=session, commit=False, write_transaction_started=True
+                )
+            if application:
+                reader = getattr(self._provider_evidence_context, "reservation_reader", None)
+                if reader is None:
+                    raise ValueError("Application custody requires its live original execution.")
+                reservation = self.require_current_provider_execution(session, reader())
+                if (
+                    reservation.scope != record.scope
+                    or reservation.route_path != f"/v1/products/{record.product}/testing-activation"
+                    or reservation.reconciliation_key != record.plan_sha256
+                ):
+                    raise ValueError(
+                        "Application custody belongs to a different original operation."
+                    )
+                row = session.scalar(
+                    self._idempotency_statement(
+                        scope=reservation.scope,
+                        route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                        idempotency_key=reservation.record_id,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    raise ValueError("The original activation intent is unavailable.")
+                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                intent = self._original_mutation_intent(session, reservation)
+                initial = TestingActivationRecord.model_validate(intent.get("testing_activation"))
+                if (initial.plan_sha256, initial.request, initial.actor) != (
+                    record.plan_sha256,
+                    record.request,
+                    record.actor,
+                ):
+                    raise ValueError("Application custody cannot replace its original intent.")
+                payload = original.response_payload.get(
+                    "testing_activation", initial.model_dump(mode="json")
+                )
+                if record.published:
+                    inventory = session.get(
+                        LaunchplaneInventoryRow, (record.context, "testing"), with_for_update=True
+                    )
+                    if (
+                        EnvironmentInventory.model_validate(inventory.payload)
+                        if inventory
+                        else None
+                    ) != record.retained_inventory:
+                        raise ValueError(
+                            "Activation predecessor inventory changed before publication."
+                        )
+                    if record.retained_deployment is not None:
+                        deployment = session.get(
+                            LaunchplaneDeploymentRow,
+                            record.retained_deployment.record_id,
+                            with_for_update=True,
+                        )
+                        if (
+                            deployment is None
+                            or DeploymentRecord.model_validate(deployment.payload)
+                            != record.retained_deployment
+                        ):
+                            raise ValueError(
+                                "Activation predecessor deployment changed before publication."
+                            )
+                    readiness = record.application_readiness
+                    if (
+                        readiness is None
+                        or readiness.private_health is None
+                        or readiness.private_health.status != "pass"
+                    ):
+                        raise ValueError("The application has no private runtime readiness.")
+                    binding_row = session.get(
+                        LaunchplaneRouteBindingRow,
+                        (record.product, record.context, "testing"),
+                        with_for_update=True,
+                    )
+                    binding = (
+                        EnvironmentRouteBindingRecord.model_validate(binding_row.payload)
+                        if binding_row
+                        else None
+                    )
+                    from control_plane.testing_publication_storage import testing_binding_authority
+
+                    if testing_binding_authority(binding) != testing_binding_authority(
+                        record.retained_route_binding
+                    ):
+                        raise ValueError("The retained serving route authority changed.")
+                    if readiness.route is not None:
+                        from datetime import datetime, timedelta, timezone
+                        from urllib.parse import urlsplit
+                        from control_plane.contracts.runtime_identity import (
+                            compare_runtime_identity,
+                        )
+
+                        now = datetime.fromisoformat(
+                            self._database_mutation_timestamp(session).replace("Z", "+00:00")
+                        )
+                        observed = datetime.fromisoformat(
+                            readiness.observed_at.replace("Z", "+00:00")
+                        ).astimezone(timezone.utc)
+                        health = readiness.public_health
+                        if (
+                            not now - timedelta(minutes=2) <= observed <= now
+                            or health is None
+                            or not health.verified
+                            or health.status != "pass"
+                            or compare_runtime_identity(
+                                expected=readiness.runtime_identity,
+                                observed=health.observed_runtime_identity,
+                            )[0]
+                            != "match"
+                            or not health.urls
+                            or any(
+                                urlsplit(url).hostname != readiness.route.host
+                                for url in health.urls
+                            )
+                            or record.published_route_binding is None
+                        ):
+                            raise ValueError(
+                                "The original public application readiness is unavailable or stale."
+                            )
             else:
-                self._begin_serialized_write(session)
-                self._lock_product_authority_bundle_write(session)
-            row = session.get(
-                LaunchplaneTestingActivationRow,
-                (record.product, record.context),
-                with_for_update=True,
-            )
-            if (TestingActivationRecord.model_validate(row.payload) if row else None) != (
+                row = session.get(
+                    LaunchplaneTestingActivationRow,
+                    (record.product, record.context),
+                    with_for_update=True,
+                )
+                payload = row.payload if row else None
+            if (TestingActivationRecord.model_validate(payload) if payload else None) != (
                 TestingActivationRecord.model_validate(expected) if expected is not None else None
             ):
                 raise ValueError("Testing activation custody changed.")
@@ -12076,6 +12252,9 @@ class PostgresRecordStore(HumanSessionStore):
                     "qualified_at",
                     "published_target",
                     "generated_configuration_sha256",
+                    "state_recipient",
+                    "application_readiness",
+                    "published_route_binding",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
@@ -12113,14 +12292,140 @@ class PostgresRecordStore(HumanSessionStore):
                         raise ValueError("Testing activation placement is immutable.")
                 if previous.published and not record.published:
                     raise ValueError("Testing activation publication cannot be undone.")
-            session.merge(
-                LaunchplaneTestingActivationRow(
-                    product=record.product,
-                    context=record.context,
-                    payload=self._payload_dict(record),
+                if any(
+                    record.state_recipient.get(key) != value
+                    for key, value in previous.state_recipient.items()
+                ):
+                    raise ValueError("Application state recipient custody is immutable.")
+            if application:
+                if record.published:
+                    from control_plane.testing_application_activation import activation_image_record
+
+                    image = activation_image_record(record)
+                    existing_image = session.get(
+                        LaunchplaneDeploymentRow, image.record_id, with_for_update=True
+                    )
+                    if (
+                        existing_image is not None
+                        and DeploymentRecord.model_validate(existing_image.payload) != image
+                    ):
+                        raise ValueError("The original activation image record changed.")
+                    session.merge(
+                        LaunchplaneDeploymentRow(
+                            record_id=image.record_id,
+                            context=image.context,
+                            instance=image.instance,
+                            artifact_id=image.artifact_identity.artifact_id,
+                            source_git_ref=image.source_git_ref,
+                            deploy_started_at=image.deploy.started_at,
+                            deploy_finished_at=image.deploy.finished_at,
+                            payload=self._payload_dict(image),
+                        )
+                    )
+                    if record.published_route_binding is not None:
+                        session.merge(self._route_binding_row(record.published_route_binding))
+                assert callable(reader)
+                self.require_current_provider_execution(session, reader())
+                session.merge(
+                    self._idempotency_row(
+                        original.model_copy(
+                            update={
+                                "updated_at": self._database_mutation_timestamp(session),
+                                "response_payload": {
+                                    **original.response_payload,
+                                    "testing_activation": record.model_dump(mode="json"),
+                                },
+                            }
+                        )
+                    )
                 )
-            )
+            else:
+                session.merge(
+                    LaunchplaneTestingActivationRow(
+                        product=record.product,
+                        context=record.context,
+                        payload=self._payload_dict(record),
+                    )
+                )
             session.commit()
+
+    def list_testing_application_activations(
+        self, product: str, context: str
+    ) -> tuple[dict[str, Any], ...]:
+        """Progress belongs to a real retained parent, never a synthetic activation receipt."""
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
+            "testing_activation"
+        ]
+        with self._session_factory() as session:
+            originals = session.scalars(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    payload["product"].as_string() == product,
+                    payload["context"].as_string() == context,
+                )
+            ).all()
+            result = []
+            for row in originals:
+                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                parent = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.record_id
+                        == original.response_payload["reservation_id"],
+                        LaunchplaneIdempotencyRow.scope == original.scope,
+                        LaunchplaneIdempotencyRow.route_path
+                        == f"/v1/products/{product}/testing-activation",
+                    )
+                )
+                if (
+                    parent is None
+                    or parent.payload["request_fingerprint"] != original.request_fingerprint
+                ):
+                    continue
+                result.append(
+                    original.response_payload.get(
+                        "testing_activation",
+                        original.response_payload["original_intent"]["testing_activation"],
+                    )
+                )
+            return tuple(result)
+
+    def read_testing_application_activation_operation(
+        self, product: str, context: str, scope: str, preparation_key: str
+    ) -> LaunchplaneIdempotencyRecord | None:
+        """Resolve the real original parent; progress is never completion evidence."""
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
+            "testing_activation"
+        ]
+        with self._session_factory() as session:
+            originals = session.scalars(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.scope == scope,
+                    payload["product"].as_string() == product,
+                    payload["context"].as_string() == context,
+                    payload["request"]["preparation_key"].as_string() == preparation_key,
+                )
+            ).all()
+            parents = []
+            for row in originals:
+                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                parent = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.record_id
+                        == original.response_payload["reservation_id"],
+                        LaunchplaneIdempotencyRow.scope == scope,
+                        LaunchplaneIdempotencyRow.route_path
+                        == f"/v1/products/{product}/testing-activation",
+                    )
+                )
+                if (
+                    parent is not None
+                    and parent.payload["request_fingerprint"] == original.request_fingerprint
+                ):
+                    parents.append(LaunchplaneIdempotencyRecord.model_validate(parent.payload))
+            if len(parents) > 1:
+                raise ValueError("Activation has more than one original parent operation.")
+            return parents[0] if parents else None
 
     def list_pending_odoo_testing_drill_alerts(
         self, product: str, context: str

@@ -1,0 +1,583 @@
+"""Reviewed fresh application inputs and real managed runtime delivery."""
+
+import base64
+from copy import deepcopy
+import hashlib
+from io import StringIO
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any
+import time
+from uuid import uuid4
+from urllib.parse import urlsplit, unquote
+import unittest
+from unittest.mock import patch
+
+from control_plane import secrets
+from control_plane.contracts.product_profile_record import (
+    ProductSecretConfigRequirement,
+    ProductOwnerSecretInput,
+)
+from control_plane.contracts.testing_application import (
+    TestingApplicationSpecification,
+    TestingApplicationState,
+    TestingApplicationCredential,
+)
+from control_plane.odoo_testing_resources import ApplicationTestingResources
+from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
+from control_plane.testing_application_credentials import (
+    generation_bundle,
+    STATE_SECRET_INTEGRATION,
+)
+from tests import test_testing_activation as activation_fixture
+
+
+class RetainedCapabilityProgramTests(unittest.TestCase):
+    spec: dict[str, Any]
+    configuration: dict[str, Any]
+    task: dict[str, Any]
+    containers: dict[str, Any]
+
+    def setUp(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.event_testing_deploy import event_testing_deploy_request
+        from control_plane.workflows.generic_web_deploy import _build_runtime_identity
+        from tests.support.profiles import product_profile_payload
+        from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        artifact = "example/app@sha256:" + "a" * 64
+        event = event_testing_deploy_request(
+            product=profile.product,
+            image_reference=artifact,
+            source_commit="a" * 40,
+            deploy_reference="example/app:sha-" + "a" * 40,
+        )
+        request = _generic_web_recovery_target().ship_request.model_copy(
+            update={
+                "artifact_id": event.deploy.artifact_id,
+                "deploy_reference": event.deploy.deploy_reference,
+                "source_git_ref": event.deploy.source_git_ref,
+            }
+        )
+        self.identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=request,
+            deployment_record_id="original-deployment",
+        ).model_dump(mode="json")
+        self.spec = {
+            "product": profile.product,
+            "context": lane.context,
+            "application": "retained-app",
+            "application_id": "retained-id",
+            "deployments": {
+                "original-deployment": {
+                    "artifact": artifact,
+                    "provider_reference": event.deploy.deploy_reference,
+                    "source": event.deploy.source_git_ref,
+                }
+            },
+        }
+        self.configuration = {
+            "Env": ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(self.identity)],
+            "Image": event.deploy.deploy_reference + "@" + artifact.split("@", 1)[1],
+            "Mounts": [
+                {"Type": "volume", "Source": "retained-state", "Target": "/var/lib/example"}
+            ],
+        }
+        self.service = {"ID": "retained-service", "Spec": {"Name": "retained-app"}}
+        self.task = {
+            "ID": "original-task",
+            "ServiceID": "retained-service",
+            "Spec": {"ContainerSpec": deepcopy(self.configuration)},
+            "Status": {"ContainerStatus": {"ContainerID": "original-container"}},
+        }
+        self.containers = {
+            "original-container": {
+                "Id": "original-container",
+                "Image": "sha256:" + "b" * 64,
+                "Config": {
+                    "Image": event.deploy.deploy_reference,
+                    "Labels": {"com.docker.swarm.service.name": "retained-app"},
+                    "Env": list(self.configuration["Env"]),
+                },
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": "retained-state",
+                        "Source": "/var/lib/docker/volumes/retained-state/_data",
+                    }
+                ],
+            },
+            "provider-manager": {
+                "Id": "provider-manager",
+                "Config": {"Labels": {}, "Env": ["DOKPLOY_TOKEN=provider-private-token"]},
+                "Mounts": [{"Type": "bind", "Source": "/var/run/docker.sock"}],
+            },
+        }
+
+    def docker(self, arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        values = arguments[1:]
+        if values == ["service", "inspect", "retained-app"]:
+            result = json.dumps([self.service])
+        elif values == ["service", "ps", "--no-trunc", "-q", "retained-app"]:
+            result = "original-task\n"
+        elif values == [
+            "ps",
+            "-aq",
+            "--no-trunc",
+            "--filter",
+            "label=com.docker.swarm.service.name=retained-app",
+        ]:
+            result = "original-container\n"
+        elif values == ["image", "inspect", self.containers["original-container"]["Image"]]:
+            result = json.dumps(
+                [
+                    {
+                        "Id": self.containers["original-container"]["Image"],
+                        "RepoDigests": [self.identity["artifact_id"]],
+                    }
+                ]
+            )
+        elif values == ["inspect", "--type", "task", "original-task"]:
+            result = json.dumps([self.task])
+        elif len(values) == 2 and values[0] == "inspect" and values[1] in self.containers:
+            result = json.dumps([self.containers[values[1]]])
+        else:
+            raise AssertionError(arguments)
+        return subprocess.CompletedProcess(arguments, 0, result, "")
+
+    def observe(self) -> str:
+        from control_plane.testing_application_capabilities import (
+            RETAINED_APPLICATION_CAPABILITY_PROGRAM,
+        )
+        from control_plane.runtime_platform_credentials import find_platform_credentials
+        from control_plane.contracts.deploy_reference import (
+            docker_image_repository,
+            docker_image_digest,
+        )
+
+        output = StringIO()
+        values = {
+            "base64": base64,
+            "hashlib": hashlib,
+            "json": json,
+            "re": re,
+            "subprocess": subprocess,
+            "sys": sys,
+            "Path": Path,
+            "find_platform_credentials": find_platform_credentials,
+            "docker_image_repository": docker_image_repository,
+            "docker_image_digest": docker_image_digest,
+        }
+        with (
+            patch.object(
+                sys, "argv", ["program", base64.b64encode(json.dumps(self.spec).encode()).decode()]
+            ),
+            patch.object(subprocess, "run", side_effect=self.docker),
+            patch("sys.stdout", output),
+        ):
+            exec(RETAINED_APPLICATION_CAPABILITY_PROGRAM, values)
+        return output.getvalue()
+
+    def test_attributable_named_volume_original_ignores_provider_manager_authority(self) -> None:
+        self.assertIn("testing_resources_ok=true", self.observe())
+
+    def test_retained_socket_mount_refuses_even_without_resource_backing_overlap(self) -> None:
+        self.task["Spec"]["ContainerSpec"]["Mounts"] = [
+            {"Type": "bind", "Source": "/var/run/docker.sock", "Target": "/var/run/docker.sock"}
+        ]
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def test_inherited_platform_key_in_captured_original_task_refuses(self) -> None:
+        self.task["Spec"]["ContainerSpec"]["Env"].append("DOKPLOY_TOKEN=retained-admin-capability")
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def test_current_clean_task_cannot_substitute_an_unrelated_deployment(self) -> None:
+        self.spec["deployments"] = {
+            "different-original-deployment": self.spec["deployments"]["original-deployment"]
+        }
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+
+class ApplicationInputTests(unittest.TestCase):
+    def test_data_mounts_reject_protected_descendants_and_unnormalized_paths(self) -> None:
+        for path in (
+            "/etc/ssh",
+            "/proc/sys",
+            "/dev/shm",
+            "/run/docker",
+            "/sys/fs",
+            "/var/../etc",
+            "/var//data",
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                TestingApplicationState(kind="volume", container_path=path)
+        self.assertEqual(
+            TestingApplicationState(
+                kind="volume", container_path="/var/lib/example"
+            ).container_path,
+            "/var/lib/example",
+        )
+
+    def test_actual_state_kind_controls_resource_count_and_binding(self) -> None:
+        common = dict(
+            product="fixture",
+            context="fixture",
+            operation_id="allocation",
+            target_id="old",
+            namespace="lp-testing-" + "a" * 32,
+        )
+        none = ApplicationTestingResources.model_validate({**common, "state_kind": "none"})
+        local = ApplicationTestingResources.model_validate({**common, "state_kind": "volume"})
+        postgres = ApplicationTestingResources.model_validate(
+            {**common, "state_kind": "postgresql"}
+        )
+        self.assertEqual(none.volumes, {})
+        self.assertEqual(set(local.volumes), {"state"})
+        self.assertEqual(set(postgres.volumes), {"database"})
+        self.assertEqual(len({row.binding_sha256 for row in (none, local, postgres)}), 3)
+
+
+class ApplicationCredentialTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "application-activation-fixture-root"
+                },
+            )
+        )
+        self.fixture = activation_fixture.ActivationTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.store = self.fixture.store
+        profile = self.store.read_product_profile_record(self.fixture.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD", context=self.fixture.context, instance="testing"
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        self.record = self.fixture.planned_record.model_copy(deep=True)
+        self.specification = TestingApplicationSpecification(
+            runtime_port=8000,
+            health_path="/health",
+            network_name="fixture-provider-network",
+            state=TestingApplicationState(kind="none"),
+            local_credentials=(
+                TestingApplicationCredential(binding_key="DB_PASSWORD", encoding="base64"),
+            ),
+        )
+        self.record.request.application = self.specification
+        version = self.store.read_secret_version("testing-version")
+        ciphertext, key_id = secrets._encrypt_secret_value("retained-test-password")
+        self.store.write_secret_version(
+            version.model_copy(update={"ciphertext": ciphertext, "key_id": key_id})
+        )
+
+    def stage(self) -> Any:
+        bundle = generation_bundle(self.store, self.record)
+        self.store.write_product_authority_bundle(bundle)
+        self.record.state_recipient.update(
+            {
+                secret.name.removeprefix(self.record.namespace + "-")
+                + "_version": secret.current_version_id
+                for secret in bundle.secret_records
+            }
+        )
+        return bundle
+
+    def test_reviewed_local_intent_generates_without_legacy_profile_flag(self) -> None:
+        from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
+
+        profile = self.store.read_product_profile_record(self.record.product)
+        self.assertFalse(
+            profile.expected_config.managed_secret_bindings[0].testing_local_credential
+        )
+        from control_plane.testing_application_credentials import (
+            staged_runtime_values,
+            runtime_activation_bundle,
+        )
+
+        bundle = self.stage()
+        environment = resolve_site_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.record.context,
+            instance_name="testing",
+            target_environment={},
+        )
+        self.assertEqual(environment.values["DB_PASSWORD"], "retained-test-password")
+        staged = staged_runtime_values(self.store, self.record)
+        decoded = base64.b64decode(staged["DB_PASSWORD"], validate=True)
+        self.assertTrue(decoded)
+        self.assertEqual(base64.b64encode(decoded).decode(), staged["DB_PASSWORD"])
+        self.store.write_product_authority_bundle(
+            runtime_activation_bundle(self.store, self.record)
+        )
+        activated = resolve_site_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.record.context,
+            instance_name="testing",
+            target_environment={},
+        )
+        self.assertEqual(activated.values["DB_PASSWORD"], staged["DB_PASSWORD"])
+        binding = next(row for row in bundle.secret_bindings if row.binding_key == "DB_PASSWORD")
+        self.assertEqual(binding.value_source, "generated")
+        self.assertNotIn("GLOBAL_PLATFORM_PASSWORD", environment.values)
+
+    def test_external_owner_input_cannot_be_reinterpreted_as_local_generation(self) -> None:
+        profile = self.store.read_product_profile_record(self.record.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD",
+                context=self.record.context,
+                instance="testing",
+                owner_input=ProductOwnerSecretInput(
+                    label="Externally issued application credential"
+                ),
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        with patch(
+            "control_plane.testing_application_credentials.random_secrets.token_bytes"
+        ) as generate:
+            with self.assertRaises(ValueError):
+                generation_bundle(self.store, self.record)
+        generate.assert_not_called()
+
+    def test_postgres_connection_is_derived_and_bootstrap_is_not_application_delivery(self) -> None:
+        from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
+
+        (runtime,) = self.store.list_runtime_environment_records(
+            context_name=self.record.context, instance_name="testing"
+        )
+        runtime.env["DATABASE_URL"] = "postgresql://old:retained@old-state/old"
+        self.store.write_runtime_environment_record(runtime)
+        self.record.request.application = self.specification.model_copy(
+            update={
+                "state": TestingApplicationState(
+                    kind="postgresql",
+                    container_path="/var/lib/postgresql/data",
+                    image_reference="example/postgres@sha256:" + "b" * 64,
+                    connection_binding="DATABASE_URL",
+                    port=5432,
+                )
+            }
+        )
+        from control_plane.testing_application_credentials import (
+            staged_runtime_values,
+            runtime_activation_bundle,
+        )
+
+        bundle = self.stage()
+        staged = staged_runtime_values(self.store, self.record)
+        before = resolve_site_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.record.context,
+            instance_name="testing",
+            target_environment={},
+        )
+        self.assertEqual(before.values["DATABASE_URL"], runtime.env["DATABASE_URL"])
+        self.assertNotIn(
+            "DATABASE_URL",
+            site_delivered_secret_bindings_from_store(
+                record_store=self.store, context_name=self.record.context, instance_name="testing"
+            ),
+        )
+        self.store.write_product_authority_bundle(
+            runtime_activation_bundle(self.store, self.record)
+        )
+        environment = resolve_site_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.record.context,
+            instance_name="testing",
+            target_environment={},
+        )
+        self.assertEqual(environment.values["DATABASE_URL"], staged["DATABASE_URL"])
+        connection = urlsplit(staged["DATABASE_URL"])
+        self.assertEqual(connection.hostname, self.record.namespace + "-postgres")
+        self.assertNotEqual(unquote(connection.password or ""), "")
+        bootstrap = next(
+            row
+            for row in bundle.secret_bindings
+            if row.integration == STATE_SECRET_INTEGRATION and row.binding_key == "bootstrap"
+        )
+        self.assertNotIn(bootstrap.binding_key, environment.values)
+        self.assertNotIn("application", environment.values)
+        self.assertTrue(
+            all(
+                row.integration == STATE_SECRET_INTEGRATION
+                for row in bundle.secret_records
+                if row.name.startswith(self.record.namespace)
+            )
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("LAUNCHPLANE_TEST_APPLICATION_POSTGRES_IMAGE"),
+        "Select an already-local immutable PostgreSQL rehearsal image.",
+    )
+    def test_fresh_postgres_image_enforces_password_authentication(self) -> None:
+        """Run emitted bootstrap SQL on PostgreSQL; topology remains a finite fixture."""
+        from tests.test_testing_application_flow import ApplicationFlowTests
+
+        image = os.environ["LAUNCHPLANE_TEST_APPLICATION_POSTGRES_IMAGE"]
+        native_run = subprocess.run
+        inspected = native_run(
+            ["docker", "image", "inspect", image], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(
+            inspected.returncode, 0, "The selected immutable rehearsal image must already be local."
+        )
+        flow = ApplicationFlowTests()
+        flow.setUp()
+        self.addCleanup(flow.doCleanups)
+        use_postgres = flow.use_postgres
+        install_state = flow.install_state
+        fixture_docker = flow.state_docker
+        container = ""
+
+        def select_postgres() -> None:
+            use_postgres()
+            flow.specification = flow.specification.model_copy(
+                update={
+                    "state": flow.specification.state.model_copy(update={"image_reference": image})
+                }
+            )
+
+        def install(payload: dict[str, Any]) -> None:
+            nonlocal container
+            install_state(payload)
+            state = next(iter(flow.state_containers.values()))
+            environment = dict(value.split("=", 1) for value in state["Config"]["Env"])
+            name = "lp-application-pg-rehearsal-" + uuid4().hex
+            command = [
+                "docker",
+                "run",
+                "--rm",
+                "--detach",
+                "--network",
+                "none",
+                "--name",
+                name,
+                "--label",
+                "launchplane.fixture=application-postgres",
+            ]
+            for key, value in environment.items():
+                command.extend(["--env", key + "=" + value])
+            command.extend([image, "postgres", "-p", "5432"])
+            created = native_run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(
+                created.returncode, 0, "The fresh PostgreSQL rehearsal recipient failed to start."
+            )
+            container = created.stdout.strip()
+            self.assertRegex(container, r"^[a-f0-9]{64}$")
+
+            def cleanup(identifier: str) -> None:
+                removed = native_run(
+                    ["docker", "rm", "--force", "--volumes", identifier],
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    removed.returncode, 0, "The owned rehearsal recipient was not removed."
+                )
+
+            self.addCleanup(cleanup, container)
+            deadline = time.monotonic() + 30
+            while True:
+                ready = native_run(
+                    [
+                        "docker",
+                        "exec",
+                        container,
+                        "pg_isready",
+                        "-h",
+                        "127.0.0.1",
+                        "-U",
+                        environment["POSTGRES_USER"],
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                if ready.returncode == 0:
+                    break
+                self.assertLess(
+                    time.monotonic(), deadline, "The fresh PostgreSQL image did not become ready."
+                )
+                time.sleep(0.1)
+            # Only SQL is delegated to the real server. The existing full flow
+            # separately proves the actual provider alias/address rules. Here
+            # its finite network endpoint is loopback inside the owned container.
+            for network in state["NetworkSettings"]["Networks"].values():
+                network["IPAddress"] = "127.0.0.1"
+            for password, succeeds in (
+                (environment["POSTGRES_PASSWORD"], True),
+                (environment["POSTGRES_PASSWORD"] + "-invalid", False),
+            ):
+                logged_in = native_run(
+                    [
+                        "docker",
+                        "exec",
+                        "-e",
+                        "PGPASSWORD=" + password,
+                        container,
+                        "psql",
+                        "--no-password",
+                        "-h",
+                        "127.0.0.1",
+                        "-U",
+                        environment["POSTGRES_USER"],
+                        "-d",
+                        "postgres",
+                        "-X",
+                        "-A",
+                        "-t",
+                        "-c",
+                        "SELECT current_user;",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(logged_in.returncode == 0, succeeds)
+                if not succeeds:
+                    self.assertIn("password authentication failed", logged_in.stderr.lower())
+
+        def database(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if arguments[1] != "exec":
+                return fixture_docker(arguments, **kwargs)
+            state = next(iter(flow.state_containers.values()))
+            values = dict(value.split("=", 1) for value in state["Config"]["Env"])
+            actual = list(arguments)
+            psql = actual.index("psql")
+            self.assertEqual(actual[psql - 1], state["Id"])
+            actual[psql - 1] = container
+            host = actual.index("-h") + 1
+            user = actual[actual.index("-U") + 1]
+            if user == values["LP_APPLICATION_ROLE"]:
+                alias = state["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"][0]
+                self.assertEqual(actual[host], alias)
+                actual[host] = "127.0.0.1"
+            else:
+                self.assertEqual(user, values["POSTGRES_USER"])
+                self.assertEqual(actual[host], "127.0.0.1")
+            flow.state_sql.append(kwargs["input"])
+            return native_run(actual, **kwargs)
+
+        with (
+            patch.object(flow, "use_postgres", side_effect=select_postgres),
+            patch.object(flow, "install_state", side_effect=install),
+            patch.object(flow, "state_docker", side_effect=database),
+        ):
+            flow.test_postgres_state_native_flow_publishes_only_application_credentials()

@@ -3,10 +3,117 @@ title: Independent generic-web testing activation
 ---
 
 `POST /v1/products/{product}/testing-activation` consumes the original caller's
-completed independent-storage preparation receipt. It creates a new empty
+completed independent-storage preparation receipt. The legacy Compose request creates a new empty
 project, environment and Compose recipient on the original placement. It never
 starts, updates, stops or deletes the old recipient, changes production, creates
 credentials, settles historical deployment effects or deploys an application.
+
+## Conventional application recipients
+
+An explicit `application` specification on both resource preparation and
+activation selects the conventional Dokploy application continuation. It keeps
+the retained application, its unresolved execution and its data unchanged. The
+service creates a fresh application ID rather than claiming the old commands,
+maintenance or verifier have stopped. The strict provider/executor exclusion
+read continues to report the unresolved original. Create-only admission uses
+that exact held original's custody and execution lock; it does not weaken the
+ordinary deploy fence.
+
+Use `scripts/stage-testing-separation.py resources-dry-run` and
+`resources-apply` with `--application-file <private-specification.json>` for
+preparation. Put that identical object in the activation request's `application`
+field, then use `scripts/activate-generic-web-testing.py --request-file ...`
+through the installed operator transport. Keep both reviews and original keys.
+
+The reviewed specification supplies the profile's actual `runtime_port` and
+`health_path`, the existing provider network name and one explicit state shape:
+
+- `none` allocates no volume or state service.
+- `volume` allocates one qualified fresh local volume at the reviewed safe
+  application data path.
+- `postgresql` allocates one qualified fresh local volume and a separate fresh
+  PostgreSQL Compose recipient. Its immutable image, data path, internal port
+  and `connection_binding` are reviewed inputs. No old cluster, administrator
+  password or application container is used to initialize it.
+
+`local_credentials` names every existing delivered application-local binding
+that must be replaced, with its required `urlsafe`, `base64` or `hex` encoding.
+The reviewed request supplies generation authority for these local values; it
+does not require the older profile generation flag. An applicable `owner_input`
+requirement refuses local generation. A PostgreSQL connection binding is a
+resource-derived output and may be created for the first time: its URL contains
+the newly allocated endpoint, database, restricted application role and generated
+password. It is never a random URL or an alias for a password binding.
+
+Prospective runtime values and separate database bootstrap credentials are
+encrypted under the original operation's state purpose. They are not delivered
+by the canonical runtime resolver before publication. Target publication and
+installation of the application-local runtime bindings commit atomically under
+the current original execution lease. Existing resolver precedence lets the new
+managed testing binding override an older plain same-key setting without
+deleting shared configuration used by other lanes. Bootstrap credentials never
+become application runtime bindings. Every carried credential must have existing
+read-only-source sharing evidence; an external writable database, bot token or
+other shared writable capability requires its own independent provider resource.
+Random generation cannot create a new external account.
+
+Before fresh creation, the fixed inspector attributes the retained application's
+actual service/tasks/containers to its captured original deployment or exact
+captured predecessor. It refuses a Docker socket mount, inherited platform
+credentials or missing attribution. Inspecting a currently clean application
+record is not historical execution proof. Missing historical evidence remains
+unknown and keeps the original key and hold.
+
+The new application's image, registry settings, mounts, effective runtime
+environment, single Swarm task and private runtime identity are read back.
+PostgreSQL qualification checks the fresh backing and consumer alias, role and
+database ownership, application login, restricted privileges and rejection of
+an invalid password. These checks run on the new state recipient through a
+fixed host program. They do not run in the retained application.
+
+For addressed lanes, the existing native route journal and writer fence retain
+the public host while switching only after private readiness. The first
+application cutover admits only the physically read, domain-bound Dokploy
+application file and its matching applied `@file` routers. Foreign file routers
+are not adopted. The legacy Compose wrapper retains its Docker route behavior. The exact
+retained file identity and later owned route template remain in original
+operation custody. A lost writer reply must settle that original native journal;
+it never permits a second blind route publication.
+
+Private and public health establish process/build identity readiness. They do
+not establish product qualification or substitute for declared migration,
+maintenance, verification or recurring-schedule activation. Those run through
+the ordinary deployment after explicit activation-backed hold lift. A health
+endpoint that requires initialized schema must have a supported fresh-resource
+startup path; this action does not invent migration commands or run reset to
+make readiness pass. The activation's image record retains pending product
+health and no passing product inventory is fabricated.
+
+Application progress is stored in the **real original activation intent** and
+its existing provider receipt. Repeat generations use distinct preparation and
+original operation keys while preserving all prior completed custody. Unknown
+creates or deployment replies recover only through exact positive original
+identity/job readback; absence is not permission to repeat. Final target,
+runtime-binding and custody publication is one transaction, including lease,
+predecessor inventory/deployment and route-authority checks. Failed publication
+leaves the old canonical target and runtime delivery intact and reuses the
+original staged credential versions.
+
+The exact completed activation permits an ordinary forward deployment to start
+with a fresh lifecycle baseline on the new application. It skips only the
+captured predecessor inventory/deployment, clears inherited prior-artifact and
+rollback inputs, and preserves same-target retry and explicit rollback checks.
+The old unresolved execution remains fenced on its old application. A plain
+repoint supplies none of this proof. Same-artifact event reconciliation must
+also qualify the current target; activation does not turn predecessor inventory
+into current product qualification.
+
+Use the existing `stage-testing-separation.py lift-dry-run` and `lift-apply`
+with this completed activation's plan digest and the unchanged interlock's
+actual purpose. The same caller must still own the hold. No application
+activation step itself clears the hold or marks the old original terminal.
+
+## Legacy Compose continuation
 
 The authenticated Director agent uses `scripts/activate-generic-web-testing.py`
 with the installed `launchplane-write-action.py` helper. Keep its request and evidence files private,

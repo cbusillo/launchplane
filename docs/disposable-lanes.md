@@ -574,7 +574,23 @@ legacy purpose remains a staff hold; no reason text is interpreted, no hold is
 converted or lifted, and even a genuine staff hold continues protecting the old
 lane. Other callers' holds and production aliases refuse preparation.
 
-Apply requires PostgreSQL, complete current provider/executor exclusion, the
+An explicit reviewed `application` specification selects the
+[conventional application continuation](testing-activation.md#conventional-application-recipients).
+It allocates zero volumes for stateless applications, one application volume,
+or one PostgreSQL state volume, rather than inventing the legacy two-volume
+shape. The same specification is required at activation. This admission retains
+the exact original unknown application execution; it proves custody and
+attributable retained-recipient capabilities without claiming remote quiescence.
+Actual old task/container attribution, no platform authority and independently
+qualified new backing are required. The strict exclusion read stays truthful.
+Application preparation accepts reviewed data paths and immutable state image
+authority; it still accepts no secret values or old database credentials.
+New credential material remains purpose-staged until atomic application
+publication. Local-command and verifier obligations then run normally against
+the new recipient after the explicit activation-backed hold lift. External
+writable identities that cannot be independently allocated remain unsupported.
+
+Legacy Compose apply requires PostgreSQL, complete current provider/executor exclusion, the
 reviewed configuration/secret-metadata/hold/reservation/provider-placement snapshot and a stable
 idempotency key. It acquires the original executor lock, but never settles or
 releases the original deployment reservation. The only new effect is a disabled,

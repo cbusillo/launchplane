@@ -49682,6 +49682,16 @@
       "SeparationResourcesRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -51722,6 +51732,16 @@
       "TestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -51795,6 +51815,118 @@
           "reason"
         ],
         "title": "TestingActivationRequest",
+        "type": "object"
+      },
+      "TestingApplicationCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "encoding": {
+            "enum": [
+              "urlsafe",
+              "base64",
+              "hex"
+            ],
+            "title": "Encoding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "encoding"
+        ],
+        "title": "TestingApplicationCredential",
+        "type": "object"
+      },
+      "TestingApplicationSpecification": {
+        "additionalProperties": false,
+        "properties": {
+          "health_path": {
+            "pattern": "^/[^\\s?#]*$",
+            "title": "Health Path",
+            "type": "string"
+          },
+          "local_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationCredential"
+            },
+            "title": "Local Credentials",
+            "type": "array"
+          },
+          "network_name": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "Network Name",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TestingApplicationState"
+          }
+        },
+        "required": [
+          "runtime_port",
+          "health_path",
+          "network_name",
+          "state"
+        ],
+        "title": "TestingApplicationSpecification",
+        "type": "object"
+      },
+      "TestingApplicationState": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_binding": {
+            "default": "",
+            "title": "Connection Binding",
+            "type": "string"
+          },
+          "container_path": {
+            "default": "",
+            "title": "Container Path",
+            "type": "string"
+          },
+          "image_reference": {
+            "default": "",
+            "title": "Image Reference",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "none",
+              "volume",
+              "postgresql"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "maximum": 65535.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TestingApplicationState",
         "type": "object"
       },
       "TestingCredentialAudit": {

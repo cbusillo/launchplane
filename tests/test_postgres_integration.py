@@ -12808,6 +12808,57 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
+    """Application custody lives in the real original intent, including JSONB progress."""
+
+    def setUp(self) -> None:
+        from tests.test_testing_application_flow import ApplicationFlowTests
+
+        database = _head_postgres_database()
+        self.fixture = ApplicationFlowTests()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+        policy = testing_activation.activation_hold_policy(
+            self.fixture.product, self.fixture.context
+        )
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:application-activation",
+                updated_at=self.fixture.old.now(),
+                policy=policy,
+            )
+        )
+
+    def test_original_intent_progress_and_native_forward_continuation(self) -> None:
+        self.fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+    def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
+        self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()
+
+    def test_expired_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_expired_execution_rolls_back_target_and_delivery()
+
+    def test_replaced_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_replaced_execution_rolls_back_target_and_delivery()
+
+    def test_later_supported_hold_correction_prevents_publication(self) -> None:
+        self.fixture.test_later_supported_hold_correction_refuses_final_publication()
+
+    def test_new_staff_use_prevents_fresh_creation(self) -> None:
+        self.fixture.test_new_staff_use_refuses_before_fresh_creation()
+
+    def test_supported_application_route_original_intent_and_key_replay(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True)
+
+
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient_qualification as qualification
