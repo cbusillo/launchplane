@@ -549,16 +549,12 @@ confirmation phrase, a non-empty reason and related issue, and an unchanged
 managed-comment observation. If the managed comment is already absent, apply
 records `already_absent` without claiming a GitHub mutation.
 
-- work graph chooser route:
+- repository context and merge-delivery routes:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
-  - `GET /v1/work-graph/snapshot` (native FastAPI)
-  - `GET /v1/work-graph/github/issues` (native FastAPI)
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
-  - `POST /v1/work-graph/rank` (native FastAPI)
-  - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
@@ -625,7 +621,7 @@ typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
-driver, preview, work-graph, merge-train, and Every Code route families, plus
+driver, preview, merge-train, and Every Code route families, plus
 the seven evidence-ingress writes and twelve Generic Web provider writes, are
 registered from dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
@@ -669,13 +665,12 @@ after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
 write route also goes in `BROWSER_WRITE_ROUTES` in
 `frontend/src/browser-write-contract.ts`;
 `frontend/tests/action-model.test.mjs` checks that those routes match the write
-manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
+manifest. The write slice currently covers product-config dry-run/apply,
 generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
 It also covers browser-human privileged-operation approval and revocation; the
 service-internal execution path is intentionally absent.
-Issue reconciliation remains a bearer-only service operation rather than a
-browser client binding. Generated request, success, validation, and error
-bindings are the API boundary consumed by the UI. Handwritten frontend types
+Generated request, success, validation, and error bindings are the API boundary
+consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
 The same canonical export also feeds the narrower checked
@@ -700,14 +695,9 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated work-graph snapshot,
-issue-inbox, Every Code summary, merge-train policy-target, and merge-train
-controller-status read models directly. Work-graph ranking is the only
-Engineering Ops POST in the generated browser write contract; it is stateless
-and accepts the current generated snapshot. Issue reconciliation remains
-read-only in the browser: the UI explains the native GitHub Actions OIDC or
-trusted Director-agent write identity boundary and renders no Dry Run or Apply
-button. Merge-train UI is also status-only: target selection comes exclusively
+The Engineering Ops browser routes consume the generated Every Code summary,
+merge-train policy-target, and controller-status read models directly.
+Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
 Each route aborts superseded reads, distinguishes denied and empty responses,
@@ -814,7 +804,6 @@ waiting.
 The cookie-capable mutation inventory is intentionally limited to:
 
 - `POST /auth/logout`
-- `POST /v1/work-graph/rank`
 - `POST /v1/agent/write-intents/evaluate`
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/generic-web/prod-promotion-workflow`
@@ -1209,21 +1198,6 @@ idempotency records. PR-feedback status preserves
 the worker transition semantics: missing feedback returns `404 not_found`, and
 already applied or ignored feedback returns `409 feedback_already_final`.
 
-`POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
-returns the queue payload under `result.queue`. The route requires the
-`work_graph.rank` action for product/context `launchplane`, accepts GitHub
-Actions OIDC and GitHub human-session callers, rejects Director-agent bearer tokens
-at the identity boundary even if a policy grant is too broad, performs no
-storage writes, and does not make Launchplane authoritative for copied GitHub or
-Code Plans state.
-
-`POST /v1/work-graph/github/issues/reconcile` retains its injected-provider
-contract. The deployed service has no reconcile provider and, after
-authorization, refuses with `400 invalid_request`. `dry_run` requires
-`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. When a
-provider is supplied, the route returns its reconcile evidence under
-`result.reconcile`.
-
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
 `service_authz` action/product/context declared by the matching merge-train
@@ -1428,7 +1402,7 @@ batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
-repository ownership/awareness read model used by work graph and agent context.
+repository ownership/awareness read model used by agent context.
 The route requires
 `product_environment.read` for product/context `launchplane`, performs no
 writes, and distinguishes Launchplane-managed runtime repos from awareness-only
@@ -1436,26 +1410,13 @@ Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 
-`GET /v1/work-graph/snapshot` is a native FastAPI route that returns the
-current Launchplane-assembled work graph snapshot for the same authorization
-boundary. It composes product overviews and Every Code work-request records into
-the typed snapshot contract.
-The deployed service assembles the work graph from product profiles and durable
-work-request records. It does not read GitHub Projects, list inbox issues, or
-reconcile Project membership. Engineering > Work graph keeps these non-Project
-items; source counts report zero planning facts. The inbox read remains empty
-and unconfigured, and reconcile refuses without a provider. No Project/inbox
-environment bundle or `GH_TOKEN` is delivered by self-deploy. See
-[Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298).
-
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, work graph snapshot, Every Code
-summary, and preview readiness projections under named sections. Each section
-reports `available`, `unauthorized`, or `unavailable`; optional work-graph
-planning provider failures mark only that section unavailable instead of dropping
-the whole context or silently omitting the failure. The endpoint writes no
+composes the existing repo-product mapping, Every Code summary, preview
+readiness, and optional exact tenant-admission projections under named sections.
+Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
+writes no
 records, fetches no issue bodies, and must preserve the lower-level
 redaction/provenance rules.
 

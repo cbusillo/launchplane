@@ -71,7 +71,7 @@ from control_plane.cli_runtime_environments import (
 from control_plane.cli_records import RecordsCliCallbacks, register_record_commands
 from control_plane.cli_service import ServiceCliCallbacks, register_service_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
-from control_plane.cli_work_graph import register_work_graph_core_commands
+from control_plane.cli_merge_train import register_merge_train_commands
 from control_plane.config_authority_audit import (
     build_config_authority_audit,
     evaluate_config_authority_gate,
@@ -2978,14 +2978,9 @@ def main() -> None:
     """Control-plane CLI."""
 
 
-@main.group("work-graph")
-def work_graph() -> None:
-    """Work graph recommendation commands."""
-
-
-register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
+register_runner_lane_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_preview_workflow_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_merge_train_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]

@@ -15,7 +15,6 @@ from control_plane.drivers import native_routes
 from control_plane.http_app import ResolvedLaunchplaneAuthzPolicy
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _seed_agent_context_read_records, _work_graph_read_policy
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import get as http_get
 from tests.support.http import request as http_request
@@ -67,60 +66,6 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
         digest_patch = patch.object(service_bootstrap, "ReleaseDigestScheduler")
         self.release_digest_scheduler = digest_patch.start().return_value
         self.addCleanup(digest_patch.stop)
-
-    def test_work_graph_keeps_record_items_with_retired_project_env(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_agent_context_read_records(database_url)
-            store = PostgresRecordStore(database_url=database_url)
-            self.addCleanup(store.close)
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "example-owner",
-                        "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
-                        "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES": "example/repo",
-                        "GH_TOKEN": "synthetic-unused-credential",
-                    },
-                    clear=True,
-                ),
-                patch("subprocess.run", side_effect=AssertionError("unexpected child process")),
-            ):
-                app = service_bootstrap.create_launchplane_service_application(
-                    state_dir=root / "state",
-                    bootstrap_authz_policy=_work_graph_read_policy(),
-                    verifier=_StubVerifier(_identity()),
-                    service_record_store=store,
-                )
-                response = asyncio.run(
-                    _http_request_for_service_test(
-                        app,
-                        method="GET",
-                        path="/v1/work-graph/snapshot",
-                        authorization="Bearer valid-token",
-                    )
-                )
-                inbox = asyncio.run(
-                    _http_request_for_service_test(
-                        app,
-                        method="GET",
-                        path="/v1/work-graph/github/issues",
-                        authorization="Bearer valid-token",
-                    )
-                )
-            self.assertEqual(response.status_code, 200, response.text)
-            payload = response.json()
-            self.assertEqual(payload["source"]["planning_fact_count"], 0)
-            issues = {
-                (item["repository"], item["number"]) for item in payload["snapshot"]["issues"]
-            }
-            self.assertIn(("every/example-site", 190), issues)
-            self.assertIn(("cbusillo/tooling", 12), issues)
-            self.assertEqual(inbox.status_code, 200, inbox.text)
-            self.assertFalse(inbox.json()["configured"])
-            self.assertEqual(inbox.json()["inbox"]["repositories"], [])
 
     def test_service_serve_runs_fastapi_app(self) -> None:
         fastapi_response: Any | None = None

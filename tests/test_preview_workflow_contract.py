@@ -317,7 +317,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "preview-workflow-decision",
                     "--event-file",
                     str(event_file),
@@ -375,7 +374,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "preview-workflow-decision",
                     "--actor",
                     "cbusillo",
@@ -404,7 +402,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
         result = CliRunner().invoke(
             CLI_MAIN,
             [
-                "work-graph",
                 "preview-workflow-decision",
                 "--event-name",
                 "pull_request_target",
@@ -444,7 +441,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
         result = CliRunner().invoke(
             CLI_MAIN,
             [
-                "work-graph",
                 "preview-workflow-decision",
                 "--event-name",
                 "pull_request",
