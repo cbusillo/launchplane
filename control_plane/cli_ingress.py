@@ -39,6 +39,62 @@ def ingress() -> None:
     """Ingress route control commands."""
 
 
+@ingress.command("health-history-summary")
+@click.option(
+    "--page", "pages", required=True, multiple=True, type=click.Path(exists=True, path_type=Path)
+)
+@click.option(
+    "--check",
+    "checks",
+    required=True,
+    multiple=True,
+    help="Required KIND:NAME check; repeat for the complete lane policy.",
+)
+@click.option(
+    "--identity-check",
+    "identity_checks",
+    required=True,
+    multiple=True,
+    help="Required KIND:NAME identity witness, a subset of --check.",
+)
+@click.option(
+    "--exclude-check",
+    "excluded_checks",
+    multiple=True,
+    help="Diagnostic KIND:NAME stream deliberately outside the lane figure.",
+)
+def health_history_summary(
+    pages: tuple[Path, ...],
+    checks: tuple[str, ...],
+    identity_checks: tuple[str, ...],
+    excluded_checks: tuple[str, ...],
+) -> None:
+    """Account for one lane's saved GET health-history pages, in cursor order."""
+    from control_plane.lane_health_history import LaneHealthHistoryResponse, summarize_history_pages
+    from control_plane.contracts.public_ingress_monitoring import PublicIngressCheckKind
+    from pydantic import TypeAdapter
+
+    try:
+        history = [
+            LaneHealthHistoryResponse.model_validate_json(page.read_bytes()).history
+            for page in pages
+        ]
+        adapter = TypeAdapter(tuple[tuple[PublicIngressCheckKind, str], ...])
+        result = summarize_history_pages(
+            history,
+            required_checks=adapter.validate_python([check.split(":", 1) for check in checks]),
+            identity_checks=adapter.validate_python(
+                [check.split(":", 1) for check in identity_checks]
+            ),
+            excluded_checks=adapter.validate_python(
+                [check.split(":", 1) for check in excluded_checks]
+            ),
+        )
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(result.model_dump_json(indent=2))
+
+
 @ingress.command("private-testing-plan")
 @click.option("--service-url", required=True)
 @click.option("--bearer-token-env", default="LAUNCHPLANE_SERVICE_TOKEN", show_default=True)

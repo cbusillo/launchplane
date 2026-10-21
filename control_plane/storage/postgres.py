@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from control_plane.testing_verification import TestingVerification
 from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
+    DateTime,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -29791,6 +29792,67 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
         return records
+
+    def list_public_ingress_history_records(
+        self,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+        since: datetime,
+        until: datetime,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        row = LaunchplanePublicIngressObservationRow
+        # Old records can use offsets or fractional seconds. Compare instants,
+        # rather than assuming their ISO text has one lexical representation.
+        observed = (
+            func.julianday(row.observed_at)
+            if self.database_dialect_name == "sqlite"
+            else sql_cast(row.observed_at, DateTime(timezone=True))
+        )
+
+        def bound(value: datetime) -> Any:
+            return (
+                func.julianday(value.isoformat())
+                if self.database_dialect_name == "sqlite"
+                else value
+            )
+
+        filters = [
+            row.product == product,
+            row.context == context_name,
+            row.instance == instance_name,
+            # Use the existing lane/time index to bound the scan independently
+            # of total retained history. ISO offsets are strictly within 24h;
+            # the widened text bounds admit every representation before the
+            # exact instant comparison below.
+            row.observed_at >= (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+            # The extra second keeps a fractional bound conservative after formatting.
+            row.observed_at < (until + timedelta(days=1, seconds=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+            observed >= bound(since),
+            observed < bound(until),
+        ]
+        if before is not None:
+            before_time = datetime.fromisoformat(before[0].replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+            position = bound(before_time)
+            filters.append(
+                row.observed_at
+                < (before_time + timedelta(days=1, seconds=1)).strftime("%Y-%m-%dT%H:%M:%S")
+            )
+            filters.append(
+                or_(observed < position, and_(observed == position, row.record_id < before[1]))
+            )
+        return self._list_models(
+            model_type=PublicIngressObservationRecord,
+            orm_model=row,
+            filters=filters,
+            order_by=(observed.desc(), row.record_id.desc()),
+            limit=limit,
+        )
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
         self._write_row(

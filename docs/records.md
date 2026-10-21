@@ -1284,6 +1284,67 @@ discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
 
+### Lane health and identity history
+
+`GET /v1/products/{product}/environments/{environment}/health-history` reads
+retained observations using the same lane-scoped `product_environment.read`
+authority as environment detail (or `preview.read` for a preview). It never runs
+a probe or changes an incident. Supply timezone-aware `since` and `until` for
+an increasing window of at most eight days, with `until` no later than now.
+The interval is `[since, until)`. Each page returns at most 500 observations;
+follow `next_cursor` with the same lane and window until it is null. The cursor
+orders equal-time observations by record id, so passing records without any
+incident and records sharing a timestamp remain reachable. URLs, image
+locations, provider details and free-text diagnostics are omitted. Artifact,
+deployment and source references accompany the expected and observed identity
+result. A stored `match` is rechecked against its own expected/observed payloads.
+
+The read includes up to two hours of lookback for evidence covering the start
+of the requested window. Save every response in cursor order and run:
+
+```bash
+uv run launchplane ingress health-history-summary --page first.json --page second.json \
+  --check public_http:health --identity-check public_http:health
+```
+
+The offline command rejects incomplete, mixed or skipped page chains. Its real
+denominator is the requested elapsed seconds for this lane and each of its
+check streams, never scheduler completions or a pooled fleet sample. Each observation
+covers time forward until the next observation or the existing freshness
+deadline, whichever comes first. Failure, missing/expired evidence and verified
+identity time are reported separately. Reconciliation is administrative evidence
+and stops the prior probe's coverage; it cannot contribute a pass. Conflicting
+equal-time records cannot select a pass by record-id spelling. Missing time
+remains in the denominator. No observations means no measured check streams,
+not a healthy lane.
+
+`health_pass_percent` and `health_and_identity_percent` are conservative
+percentages of retained verified time. They do not establish physical outage
+durations. Provider delivery/source-warning streams stay separate from actual
+HTTP health streams. Supply the complete reviewed required check set with
+repeated `--check KIND:NAME`, and the checks that must verify runtime identity
+with `--identity-check KIND:NAME`.
+The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
+outside the health set. Every observed stream must be required or explicitly
+excluded; an unaccounted-for stream refuses the calculation. Required and
+excluded sets cannot overlap. The report prints all three sets, every stream
+row, and required checks with zero measured pass/fail coverage. Provider
+`monitor-cadence:...` and monitor-source warning streams are event-only
+diagnostics for `--exclude-check`; their incident and cadence qualification
+remains separate. Lane totals intersect required streams in time, so disjoint
+failures cannot hide behind individually passing percentages. A required check
+with no records contributes unknown time, not a pass. TLS or dependency checks
+can belong to the health set without being runtime-identity witnesses. The
+`lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
+those intersections. These observations do not reconstruct past profile
+declarations,
+check applicability, incident-open intervals or the historical Live roster.
+Those qualifications and the no-open-warning closing condition remain separate;
+this read cannot certify the Q419 milestone, reset a clock or retroactively
+declare missing evidence healthy. Pagination is a read of retained rows, not a
+transactional snapshot across requests; use a settled historical cutoff and
+repeat collection if older observations can still be arriving.
+
 ### TLS observation reader compatibility
 
 TLS observation readers also accept `route_binding_status: missing` and

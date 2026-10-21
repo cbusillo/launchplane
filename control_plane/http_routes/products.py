@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path as FileSystemPath
@@ -6,7 +7,14 @@ from typing import Annotated, Literal, Protocol, cast
 
 import click
 from fastapi import Depends, Path, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict
+
+from control_plane.lane_health_history import (
+    HistoryQueryError,
+    HistoryStore,
+    LaneHealthHistoryResponse,
+    read_lane_health_history,
+)
 
 from control_plane import (
     product_operational_readiness_service as control_plane_product_operational_readiness_service,
@@ -1271,6 +1279,54 @@ def register_product_environment_read_routes(
             host_network_capacity=capacity,
         )
 
+    def read_product_environment_health_history(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        since: AwareDatetime,
+        until: AwareDatetime,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
+    ) -> LaneHealthHistoryResponse:
+        trace_id = common.next_trace_id()
+        scope = _build_product_incident_scope(
+            dependencies=common,
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            product=product,
+            environment=environment,
+        )
+        _require_database_read_store_methods(
+            record_store,
+            dependencies=common,
+            trace_id=trace_id,
+            method_names=("list_public_ingress_history_records",),
+            message="Lane health history requires retained observation reads.",
+        )
+        try:
+            if until > datetime.now(timezone.utc):
+                raise HistoryQueryError("History cannot include future observations.")
+            history = read_lane_health_history(
+                cast(HistoryStore, record_store),
+                product=scope.product,
+                context=scope.context,
+                instance=scope.instance,
+                since=since,
+                until=until,
+                limit=limit,
+                cursor=cursor,
+            )
+        except HistoryQueryError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        return LaneHealthHistoryResponse(trace_id=trace_id, history=history)
+
     def list_product_environment_incidents(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -1567,6 +1623,15 @@ def register_product_environment_read_routes(
         response_model=ProductEnvironmentResponse,
         operation_id="read_product_environment",
         summary="Read one product environment",
+        responses=error_responses,
+    )
+    app.add_api_route(
+        "/v1/products/{product}/environments/{environment}/health-history",
+        read_product_environment_health_history,
+        methods=["GET"],
+        response_model=LaneHealthHistoryResponse,
+        operation_id="read_product_environment_health_history",
+        summary="Read retained lane health and runtime identity observations",
         responses=error_responses,
     )
     app.add_api_route(

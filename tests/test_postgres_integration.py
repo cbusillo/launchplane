@@ -1887,6 +1887,12 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_lane_health_history_orders_offset_fractional_and_equal_instants(self) -> None:
+        from tests.test_lane_health_history import assert_history_time_bounds
+
+        with _store_for_fresh_head_database() as store:
+            assert_history_time_bounds(self, store)
+
     def test_setup_recovery_receipt_commits_before_unknown_provider_effect(self) -> None:
         from tests.test_merge_train_setup_recovery_receipt import (
             assert_committed_reservation_survives_unknown_delete,
