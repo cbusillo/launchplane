@@ -53551,6 +53551,39 @@
         "title": "UpdaterFileChange",
         "type": "object"
       },
+      "UpdaterFileEdit": {
+        "additionalProperties": false,
+        "description": "Bounded exact edits to an existing regular file, preserving its mode.",
+        "properties": {
+          "base_blob_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Blob Sha",
+            "type": "string"
+          },
+          "edits": {
+            "items": {
+              "$ref": "#/components/schemas/UpdaterTextEdit"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "title": "Edits",
+            "type": "array"
+          },
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "base_blob_sha",
+          "edits"
+        ],
+        "title": "UpdaterFileEdit",
+        "type": "object"
+      },
       "UpdaterProposalRequest": {
         "additionalProperties": false,
         "properties": {
@@ -53567,7 +53600,14 @@
           },
           "files": {
             "items": {
-              "$ref": "#/components/schemas/UpdaterFileChange"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UpdaterFileChange"
+                },
+                {
+                  "$ref": "#/components/schemas/UpdaterFileEdit"
+                }
+              ]
             },
             "maxItems": 32,
             "minItems": 1,
@@ -53644,6 +53684,35 @@
           "pull_request_url"
         ],
         "title": "UpdaterProposalResponse",
+        "type": "object"
+      },
+      "UpdaterTextEdit": {
+        "additionalProperties": false,
+        "description": "Replace exact UTF-8 text at a byte offset in the original base blob.",
+        "properties": {
+          "new_text": {
+            "maxLength": 524288,
+            "title": "New Text",
+            "type": "string"
+          },
+          "old_text": {
+            "maxLength": 524288,
+            "title": "Old Text",
+            "type": "string"
+          },
+          "start_byte": {
+            "maximum": 1048576.0,
+            "minimum": 0.0,
+            "title": "Start Byte",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_byte",
+          "old_text",
+          "new_text"
+        ],
+        "title": "UpdaterTextEdit",
         "type": "object"
       },
       "UrgentReleaseReviewEnvelope": {

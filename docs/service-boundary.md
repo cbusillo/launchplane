@@ -4543,8 +4543,9 @@ The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
 `mode` (`100644` or `100755`). An omitted mode preserves an existing regular
 file's mode and defaults to `100644` for a new file; symlinks are refused.
-It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
-deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
+The whole-file form accepts at most 512 KiB of old-plus-new changed content
+(including deletions). Requests accept at most 32 files and a 1 MiB JSON body.
+It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
 or merge settings. The base must match the verified OIDC `sha`. A new branch
 also requires the
@@ -4552,6 +4553,53 @@ current default-branch head; a stale new proposal receives 409
 `updater_proposal_conflict` and reruns against the new base. An exact existing
 branch can resume its original bounded proposal after verifying its tree and
 single parent; it never updates that branch.
+
+An existing regular UTF-8 file can instead use the sparse form:
+
+```json
+{
+  "path": "scripts/example.py",
+  "base_blob_sha": "0123456789012345678901234567890123456789",
+  "edits": [{"start_byte": 42, "old_text": "example==1", "new_text": "example==2"}]
+}
+```
+
+The illustrative blob ID and offset must be replaced with evidence from the
+request's exact base commit. `base_blob_sha` must match this path's blob in
+that commit's complete tree. The service reads that immutable blob, checks
+its declared and decoded size, base64 encoding, Git blob hash and UTF-8, then
+reconstructs the candidate as data. It never runs a patch program or source
+code. Sparse form cannot create/delete a file or change its mode; whole-file
+form still supports those existing operations. Mixing the two forms in one
+file entry is refused, while different files can use different forms.
+
+Each `start_byte` is a strict nonnegative integer offset into the **original
+UTF-8 bytes**, including original newline bytes. Its `old_text` must match
+exactly there. Edits must have strictly increasing start offsets and must not
+overlap or split UTF-8 characters. Empty `old_text` inserts; empty `new_text`
+removes that span. Two insertions at the same position are refused. Later
+offsets still refer to the original, regardless of earlier replacement lengths.
+No-op sparse files are refused; callers omit unchanged files. Caller-specific
+validation, such as allowing only dependency metadata edits, remains the trusted
+submit job's responsibility.
+
+The existing 512 KiB change budget counts sparse `old_text` plus `new_text`
+UTF-8 bytes, together with the complete old-plus-new bytes of whole-file entries.
+At most 256 sparse edits are allowed across a request. Sparse original and
+result files are each limited to 1 MiB, with a separate 4 MiB aggregate limit
+for the complete original-plus-result bytes of **all** changed files. Advertised
+base sizes, estimated result sizes and aggregate budgets are checked before blob
+fetches. Every sparse blob and result is verified before the first Git object
+write. Encoded-field checks bound decoding and reconstruction; provider HTTP
+response reading retains the existing GitHub transport behavior. These limits
+do not relax the whole-file budget, JSON body limit or allowed provider effects.
+An oversized coherent candidate is explicitly refused; callers must not skip
+files or split it into competing pending proposals to conceal that refusal.
+
+The representation is part of the immutable request digest. Existing whole-file
+serialization and branch identities remain unchanged. Identical sparse retries
+retain their original identity; a differently represented equivalent result is
+another request and follows ordinary pending behavior.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set
