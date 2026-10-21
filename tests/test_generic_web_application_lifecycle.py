@@ -775,14 +775,16 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
         profile = profile.model_copy(update={"lanes": (lane,)})
         store = _GenericWebDeployStore(profile)
+        operation_key = "provider-operation:lifecycle"
         provider = _LifecycleDeployProvider(
+            original_operation_key=operation_key,
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="success",
                 deployment_id="deployed-123",
                 started_at=utc_now_timestamp(),
                 finished_at=utc_now_timestamp(),
-            )
+            ),
         )
         adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=Path("."),
@@ -794,7 +796,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             deploy_provider=provider,
         )
         observation = adapter.observe(
-            "provider-operation:lifecycle",
+            operation_key,
             "application_schedule_canary",
             adapter.reconciliation_key(),
         )
