@@ -262,10 +262,6 @@ def rehearsal_inputs(
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if request.business_validation is not None and (
-            request.business_validation.source_commit != previous.target_artifact.source_commit
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
         if (
             request.action == "verify"
             and previous.business_validations
@@ -1009,14 +1005,7 @@ class OdooRehearsalAdapter:
         return rehearsal_inputs(self.root, self.store, self.product, self.request, self.principal)
 
     def reviewed_binding(self, record: OdooUpgradeRehearsalRecord) -> str:
-        if self.request.business_validation is None:
-            return record.binding_sha256
-        return canonical_json_sha256(
-            {
-                "record": record.binding_sha256,
-                "validation": self.request.business_validation.sha256,
-            }
-        )
+        return record.binding_sha256
 
     def run_script(
         self, record: OdooUpgradeRehearsalRecord, script: str, checkpoint: Callable[[], None]
@@ -1121,15 +1110,15 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
-        if self.request.business_validation is not None:
-            from control_plane._odoo_rehearsal_business_validation import business_validation_runner
-
-            plan = self.request.business_validation
-            spec["business_validation"] = plan.model_dump(mode="json")
-            spec["business_validation_sha256"] = plan.sha256
-            spec["business_validation_runner"] = business_validation_runner(
-                plan.model_dump(mode="json")
-            )
+        if self.request.action == "validate-business":
+            spec["business_validation_identity"] = {
+                "product": record.product,
+                "rehearsal_id": record.rehearsal_id,
+                "artifact_id": record.target_artifact.artifact_id,
+                "source_commit": record.target_artifact.source_commit,
+                "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
+                "attempt_sha256": str(spec["attempt_sha256"]),
+            }
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         # Keep both Dokploy's remote shell materializer and Python's argv small.
@@ -1254,7 +1243,7 @@ class OdooRehearsalAdapter:
             if (
                 not isinstance(pending, dict)
                 or mode != "observe"
-                or self.request.business_validation is None
+                or self.request.action != "validate-business"
                 or result["completed"] is not False
                 or result["business_validation"] is not None
                 or result["business_validation_postcheck_verified"] is not False
@@ -1265,7 +1254,7 @@ class OdooRehearsalAdapter:
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             result["diagnostics_private"] = True
-        if self.request.business_validation is not None and (
+        if self.request.action == "validate-business" and (
             result.get("completed") is True or pending is not None
         ):
             validation = (
@@ -1273,22 +1262,16 @@ class OdooRehearsalAdapter:
                 if isinstance(pending, dict)
                 else result.get("business_validation")
             )
-            plan = self.request.business_validation
-            if not isinstance(validation, dict) or (
-                validation["validation_sha256"] != plan.sha256
-                or validation["database"] != plan.database
-                or validation["source_commit"] != record.target_artifact.source_commit
-                or validation["attempt_sha256"]
-                != canonical_json_sha256({"operation_key": operation_key})
-                or [step["key"] for step in validation["steps"]]
-                != [step.key for step in plan.steps][: len(validation["steps"])]
-                or (
-                    validation["passed"]
-                    and (
-                        len(validation["steps"]) != len(plan.steps)
-                        or not all(step["passed"] for step in validation["steps"])
-                    )
-                )
+            expected = {
+                "product": record.product,
+                "rehearsal_id": record.rehearsal_id,
+                "artifact_id": record.target_artifact.artifact_id,
+                "source_commit": record.target_artifact.source_commit,
+                "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
+                "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
+            }
+            if not isinstance(validation, dict) or any(
+                validation[key] != value for key, value in expected.items()
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result

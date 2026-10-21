@@ -4,6 +4,11 @@ Only the separately owned compose and its data are writable. Source SSH is read
 only, and raw failure material remains outside every application mount.
 """
 
+from control_plane._odoo_rehearsal_business_validation import (
+    BUSINESS_VALIDATION_ENTRYPOINT,
+    BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+    BUSINESS_VALIDATION_RECEIPT_LIBRARY,
+)
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -17,6 +22,12 @@ ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
+    + "\nBUSINESS_VALIDATION_ENTRYPOINT = "
+    + repr(BUSINESS_VALIDATION_ENTRYPOINT)
+    + "\nBUSINESS_VALIDATION_RECEIPT_MAX_BYTES = "
+    + repr(BUSINESS_VALIDATION_RECEIPT_MAX_BYTES)
+    + "\n"
+    + BUSINESS_VALIDATION_RECEIPT_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -290,7 +301,7 @@ def private_health(spec,containers):
 
 def business_validation_precheck(spec,containers):
     record=spec['record']
-    plan=spec['business_validation']
+    plan=spec['business_validation_identity']
     database=database_names(spec)['final_upgrade']
     if (record['state']!='switched' or plan['database']!=database
             or plan['source_commit']!=record['target_artifact']['source_commit']
@@ -303,17 +314,37 @@ def business_validation_precheck(spec,containers):
         raise RuntimeError('Validation connection isolation changed')
 
 
+def product_command(arguments, *, stdin=None):
+    # Product stderr and failed stdout can contain copied Client data. They are
+    # never passed through the generic command diagnostic redactor.
+    result=subprocess.run(arguments,input=stdin,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
+    if result.returncode:
+        raise RehearsalCommandFailure({'step':'business_validation',
+            'exit_status':result.returncode,'error_text':'Product validation unavailable'})
+    return result.stdout
+
+
+def check_business_entrypoint(spec):
+    product_command(['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL',
+        '--security-opt','no-new-privileges','--entrypoint','python3',spec['target_image'],
+        BUSINESS_VALIDATION_ENTRYPOINT,'--check'])
+
+
 def business_validation(spec,containers):
-    database=spec['business_validation']['database']
-    output=docker('exec','-i','-e','ODOO_DB_NAME='+database,containers['script-runner'][0],
-        'python3','-',stdin=spec['business_validation_runner'].encode())
+    expected=spec['business_validation_identity']
+    output=product_command(['docker','exec','-i','-e','ODOO_DB_NAME='+expected['database'],
+        containers['script-runner'][0],'python3',BUSINESS_VALIDATION_ENTRYPOINT],
+        stdin=json.dumps(expected,separators=(',',':')).encode())
     markers=[line.split(b'=',1)[1] for line in output.splitlines()
         if line.startswith(b'business_validation_result=')]
-    if len(markers)!=1:
+    if len(markers)!=1 or len(markers[0])>2*BUSINESS_VALIDATION_RECEIPT_MAX_BYTES:
         raise RuntimeError('Validation evidence is unavailable')
-    result=json.loads(bytes.fromhex(markers[0].decode()))
-    return {**result,'database':database,'source_commit':spec['business_validation']['source_commit'],
-        'validation_sha256':spec['business_validation_sha256'],'attempt_sha256':spec['attempt_sha256']}
+    try:
+        result=json.loads(bytes.fromhex(markers[0].decode()))
+        return checked_business_receipt(result,expected)
+    except (ValueError,TypeError,KeyError):
+        # Do not attach a parser exception or its input to provider logs.
+        raise RuntimeError('Invalid product validation receipt') from None
 
 
 def pending_business_outcome(spec,root,receipt,lock_held):
@@ -336,20 +367,7 @@ def pending_business_outcome(spec,root,receipt,lock_held):
             or result['copies']!=spec['record']['copies'] or result['resources_preserved'] is not True
             or result['public_route'] is not False or result['business_host_frozen'] is not False):
         raise RuntimeError('Invalid retained validation result')
-    validation=result['business_validation']
-    plan=spec['business_validation']
-    if (set(validation)!={'passed','committed','steps','database','source_commit','validation_sha256','attempt_sha256'}
-            or validation['database']!=plan['database'] or validation['source_commit']!=plan['source_commit']
-            or validation['validation_sha256']!=spec['business_validation_sha256']
-            or validation['attempt_sha256']!=spec['attempt_sha256']
-            or type(validation['passed']) is not bool or type(validation['committed']) is not bool
-            or not 0<len(validation['steps'])<=len(plan['steps'])):
-        raise RuntimeError('Invalid retained validation evidence')
-    for step,expected in zip(validation['steps'],plan['steps']):
-        if (set(step)!={'key','record_ids','passed'} or step['key']!=expected['key']
-                or type(step['passed']) is not bool or not isinstance(step['record_ids'],list)
-                or any(type(identifier) is not int or identifier<1 for identifier in step['record_ids'])):
-            raise RuntimeError('Invalid retained validation step')
+    validation=checked_business_receipt(result['business_validation'],spec['business_validation_identity'])
     verified=False
     if lock_held:
         try:
@@ -699,7 +717,7 @@ def main():
         return
     if action=='validate-business':
         # Each original operation has its own effect marker and receipt. A
-        # later reviewed batch cannot replay or adopt an earlier batch.
+        # later reviewed attempt cannot replay or adopt an earlier attempt.
         action+='-'+spec['attempt_sha256']
     receipt=root/(action+'.json')
     spec['receipt_action']=action
@@ -739,6 +757,7 @@ def main():
         action=spec['action']
         database,image=current(spec)
         if action=='prepare':
+            check_business_entrypoint(spec)
             (root/(action+'.started')).touch(mode=0o600)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120
