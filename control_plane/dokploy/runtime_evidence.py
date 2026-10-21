@@ -480,6 +480,11 @@ def summarize_runtime_log_lines(lines: tuple[str, ...]) -> RuntimeLogClassificat
 def _normalize_container_config(
     raw_config: dokploy_api.JsonValue,
 ) -> dokploy_api.JsonObject | None:
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except ValueError:
+            return None
     container_config = dokploy_api.as_json_object(raw_config)
     if container_config is not None:
         return container_config

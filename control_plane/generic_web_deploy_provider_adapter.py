@@ -87,6 +87,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     default_generic_web_deploy_provider,
     evaluate_generic_web_runtime_close_out,
     generic_web_provider_deployment_succeeded,
+    qualify_testing_application_observation,
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_post_deploy import (
@@ -749,6 +750,35 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
+        saved = evidence.execution_record
+        saved_receipt = execution_receipt(saved) if saved is not None else None
+        # Product execution and image settlement are independent proof. Legacy
+        # statuses alone do not retain the original runtime qualification.
+        final_failed_result = (
+            self._application_testing(resolved_target)
+            and evidence.execution is not None
+            and evidence.execution.outcome == "terminal"
+            and saved is not None
+            and saved_receipt is not None
+            and bool(saved_receipt.settled_image_deployment_id)
+            and _saved_testing_result_is_final(saved)
+            and not deployment_record_passed(saved)
+            and observation.outcome == "present"
+            and saved_receipt.settled_image_deployment_id
+            == saved.deploy.deployment_id
+            == observation.deployment_id
+            and observation.deployment_status not in {"canceled", "cancelled", "killed"}
+        )
+        if not final_failed_result:
+            observation = qualify_testing_application_observation(
+                provider=self._deploy_provider,
+                control_plane_root=self._control_plane_root,
+                target=resolved_target,
+                observation=observation,
+                deployment_record_id=self._deployment_record_id(provider_operation_key),
+            )
+        if observation.outcome != "present":
+            return replace(evidence, observation=observation)
         post_deploy_unobserved = generic_web_provider_deployment_succeeded(
             observation.deployment_status
         ) and (

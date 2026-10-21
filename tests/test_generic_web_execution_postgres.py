@@ -115,7 +115,6 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 normal = pool.submit(
                     fixture.run_normal, fixture.normal_adapter(), "receipt-correction"
                 )
-                ingestion = None
                 try:
                     self.assertTrue(executing.wait(15))
                     progress = first.read_environment_inventory(
@@ -394,6 +393,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 request_fingerprint=reservation.request_fingerprint,
                 reconciliation_key=reservation.reconciliation_key,
             )
+            provider.original_operation_key = operation
             record, _records, _result = build_observed_generic_web_deploy(
                 record_store=first,
                 profile=profile,

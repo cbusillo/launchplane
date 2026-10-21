@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+from time import monotonic
 from typing import Callable, Literal, Protocol, cast
 
 import click
@@ -67,6 +68,7 @@ from control_plane.workflows.generic_web_deploy_provider import GenericWebResolv
 from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
 from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
+    qualify_testing_application_observation,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.generic_web_application_snapshot import (
@@ -796,6 +798,8 @@ def _execute_generic_web_deploy_unserialized(
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
+    runtime_deadline: float | None = None
+    runtime_failure_proved = False
 
     def write_pending(record: DeploymentRecord) -> None:
         if execution_recorder is not None:
@@ -1020,6 +1024,15 @@ def _execute_generic_web_deploy_unserialized(
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("application_lifecycle_prepared")
             application_lifecycle.prepare()
+        testing_application = (
+            resolved_lane.instance == "testing"
+            and prepared_deploy_target.resolved_target.target_type == "application"
+        )
+        runtime_deadline = (
+            monotonic() + prepared_deploy_target.deploy_timeout_seconds
+            if testing_application
+            else None
+        )
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -1056,6 +1069,34 @@ def _execute_generic_web_deploy_unserialized(
                 raise click.ClickException(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
+        if testing_application:
+            qualified = qualify_testing_application_observation(
+                provider=resolved_deploy_provider,
+                control_plane_root=control_plane_root,
+                target=prepared_deploy_target,
+                observation=provider_deployment_observation
+                or GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="control-plane-dokploy",
+                    started_at=started_at,
+                    finished_at=utc_now_timestamp(),
+                ),
+                deployment_record_id=record_id,
+                wait=True,
+                deadline=runtime_deadline,
+            )
+            if qualified.outcome != "present":
+                raise click.ClickException("Application testing runtime rollout is not qualified.")
+            if not generic_web_provider_deployment_succeeded(qualified.deployment_status):
+                runtime_failure_proved = True
+                raise GenericWebProviderDeploymentFailed(qualified)
+            if (
+                execution_recorder is not None
+                and provider_deployment_observation is not None
+                and qualified.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            ):
+                execution_recorder.record_settled_image(qualified.deployment_id)
         deploy_completed = True
         previous_inventory = None
         if post_deploy_executor is not None:
@@ -1171,8 +1212,34 @@ def _execute_generic_web_deploy_unserialized(
             # This first admission refusal precedes dispatch. Do not turn it
             # into a failed deployment that prevents the same accepted retest.
             raise
+        provider_failure_observed = isinstance(exc, GenericWebProviderDeploymentFailed)
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
+            if runtime_deadline is not None:
+                provider_failure_observed = runtime_failure_proved
+                if not runtime_failure_proved:
+                    failed = qualify_testing_application_observation(
+                        provider=resolved_deploy_provider,
+                        control_plane_root=control_plane_root,
+                        target=prepared_deploy_target,
+                        observation=exc.observation,
+                        deployment_record_id=record_id,
+                        wait=True,
+                        deadline=runtime_deadline,
+                    )
+                    provider_failure_observed = failed.outcome == "present" and not (
+                        generic_web_provider_deployment_succeeded(failed.deployment_status)
+                    )
+        if (
+            execution_recorder is not None
+            and runtime_deadline is not None
+            and provider_failure_observed
+            and not deploy_completed
+            and provider_deployment_observation is not None
+            and provider_deployment_observation.deployment_id
+            != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+        ):
+            execution_recorder.record_settled_image(provider_deployment_observation.deployment_id)
         if application_lifecycle is not None:
             try:
                 require_cleanup_authority()
@@ -1308,9 +1375,7 @@ def _execute_generic_web_deploy_unserialized(
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
             provider_failure_proved=(
-                isinstance(exc, GenericWebProviderDeploymentFailed)
-                and application_lifecycle is None
-                and not deploy_completed
+                provider_failure_observed and application_lifecycle is None and not deploy_completed
             ),
             image_effect_attempted=image_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
