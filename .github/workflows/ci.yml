@@ -118,7 +118,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: cbusillo/codex-skills
-          ref: CODEX_SKILLS_PIN
+          ref: 5923e84d2a3358dfcea8ca5abc610b35770794c4
           path: .test-quality-catalog
           persist-credentials: false
 
