@@ -39,10 +39,9 @@ from tests import test_testing_replacement_resources as resource_tests
 
 class FreshTestingBootstrapScenario(unittest.TestCase):
     def seed(self, store_url: str, *, initial_generation: bool = False) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.database_url = store_url
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(
+            self, database_url=store_url
+        )
         fixture = self.fixture
         self.store = fixture.store
         from tests.support.stores import _write_runtime_key_safety_policy
@@ -972,9 +971,7 @@ class FreshTestingBootstrapObservationTests(unittest.TestCase):
 
 class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(self)
 
     async def post(self, **changes: object) -> Any:
         from tests.support.http import request
@@ -1020,7 +1017,13 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_sqlite_cannot_publish_bootstrap_or_private_failure_details(self) -> None:
-        for mode in ("apply", "readback"):
+        for mode in (
+            "apply",
+            "readback",
+            "route-repair-dry-run",
+            "route-repair-apply",
+            "route-repair-readback",
+        ):
             result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
             self.assertEqual(result.status_code, 503, result.text)
         with patch(

@@ -473,12 +473,10 @@ class DokployConfigTests(unittest.TestCase):
             remote_command_failed=True,
         )
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
-                "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "deployment-before", "status": "success"},
-                    {"deploymentId": "deployment-failed", "status": "failed"},
-                ),
+                "control_plane.dokploy.api._read_schedule_deployments",
+                return_value=[{"deploymentId": "deployment-failed", "status": "failed"}],
             ),
             patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error),
             patch(
@@ -2826,6 +2824,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 }
 
             with (
+                patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=fetch_target_payload,
@@ -2857,7 +2856,11 @@ domains = ["cm-testing.shinycomputers.com"]
                     return_value={"deploymentId": "schedule-before"},
                 ),
                 patch(
-                    "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                    "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                    return_value={"deploymentId": "schedule-after"},
+                ),
+                patch(
+                    "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                     return_value="deployment=schedule-after status=done",
                 ),
                 patch(
@@ -2945,8 +2948,13 @@ domains = ["cm-testing.shinycomputers.com"]
         with (
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
-                return_value={"env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value"},
+                return_value={
+                    "env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value",
+                    "appName": "fixture-app",
+                    "serverId": "fixture-server",
+                },
             ),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch("control_plane.dokploy.api.update_dokploy_target_env") as update,
             patch("control_plane.dokploy.api.trigger_deployment") as deploy,
             patch("control_plane.dokploy.api.upsert_dokploy_schedule") as schedule,
@@ -2999,6 +3007,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 side_effect=lambda **_kwargs: None,
             ),
             patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert_schedule,
         ):
             with self.assertRaises(click.ClickException) as raised_error:
@@ -3053,6 +3062,7 @@ domains = ["cm-testing.shinycomputers.com"]
             }
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=fetch_target_payload,
@@ -3082,7 +3092,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs", return_value=()),
@@ -3115,6 +3129,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3131,13 +3146,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "schedule-before"},
-                    {"id": "schedule-after", "status": "done"},
-                ),
+                side_effect=({"id": "schedule-after", "status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3216,13 +3232,16 @@ domains = ["cm-testing.shinycomputers.com"]
                     ),
                     find_matching_dokploy_schedule=Mock(return_value=None),
                     upsert_dokploy_schedule=Mock(return_value={"scheduleId": "schedule-example"}),
+                    read_dokploy_schedule_baseline=Mock(return_value=[]),
                     latest_deployment_for_schedule=Mock(
                         side_effect=[
-                            {"id": "before"},
                             {"id": "after", "logs": logs},
                         ]
                     ),
-                    wait_for_dokploy_schedule_deployment=Mock(
+                    _read_back_triggered_schedule_deployment=Mock(
+                        return_value={"deploymentId": "after"}
+                    ),
+                    wait_for_exact_dokploy_schedule_deployment=Mock(
                         return_value="deployment=after status=done"
                     ),
                     fetch_dokploy_deployment_logs=Mock(return_value=logs),
@@ -3263,6 +3282,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3280,7 +3300,6 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after",
                         "status": "done",
@@ -3292,7 +3311,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs") as fetch_logs_mock,
@@ -3329,6 +3352,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3346,7 +3370,6 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after-newer",
                         "status": "running",
@@ -3355,7 +3378,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after-waited"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after-waited status=done",
             ),
             patch(
@@ -3403,6 +3430,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3419,13 +3447,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "schedule-before"},
-                    {"deploymentId": "schedule-after", "status": "done"},
-                ),
+                side_effect=({"deploymentId": "schedule-after", "status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3462,6 +3491,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3478,13 +3508,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"status": "done"},
-                    {"status": "done"},
-                ),
+                side_effect=({"status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-row-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-row-after status=done",
             ),
             patch(
@@ -3533,6 +3564,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3563,7 +3595,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3757,6 +3793,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3770,7 +3807,11 @@ esac
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3821,6 +3862,7 @@ esac
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3838,7 +3880,11 @@ esac
                 return_value={"ok": True},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3896,6 +3942,7 @@ esac
             return {"scheduleId": "schedule-verify"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3913,7 +3960,11 @@ esac
                 return_value={"ok": True},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=success",
             ),
             patch(
@@ -4223,6 +4274,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -4258,7 +4310,6 @@ esac
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after",
                         "logs": [
@@ -4271,7 +4322,11 @@ esac
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(

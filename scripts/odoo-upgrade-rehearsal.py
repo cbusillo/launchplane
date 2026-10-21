@@ -9,10 +9,12 @@ import runpy
 import urllib.error
 from urllib.parse import quote
 
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
     ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
+    REHEARSAL_RELEASED_RESERVATION_HEADERS,
     OdooUpgradeRehearsalRequest,
     IncompleteRehearsalRetirementReceipt,
     RehearsalPreflightResult,
@@ -62,7 +64,11 @@ def main() -> int:
             parser.error("Initial planning and prepare require their original stable key.")
         intent = {
             "product": args.product,
-            "request": draft.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            "request": {
+                key: value
+                for key, value in draft.model_dump(mode="json").items()
+                if key not in {"mode", "reviewed_plan_sha256"}
+            },
             "key": args.idempotency_key,
         }
     helper = args.operator_helper.expanduser().resolve(strict=True)
@@ -103,7 +109,11 @@ def main() -> int:
             print(json.dumps(public))
             return 0
         assert draft is not None
-        if args.mode == "apply":
+        if args.mode == "apply" or (
+            draft.action == "validate-business" and args.mode == "readback"
+        ):
+            if evidence is None:
+                raise ValueError("Business readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
             if saved["intent"] != intent or saved["plan"]["applied"] is not False:
                 raise ValueError("Review belongs to another intent.")
@@ -166,10 +176,15 @@ def main() -> int:
                 )
             )
             return 1
+        failed_validation = (
+            draft.action == "validate-business"
+            and args.mode in {"apply", "readback"}
+            and result.get("business_validation", {}).get("passed") is False
+        )
         print(
             json.dumps(
                 {
-                    "status": "verified",
+                    "status": "failed" if failed_validation else "verified",
                     "mode": args.mode,
                     "action": draft.action,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
@@ -177,7 +192,7 @@ def main() -> int:
                 }
             )
         )
-        return 0
+        return 1 if failed_validation else 0
     except urllib.error.HTTPError as error:
         try:
             failure = json.loads(error.read())
@@ -186,7 +201,22 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
-        refused = error.code == 409 and code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+        released = (
+            args.mode == "apply"
+            and error.headers is not None
+            and all(
+                error.headers.get(name) == value
+                for name, value in REHEARSAL_RELEASED_RESERVATION_HEADERS.items()
+            )
+        )
+        refused = (
+            released
+            or error.code == 409
+            and (
+                code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+                or code in HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
+            )
+        )
         print(
             json.dumps(
                 {

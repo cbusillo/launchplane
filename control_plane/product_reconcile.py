@@ -51,7 +51,13 @@ from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
-from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.api import (
+    DokployRequestFailed,
+    DokployScheduleExecutionFailed,
+    is_transient_dokploy_error,
+)
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -1652,6 +1658,16 @@ def _plan_testing_target(
     )
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
+        if isinstance(desired, VerifiedGenericWebBuild):
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if deployed.post_deploy_update.status == "pending":
+                    plan.update(action="deploy", reason="testing_qualification_pending")
     else:
         if current_artifact_id and not current_commit:
             plan.update(action="none", reason="current_source_unverified", held=True)
@@ -2195,7 +2211,13 @@ def _run_preview_operation(
                 }
             )
         except Exception as execution_error:
-            if isinstance(execution_error, DokployRequestFailed) and not execution_error.retryable:
+            if (
+                isinstance(execution_error, DokployRequestFailed)
+                or (
+                    isinstance(execution_error, DokployScheduleExecutionFailed)
+                    and execution_error.cause == "trigger_baseline_unavailable"
+                )
+            ) and not is_transient_dokploy_error(execution_error):
                 plan["preview_execution_refused"] = True
             raise
 
@@ -2369,6 +2391,8 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+        return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
@@ -2378,7 +2402,7 @@ def _run_preview_operation(
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
 
@@ -2502,7 +2526,7 @@ def _run_generic_web_preview_operation(
             )
             status = str(result.get("destroy_status") or "")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         _LOGGER.warning(
             "Generic-web preview %s of %s refused: %s", operation, profile.product, error
@@ -2715,6 +2739,8 @@ def run_product_reconcile_once(
     if request.target_kind == "preview" and outcome.error:
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
+            *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",

@@ -192,6 +192,8 @@ def update_dokploy_target_artifact(
                 **{key: artifact_id for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS},
                 **(runtime_identity_env(runtime_identity) if runtime_identity is not None else {}),
             },
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
         )
         if before_provider_mutation is not None:
             before_provider_mutation("target_update")

@@ -280,6 +280,14 @@ def _feedback_message(
                 "reconciling its saved recovery attempt. Recheck the current head and "
                 "post a fresh checked gh-pr.py ready handoff to rejoin the train."
             )
+        if result.get("reason_code") == "candidate_block_unrelated_setup_reviewed":
+            return (
+                "Launchplane cleared its failed-candidate block after verifying an unrelated "
+                "missing pnpm-store file before browser tests, unchanged install inputs, "
+                "green current-head checks and a weighed review. The one-time recovery "
+                "budget is recorded. Post a fresh checked gh-pr.py ready handoff to "
+                "rejoin normal train validation."
+            )
         return (
             "Launchplane cleared its failed-candidate block after verifying a different "
             "current head, green checks and a weighed review. Post a fresh checked "

@@ -1518,8 +1518,7 @@ jobs:
               /v1/drivers/launchplane/self-deploy \
               /v1/drivers/odoo/preview-apply-inputs \
               /v1/drivers/odoo/preview-apply \
-              /v1/previews/pr-feedback \
-              /v1/work-graph/snapshot; do
+              /v1/previews/pr-feedback; do
               if ! jq -e --arg route_path "$route_path" '.paths[$route_path]' \
                 "$openapi_response_file" >/dev/null; then
                 openapi_ok="false"

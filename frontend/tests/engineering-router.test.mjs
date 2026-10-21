@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   engineeringPath,
-  engineeringViewLabel,
   ownerReviewPath,
   productReviewLookupFromSearch,
   parseAppRoute,
@@ -24,8 +23,6 @@ test("engineering hub and every child route deep-link exactly", () => {
     view: "hub",
   });
   for (const view of [
-    "work-graph",
-    "issue-inbox",
     "every-code",
     "merge-train",
     "tenant-admission",
@@ -48,18 +45,6 @@ test("unknown or nested engineering paths fail closed", () => {
     kind: "not-found",
     path: "/ui/engineering/merge-train/run-once",
   });
-});
-
-test("engineering labels are route-specific", () => {
-  assert.equal(engineeringViewLabel("hub"), "Engineering Ops");
-  assert.equal(engineeringViewLabel("issue-inbox"), "Issue inbox");
-  assert.equal(engineeringViewLabel("every-code"), "Every Code");
-  assert.equal(engineeringViewLabel("tenant-admission"), "Tenant admission");
-  assert.equal(engineeringViewLabel("governance-projection"), "Governance evidence");
-  assert.equal(
-    engineeringViewLabel("privileged-operations"),
-    "Privileged operation plans",
-  );
 });
 
 test("Owner review deep-link query selects one exact lookup", () => {

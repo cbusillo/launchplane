@@ -117,6 +117,17 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+The existing testing-retry route also admits the authenticated Director agent
+through the existing `local_operator` bearer transport under the standing
+permission. Terminal-agent credentials retain their read-only transport boundary.
+This is a testing-only reconciler wakeup, not
+inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
+production/testing scope keeps its policy checks. Other callers still require
+that action on the exact testing lane. Mutation authentication and browser CSRF,
+reviewed digests, original-key replay, generation and custody fences, staff
+holds, active/unknown-operation refusal and the worker's safety checks remain
+in force. See [testing retry](testing-deploy-retry.md).
+
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
 in `tests/test_projection_sync.py`; an action without that proof stays `write`.
@@ -1104,7 +1115,26 @@ planner and the locked write both enforce that boundary. See the
 A `local_operators`
 caller may set an ordinary protective testing hold. Lifting an ordinary staff
 hold remains an administrator action because it requests testing reconciliation,
-which can deploy. The authenticated Director agent has the separate bounded
+which can deploy. The product's testing overview exposes **Review lift** and
+**Lift testing hold** only to the service-verified signed-in administrator.
+The existing testing-hold endpoints accept that browser session, with origin,
+fetch-metadata and single-use CSRF protection on the review and apply requests.
+The card displays the stored reason, recorder, time and an HTTPS issue link
+recorded in the reason. Missing historical metadata is shown as not recorded.
+The administrator
+reviews the current hold, supplies an audit reason and confirms that testing
+can deploy before submitting its digest-bound lift. The existing authenticated
+idempotency receipt retains the original hold, lift reason, actor scope, time
+and trace. A lost response retains the original reviewed request and key for
+retry, including after reloading the tab. If that request cannot settle, an
+administrator can explicitly start a separate review of the current hold;
+the earlier key is shown as unverified in this tab across reloads. Closing the
+tab or clearing its storage discards this local history, not the service's audit
+receipt. This does not claim the earlier request failed or succeeded.
+Isolation staging interlocks retain
+their separate activation flow.
+The Director's agent can set a testing hold but not lift one.
+The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
 the service must have marked its original hold as a qualified rehearsal, and
 the original actor, current safety evidence, bindings and unresolved-effect
@@ -1185,3 +1215,14 @@ mechanical v3 persistence fence remain in place until the separately reviewed
 activation work enables a complete supported path. Once v3 policy or evidence is
 persisted, rollback must use an image that can read it; a source compatibility
 change alone is neither activation nor proof of the deployed policy version.
+
+### Pending Client review withdrawal
+
+`product_review.withdraw` is a write under the Director agent's existing
+standing permission. It creates no DB policy grant, credential, Client decision,
+release acceptance or merge authority. Only an authenticated Director agent or
+admin can apply withdrawal; read-only identities, ordinary scoped agents and workflow
+identities cannot. Dry-run and readback use `product_profile.read`; saved operation
+keys remain bound to the original caller. The [withdrawal contract](owner-acceptance.md#withdrawing-a-pending-request)
+requires a recorded Director decision, reason and exact reviewed head and
+refuses after a current-head Client decision.

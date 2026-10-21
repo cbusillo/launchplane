@@ -15,6 +15,7 @@ import click
 from pydantic import Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
 )
@@ -440,7 +441,7 @@ class NativeTestingRebuildAdapter:
         with self.store.testing_replacement_execution_lock(self.operation.operation_id) as check:
             if check is None:
                 return ProviderObservation("unknown")
-            return ProviderObservation("absent", retry_safe=True)
+            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -1721,11 +1722,16 @@ def rebuild_result(
     )
 
 
-def read_public_testing_health(base_url: str, path: str) -> HealthcheckEvidence:
+def read_public_testing_health(
+    base_url: str, path: str, expected_identity: RuntimeIdentity | None = None
+) -> HealthcheckEvidence:
     """A redirect, timeout or missing identity never proves a healthy origin."""
     from urllib.error import HTTPError, URLError
     from urllib.request import HTTPRedirectHandler, Request, build_opener
-    from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
+    from control_plane.contracts.runtime_identity import (
+        runtime_identity_from_health_payload,
+        health_payload_runtime_identity_status,
+    )
 
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(
@@ -1739,17 +1745,34 @@ def read_public_testing_health(base_url: str, path: str) -> HealthcheckEvidence:
             if response.geturl() != url:
                 return HealthcheckEvidence(status="pending", urls=(url,))
             payload = json.loads(response.read(262144).decode())
+            if not isinstance(payload, dict):
+                raise ValueError("Health document is unavailable.")
             identity = runtime_identity_from_health_payload(payload)
+            classification: dict[str, Any] = {}
+            if expected_identity is not None:
+                status, detail, identity = health_payload_runtime_identity_status(
+                    expected=expected_identity, payload=payload
+                )
+                classification = {
+                    "runtime_identity_status": status,
+                    "runtime_identity_detail": detail,
+                }
             return HealthcheckEvidence(
                 verified=True,
                 urls=(url,),
                 timeout_seconds=5,
                 status="pass",
                 observed_runtime_identity=identity,
+                **classification,
             )
     except HTTPError as error:
         error.close()
-        return HealthcheckEvidence(verified=True, urls=(url,), timeout_seconds=5, status="fail")
+        return HealthcheckEvidence(
+            verified=not 300 <= error.code < 400,
+            urls=(url,),
+            timeout_seconds=5,
+            status="pending" if 300 <= error.code < 400 else "fail",
+        )
     except (URLError, TimeoutError, OSError, ValueError):
         return HealthcheckEvidence(status="pending", urls=(url,))
 
@@ -1793,6 +1816,8 @@ def execute_native_testing_rebuild(
         # The worker already preserves timeout uncertainty on the same operation.
         raise
     except NativeTestingRebuildPending:
+        raise
+    except ScheduleMaterializationTooLarge:
         raise
     except Exception as error:
         if native_rebuild_effects_started(store, operation):

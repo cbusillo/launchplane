@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
@@ -26,6 +26,139 @@ from tests.test_client_release_redeploy import _prepare, _replacement_env
 
 
 class EventDeployRedeployTests(unittest.TestCase):
+    def test_rehearsal_drain_preserves_unrelated_admission_and_historical_holds(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.contracts.privileged_operation_identity import (
+            PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+        )
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+        original = self.store.reserve_mutation(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            idempotency_key="historical",
+            request_fingerprint="historical",
+            lease_owner="ended-worker",
+            reconciliation_key="historical-intent",
+            provider_target_key="historical-record-only-target",
+        ).record
+        assert original is not None
+        held = self.store.mark_mutation_reconcile_required(
+            reservation=original, reconciliation_key=original.reconciliation_key
+        ).record
+        assert held is not None
+        rehearsal = self.store.reserve_mutation(
+            scope="local-operator|example-agent",
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"),
+            idempotency_key="rehearsal",
+            request_fingerprint="rehearsal",
+            lease_owner="rehearsal-worker",
+            reconciliation_key="rehearsal-intent",
+            provider_target_key="isolated-rehearsal",
+        ).record
+        assert rehearsal is not None
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertEqual(blockers, (rehearsal.record_id,))
+        self.assertFalse(dispatch)
+        for scope, route in (
+            (PRIVILEGED_OPERATION_EXECUTION_SCOPE, PRIVILEGED_OPERATION_EXECUTION_ROUTE),
+            (REBUILD_SCOPE, REBUILD_ROUTE),
+        ):
+            with self.subTest(scope=scope):
+                result = self.store.reserve_mutation(
+                    scope=scope,
+                    route_path=route,
+                    idempotency_key="admitted-child",
+                    request_fingerprint="admitted-child",
+                    lease_owner="admitted-parent",
+                    reconciliation_key="child-intent",
+                    provider_target_key=scope + ":child-target",
+                )
+                self.assertEqual(result.status, "acquired")
+        completion = self.store.complete_mutation_reservation(
+            completion=complete_launchplane_mutation_reservation(
+                rehearsal,
+                response_status_code=200,
+                response_trace_id="rehearsal-finished",
+                response_payload={"completed": True},
+                completed_at=rehearsal.updated_at,
+            )
+        )
+        self.assertEqual(completion.status, "completed")
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=held.scope,
+                route_path=held.route_path,
+                idempotency_key=held.idempotency_key,
+            ),
+            held,
+        )
+
+    def test_agent_rehearsals_drain_without_losing_original_custody(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+        from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter
+
+        adapter = Mock(spec=OdooRehearsalAdapter)
+        adapter.target_key.return_value = "isolated-rehearsal"
+        retirement = IncompleteRehearsalRetirement(adapter, "original-execute")
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for index, (route, target) in enumerate(
+            (
+                (ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"), adapter.target_key()),
+                (ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"), retirement.target_key()),
+            )
+        ):
+            with self.subTest(route=route, target=target):
+                store = PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(directory.name) / f'{index}.db'}"
+                )
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                intent = dict(
+                    scope="local-operator|example-agent",
+                    route_path=route,
+                    idempotency_key="original-execute",
+                    request_fingerprint="reviewed-execute",
+                    lease_owner="original-worker",
+                    reconciliation_key="original-intent",
+                    provider_target_key=target,
+                )
+                reservation = store.reserve_mutation(**intent).record
+                assert reservation is not None
+                _, blockers, dispatch = _prepare(store)
+                self.assertEqual(blockers, (reservation.record_id,))
+                self.assertFalse(dispatch)
+                with self.assertRaises(ServiceDeployDraining):
+                    store.reserve_mutation(**{**intent, "idempotency_key": "fresh"})
+                renewed = store.renew_mutation_reservation(reservation=reservation).record
+                assert renewed is not None
+                expired = parse_launchplane_mutation_timestamp(
+                    renewed.lease_expires_at, field_name="lease_expires_at"
+                ) + timedelta(seconds=1)
+                with patch.object(
+                    store, "_database_mutation_timestamp", return_value=expired.isoformat()
+                ):
+                    with store.testing_replacement_execution_lock("isolated-rehearsal") as check:
+                        assert check is not None
+                        _, blockers, dispatch = _prepare(store)
+                        self.assertEqual(blockers, (reservation.record_id,))
+                        self.assertFalse(dispatch)
+                    _, blockers, dispatch = _prepare(store)
+                    self.assertTrue(dispatch)
+                    self.assertFalse(blockers)
+                    held = store.reserve_mutation(**intent).record
+                    assert held is not None
+                    self.assertEqual(held.record_id, reservation.record_id)
+                    self.assertEqual(held.state, "reconcile_required")
+                    with self.assertRaises(ServiceDeployDraining):
+                        store.retry_reconciled_mutation(reservation=held, lease_owner="retry")
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -35,7 +168,7 @@ class EventDeployRedeployTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
 
-    def reserve(self, key: str = "event") -> MutationReservationResult:
+    def reserve(self, key: str = "event", *, lease_seconds: int = 300) -> MutationReservationResult:
         return self.store.reserve_mutation(
             scope=reconcile_reservation_scope("example-product"),
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
@@ -44,6 +177,7 @@ class EventDeployRedeployTests(unittest.TestCase):
             lease_owner="event-worker",
             reconciliation_key="original-request-and-target",
             provider_target_key="testing-target",
+            lease_seconds=lease_seconds,
         )
 
     def test_admitted_event_finishes_heartbeat_and_terminal_write_while_draining(self) -> None:
@@ -115,7 +249,7 @@ class EventDeployRedeployTests(unittest.TestCase):
             self.assertEqual(self.reserve().status, "acquired")
 
     def test_self_deploy_proceeds_or_fails_loudly_by_its_absolute_drain_deadline(self) -> None:
-        reservation = self.reserve().record
+        reservation = self.reserve(lease_seconds=SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS * 2).record
         assert reservation is not None
         record, _, _ = _prepare(self.store)
         began = parse_launchplane_mutation_timestamp(record.updated_at, field_name="updated_at")
@@ -160,6 +294,45 @@ class EventDeployRedeployTests(unittest.TestCase):
             request_fingerprint=reservation.request_fingerprint,
         ).record
         self.assertEqual(observed, reservation)
+        restarted.close()
+        restarted = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(restarted.close)
+        clock = patch.object(
+            restarted, "_database_mutation_timestamp", return_value=deadline.isoformat()
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.assertFalse(read_status(restarted)["admission_paused"])
+        renewed = restarted.renew_mutation_reservation(reservation=reservation).record
+        assert renewed is not None
+        self.assertEqual(
+            restarted.complete_mutation_reservation(
+                completion=complete_launchplane_mutation_reservation(
+                    renewed,
+                    response_status_code=200,
+                    response_trace_id="finished-without-kill",
+                    response_payload={"result": {"deploy_status": "pass"}},
+                    completed_at=renewed.updated_at,
+                )
+            ).status,
+            "completed",
+        )
+        # A timed-out intent never dispatches on replay. A fresh normal deploy
+        # (fresh key AND marker) is the supported continuation after the alert.
+        with self.assertRaises(ServiceDeployDrainTimeout):
+            _prepare(restarted)
+        from control_plane.service_deploy_drain import prepare
+
+        _, blockers, dispatch = prepare(
+            restarted,
+            request_fingerprint="fresh-after-timeout",
+            target_type=record.target_type,
+            target_id=record.target_id,
+            image_reference=record.image_reference,
+            deployment_marker=record.deployment_marker + "-retry",
+        )
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
 
     def test_active_reconciliation_tail_blocks_but_expired_hold_is_diagnostic_only(self) -> None:
         reservation = self.reserve().record

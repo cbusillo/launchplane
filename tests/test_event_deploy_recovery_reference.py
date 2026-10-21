@@ -36,6 +36,7 @@ from tests.test_generic_web_deploy_recovery import (
     _generic_web_recovery_target,
     _generic_web_deploy_result,
     _write_generic_web_recovery_reservation,
+    _write_recovery_target_authority,
     _RecoveryObservationProvider,
 )
 from tests.test_service import _invoke_app
@@ -55,6 +56,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
         )
+        _write_recovery_target_authority(self.store)
         self.manifest = ArtifactIdentityManifest(
             artifact_id="recorded-build",
             source_commit="abc123",

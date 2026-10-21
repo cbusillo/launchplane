@@ -100,6 +100,7 @@ class RecipientCutoverTests(unittest.TestCase):
             "client-release-fixture",
             self.old_backup,
             self.validate_release,
+            validate_source=self.validate_release,
         )
         for replacement in (
             patch(
@@ -332,7 +333,7 @@ class RecipientCutoverTests(unittest.TestCase):
             {
                 **runtime_values(self.store, self.fixture.root, current),
                 **runtime_identity_env(kwargs["runtime_identity"]),
-            }
+            },
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
         self.assertFalse(self.old_running)
@@ -467,6 +468,7 @@ class RecipientCutoverTests(unittest.TestCase):
             cutover_intent(self.fixture.root, self.store, self.record, wrong)
 
     def test_drill_restores_retained_data_then_repromotes_without_reinitialization(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
         from control_plane.production_recipient_inverse import run_recipient_inverse
 
         self.assertEqual(self.run_release().response_status_code, 202)
@@ -526,7 +528,23 @@ class RecipientCutoverTests(unittest.TestCase):
             self.adapter.trace_id,
             backup,
             self.validate_release,
+            validate_source=self.validate_release,
         )
+        source_qualified = False
+
+        def admit_source() -> None:
+            if not source_qualified:
+                raise GenericWebPromotionSourceRefused(
+                    "Testing is not qualified for this repromotion."
+                )
+
+        adapter.validate_source = admit_source
+
+        def advance_after_pause(*args: Any, **kwargs: Any) -> None:
+            nonlocal source_qualified
+            self.writer(*args, **kwargs)
+            if kwargs.get("old") and kwargs.get("action") == "pause":
+                source_qualified = False
 
         def run_second() -> Any:
             return run_durable_provider_operation(
@@ -547,7 +565,17 @@ class RecipientCutoverTests(unittest.TestCase):
             self.assertTrue(self.old_running)
             self.assertFalse(self.new_running)
             self.accepted = True
-            result = run_second()
+            # Generic pause/trigger facts from the original release cannot
+            # admit this new attempt. Its own dispatch marker then survives B.
+            for _ in range(2):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    run_second()
+            source_qualified = True
+            with patch(
+                "control_plane.production_recipient_cutover.writer_action",
+                side_effect=advance_after_pause,
+            ):
+                result = run_second()
         self.assertEqual(result.response_status_code, 202, result.response_payload)
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)

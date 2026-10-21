@@ -2208,6 +2208,16 @@ class FilesystemRecordStore:
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 
+    def read_merge_train_pr_feedback_record(
+        self, feedback_id: str
+    ) -> MergeTrainPrFeedbackRecord | None:
+        try:
+            return self._read_model(
+                MergeTrainPrFeedbackRecord, "launchplane_merge_train_pr_feedback", feedback_id
+            )
+        except FileNotFoundError:
+            return None
+
     def list_merge_train_pr_feedback_records(
         self,
         *,

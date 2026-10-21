@@ -40,6 +40,7 @@ def fetch_testing_private_health(
     endpoint_sha256: str,
     url: str,
     timeout_seconds: int,
+    route_activation: object = None,
 ) -> PublicHttpResponse:
     """A receipt is a claim to check, never permission to probe an arbitrary URL."""
     try:
@@ -84,6 +85,7 @@ def fetch_testing_private_health(
             ),
             "testing-health-probe",
             client,
+            route_activation=route_activation,
         )
 
         def unresolved_effects() -> bool:

@@ -1370,7 +1370,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     error_response_model=BaseModel,
                 ),
                 read_product_profile_list_identity=lambda: None,
-                work_graph_planning_facts_provider=None,
                 workflow_credentials_ready=lambda *_: False,
                 control_plane_root=self.root,
                 github_token=lambda **_: "",

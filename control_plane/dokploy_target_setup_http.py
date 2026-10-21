@@ -857,6 +857,8 @@ def _execute_dokploy_target_setup(
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,
+            # Only the durable resource producer supplies recorded partial placement.
+            resuming_create=bool(disposable_placement and any(disposable_placement)),
             required_context_owner=(source_profile.product, request.context)
             if source_profile
             else required_context_owner,

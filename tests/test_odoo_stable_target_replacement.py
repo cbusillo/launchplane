@@ -3288,6 +3288,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         restore_schedule_upsert: Callable[[], dict[str, str]] | None = None,
         external_checkpoint: Callable[[str], None] | None = None,
         fresh_generation: FreshOdooTestingGeneration | None = None,
+        route_writes: list[dict[str, object]] | None = None,
         revoke_on_pending: bool = False,
         provider_extra_env: tuple[str, ...] = (),
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
@@ -3448,7 +3449,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route",
+                side_effect=lambda **kwargs: (
+                    route_writes.append(kwargs) if route_writes is not None else None
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
@@ -3758,6 +3762,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     _opw_profile_with_prelaunch_policy(enabled=True).lanes[0].base_url
                 ).hostname,
                 "reconcile_requested_at": "2026-10-15T00:00:00Z",
+                "certificate_type": "letsencrypt",
             }
         )
         markers = {
@@ -3772,6 +3777,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         override.website_bootstrap.canonical_url = "https://retained.example.invalid"
         for missing in (None, *markers):
             with self.subTest(missing=missing):
+                route_writes: list[dict[str, object]] = []
                 readback = {key: value for key, value in markers.items() if key != missing}
                 passed = OdooPostDeployResult(
                     context="opw",
@@ -3789,6 +3795,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             post_deploy_results=(passed,),
                             test_instance="testing",
                             fresh_generation=fresh,
+                            route_writes=route_writes,
                             mutate_before_restore=observed.append,
                         )
                     self.assertEqual(caught.exception.code, "fresh_testing_restore_unverified")
@@ -3801,6 +3808,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         post_deploy_results=(passed,),
                         test_instance="testing",
                         fresh_generation=fresh,
+                        route_writes=route_writes,
                     )
                     self.assertEqual(result.deploy_status, "pass")
                     self.assertEqual(store.odoo_instance_override_record, override)
@@ -3831,6 +3839,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             for key in store.last_provider_env
                         )
                     )
+
+                self.assertTrue(route_writes)
+                self.assertTrue(
+                    all(
+                        write.get("certificate_type") == fresh.certificate_type
+                        for write in route_writes
+                    )
+                )
 
     def test_fresh_restore_preflights_forbidden_overrides_and_rechecks_plan_drift(self) -> None:
         from control_plane.contracts.odoo_target_replacement_failures import (
@@ -4108,7 +4124,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             policy = durable_operation_policy_record(revision=43)
             return {"scheduleId": "fixture-restore"}
 
-        with patch("control_plane.dokploy.api.trigger_dokploy_schedule_and_wait") as trigger:
+        with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
+            patch("control_plane.dokploy.api.dokploy_request") as trigger,
+        ):
             with self.assertRaises(DurableOperationAuthorizationDeniedError) as caught:
                 self._apply_upstream_restore(
                     override_record=None,
@@ -5587,8 +5606,8 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
                     )
         return result, persisted_env, sync_source
 
-    def test_compose_keeps_its_portability_refusal_before_provider_writes(self) -> None:
-        for value in ("fixture\x00value", "fixture\nsecond line", "fixture "):
+    def test_compose_refuses_unsupported_inputs_before_provider_writes(self) -> None:
+        for value in ("fixture\x00value",):
             with self.subTest(value=value):
 
                 def write_records(record_store: PostgresRecordStore) -> None:
@@ -5618,6 +5637,37 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
                 self.assertNotIn(value, result.error_message)
                 self.assertNotIn("APP_SETTING", persisted_env)
                 sync_source.assert_not_called()
+
+    def test_compose_delivers_multiline_and_padded_runtime_values(self) -> None:
+        for value in ("fixture\nsecond line", "fixture ", '"literal" $NAME'):
+            with self.subTest(value=value):
+
+                def write_records(record_store: PostgresRecordStore) -> None:
+                    record_store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="cm",
+                            env={"APP_SETTING": value},
+                            updated_at="2026-07-25T00:00:00Z",
+                        )
+                    )
+
+                result, persisted_env, _ = self._apply(
+                    write_records=write_records,
+                    policy_rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="ODOO_DB_PASSWORD",
+                            secret_class="testing",
+                            allowed_contexts=("cm",),
+                            allowed_instances=("testing",),
+                        ),
+                    ),
+                )
+                self.assertEqual(result.deploy_status, "pass")
+                self.assertEqual(
+                    control_plane_dokploy.parse_dokploy_env_text(persisted_env)["APP_SETTING"],
+                    value,
+                )
 
     def test_plan_lists_the_keys_it_would_deliver_without_requiring_declarations(self) -> None:
         store = _Store(

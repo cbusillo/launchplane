@@ -186,6 +186,7 @@ class RehearsalClientTests(unittest.TestCase):
         lost: bool = False,
         changed: bool = False,
         failure: tuple[int, dict[str, Any]] | None = None,
+        failure_headers: dict[str, str] | None = None,
         action: str = "prepare",
         response_result: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any], Mock]:
@@ -232,11 +233,14 @@ class RehearsalClientTests(unittest.TestCase):
             post.side_effect = http.client.IncompleteRead(b"", 1)
         if failure is not None:
             status, failure_payload = failure
+            headers = Message()
+            for name, value in (failure_headers or {}).items():
+                headers[name] = value
             post.side_effect = urllib.error.HTTPError(
                 "https://service.invalid",
                 status,
                 "Fixture refusal",
-                Message(),
+                headers,
                 io.BytesIO(json.dumps(failure_payload).encode()),
             )
             self.addCleanup(post.side_effect.close)

@@ -14,21 +14,37 @@ from control_plane._odoo_rehearsal_diagnostics import (
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.contracts.odoo_rehearsal_business_validation import (
+    BusinessValidationReceipt,
+)
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
 ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE = ODOO_UPGRADE_REHEARSAL_ROUTE + "/preflight"
+REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": "released"}
+INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
 RehearsalAction = Literal[
-    "prepare", "execute", "simulate-final", "verify", "retire", "retire-incomplete"
+    "prepare",
+    "execute",
+    "simulate-final",
+    "validate-business",
+    "verify",
+    "retire",
+    "retire-incomplete",
 ]
 RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
 ]
+
+
+def rehearsal_execution_lock_name(provider_target_key: str) -> str:
+    """Execute and incomplete retirement share the original rehearsal executor."""
+    return provider_target_key.removesuffix(INCOMPLETE_REHEARSAL_TARGET_SUFFIX)
 
 
 class RehearsalBackingGroup(BaseModel):
@@ -114,6 +130,9 @@ class RehearsalCopyReceipt(BaseModel):
     sanitized: Literal[True]
     odoo_version: str = Field(min_length=1)
     captured_at: datetime
+    business_validation_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: value == ""
+    )
 
     @model_validator(mode="after")
     def aware(self) -> "RehearsalCopyReceipt":
@@ -136,6 +155,7 @@ class IncompleteRehearsalHostResult(BaseModel):
     volumes_absent: bool
     network_absent: bool
     raw_source_absent: bool
+    initial_source_snapshot: RehearsalCopyReceipt | None = None
     public_route: Literal[False]
     business_host_frozen: Literal[False]
 
@@ -223,6 +243,9 @@ class OdooUpgradeRehearsalRecord(BaseModel):
     compose_id: str = ""
     state: RehearsalState = "planned"
     copies: tuple[RehearsalCopyReceipt, ...] = ()
+    business_validations: tuple[BusinessValidationReceipt, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
@@ -334,6 +357,14 @@ class RehearsalRetainedLogs(BaseModel):
     truncated: bool
 
 
+class PendingBusinessValidation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    record_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    receipt: BusinessValidationReceipt
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -384,9 +415,14 @@ class RehearsalHostResult(BaseModel):
         Literal["reference_present", "reference_not_found", "unavailable", "incomplete"] | None
     ) = None
     refusal_code: Literal[
-        "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
+        "",
+        "rehearsal_storage_capacity_insufficient",
+        "rehearsal_precheck_refused",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    business_validation: BusinessValidationReceipt | None = None
+    pending_business_validation: PendingBusinessValidation | None = None
+    business_validation_postcheck_verified: Literal[False] | None = None
 
 
 def rehearsal_identity(product: str, principal: str, key: str) -> str:

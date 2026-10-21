@@ -78,3 +78,102 @@ class DokployEnvironmentTests(unittest.TestCase):
             api.parse_dokploy_env_text(rendered),
             {"KEEP": "first#second\nthird", "CHANGE": '"new"'},
         )
+
+    def test_compose_readback_merge_and_retirement_use_literal_values(self) -> None:
+        values = {"KEEP": '"quoted" $NAME\nnext', "REMOVE": "old"}
+        stored = api.serialize_dokploy_env_text(values, target_type="compose")
+        self.assertEqual(api.parse_dokploy_env_text(stored), values)
+        updated = api.render_dokploy_env_text_with_overrides(
+            stored, updates={"NEW": "new"}, removals=("REMOVE",), target_type="compose"
+        )
+        self.assertEqual(
+            api.parse_dokploy_env_text(updated), {"KEEP": values["KEEP"], "NEW": "new"}
+        )
+        self.assertEqual(
+            api.serialize_dokploy_env_text(
+                api.parse_dokploy_env_text(updated), target_type="compose"
+            ),
+            updated,
+        )
+
+    def test_compose_refuses_invalid_container_values_before_provider_writes(self) -> None:
+        from unittest.mock import patch
+
+        for value in ("nul\x00value",):
+            with self.subTest(value=value), patch.object(api, "dokploy_request") as request:
+                with self.assertRaises(api.DokployEnvironmentEncodingError) as error:
+                    api.update_dokploy_target_env(
+                        host="https://provider.invalid",
+                        token="synthetic",
+                        target_type="compose",
+                        target_id="synthetic",
+                        target_payload={"env": ""},
+                        env_text=api.serialize_dokploy_env_text({"APP": value}),
+                    )
+                request.assert_not_called()
+                self.assertNotIn(value, str(error.exception))
+
+    def test_compose_encoding_does_not_hide_platform_credentials(self) -> None:
+        from unittest.mock import patch
+
+        import click
+
+        stored = api.serialize_dokploy_env_text(
+            {"DOKPLOY_TOKEN": '"synthetic token"'}, target_type="compose"
+        )
+        with (
+            patch.object(api, "dokploy_request") as request,
+            self.assertRaises(click.ClickException),
+        ):
+            api.update_dokploy_target_env(
+                host="https://provider.invalid",
+                token="synthetic",
+                target_type="compose",
+                target_id="synthetic",
+                target_payload={"env": ""},
+                env_text=stored,
+            )
+        request.assert_not_called()
+
+    def test_provider_edits_and_header_normalization_remain_readable_and_reconcilable(self) -> None:
+        original = {"KEEP": '"literal" $NAME\nnext'}
+        wire = api.serialize_dokploy_env_text(original, target_type="compose")
+        for edited, additions in (
+            ("NEW=1\n" + wire, {"NEW": "1"}),
+            ("# provider comment\n" + wire.replace("\n", "\r\n"), {}),
+            (wire + '\nNEW="hello world"\nARRAY=["a"]', {"NEW": "hello world", "ARRAY": '["a"]'}),
+            (
+                api.render_dokploy_env_text_with_overrides(wire, updates={"KEEP": "hello world"}),
+                {"KEEP": "hello world"},
+            ),
+        ):
+            with self.subTest(additions=additions):
+                values = {**original, **additions}
+                self.assertEqual(api.parse_dokploy_env_text(edited), values)
+                rewritten = api.render_dokploy_env_text_with_overrides(
+                    edited, updates={"NEXT": "next"}, target_type="compose"
+                )
+                self.assertEqual(api.parse_dokploy_env_text(rewritten), {**values, "NEXT": "next"})
+
+    def test_format_comment_inside_a_value_is_not_metadata(self) -> None:
+        from control_plane.dokploy.environment import compose_environment_is_encoded
+
+        encoded = api.serialize_dokploy_env_text({"INPUT": "value"}, target_type="compose")
+        header = encoded.splitlines()[0]
+        legacy = api.serialize_dokploy_env_text({"APP": "line\n" + header + "\nnext"})
+        self.assertFalse(compose_environment_is_encoded(legacy))
+        self.assertEqual(api.parse_dokploy_env_text(legacy), {"APP": "line\n" + header + "\nnext"})
+
+    def test_explicit_literal_keys_requalify_unchanged_legacy_values(self) -> None:
+        from control_plane.dokploy.environment import compose_unqualified_keys
+
+        values = {"APP": "hello $NAME", "SAFE": "plain", "OTHER": "${REFERENCE}"}
+        legacy = api.serialize_dokploy_env_text(values)
+        self.assertEqual(compose_unqualified_keys(legacy, values), ["APP", "OTHER"])
+        wire = api.serialize_dokploy_env_text(
+            values, target_type="compose", current_env_text=legacy, literal_keys=("APP",)
+        )
+        self.assertEqual(api.parse_dokploy_env_text(wire), values)
+        self.assertEqual(compose_unqualified_keys(wire, values), ["OTHER"])
+        with self.assertRaises(api.DokployEnvironmentEncodingError):
+            api.serialize_dokploy_env_text(values, target_type="compose", literal_keys=("ABSENT",))

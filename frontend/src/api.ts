@@ -1,4 +1,20 @@
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
+import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
+import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
+
+export function readDiscussionTopics(product: string, signal?: AbortSignal): Promise<DiscussionTopicsResponse> {
+  return requestJson<DiscussionTopicsResponse>(`/v1/products/${encodeURIComponent(product)}/discussion-topics`, "GET", undefined, signal);
+}
+
+export function readTestingHold(query: NonNullable<ReadTestingHoldData["query"]>, signal?: AbortSignal): Promise<ReadTestingHoldResponse> {
+  return requestJson(`/v1/product-config/testing-hold?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyTestingHold(body: ApplyTestingHoldData["body"], options: BrowserOperationOptions): Promise<ApplyTestingHoldResponse> {
+  const request: ApplyTestingHoldData = { url: BROWSER_WRITE_ROUTES.testingHoldApply, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
@@ -71,8 +87,6 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
-  RankWorkGraphSnapshotData,
-  RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
@@ -82,9 +96,6 @@ import type {
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
-  WorkGraphIssueInboxResponse,
-  WorkGraphSnapshot,
-  WorkGraphSnapshotResponse,
   ProductReviewResponse,
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
@@ -372,9 +383,10 @@ export function readProductEnvironment(
   product: string,
   environment: string,
   signal?: AbortSignal,
+  includeHostNetworkCapacity = false,
 ): Promise<ProductEnvironmentResponse> {
   return requestJson<ProductEnvironmentResponse>(
-    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}${includeHostNetworkCapacity ? "?include_host_network_capacity=true" : ""}`,
     "GET",
     undefined,
     signal,
@@ -482,17 +494,6 @@ export function readEveryCodeSummary(
   );
 }
 
-export function readWorkGraphSnapshot(
-  signal?: AbortSignal,
-): Promise<WorkGraphSnapshotResponse> {
-  return requestJson<WorkGraphSnapshotResponse>(
-    "/v1/work-graph/snapshot",
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readTenantAdmissionEvaluation(
   request: Pick<ReadTenantAdmissionEvaluationData, "query">,
   signal?: AbortSignal,
@@ -510,32 +511,6 @@ export function readTenantAdmissionEvaluation(
   });
   return requestJson<TenantAdmissionEvaluationReadResponse>(
     `/v1/work-graph/tenant-admission/evaluation?${params.toString()}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function rankWorkGraphSnapshot(
-  snapshot: WorkGraphSnapshot,
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<RankWorkGraphSnapshotResponse> {
-  const request: RankWorkGraphSnapshotData = {
-    url: BROWSER_WRITE_ROUTES.workGraphRank,
-    body: {
-      snapshot,
-      limit,
-    },
-  };
-  return requestGeneratedPost<RankWorkGraphSnapshotResponse>(request, signal);
-}
-
-export function readGitHubIssueInbox(
-  signal?: AbortSignal,
-): Promise<WorkGraphIssueInboxResponse> {
-  return requestJson<WorkGraphIssueInboxResponse>(
-    "/v1/work-graph/github/issues",
     "GET",
     undefined,
     signal,

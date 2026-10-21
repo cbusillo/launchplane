@@ -135,6 +135,14 @@ class ActivationTests(unittest.TestCase):
     local_credential_fixture = False
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         self.preparation = preparation.SeparationResourceTests()
         self.preparation.database_url = self.database_url
         self.preparation.setUp()
@@ -471,6 +479,25 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_activation()
+            self.assertEqual(self.writes, [])
+            self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(self.capacity_read.call_args.kwargs["server_id"], "server")
 
     def test_unencodable_input_retains_allocation_fences_without_configure_checkpoint(self) -> None:
         from control_plane.dokploy import api
@@ -1279,6 +1306,51 @@ class ActivationTests(unittest.TestCase):
                             self.store, self.root, self.planned_record, resources
                         )
         self.assertEqual(self.writes, [])
+
+    def test_new_staff_use_correction_refuses_initial_custody(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        second = PostgresRecordStore(
+            database_url=self.store._engine.url.render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        write = self.store.write_testing_activation
+        observed: list[DisposableLaneSafety] = []
+
+        def correction(**kwargs: Any) -> None:
+            if kwargs["expected"] is None and not observed:
+                binding = resolve_disposable_observation_binding(
+                    second, product=self.product, context=self.context, instance="testing"
+                )
+                now = datetime.now(timezone.utc)
+                record = DisposableLaneSafety(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                    observed_by=self.actor,
+                    observer_kind="director_agent",
+                    binding_sha256=binding.binding_sha256,
+                    usage="in_use",
+                    usage_evidence="A fresh staff-use correction.",
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+                self.assertTrue(second.publish_collected_disposable_lane_safety(record))
+                observed.append(record)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correction):
+            result = self.run_activation()
+        self.assertTrue(observed)
+        self.assertEqual(result.response_status_code, 409)
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertFalse(self.writes)
+        self.assertEqual(
+            second.read_disposable_lane_safety(self.product, self.context, "testing"), observed[0]
+        )
 
     def test_hold_continuation_requires_exact_caller_and_preserves_later_staff_hold(self) -> None:
         from control_plane.testing_activation import require_activation_hold_lift

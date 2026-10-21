@@ -70,7 +70,7 @@ Product repo adapters can ask Launchplane to render that decision from a GitHub
 event payload before doing product-owned work:
 
 ```shell
-uv run launchplane work-graph preview-workflow-decision \
+uv run launchplane preview-workflow-decision \
   --event-file "$GITHUB_EVENT_PATH" \
   --event-name "$GITHUB_EVENT_NAME" \
   --product sell-your-outboard \

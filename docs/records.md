@@ -462,6 +462,12 @@ the first migrated provider routes; both require an `Idempotency-Key` and a
 database store. Provider-specific observation and reconciliation stay behind
 the adapter boundary.
 
+An admission refusal inside the atomic effect checkpoint reaches the adapter as
+its original domain error, so it can settle a pre-effect refusal normally. The
+checkpoint refusal says only that this proposed dispatch did not start; any
+earlier effect marker and the exact reservation identity still govern release.
+Storage failures and lost leases retain their existing reconciliation behavior.
+
 The `launchplane_idempotency_active_reconciliation_idx` partial unique index
 fences each provider target while its reservation is `running` or
 `reconcile_required`, regardless of caller idempotency key, using the promoted
@@ -876,8 +882,9 @@ an ORM column/table or remains only in the evidence payload.
   overwrite.
   Native FastAPI
   `POST /v1/route-bindings/odoo-testing/controller/run-once` performs bounded
-  testing-only discovery from product profiles and invokes this same planner for
-  each active service-owned binding. Its contract contains no target selectors,
+  testing-only discovery from product profiles. Legacy service-owned bindings use
+  the reconcile planner; published native testing bindings use fresh managed-route
+  observation joined to their original publication custody. Its contract contains no target selectors,
   caps discovery at 25 records, pre-authorizes every exact instance, and applies
   due refreshes sequentially. Absent, disabled, admin-owned, non-Odoo, and
   production records are not candidates. No schema migration is required.
@@ -1960,6 +1967,36 @@ provider message or rollback health exception is embedded in the detail.
 
 ## Deployment Record
 
+In-place application testing retains a cumulative typed receipt in
+`post_deploy_update.evidence.generic_web_original_execution`. The original
+deployment and reservation identify its product, lane, artifact, source and
+provider target. The receipt records intent before dispatch, the complete
+pre-dispatch schedule-history identifiers, bounded acknowledgements and
+attributable terminal facts. It also binds the pre-attempt inventory by digest.
+An optional application lifecycle snapshot retains the original schedule
+baseline; executor-only testing does not manufacture a snapshot.
+
+Only the current original provider execution can create or advance these
+facts. Supported deployment-evidence corrections can preserve them exactly and
+correct other evidence, but cannot replace the captured lifecycle baseline or
+turn unknown work into completed work. Cleanup appends evidence; it never
+replaces earlier unresolved effects. Terminal execution and testing
+qualification remain separate: a healthy image with failed product assertions
+can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. Its lease, exact record/inventory CAS and
+current target binding protect that unqualified fact. Current profile and captured
+input qualification are checked again after its commit, before more work.
+That projection contains no previous qualification verdict. The executor receives
+the prior inventory captured before publication, so bounded qualification retries
+retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
+
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes
 separate execution, post-deploy and readiness failures; restore codes separate
@@ -3016,8 +3053,8 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, work graph snapshot,
-  Every Code summary, and preview readiness projections, then reports each
+  context. It aggregates the existing repo-product mapping, Every Code summary,
+  preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
 - Agent-consumer authorization diagnostics use a compact subject model for

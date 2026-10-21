@@ -28,6 +28,7 @@ from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainSetupFailureRecovery,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
@@ -85,6 +86,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
 from control_plane.merge_train_codeowners import (
     individual_landing_snapshots,
     carried_change_requires_individual_landing,
@@ -330,6 +335,13 @@ class UrllibMergeTrainGitHubTransport:
             data=request_body,
         )
         try:
+            if method == "GET" and re.fullmatch(
+                r"/repos/[^/]+/[^/]+/actions/jobs/[1-9][0-9]*/logs", path
+            ):
+                from control_plane.merge_train_job_logs import read_job_log
+
+                with timed_github_request(method=method, path=path):
+                    return read_job_log(request, observer=self.response_headers_observer)
             with (
                 timed_github_request(method=method, path=path),
                 urlopen(request, timeout=15) as response,
@@ -2456,6 +2468,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
         return candidate_block_application(self, candidate=candidate, policy=policy)
 
+    def read_setup_failure_recovery(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainSetupFailureRecovery | None:
+        from control_plane.merge_train_github_setup_failure_recovery import (
+            read_setup_failure_recovery,
+        )
+
+        return read_setup_failure_recovery(self, candidate=candidate)
+
     def recover_candidate_block(
         self,
         *,
@@ -2466,6 +2487,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
+        setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -2478,6 +2500,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
             before_remove=before_remove,
+            setup_failure_evidence=setup_failure_evidence,
         )
 
     def update_pull_request_branch(
@@ -3510,7 +3533,24 @@ class GitHubMergeTrainSnapshotReader:
             else ("unknown", "")
         )
         checks_status, checks_error = checks_observation
+        try:
+            recovery_floor = self._recovery_ready_floor(
+                repository_path, pull_request_number, head_sha
+            )
+            recovery_unavailable = False
+        except Exception:
+            recovery_floor, recovery_unavailable = 0, True
+        if recovery_floor and ready_handoff is None:
+            ready_handoff = self._read_ready_handoff(
+                repository_path=repository_path,
+                number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
+            )
         return MergeTrainPullRequestSnapshot(
+            recovery_ready_unavailable=recovery_unavailable,
+            recovery_ready_comment_floor=recovery_floor,
             ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
             client_test_notes_error=review_intent.error,
@@ -3538,6 +3578,12 @@ class GitHubMergeTrainSnapshotReader:
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
+
+    def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
+        from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
+
+        receipt = read_setup_recovery_receipt(self._branch_refresh_store, repository, number, head)
+        return receipt.evidence.ready_comment_floor if receipt else 0
 
     def _read_ready_handoff(
         self,
@@ -5674,7 +5720,7 @@ def _without_superseded_actions_checks(
         superseded = {
             (run["id"], run["check_suite_id"])
             for run in selection["superseded"]
-            if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
+            if run["id"] not in current_ids
         }
     except (ValueError, KeyError, TypeError, AttributeError):
         return unavailable("actions_history_selection_malformed")
@@ -5723,19 +5769,26 @@ def _latest_check_runs(check_runs: list[object]) -> list[object]:
     the same suite supersedes its earlier attempt; the highest check id wins.
     """
     latest: dict[tuple[str, object, int | None], dict[str, object]] = {}
+    unidentified: list[dict[str, object]] = []
     for item in check_runs:
         check_run = _json_object(item, "GitHub check run")
         app = check_run.get("app")
         app_id = app.get("id") if isinstance(app, dict) else None
         suite = check_run.get("check_suite")
         suite_id = suite.get("id") if isinstance(suite, dict) else None
-        if not isinstance(suite_id, int) or isinstance(suite_id, bool):
-            suite_id = None
+        if (
+            not isinstance(suite_id, int)
+            or isinstance(suite_id, bool)
+            or suite_id <= 0
+            or _check_run_order(check_run) <= 0
+        ):
+            unidentified.append(check_run)
+            continue
         key = (str(check_run.get("name") or "").casefold(), app_id, suite_id)
         current = latest.get(key)
         if current is None or _check_run_order(check_run) > _check_run_order(current):
             latest[key] = check_run
-    return list(latest.values())
+    return [*latest.values(), *unidentified]
 
 
 def _check_run_order(check_run: dict[str, object]) -> int:
@@ -5752,7 +5805,7 @@ def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {"failure", "timed_out", "cancelled", "action_required"}:
+    if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"
     return "unknown"
 

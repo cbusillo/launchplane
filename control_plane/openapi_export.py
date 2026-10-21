@@ -144,6 +144,8 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/operations/provider-hold-attention": "read_provider_hold_attention",
+    "/v1/product-config/testing-hold": "read_testing_hold",
+    "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}": "read_testing_rebuild",
     "/v1/production-backup-authority": "read_production_backup_authority",
@@ -186,9 +188,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/every-code/summary": "read_every_code_summary",
     "/v1/every-code/work-requests": "list_every_code_work_requests",
     "/v1/previews/readiness": "read_preview_readiness",
-    "/v1/work-graph/snapshot": "read_work_graph_snapshot",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
-    "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
@@ -210,6 +210,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
@@ -228,7 +229,6 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/authorization-candidates/prepare": (
         "prepare_authorization_candidate"
     ),
-    "/v1/work-graph/rank": "rank_work_graph_snapshot",
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),
