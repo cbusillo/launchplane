@@ -296,6 +296,9 @@ class TestingPublicIngressTests(TestingPublicIngressScenario):
             .outcome,
             "unknown",
         )
+        undispatched = self.edge().observe("foreign-provider-key", "", "fixture")
+        self.assertEqual(undispatched.outcome, "absent")
+        self.assertTrue(undispatched.retry_safe)
         binding = self.store.read_route_binding_record(
             product=self.profile.product, context_name=self.fixture.context, instance_name="testing"
         )

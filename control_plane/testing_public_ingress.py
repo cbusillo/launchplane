@@ -700,7 +700,11 @@ class TestingPublicIngressAdapter:
                     _AUDIT_PREFIX + self.request.reviewed_plan_sha256
                 )
                 if audit.idempotency_key != provider_operation_key:
-                    return ProviderObservation("unknown")
+                    return (
+                        ProviderObservation("unknown")
+                        if provider_effect_phase
+                        else ProviderObservation("absent", retry_safe=True)
+                    )
                 result = self.readback()
             except TestingIngressPrerequisiteError:
                 return ProviderObservation("unknown")
