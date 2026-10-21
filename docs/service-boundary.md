@@ -4504,7 +4504,7 @@ The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
 `mode` (`100644` or `100755`). An omitted mode preserves an existing regular
 file's mode and defaults to `100644` for a new file; symlinks are refused.
-It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
+It accepts at most 32 files, 2 MiB of old-plus-new changed content (including
 deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
 or merge settings. The base must match the verified OIDC `sha`. A new branch
@@ -4513,6 +4513,17 @@ current default-branch head; a stale new proposal receives 409
 `updater_proposal_conflict` and reruns against the new base. An exact existing
 branch can resume its original bounded proposal after verifying its tree and
 single parent; it never updates that branch.
+
+The whole-file budget includes unchanged bytes within every submitted file. It
+is deliberately larger than the 1 MiB JSON ingress limit so small changes to
+large source files or lockfiles can fit without a second edit representation.
+The body limit still bounds all submitted content, JSON escaping and metadata;
+raising the old-plus-new budget does not raise that limit or file count. Callers
+omit genuinely unchanged files and measure the complete serialized request and
+old-plus-new changed-file bytes. An oversized coherent candidate is explicitly
+refused; do not skip necessary changes, truncate files or split it into competing
+pending proposals. The service still consumes whole UTF-8 file contents as data
+and performs no caller-supplied patch execution.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set
