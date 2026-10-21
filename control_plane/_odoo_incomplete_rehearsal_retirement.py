@@ -1,4 +1,4 @@
-"""Fixed host disposal for an idle incomplete standalone rehearsal."""
+"""Fixed host disposal for an idle incomplete or completed later-phase standalone rehearsal."""
 
 INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
 def incomplete_initial_snapshot(spec,root,*,allow_partial):
@@ -36,11 +36,62 @@ def incomplete_initial_snapshot(spec,root,*,allow_partial):
     return receipt
 
 
+LATER_PHASE_ROLES={'upgraded':('source',),'switched':('source','final_source')}
+
+
+def same_receipt(saved,recorded):
+    # Launchplane and the host serialize the same capture instant differently.
+    return (isinstance(saved,dict) and isinstance(recorded,dict)
+        and {key:value for key,value in saved.items() if key!='captured_at'}
+            =={key:value for key,value in recorded.items() if key!='captured_at'}
+        and isinstance(saved.get('captured_at'),str) and isinstance(recorded.get('captured_at'),str)
+        and datetime.fromisoformat(saved['captured_at'])==datetime.fromisoformat(recorded['captured_at']))
+
+
+def later_phase_snapshots(spec,root):
+    # Bind exactly the recorded recovery snapshots of a settled later phase.
+    record=spec['record']
+    names=database_names(spec)
+    copies=record['copies']
+    roles=LATER_PHASE_ROLES[record['state']]
+    if [copy['database'] for copy in copies]!=[names[role] for role in roles]:
+        raise RuntimeError('Recorded recovery copies do not match the rehearsal phase')
+    for role,database in names.items():
+        if role not in roles and ((root/database).exists() or (root/database).is_symlink()):
+            raise RuntimeError('An unrecorded recovery snapshot cannot be disposed')
+    if (root/'capture.pending').exists() or (root/'capture.pending').is_symlink():
+        raise RuntimeError('A pending capture is not a settled phase')
+    for copy in copies:
+        path=root/copy['database']
+        for item in (path,root/'capture.json',path/'database.dump',path/'filestore.tar'):
+            if item.is_symlink() or not item.exists():
+                raise RuntimeError('Recovery snapshot custody is missing or aliased')
+    # Witness, lineage and bytes must still be exactly the recorded tuples.
+    validate_snapshots(spec,root,{},copies,retired=True)
+    # Every started effect settled with its receipt; none may still be writing.
+    receipts=[]
+    for marker in root.iterdir():
+        if marker.name.endswith('.started'):
+            receipt=root/(marker.name[:-len('.started')]+'.json')
+            if receipt.is_symlink() or not receipt.is_file():
+                raise RuntimeError('Uncertain original effect retains its custody')
+            receipts.append(json.loads(receipt.read_text()))
+    if not any(isinstance(saved,dict) and saved.get('intent_sha256')==record['intent_sha256']
+            and saved.get('state')==record['state'] and isinstance(saved.get('copies'),list)
+            and len(saved['copies'])==len(copies)
+            and all(same_receipt(left,right) for left,right in zip(saved['copies'],copies))
+            for saved in receipts):
+        raise RuntimeError('No settled operation published this phase')
+    return copies
+
+
 def incomplete_retirement(spec, root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    if record['state']!='prepared' or record['copies'] or spec['mode'] not in {'dry-run','apply'}:
-        raise RuntimeError('Only an incomplete prepared rehearsal can be disposed')
+    if spec['mode'] not in {'dry-run','apply'} or not (
+            (record['state']=='prepared' and not record['copies'])
+            or (record['state'] in LATER_PHASE_ROLES and record['copies'])):
+        raise RuntimeError('Only an incomplete prepared or settled later-phase rehearsal can be disposed')
     if not root.is_dir() or root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Missing private rehearsal custody')
     lock_path=root/'.execution.lock'
@@ -90,6 +141,14 @@ def incomplete_retirement_locked(spec,root):
         manifest=admitted['manifest']
         if manifest['binding']!=binding: raise RuntimeError('Disposal belongs to another operation')
         if admitted['reviewed_plan_sha256']!=review: raise RuntimeError('Disposal review changed')
+    elif record['copies']:
+        snapshots=later_phase_snapshots(spec,root)
+        database,image=current(spec)
+        containers=inspection(spec,database,image)
+        # The private web may serve the settled copy; an exec is an unsettled writer.
+        if any('ExecIDs' not in item[1] or item[1]['ExecIDs'] not in (None,[])
+                for item in containers.values()):
+            raise RuntimeError('An active rehearsal exec cannot be retired')
     else:
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
@@ -112,6 +171,7 @@ def incomplete_retirement_locked(spec,root):
         containers=inspection(spec,database,image)
         if containers['web'][1].get('State',{}).get('Running') is not False:
             raise RuntimeError('An active rehearsal writer cannot be retired as incomplete')
+    if not marker.exists():
         own={item[1]['Id'] for item in containers.values()}
         volumes={namespace+suffix for suffix in ('-data','-db','-logs')}
         backings=inspect_volume_backings(volumes,all_containers,own,
@@ -120,8 +180,12 @@ def incomplete_retirement_locked(spec,root):
         network=one_inspection(network_name)
         manifest={'binding':binding,'containers':sorted(own),'volumes':backings,
             'network_name':network_name,'network_id':network['Id'],
-            'root':[root.stat().st_dev,root.stat().st_ino],
-            'initial_source_snapshot':snapshot}
+            'root':[root.stat().st_dev,root.stat().st_ino]}
+        if record['copies']:
+            manifest['initial_source_snapshot']=None
+            manifest['recovery_snapshots']=snapshots
+        else:
+            manifest['initial_source_snapshot']=snapshot
     if manifest['root']!=[root.stat().st_dev,root.stat().st_ino]:
         raise RuntimeError('Custody directory changed')
     binding_sha256=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -192,6 +256,7 @@ def incomplete_retirement_locked(spec,root):
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'initial_source_snapshot':manifest.get('initial_source_snapshot'),
+        'recovery_snapshots':manifest.get('recovery_snapshots',[]),
         'public_route':False,'business_host_frozen':False}
     emit_rehearsal_result(result)
     return result

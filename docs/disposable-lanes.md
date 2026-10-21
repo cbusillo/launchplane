@@ -2822,10 +2822,39 @@ source snapshot, with exact witness, capture lineage and database/filestore
 hashes. The review binds that receipt into its native disposal manifest;
 apply and readback retain it as `host_disposal.initial_source_snapshot` after
 disposal. It is initial input evidence, never a final-source, upgraded or
-post-write recovery tuple. The web writer must be stopped. Later-phase incomplete
-runtimes remain held for their qualified disposition. Verified, actively running,
+post-write recovery tuple. The web writer must be stopped. Verified, actively running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
+
+A completed later phase that cannot reach `verified`, for example a superseded
+`switched` rehearsal whose candidate cannot run business validation, uses the
+same `retire-incomplete` action to recover its capacity. Supply the unchanged
+intent and the key of the **completed operation that published the current
+phase**: `execute` for `upgraded`, or the last `simulate-final` or
+`validate-business` for `switched`. Its stored result must equal the current
+record's state, copy receipts and phase timings exactly, so an earlier or
+unrelated key refuses. Any `running` or `reconcile_required` journal on the
+rehearsal refuses, before host inspection and again inside the publication
+transaction; an uncertain writer is never disposed around. The recorded copies
+must be exactly the phase's recovery snapshots (`source`, plus `final_source`
+after the switch). A `final_upgrade` post-write snapshot is never disposed by
+this path.
+
+Natively, the host lock must be free and every `<action>.started` marker must
+have its completed `<action>.json` receipt. One settled receipt must have
+published exactly the recorded copies. The phase-selected runtime may still
+serve its private web; a container with any active exec session is treated as
+a writer and refuses. Each recorded snapshot must be a real directory, not a
+link, with witness, capture lineage and database/filestore bytes matching its
+recorded receipt. An unrecorded snapshot directory or pending capture refuses.
+The review binds those receipts into the native manifest as
+`host_disposal.recovery_snapshots`. Apply then stops and removes the runtime
+and disposes the snapshot bytes under the same absence proofs as below.
+Publication marks the rehearsal retired and removes its target registration.
+It leaves the completed original journal unchanged as custody evidence; there
+is no hold to release. The retired record and the receipt keep the copy
+receipts as the custody record of what was disposed. Readback rebuilds the
+receipt from the persisted host disposal and placement absence.
 
 The dry-run acquires executor exclusion and inspects the exact private placement,
 containers, private network, labeled local volumes and backing identities. It

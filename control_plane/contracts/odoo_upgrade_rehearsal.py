@@ -156,6 +156,9 @@ class IncompleteRehearsalHostResult(BaseModel):
     network_absent: bool
     raw_source_absent: bool
     initial_source_snapshot: RehearsalCopyReceipt | None = None
+    # A completed later phase disposes the bytes of its recorded recovery
+    # snapshots; their receipts stay on the rehearsal record.
+    recovery_snapshots: tuple[RehearsalCopyReceipt, ...] = ()
     public_route: Literal[False]
     business_host_frozen: Literal[False]
 
@@ -170,6 +173,8 @@ class IncompleteRehearsalHostResult(BaseModel):
             )
         ):
             raise ValueError("Disposal requires every native absence observation.")
+        if self.initial_source_snapshot is not None and self.recovery_snapshots:
+            raise ValueError("Initial and later-phase disposal are exclusive.")
         return self
 
 
@@ -202,7 +207,7 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     target_artifact_id: str
     source_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     shape_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    copies: tuple[RehearsalCopyReceipt, ...] = Field(max_length=0)
+    copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
     resources_preserved: Literal[False]
     public_route: Literal[False]
@@ -219,6 +224,8 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     def native_disposal(self) -> "IncompleteRehearsalRetirementReceipt":
         if not self.host_disposal.disposed:
             raise ValueError("Retirement requires completed native disposal.")
+        if self.copies != self.host_disposal.recovery_snapshots:
+            raise ValueError("Retained copy receipts must be exactly the disposed snapshots.")
         return self
 
 

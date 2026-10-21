@@ -11597,22 +11597,35 @@ class PostgresRecordStore(HumanSessionStore):
         trace_id: str,
         result: dict[str, object],
     ) -> None:
-        """Publish disposal and settle its exact held execute in one transaction."""
+        """Publish disposal and settle its exact original operation in one transaction.
+
+        A held execute is completed with the retirement result. A completed
+        later phase keeps its original journal unchanged as custody evidence.
+        """
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.odoo_incomplete_rehearsal_retirement import later_phase_copies
         from control_plane.odoo_upgrade_rehearsal import require_unaliased_rehearsal
         from control_plane.provider_operations import provider_operation_response_payload
 
+        later = bool(expected.copies)
+        if later:
+            admitted = (
+                later_phase_copies(expected, expected.state) and original.state == "completed"
+            )
+        else:
+            admitted = (
+                expected.state == "prepared"
+                and original.state in {"running", "reconcile_required"}
+                and original.provider_effect_phase == "execute"
+                and bool(original.provider_effect_started_at)
+            )
         if (
-            expected.state != "prepared"
-            or expected.copies
+            not admitted
             or replacement.state != "retired"
             or replacement.model_copy(
                 update={"state": expected.state, "updated_at": expected.updated_at}
             )
             != expected
-            or original.state not in {"running", "reconcile_required"}
-            or original.provider_effect_phase != "execute"
-            or not original.provider_effect_started_at
             or original.scope != expected.principal
             or original.provider_target_key != expected.rehearsal_id
             or original.route_path != ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=expected.product)
@@ -11647,6 +11660,16 @@ class PostgresRecordStore(HumanSessionStore):
                     "Original rehearsal custody changed before retirement publication."
                 )
             require_unaliased_rehearsal(self, expected)
+            if later and session.scalar(
+                select(LaunchplaneIdempotencyRow.record_id)
+                .where(
+                    LaunchplaneIdempotencyRow.provider_target_key == expected.rehearsal_id,
+                    LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
+                )
+                .limit(1)
+                .with_for_update()
+            ):
+                raise ValueError("Another rehearsal operation is unsettled.")
             now = self._database_mutation_timestamp(session)
             if original.state == "running" and parse_launchplane_mutation_timestamp(
                 original.lease_expires_at, field_name="lease_expires_at"
@@ -11674,7 +11697,8 @@ class PostgresRecordStore(HumanSessionStore):
             if provider_row is None or provider_row.target_id != expected.compose_id:
                 raise ValueError("Rehearsal placement ownership changed.")
             session.delete(provider_row)
-            self._sync_idempotency_row(operation_row, completed)
+            if not later:
+                self._sync_idempotency_row(operation_row, completed)
             row.payload = self._payload_dict(replacement)
             session.commit()
 
