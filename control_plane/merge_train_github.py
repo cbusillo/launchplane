@@ -1170,7 +1170,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 or head.get("sha") != entry.head_sha
                 or base.get("sha") != candidate.base_sha
                 or base.get("ref") != candidate.base_branch
-                or base_repo.get("full_name") != candidate.repository
+                # GitHub reports the repository's own casing; candidates store it lowercased.
+                or str(base_repo.get("full_name") or "").casefold()
+                != candidate.repository.casefold()
             ):
                 return None
             if (
@@ -1237,7 +1239,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 or confirmed_head.get("sha") != entry.head_sha
                 or confirmed_base.get("sha") != candidate.base_sha
                 or confirmed_base.get("ref") != candidate.base_branch
-                or confirmed_repo.get("full_name") != candidate.repository
+                or str(confirmed_repo.get("full_name") or "").casefold()
+                != candidate.repository.casefold()
             ):
                 return None
             if not self._head_check_reuse_base_history_is_unchanged(

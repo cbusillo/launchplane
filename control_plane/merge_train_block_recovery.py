@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Protocol, cast
 
@@ -24,6 +25,8 @@ from control_plane.merge_train_setup_recovery_receipt import (
     receipt_id,
     SetupRecoveryReceipt,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class CandidateBlockRecoveryClient(Protocol):
@@ -119,11 +122,28 @@ def recover_candidate_block(
             or not candidate.source.startswith("service:controller:")
             or failed.status != "failed"
             or failed.required_checks_status != "fail"
-            or failed.repository != snapshot.repository
-            or failed.base_branch != snapshot.base_branch
-            or failed.policy_key != policy.policy_key
             or len(failed.entries) != 1
         ):
+            continue
+        # Candidate records store the repository lowercased; the snapshot keeps
+        # the caller's casing. GitHub repository names are case-insensitive.
+        if (
+            failed.repository.casefold() != snapshot.repository.casefold()
+            or failed.base_branch != snapshot.base_branch
+            or failed.policy_key != policy.policy_key
+        ):
+            _LOGGER.warning(
+                "Candidate block recovery skipped a candidate for another target; preserving hold",
+                extra={
+                    "repository": snapshot.repository,
+                    "base_branch": snapshot.base_branch,
+                    "policy_key": policy.policy_key,
+                    "merge_train_batch_candidate_record_id": candidate.record_id,
+                    "candidate_repository": failed.repository,
+                    "candidate_base_branch": failed.base_branch,
+                    "candidate_policy_key": failed.policy_key,
+                },
+            )
             continue
         entry = failed.entries[0]
         if entry.pull_request_number not in blocked or (
