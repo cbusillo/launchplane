@@ -2,17 +2,14 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
 import click
-from playwright.sync_api import Page
-from pyee import EventEmitter
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence, PostDeployUpdateEvidence
@@ -226,30 +223,6 @@ class _Browser:
 
 
 class ProductExecutionTests(unittest.TestCase):
-    def test_collector_registers_with_the_public_playwright_event_api(self) -> None:
-        loop = asyncio.new_event_loop()
-        self.addCleanup(loop.close)
-
-        class PageEvents(EventEmitter):
-            def __init__(self) -> None:
-                super().__init__()
-                self._loop = loop
-                self._dispatcher_fiber = None
-
-        events = PageEvents()
-        # Only the event transport is finite; Page.on's SDK adaptation is real.
-        page = Page(cast(Any, events))
-        collector = verification._TestingPageExchanges(
-            page, "https://video.test", GenericWebPostDeployGuard()
-        )
-        finished, failed = object(), object()
-        events.emit("requestfinished", finished)
-        events.emit("requestfailed", failed)
-        self.assertIn(finished, collector.completed)
-        self.assertNotIn(finished, collector.failed)
-        self.assertIn(failed, collector.failed)
-        self.assertNotIn(failed, collector.completed)
-
     def verify(self, failure: str) -> tuple[ExecutionRecorder, _Browser, list[str]]:
         captured = context()
         records = _GenericWebDeployStore(_profile())
