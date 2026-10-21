@@ -1,4 +1,4 @@
-"""One atomic activation bundle installs local and resource-derived credentials."""
+"""One atomic activation bundle installs local credentials."""
 
 import base64
 import secrets as random_secrets
@@ -19,18 +19,12 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     SecretDeliverySetExpectation,
 )
-from control_plane.workflows.verireel_preview_driver import _build_preview_database_url
 
 STATE_SECRET_INTEGRATION = "testing_application_state"
 
 
 def state_secret_name(record: TestingActivationRecord, purpose: str) -> str:
     return record.namespace + "-" + purpose
-
-
-def postgres_coordinates(record: TestingActivationRecord) -> tuple[str, str, str]:
-    suffix = record.namespace.removeprefix("lp-testing-").removesuffix("-recipient")
-    return "db_" + suffix, "app_" + suffix, record.namespace + "-postgres"
 
 
 def credential_binding_names(
@@ -59,8 +53,6 @@ def credential_binding_names(
     )
     local_keys = {item.binding_key for item in specification.local_credentials}
     keys = set(local_keys)
-    if specification.state.kind == "postgresql":
-        keys.add(specification.state.connection_binding)
     if (
         not local_keys.issubset({item.binding_key for item in requirements})
         or not local_keys.issubset(delivered)
@@ -69,9 +61,6 @@ def credential_binding_names(
         raise ValueError(
             "Local generation requires declared delivered binding names without external owner input."
         )
-    # A connection URL is output from the newly allocated resource, rather than
-    # an externally supplied credential or another random local key. The reviewed
-    # state specification names its first lane-local delivery binding.
     names = {key: key for key in keys}
     for key, binding in delivered.items():
         if key not in keys:
@@ -105,19 +94,6 @@ def generation_bundle(
             else raw.hex()
             if item.encoding == "hex"
             else base64.urlsafe_b64encode(raw).decode().rstrip("=")
-        )
-    state_values: dict[str, str] = {}
-    if specification.state.kind == "postgresql":
-        database, role, host = postgres_coordinates(record)
-        password = random_secrets.token_urlsafe(32)
-        state_values = {"bootstrap": random_secrets.token_urlsafe(32), "application": password}
-        assert specification.state.port is not None
-        values[specification.state.connection_binding] = _build_preview_database_url(
-            host=host,
-            port=specification.state.port,
-            database_name=database,
-            role_name=role,
-            password=password,
         )
     entries = [
         {
@@ -163,10 +139,6 @@ def generation_bundle(
             *(
                 (STATE_SECRET_INTEGRATION, state_secret_name(record, "runtime_" + key), key, value)
                 for key, value in values.items()
-            ),
-            *(
-                (STATE_SECRET_INTEGRATION, state_secret_name(record, key), key, value)
-                for key, value in state_values.items()
             ),
         )
     ]
@@ -226,8 +198,6 @@ def staged_runtime_values(
     specification = record.request.application
     assert specification is not None
     keys = {item.binding_key for item in specification.local_credentials}
-    if specification.state.kind == "postgresql":
-        keys.add(specification.state.connection_binding)
     return {key: state_password(store, record, "runtime_" + key) for key in keys}
 
 

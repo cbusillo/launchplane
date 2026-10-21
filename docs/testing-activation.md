@@ -31,28 +31,25 @@ The reviewed specification supplies the profile's actual `runtime_port` and
 - `none` allocates no volume or state service.
 - `volume` allocates one qualified fresh local volume at the reviewed safe
   application data path.
-- `postgresql` allocates one qualified fresh local volume and a separate fresh
-  PostgreSQL Compose recipient. Its immutable image, data path, internal port
-  and `connection_binding` are reviewed inputs. No old cluster, administrator
-  password or application container is used to initialize it.
+
+Independent PostgreSQL recipient/bootstrap and resource-derived connection URLs
+are deferred to [#4290](https://github.com/cbusillo/launchplane/issues/4290).
+Those request variants refuse before provider effects; existing Odoo/Compose
+PostgreSQL and control-plane PostgreSQL storage remain unchanged.
 
 `local_credentials` names every existing delivered application-local binding
 that must be replaced, with its required `urlsafe`, `base64` or `hex` encoding.
 The reviewed request supplies generation authority for these local values; it
 does not require the older profile generation flag. An applicable `owner_input`
-requirement refuses local generation. A PostgreSQL connection binding is a
-resource-derived output and may be created for the first time: its URL contains
-the newly allocated endpoint, database, restricted application role and generated
-password. It is never a random URL or an alias for a password binding.
+requirement refuses local generation.
 
-Prospective runtime values and separate database bootstrap credentials are
+Prospective application-local runtime values are
 encrypted under the original operation's state purpose. They are not delivered
 by the canonical runtime resolver before publication. Target publication and
 installation of the application-local runtime bindings commit atomically under
 the current original execution lease. Existing resolver precedence lets the new
 managed testing binding override an older plain same-key setting without
-deleting shared configuration used by other lanes. Bootstrap credentials never
-become application runtime bindings. Every carried credential must have existing
+deleting shared configuration used by other lanes. Every carried credential must have existing
 read-only-source sharing evidence; an external writable database, bot token or
 other shared writable capability requires its own independent provider resource.
 Random generation cannot create a new external account.
@@ -66,10 +63,6 @@ unknown and keeps the original key and hold.
 
 The new application's image, registry settings, mounts, effective runtime
 environment, single Swarm task and private runtime identity are read back.
-PostgreSQL qualification checks the fresh backing and consumer alias, role and
-database ownership, application login, restricted privileges and rejection of
-an invalid password. These checks run on the new state recipient through a
-fixed host program. They do not run in the retained application.
 
 For addressed lanes, the existing native route journal and writer fence retain
 the public host while switching only after private readiness. The first
@@ -107,18 +100,22 @@ A refusal before the first provider checkpoint releases that unused activation
 reservation, so a fresh review and key can proceed. After the fixed read-only
 retained-capability inspection, a refusal before recipient creation instead
 completes a negative original receipt while preserving that inspection's schedule
-custody. An exactly attributed failed private application or state deployment
+custody. An exactly attributed failed private application deployment
 can also complete negatively while retaining its recipient, credentials and
 volumes. Neither outcome says that a running process stopped or that old unknown
 work became terminal. A terminal original private job can also be retained after
 a permanent authority correction, without requiring a passing private-health
 result. Before any image deployment, exact answered placement, mount or
 configuration markers can instead prove an unused private recipient. These
-markers remain bound to the original database checkpoint and complete empty
+markers remain bound to durably admitted progress and complete empty
 deployment history; staged local credentials do not authorize deployment. This
 bounded path covers stateless and local-volume recipients, reports that no
 deployment was requested, and preserves every allocated resource.
-Unsettled create, mount, configuration or host-program outcomes remain unknown. A stable
+Guards and the current-lease effect checkpoint precede the durable may-dispatch
+phase and actual dispatch. An admitted unanswered create, mount or deploy remains
+unknown even when a later readonly inspection changes the latest checkpoint.
+Absolute configuration writes can replay only against the positively owned,
+unused recipient. Unsettled create, mount or host-program outcomes remain unknown. A stable
 original task/container with the expected image, environment and state may prove
 a failed task, HTTP error or health-identity mismatch. Empty task inventory,
 startup pending, transport failures and unreadable responses prove no failure.
@@ -312,3 +309,33 @@ and original allocation/key while addressing that check, then plan again.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
+
+Private same-address application activation uses the original private endpoint,
+edge receipt, certificate, access list and exact provider origin. It moves only
+the existing native HTTP route; the old provider domain and edge payload stay
+unchanged. The canonical private recipient has no copied domain or managed public
+route binding. Ordinary private monitoring verifies the original receipt and
+unbroken completed activation lineage, then independently reads the actual winning
+native route. The next generation reuses that same original route template.
+Disable, newer edge receipts and changed endpoint/certificate/access-list/server
+authority retain their protection; activation never re-enables an edge.
+
+Old port, root path and complete file/applied authority are admitted read-only
+before candidate mutations and rechecked before switching. A proven contradiction
+before any route writer can retain an exactly closed private candidate negatively;
+unavailable transport and possibly dispatched writers keep the original key.
+Readiness is observed within a bounded window with the canonical identity parser.
+Warm-up and replacement tasks can become healthy on the original key. Redirects,
+transport/framing/JSON errors and nonmapping bodies stay unknown; a final stable
+attributed failure is recovery-only under the original receipt. No fixture or
+source receipt substitutes for actual private TLS, authenticated WSS and product
+qualification after delivery.
+
+A predecessor health response is diagnostic and never requires repairing the old
+unknown recipient before independent recovery. Physical route, task and ownership
+custody remain mandatory. The candidate must independently pass private readiness
+and exact identity at the unchanged edge. When the predecessor was unqualified,
+a nonqualifying edge response alone leaves the original key pending; a later
+passing response can finish without replaying the physical route write. Proven
+candidate failure or authority drift still uses the existing exact inverse, which
+restores the original route without calling the original application healthy.

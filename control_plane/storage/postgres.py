@@ -247,7 +247,10 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentAuthenticationCredentialRecord,
 )
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
-from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditRecord,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+)
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionFenceRejectedError,
@@ -5811,10 +5814,15 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneInventoryRow
                 | LaunchplaneReleaseTupleRow
                 | LaunchplanePrivateHealthEndpointRow
+                | LaunchplaneEdgeEndpointRow
                 | LaunchplaneReleaseReviewDecisionRow,
             )
             authority_row = authority_row or (
                 isinstance(row, LaunchplaneDeploymentRow) and row.instance == "testing"
+            )
+            authority_row = authority_row or (
+                isinstance(row, LaunchplaneIngressRouteAuditRow)
+                and row.record_id.startswith(TESTING_PRIVATE_INGRESS_AUDIT_PREFIX)
             )
             if authority_row:
                 self._begin_serialized_write(session)
@@ -8590,6 +8598,10 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                if normalized_provider_target_key.startswith("testing-private-ingress:"):
+                    # Private edge admission and native application publication
+                    # share the same authority transaction fence.
+                    self._lock_product_authority_bundle_write(session)
                 observed = self._observe_mutation_during_drain(
                     session,
                     scope=normalized_scope,
@@ -12129,6 +12141,19 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     raise ValueError("Known staff use protects the retained testing recipient.")
             application = record.request.application is not None
+            if before is not None and before.application_readiness is not None:
+                for name in ("private_health", "public_health"):
+                    verdict = getattr(before.application_readiness, name)
+                    if (
+                        verdict is not None
+                        and verdict.verified
+                        and verdict.status == "fail"
+                        and (
+                            record.application_readiness is None
+                            or getattr(record.application_readiness, name) != verdict
+                        )
+                    ):
+                        raise ValueError("A finalized application failure is recovery-only.")
             if application:
                 from control_plane.testing_activation import configuration_digest
 
@@ -12245,15 +12270,9 @@ class PostgresRecordStore(HumanSessionStore):
                         target_type = (
                             "application"
                             if before.phase == "deploy_application_deployment_id"
-                            else "compose"
-                            if before.phase == "deploy_state_deployment_id"
                             else ""
                         )
-                        target_id = (
-                            before.target_id
-                            if target_type == "application"
-                            else before.state_recipient.get("target_id", "")
-                        )
+                        target_id = before.target_id if target_type == "application" else ""
                         if (
                             not target_type
                             or failure.target_type != target_type
@@ -12312,6 +12331,14 @@ class PostgresRecordStore(HumanSessionStore):
                             raise ValueError(
                                 "Activation predecessor deployment changed before publication."
                             )
+                    if record.retained_private_ingress:
+                        from control_plane.testing_application_private_route import (
+                            require_private_ingress_records,
+                        )
+
+                        require_private_ingress_records(
+                            self, record.product, record.context, record.retained_private_ingress
+                        )
                     readiness = record.application_readiness
                     if (
                         readiness is None
@@ -12364,7 +12391,10 @@ class PostgresRecordStore(HumanSessionStore):
                                 urlsplit(url).hostname != readiness.route.host
                                 for url in health.urls
                             )
-                            or record.published_route_binding is None
+                            or (
+                                record.published_route_binding is None
+                                and not record.retained_private_ingress
+                            )
                         ):
                             raise ValueError(
                                 "The original public application readiness is unavailable or stale."

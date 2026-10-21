@@ -13,7 +13,6 @@ import sys
 from typing import Any
 import time
 from uuid import uuid4
-from urllib.parse import urlsplit, unquote
 import unittest
 from unittest.mock import patch
 
@@ -28,10 +27,8 @@ from control_plane.contracts.testing_application import (
     TestingApplicationCredential,
 )
 from control_plane.odoo_testing_resources import ApplicationTestingResources
-from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
 from control_plane.testing_application_credentials import (
     generation_bundle,
-    STATE_SECRET_INTEGRATION,
 )
 from tests import test_testing_activation as activation_fixture
 
@@ -229,6 +226,19 @@ class ApplicationInputTests(unittest.TestCase):
             "/var/lib/example",
         )
 
+    def test_deferred_state_kind_and_options_refuse_at_contract_boundary(self) -> None:
+        for payload in (
+            {"kind": "postgresql"},
+            {"kind": "none", "connection_binding": "DATABASE_URL"},
+            {
+                "kind": "volume",
+                "container_path": "/var/lib/example",
+                "image_reference": "example/db@sha256:" + "a" * 64,
+            },
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                TestingApplicationState.model_validate(payload)
+
     def test_actual_state_kind_controls_resource_count_and_binding(self) -> None:
         common = dict(
             product="fixture",
@@ -239,13 +249,9 @@ class ApplicationInputTests(unittest.TestCase):
         )
         none = ApplicationTestingResources.model_validate({**common, "state_kind": "none"})
         local = ApplicationTestingResources.model_validate({**common, "state_kind": "volume"})
-        postgres = ApplicationTestingResources.model_validate(
-            {**common, "state_kind": "postgresql"}
-        )
         self.assertEqual(none.volumes, {})
         self.assertEqual(set(local.volumes), {"state"})
-        self.assertEqual(set(postgres.volumes), {"database"})
-        self.assertEqual(len({row.binding_sha256 for row in (none, local, postgres)}), 3)
+        self.assertNotEqual(none.binding_sha256, local.binding_sha256)
 
 
 class ApplicationCredentialTests(unittest.TestCase):
@@ -356,232 +362,6 @@ class ApplicationCredentialTests(unittest.TestCase):
                 generation_bundle(self.store, self.record)
         generate.assert_not_called()
 
-    def test_postgres_connection_is_derived_and_bootstrap_is_not_application_delivery(self) -> None:
-        from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
-
-        (runtime,) = self.store.list_runtime_environment_records(
-            context_name=self.record.context, instance_name="testing"
-        )
-        runtime.env["DATABASE_URL"] = "postgresql://old:retained@old-state/old"
-        self.store.write_runtime_environment_record(runtime)
-        self.record.request.application = self.specification.model_copy(
-            update={
-                "state": TestingApplicationState(
-                    kind="postgresql",
-                    container_path="/var/lib/postgresql/data",
-                    image_reference="example/postgres@sha256:" + "b" * 64,
-                    connection_binding="DATABASE_URL",
-                    port=5432,
-                )
-            }
-        )
-        from control_plane.testing_application_credentials import (
-            staged_runtime_values,
-            runtime_activation_bundle,
-        )
-
-        bundle = self.stage()
-        staged = staged_runtime_values(self.store, self.record)
-        before = resolve_site_runtime_environment_from_store(
-            record_store=self.store,
-            context_name=self.record.context,
-            instance_name="testing",
-            target_environment={},
-        )
-        self.assertEqual(before.values["DATABASE_URL"], runtime.env["DATABASE_URL"])
-        self.assertNotIn(
-            "DATABASE_URL",
-            site_delivered_secret_bindings_from_store(
-                record_store=self.store, context_name=self.record.context, instance_name="testing"
-            ),
-        )
-        self.store.write_product_authority_bundle(
-            runtime_activation_bundle(self.store, self.record)
-        )
-        environment = resolve_site_runtime_environment_from_store(
-            record_store=self.store,
-            context_name=self.record.context,
-            instance_name="testing",
-            target_environment={},
-        )
-        self.assertEqual(environment.values["DATABASE_URL"], staged["DATABASE_URL"])
-        connection = urlsplit(staged["DATABASE_URL"])
-        self.assertEqual(connection.hostname, self.record.namespace + "-postgres")
-        self.assertNotEqual(unquote(connection.password or ""), "")
-        bootstrap = next(
-            row
-            for row in bundle.secret_bindings
-            if row.integration == STATE_SECRET_INTEGRATION and row.binding_key == "bootstrap"
-        )
-        self.assertNotIn(bootstrap.binding_key, environment.values)
-        self.assertNotIn("application", environment.values)
-        self.assertTrue(
-            all(
-                row.integration == STATE_SECRET_INTEGRATION
-                for row in bundle.secret_records
-                if row.name.startswith(self.record.namespace)
-            )
-        )
-
-    @unittest.skipUnless(
-        os.environ.get("LAUNCHPLANE_TEST_APPLICATION_POSTGRES_IMAGE"),
-        "Select an already-local immutable PostgreSQL rehearsal image.",
-    )
-    def test_fresh_postgres_image_enforces_password_authentication(self) -> None:
-        """Run emitted bootstrap SQL on PostgreSQL; topology remains a finite fixture."""
-        from tests.test_testing_application_flow import ApplicationFlowTests
-
-        image = os.environ["LAUNCHPLANE_TEST_APPLICATION_POSTGRES_IMAGE"]
-        native_run = subprocess.run
-        inspected = native_run(
-            ["docker", "image", "inspect", image], capture_output=True, text=True, check=False
-        )
-        self.assertEqual(
-            inspected.returncode, 0, "The selected immutable rehearsal image must already be local."
-        )
-        flow = ApplicationFlowTests()
-        flow.setUp()
-        self.addCleanup(flow.doCleanups)
-        use_postgres = flow.use_postgres
-        install_state = flow.install_state
-        fixture_docker = flow.state_docker
-        container = ""
-
-        def select_postgres() -> None:
-            use_postgres()
-            flow.specification = flow.specification.model_copy(
-                update={
-                    "state": flow.specification.state.model_copy(update={"image_reference": image})
-                }
-            )
-
-        def install(payload: dict[str, Any]) -> None:
-            nonlocal container
-            install_state(payload)
-            state = next(iter(flow.state_containers.values()))
-            environment = dict(value.split("=", 1) for value in state["Config"]["Env"])
-            name = "lp-application-pg-rehearsal-" + uuid4().hex
-            command = [
-                "docker",
-                "run",
-                "--rm",
-                "--detach",
-                "--network",
-                "none",
-                "--name",
-                name,
-                "--label",
-                "launchplane.fixture=application-postgres",
-            ]
-            for key, value in environment.items():
-                command.extend(["--env", key + "=" + value])
-            command.extend([image, "postgres", "-p", "5432"])
-            created = native_run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(
-                created.returncode, 0, "The fresh PostgreSQL rehearsal recipient failed to start."
-            )
-            container = created.stdout.strip()
-            self.assertRegex(container, r"^[a-f0-9]{64}$")
-
-            def cleanup(identifier: str) -> None:
-                removed = native_run(
-                    ["docker", "rm", "--force", "--volumes", identifier],
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(
-                    removed.returncode, 0, "The owned rehearsal recipient was not removed."
-                )
-
-            self.addCleanup(cleanup, container)
-            deadline = time.monotonic() + 30
-            while True:
-                ready = native_run(
-                    [
-                        "docker",
-                        "exec",
-                        container,
-                        "pg_isready",
-                        "-h",
-                        "127.0.0.1",
-                        "-U",
-                        environment["POSTGRES_USER"],
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-                if ready.returncode == 0:
-                    break
-                self.assertLess(
-                    time.monotonic(), deadline, "The fresh PostgreSQL image did not become ready."
-                )
-                time.sleep(0.1)
-            # Only SQL is delegated to the real server. The existing full flow
-            # separately proves the actual provider alias/address rules. Here
-            # its finite network endpoint is loopback inside the owned container.
-            for network in state["NetworkSettings"]["Networks"].values():
-                network["IPAddress"] = "127.0.0.1"
-            for password, succeeds in (
-                (environment["POSTGRES_PASSWORD"], True),
-                (environment["POSTGRES_PASSWORD"] + "-invalid", False),
-            ):
-                logged_in = native_run(
-                    [
-                        "docker",
-                        "exec",
-                        "-e",
-                        "PGPASSWORD=" + password,
-                        container,
-                        "psql",
-                        "--no-password",
-                        "-h",
-                        "127.0.0.1",
-                        "-U",
-                        environment["POSTGRES_USER"],
-                        "-d",
-                        "postgres",
-                        "-X",
-                        "-A",
-                        "-t",
-                        "-c",
-                        "SELECT current_user;",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertEqual(logged_in.returncode == 0, succeeds)
-                if not succeeds:
-                    self.assertIn("password authentication failed", logged_in.stderr.lower())
-
-        def database(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            if arguments[1] != "exec":
-                return fixture_docker(arguments, **kwargs)
-            state = next(iter(flow.state_containers.values()))
-            values = dict(value.split("=", 1) for value in state["Config"]["Env"])
-            actual = list(arguments)
-            psql = actual.index("psql")
-            self.assertEqual(actual[psql - 1], state["Id"])
-            actual[psql - 1] = container
-            host = actual.index("-h") + 1
-            user = actual[actual.index("-U") + 1]
-            if user == values["LP_APPLICATION_ROLE"]:
-                alias = state["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"][0]
-                self.assertEqual(actual[host], alias)
-                actual[host] = "127.0.0.1"
-            else:
-                self.assertEqual(user, values["POSTGRES_USER"])
-                self.assertEqual(actual[host], "127.0.0.1")
-            flow.state_sql.append(kwargs["input"])
-            return native_run(actual, **kwargs)
-
-        with (
-            patch.object(flow, "use_postgres", side_effect=select_postgres),
-            patch.object(flow, "install_state", side_effect=install),
-            patch.object(flow, "state_docker", side_effect=database),
-        ):
-            flow.test_postgres_state_native_flow_publishes_only_application_credentials()
-
 
 class ApplicationRuntimeImageTests(unittest.TestCase):
     @unittest.skipUnless(
@@ -653,14 +433,10 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
 
         def cleanup() -> None:
             command(["docker", "rm", "--force", "--volumes", identifier])
-            absent = native_run(
-                ["docker", "inspect", identifier], capture_output=True, timeout=25, check=False
+            absent = command(
+                ["docker", "ps", "-a", "-q", "--no-trunc", "--filter", "id=" + identifier]
             )
-            self.assertNotEqual(absent.returncode, 0)
-            self.assertTrue(
-                b"no such object" in absent.stderr.lower()
-                or b"no such container" in absent.stderr.lower()
-            )
+            self.assertEqual(absent.stdout.strip(), b"")
 
         self.addCleanup(cleanup)
         command(["docker", "start", identifier])

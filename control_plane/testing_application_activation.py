@@ -23,10 +23,9 @@ from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     runtime_identity_env,
     parse_runtime_identity_payload,
-    compare_runtime_identity,
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.dokploy import api, source, compose
+from control_plane.dokploy import api, source
 from control_plane.dokploy.fresh_application import require_fresh_application_runtime
 from control_plane.dokploy_inventory import MAX_PROJECTS, read_dokploy_inventory
 from control_plane.generic_web_testing_exclusion import (
@@ -60,6 +59,10 @@ from control_plane.testing_separation_resources import preparation_binding
 APPLICATION_CAPABILITY_PHASE = "application_capability_inspection"
 
 
+class ApplicationRouteAdmissionContradiction(TestingActivationRefusal):
+    """A complete route read positively contradicts the admitted predecessor."""
+
+
 def undispatched_application_recipient(
     record: TestingActivationRecord, reservation: LaunchplaneIdempotencyRecord
 ) -> bool:
@@ -69,8 +72,7 @@ def undispatched_application_recipient(
         and not any((record.project_id, record.environment_id, record.target_id, record.app_name))
         and not record.state_recipient
         and record.application_readiness is None
-        and record.phase in {"prepared", "create_project"}
-        and reservation.provider_effect_phase == APPLICATION_CAPABILITY_PHASE
+        and record.phase == "prepared"
     )
 
 
@@ -85,26 +87,25 @@ def unstarted_application_recipient(
         or specification.state.kind not in {"none", "volume"}
         or record.published
         or not all((record.project_id, record.environment_id, record.target_id, record.app_name))
-        or any(
-            record.state_recipient.get(key)
-            for key in ("target_id", "application_deployment_id", "state_deployment_id")
-        )
+        or any(record.state_recipient.get(key) for key in ("application_deployment_id",))
         or (
             readiness is not None
             and (readiness.route is not None or readiness.private_health is not None)
         )
     ):
         return False
-    stage = {
-        "create_application": "recipient_ready",
-        "create_application_mount": "create_application_mount"
-        if record.state_recipient.get("mount_verified") == "true"
-        else "",
-        "configure_application": "configure_application"
-        if record.state_recipient.get("application_configured") == "true"
-        else "",
-    }.get(reservation.provider_effect_phase, "")
-    return bool(stage) and record.phase in {stage, "refusing_private_candidate", "refused"}
+    if (
+        record.phase == "create_application_mount"
+        and record.state_recipient.get("mount_verified") != "true"
+    ):
+        return False
+    return record.phase in {
+        "recipient_ready",
+        "create_application_mount",
+        "configure_application",
+        "refusing_private_candidate",
+        "refused",
+    }
 
 
 def require_retained_route_authority(store: Any, record: TestingActivationRecord) -> None:
@@ -337,6 +338,23 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             )
         except FileNotFoundError:
             pass
+        lane = next(
+            item
+            for item in profile.lanes
+            if (item.context, item.instance) == (record.context, "testing")
+        )
+        audits = self.store.list_ingress_route_audit_records(
+            product=record.product, context_name=record.context
+        )
+        if not lane.base_url and any(
+            audit.record_id.startswith("testing-private-ingress-") and audit.status == "applied"
+            for audit in audits
+        ):
+            from control_plane.testing_application_private_route import private_ingress_snapshot
+
+            _, _, record.retained_private_ingress = private_ingress_snapshot(
+                self.root, self.store, record.product, record.context
+            )
         record.plan_sha256 = canonical_json_sha256(record.model_dump(exclude={"plan_sha256"}))
         return record
 
@@ -549,8 +567,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 }
                 if old.get("serverId"):
                     body["serverId"] = str(old["serverId"])
-            record = self.save(record, phase=phase)
             checkpoint(phase)
+            record = self.save(record, phase=phase)
             result = api.dokploy_request(
                 host=host, token=token, path=path, method="POST", payload=cast(api.JsonObject, body)
             )
@@ -587,160 +605,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def save_state(self, record: TestingActivationRecord, **values: str) -> TestingActivationRecord:
         return self.save(record, state_recipient={**record.state_recipient, **values})
-
-    def state_live(self, record: TestingActivationRecord) -> api.JsonObject:
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        payload = api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=record.state_recipient["target_id"],
-        )
-        old = api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="application",
-            target_id=record.retained_target_id.target_id,
-        )
-        namespace = record.namespace + "-state"
-        if (
-            payload.get("composeId") != record.state_recipient["target_id"]
-            or payload.get("environmentId") != record.environment_id
-            or not isinstance(payload.get("appName"), str)
-            or not re.fullmatch(
-                re.escape(namespace) + r"(?:-[a-z0-9]{6})?", str(payload["appName"])
-            )
-            or record.state_recipient.get("app_name") not in {None, payload["appName"]}
-            or payload.get("domains") != []
-            or payload.get("mounts") not in (None, [])
-            or payload.get("serviceNetworks")
-            or payload.get("randomize")
-            or payload.get("isolatedDeployment")
-            or payload.get("serverId") != old.get("serverId")
-        ):
-            raise TestingActivationRefusal(
-                "The independent state recipient identity/options changed."
-            )
-        return payload
-
-    def create_state_placement(
-        self, record: TestingActivationRecord, checkpoint: Callable[[str], None]
-    ) -> TestingActivationRecord:
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        namespace = record.namespace + "-state"
-        if "target_id" not in record.state_recipient:
-            inventory = read_dokploy_inventory(host=host, token=token, offset=0, limit=MAX_PROJECTS)
-            if inventory.next_offset is not None or inventory.total_projects != len(
-                inventory.projects
-            ):
-                raise TestingActivationRefusal("State recipient inventory is incomplete.")
-            matches = [
-                target
-                for project in inventory.projects
-                if project.project_id == record.project_id
-                for environment in project.environments
-                if environment.environment_id == record.environment_id
-                for target in environment.targets
-                if target.category == "compose" and target.name == namespace
-            ]
-            if record.phase == "create_state_recipient":
-                if len(matches) != 1:
-                    raise TestingActivationRefusal(
-                        "Original state create is absent or ambiguous; retain its key."
-                    )
-                record = self.save_state(record, target_id=matches[0].target_id)
-            else:
-                if matches:
-                    raise TestingActivationRefusal("An unrequested state recipient already exists.")
-                old = api.fetch_dokploy_target_payload(
-                    host=host,
-                    token=token,
-                    target_type="application",
-                    target_id=record.retained_target_id.target_id,
-                )
-                record = self.save(record, phase="create_state_recipient")
-                checkpoint(record.phase)
-                payload: api.JsonObject = {
-                    "name": namespace,
-                    "appName": namespace,
-                    "environmentId": record.environment_id,
-                    "composeType": "docker-compose",
-                }
-                if old.get("serverId"):
-                    payload["serverId"] = old["serverId"]
-                response = api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path="/api/compose.create",
-                    method="POST",
-                    payload=payload,
-                )
-                if (
-                    not isinstance(response, dict)
-                    or not isinstance(response.get("composeId"), str)
-                    or not response["composeId"]
-                ):
-                    raise TestingActivationRefusal("Original state create outcome is unknown.")
-                record = self.save_state(record, target_id=str(response["composeId"]))
-        live = self.state_live(record)
-        if "app_name" not in record.state_recipient:
-            record = self.save_state(record, app_name=str(live["appName"]))
-        return record
-
-    def verify_state_source(
-        self,
-        record: TestingActivationRecord,
-        resources: ApplicationTestingResources,
-        *,
-        materialized: bool,
-    ) -> None:
-        from control_plane.testing_application_postgres import postgres_source
-        from control_plane.testing_activation_compose import interpolate
-
-        document, values = postgres_source(self.store, record, resources)
-        live = self.state_live(record)
-        if (
-            live.get("sourceType") != "raw"
-            or live.get("autoDeploy") is not False
-            or api.parse_dokploy_env_text(str(live.get("env") or "")) != values
-            or json.loads(str(live.get("composeFile") or "null")) != document
-        ):
-            raise TestingActivationRefusal(
-                "State source or managed credentials differ from the original plan."
-            )
-        if not materialized:
-            return
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        actual = yaml.safe_load(
-            compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.state_recipient["target_id"]
-            )
-        )
-        expected = interpolate(document, values)
-        if isinstance(actual, dict):
-            actual.pop("name", None)
-            services = actual.get("services")
-            if isinstance(services, dict):
-                for service in services.values():
-                    if isinstance(service, dict) and service.get("labels") in (
-                        {},
-                        {"traefik.enable": "false"},
-                    ):
-                        service.pop("labels", None)
-                networks = actual.get("networks")
-                if (
-                    isinstance(networks, dict)
-                    and networks.get("dokploy-network") == {"external": True}
-                    and all(
-                        isinstance(item, dict) and "dokploy-network" not in item.get("networks", {})
-                        for item in services.values()
-                    )
-                ):
-                    networks.pop("dokploy-network")
-        if actual != expected:
-            raise TestingActivationRefusal(
-                "Actual state render differs from its fixed reviewed source."
-            )
 
     def deploy_owned_target(
         self,
@@ -780,8 +644,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal(
                 "The fresh recipient has an unrequested deployment history."
             )
-        record = self.save(record, phase=phase)
         checkpoint(phase)
+        record = self.save(record, phase=phase)
         api.trigger_deployment(
             host=host,
             token=token,
@@ -802,107 +666,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         if not deployment:
             raise TestingActivationRefusal("Original deployment completion is unavailable.")
         return self.save_state(record, **{state_key: deployment})
-
-    def prepare_postgres(
-        self,
-        record: TestingActivationRecord,
-        resources: ApplicationTestingResources,
-        provider_operation_key: str,
-        checkpoint: Callable[[str], None],
-    ) -> TestingActivationRecord:
-        specification = record.request.application
-        assert specification is not None
-        if specification.state.kind != "postgresql":
-            return record
-        from control_plane.testing_application_postgres import (
-            postgres_source,
-            postgres_bootstrap_script,
-        )
-        from control_plane.testing_application_host import run_application_host_program
-
-        record = self.create_state_placement(record, checkpoint)
-        document, values = postgres_source(self.store, record, resources)
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        live = self.state_live(record)
-        try:
-            self.verify_state_source(record, resources, materialized=False)
-        except ValueError:
-            if (
-                live.get("sourceType") not in {None, "", "raw"}
-                or live.get("composeFile")
-                or live.get("env")
-                or live.get("deployments") != []
-                or live.get("composeStatus") not in {None, "idle"}
-            ):
-                raise TestingActivationRefusal(
-                    "The original unused state recipient changed before configuration."
-                ) from None
-            record = self.save(record, phase="configure_state_recipient")
-            checkpoint(record.phase)
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/compose.update",
-                method="POST",
-                payload={
-                    "composeId": record.state_recipient["target_id"],
-                    "name": record.namespace + "-state",
-                    "environmentId": record.environment_id,
-                    "sourceType": "raw",
-                    "composePath": "docker-compose.yml",
-                    "autoDeploy": False,
-                    "composeFile": json.dumps(document),
-                    "env": api.serialize_dokploy_env_text(values, target_type="compose"),
-                },
-            )
-            self.verify_state_source(record, resources, materialized=False)
-        try:
-            self.verify_state_source(record, resources, materialized=True)
-        except ValueError:
-            converted = compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.state_recipient["target_id"]
-            )
-            if (
-                yaml.safe_load(converted) is not None
-                or self.state_live(record).get("deployments") != []
-            ):
-                raise
-            record = self.save(record, phase="materialize_state_recipient")
-            checkpoint(record.phase)
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/compose.fetchSourceType",
-                method="POST",
-                payload={"composeId": record.state_recipient["target_id"]},
-            )
-            self.verify_state_source(record, resources, materialized=True)
-        record = self.deploy_owned_target(
-            record,
-            target_type="compose",
-            target_id=record.state_recipient["target_id"],
-            title=provider_operation_title(provider_operation_key) + " state",
-            state_key="state_deployment_id",
-            checkpoint=checkpoint,
-        )
-        prepare, binding = postgres_bootstrap_script(self.store, record, resources, readback=False)
-        readback, _ = postgres_bootstrap_script(self.store, record, resources, readback=True)
-        result = run_application_host_program(
-            root=self.root,
-            retained_target_id=record.retained_target_id.target_id,
-            context=record.context,
-            namespace=record.namespace,
-            name="Launchplane independent PostgreSQL initialization",
-            prepare_script=prepare,
-            readback_script=readback,
-            before_effect=checkpoint,
-        )
-        if (
-            result.get("testing_resources_ok") != "true"
-            or result.get("testing_resources_binding_sha256") != binding
-        ):
-            raise TestingActivationRefusal("The independent state recipient remains unqualified.")
-        return self.save_state(record, qualification_sha256=binding)
 
     def application_values(self, record: TestingActivationRecord) -> dict[str, str]:
         from control_plane.runtime_environments import (
@@ -1136,8 +899,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     raise TestingActivationRefusal(
                         "The original mount outcome is unknown; do not repeat it."
                     )
+                checkpoint("create_application_mount")
                 record = self.save(record, phase="create_application_mount")
-                checkpoint(record.phase)
                 api.dokploy_request(
                     host=host,
                     token=token,
@@ -1163,8 +926,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 raise TestingActivationRefusal(
                     "The application deployed before configuration was qualified."
                 )
+            checkpoint("configure_application")
             record = self.save(record, phase="configure_application")
-            checkpoint(record.phase)
             api.dokploy_request(
                 host=host,
                 token=token,
@@ -1234,9 +997,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         except VerifiedApplicationRuntimeFailure as error:
             frame, failure = error.evidence, error
         health_identity = parse_runtime_identity_payload(frame.get("health_identity"))
-        identity_status, identity_detail = compare_runtime_identity(
-            expected=readiness.runtime_identity, observed=health_identity
-        )
+        identity_status, identity_detail = frame["identity_status"], frame["identity_detail"]
         replacement = readiness.model_copy(
             update={
                 "service_id": frame["service_id"],
@@ -1263,24 +1024,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             ) from failure
         return record
 
-    def switch_application_route(
-        self,
-        record: TestingActivationRecord,
-        lease: ProviderOperationLease,
-        checkpoint: Callable[[str], None],
-    ) -> TestingActivationRecord:
+    def route_authority(
+        self, record: TestingActivationRecord, *, check_private: bool = True
+    ) -> tuple[str, str]:
         from urllib.parse import urlsplit
-        from control_plane.contracts.runtime_identity import compare_runtime_identity
-        from control_plane.dokploy.testing_route import (
-            compile_testing_route,
-            testing_ingress_entrypoints,
-        )
-        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
-        from control_plane.testing_application_capabilities import (
-            retained_application_capability_spec,
-        )
-        from control_plane.testing_rebuild_service import read_public_testing_health
-        from control_plane.testing_activation import completed_application_activation
 
         profile = self.store.read_product_profile_record(record.product)
         lane = next(
@@ -1288,57 +1035,156 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             for item in profile.lanes
             if (item.context, item.instance) == (record.context, "testing")
         )
-        if not lane.base_url:
-            if (
-                record.retained_target.public_hosts
-                or record.retained_target.pending_public_host_effects
-            ):
-                raise TestingActivationRefusal("The addressed lane has no admitted public address.")
-            return record
-        readiness = record.application_readiness
-        specification = record.request.application
-        assert (
-            readiness is not None
-            and specification is not None
-            and isinstance(lease, ProviderEvidenceLease)
+        if lane.base_url:
+            hostname = urlsplit(lane.base_url).hostname
+            if not hostname:
+                raise ApplicationRouteAdmissionContradiction(
+                    "The stable public address is unavailable."
+                )
+            return hostname, lane.base_url
+        if record.retained_private_ingress:
+            if check_private:
+                self.require_private_ingress(record)
+            endpoint = self.store.read_private_health_endpoint_record(
+                record.retained_private_ingress["endpoint_key"]
+            )
+            return urlsplit(endpoint.url).hostname or "", endpoint.url
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        old = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.retained_target_id.target_id,
         )
-        hostname = urlsplit(lane.base_url).hostname
-        if hostname is None:
-            raise TestingActivationRefusal("The stable public address is unavailable.")
+        if (
+            record.retained_target.domains
+            or record.retained_target.public_hosts
+            or record.retained_target.pending_public_host_effects
+            or old.get("domains") != []
+        ):
+            raise ApplicationRouteAdmissionContradiction(
+                "The addressed lane has no admitted stable route authority."
+            )
+        return "", ""
+
+    def require_private_ingress(self, record: TestingActivationRecord) -> None:
+        if not record.retained_private_ingress:
+            return
+        from control_plane.testing_application_private_route import (
+            private_ingress_snapshot,
+            require_private_ingress_records,
+            PrivateIngressAuthorityChanged,
+        )
+
+        try:
+            require_private_ingress_records(
+                self.store, record.product, record.context, record.retained_private_ingress
+            )
+        except PrivateIngressAuthorityChanged as error:
+            raise TestingActivationRefusal(
+                str(error), code=TestingActivationRefusalCode.AUTHORITY_CHANGED
+            ) from error
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        actual = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.retained_target_id.target_id,
+        )
+        if (
+            actual.get("applicationId") == record.retained_target_id.target_id
+            and isinstance(actual.get("serverId"), str)
+            and actual["serverId"] != record.retained_private_ingress["server_id"]
+        ):
+            raise TestingActivationRefusal(
+                "The retained private application server changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
+        selected = None
+        readiness = record.application_readiness
+        if readiness and readiness.route:
+            child = self.store.read_idempotency_record(
+                scope=record.scope,
+                route_path=f"/v1/products/{record.product}/testing-activation:route",
+                idempotency_key=record.plan_sha256 + ":route",
+            )
+            if child:
+                selected = record
+        try:
+            _, _, binding = private_ingress_snapshot(
+                self.root,
+                self.store,
+                record.product,
+                record.context,
+                endpoint_key=record.retained_private_ingress["endpoint_key"],
+                route_activation=selected,
+            )
+        except PrivateIngressAuthorityChanged as error:
+            raise TestingActivationRefusal(
+                str(error), code=TestingActivationRefusalCode.AUTHORITY_CHANGED
+            ) from error
+        if binding != record.retained_private_ingress:
+            raise TestingActivationRefusal(
+                "The original private ingress authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
+
+    def route_admission(self, record: TestingActivationRecord) -> tuple[Any, dict[str, Any]] | None:
+        from control_plane.testing_application_capabilities import (
+            retained_application_capability_spec,
+        )
+        from control_plane.testing_activation import completed_application_activation
+        from control_plane.dokploy.testing_route import (
+            admit_testing_route_predecessor,
+            testing_ingress_entrypoints,
+        )
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        hostname, _ = self.route_authority(record)
+        if not hostname:
+            return None
+        specification, readiness = record.request.application, record.application_readiness
+        assert specification is not None
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        old_payload = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.retained_target_id.target_id,
+        )
         old_spec = retained_application_capability_spec(
             self.store, self.root, record.product, record.context
         )
         old_spec.update(name=old_spec["application"], port=specification.runtime_port)
         previous_route = None
-        if record.retained_route_binding is not None:
-            previous_key = record.retained_route_binding.source.source_versions.get(
-                "testing_activation"
+        previous_key = (
+            record.retained_route_binding.source.source_versions.get("testing_activation")
+            if record.retained_route_binding
+            else None
+        )
+        previous = [
+            TestingActivationRecord.model_validate(value)
+            for value in self.store.list_testing_application_activations(
+                record.product, record.context
             )
-            previous = [
-                TestingActivationRecord.model_validate(value)
-                for value in self.store.list_testing_application_activations(
-                    record.product, record.context
-                )
-            ]
-            matches = [
-                value
-                for value in previous
-                if value.plan_sha256 == previous_key
-                and value.target_id == record.retained_target_id.target_id
-                and completed_application_activation(self.store, value)
-            ]
-            if len(matches) > 1:
-                raise TestingActivationRefusal("The original owned route custody is ambiguous.")
-            if matches:
-                previous_readiness = matches[0].application_readiness
-                if previous_readiness is None or previous_readiness.route is None:
-                    raise TestingActivationRefusal(
-                        "The original owned route template is unavailable."
-                    )
-                previous_route = previous_readiness.route
+        ]
+        matches = [
+            value
+            for value in previous
+            if (previous_key is None or value.plan_sha256 == previous_key)
+            and value.target_id == record.retained_target_id.target_id
+            and completed_application_activation(self.store, value)
+        ]
+        if len(matches) > 1:
+            raise TestingActivationRefusal("The original owned route custody is ambiguous.")
+        if matches:
+            previous_readiness = matches[0].application_readiness
+            if previous_readiness is None or previous_readiness.route is None:
+                raise TestingActivationRefusal("The original owned route template is unavailable.")
+            previous_route = previous_readiness.route
         if previous_route is None:
             previous_route = restored_application_route(self.store, record)
-        original_route = readiness.route or previous_route
+        original_route = (readiness.route if readiness else None) or previous_route
         if original_route is not None and original_route.application_file_name:
             old_spec["route_file_name"] = original_route.application_file_name
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -1359,25 +1205,25 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 and domain.get("domainId")
                 for domain in domains
             ):
-                raise TestingActivationRefusal(
-                    "The retained application does not own this exact public host/port."
+                raise ApplicationRouteAdmissionContradiction(
+                    "The retained application does not own this exact stable host/port."
                 )
         transport = DokployTestingRouteTransport(
             host=host,
             token=token,
-            server_id=str(self.live(record).get("serverId") or ""),
+            server_id=str(old_payload.get("serverId") or ""),
             old_project="",
             product=record.product,
             context=record.context,
             public_host=hostname,
-            entrypoints=readiness.route.public_entrypoints if readiness.route is not None else (),
-            old_runtime_identity=readiness.old_runtime_identity,
+            entrypoints=readiness.route.public_entrypoints if readiness and readiness.route else (),
+            old_runtime_identity=readiness.old_runtime_identity if readiness else None,
             old_application=old_spec,
             new_application={
                 "name": record.app_name,
                 "port": specification.runtime_port,
-                "service_id": readiness.service_id,
-                "task_id": readiness.task_id,
+                "service_id": readiness.service_id if readiness else "",
+                "task_id": readiness.task_id if readiness else "",
             },
         )
         if original_route is not None and original_route.application_file_sha256:
@@ -1385,66 +1231,173 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 original_route.application_file_sha256
             )
         frame = transport.read()
-        if readiness.route is None:
-            template = previous_route.template if previous_route is not None else None
-            application_document = (
+        try:
+            document = (
                 yaml.safe_load(frame["application_file"])
                 if frame["application_file"] is not None
                 else None
             )
-            if not isinstance(application_document, dict):
-                raise TestingActivationRefusal(
-                    "The actual retained application route file is unavailable."
-                )
+            if not isinstance(document, dict):
+                raise ValueError("The actual retained application route file is unavailable.")
             points = testing_ingress_entrypoints(frame["raw"], hostname)
-            owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
-            route = compile_testing_route(
+            arguments = dict(
                 product=record.product,
                 context=record.context,
                 host=hostname,
                 old_backend=f"http://{old_spec['name']}:{specification.runtime_port}",
                 old_backend_addresses=tuple(frame["old_endpoints"]),
-                new_backend=readiness.backend,
                 raw=frame["raw"],
                 public_entrypoints=points,
-                owned_document=owned,
-                recorded_template=template,
-                application_document=application_document,
+                owned_document=json.loads(frame["owned_file"])
+                if frame["owned_file"] is not None
+                else None,
+                recorded_template=previous_route.template if previous_route else None,
+                application_document=document,
                 application_file_name=frame["application_file_name"],
                 application_file_sha256=frame["application_file_sha256"],
                 recorded_application_route=previous_route,
             )
-            transport.payload["entrypoints"] = points
-            transport.payload["expected_application_file_sha256"] = route.application_file_sha256
-            execution = transport.execution_intent(
-                route, route.new_backend, operation_id=record.plan_sha256
+            admit_testing_route_predecessor(**arguments)
+        except ValueError as error:
+            raise ApplicationRouteAdmissionContradiction(str(error)) from error
+        transport.payload["entrypoints"] = points
+        return transport, arguments
+
+    def read_edge_health(
+        self,
+        record: TestingActivationRecord,
+        *,
+        prospective: bool = False,
+        expected: RuntimeIdentity | None = None,
+    ) -> Any:
+        from control_plane.contracts.promotion_record import HealthcheckEvidence
+        from control_plane.contracts.runtime_identity import health_payload_runtime_identity_status
+        from control_plane.testing_rebuild_service import read_public_testing_health
+
+        _, address = self.route_authority(record, check_private=False)
+        if not record.retained_private_ingress:
+            assert record.request.application is not None
+            return read_public_testing_health(
+                address, record.request.application.health_path, expected
             )
+        from control_plane.testing_private_health import fetch_testing_private_health
+        from control_plane.contracts.private_health_endpoint_record import (
+            private_health_endpoint_record_sha256,
+        )
+
+        endpoint = self.store.read_private_health_endpoint_record(
+            record.retained_private_ingress["endpoint_key"]
+        )
+        try:
+            response = fetch_testing_private_health(
+                root=self.root,
+                store=self.store,
+                product=record.product,
+                context=record.context,
+                instance="testing",
+                endpoint_key=endpoint.endpoint_key,
+                endpoint_sha256=private_health_endpoint_record_sha256(endpoint),
+                url=endpoint.url,
+                timeout_seconds=5,
+                route_activation=record if prospective else None,
+            )
+            if 300 <= response.status_code < 400:
+                return HealthcheckEvidence(status="pending", urls=(address,))
+            payload = json.loads(response.body) if 200 <= response.status_code < 300 else None
+            if 200 <= response.status_code < 300 and not isinstance(payload, dict):
+                raise ValueError("Private health document unavailable.")
+            status, detail, identity = health_payload_runtime_identity_status(
+                expected=expected, payload=payload
+            )
+            return HealthcheckEvidence(
+                status="pass" if 200 <= response.status_code < 300 else "fail",
+                verified=True,
+                timeout_seconds=5,
+                urls=(address,),
+                observed_runtime_identity=identity,
+                runtime_identity_status=status,
+                runtime_identity_detail=detail,
+            )
+        except (ValueError, OSError, RuntimeError):
+            return HealthcheckEvidence(status="pending", urls=(address,))
+
+    def preflight_application_route(self, record: TestingActivationRecord) -> None:
+        readiness = record.application_readiness
+        if readiness and readiness.route:
+            return
+        admission = self.route_admission(record)
+        if admission is not None and admission[0].old_runtime_identity is None:
+            raise ApplicationRouteAdmissionContradiction(
+                "The retained runtime identity is unavailable."
+            )
+
+    def switch_application_route(
+        self,
+        record: TestingActivationRecord,
+        lease: ProviderOperationLease,
+        checkpoint: Callable[[str], None],
+    ) -> TestingActivationRecord:
+        from control_plane.dokploy.testing_route import compile_testing_route
+        from control_plane.testing_application_private_route import application_route_transport
+        from control_plane.testing_application_runtime import qualify_edge_health
+
+        readiness = record.application_readiness
+        assert readiness is not None
+        if readiness.route is None:
+            admission = self.route_admission(record)
+            if admission is None:
+                return record
+            transport, arguments = admission
+            # The retained copy can be unhealthy: independent recovery must not
+            # require repairing or redeploying that unknown original first.
+            baseline = self.read_edge_health(record, expected=transport.old_runtime_identity)
+            if baseline.runtime_identity_status == "unchecked":
+                from control_plane.contracts.runtime_identity import compare_runtime_identity
+
+                status, detail = compare_runtime_identity(
+                    expected=transport.old_runtime_identity,
+                    observed=baseline.observed_runtime_identity,
+                )
+                baseline = baseline.model_copy(
+                    update={"runtime_identity_status": status, "runtime_identity_detail": detail}
+                )
+            route = compile_testing_route(new_backend=readiness.backend, **arguments)
+            transport.payload["expected_application_file_sha256"] = route.application_file_sha256
             readiness = readiness.model_copy(
                 update={
                     "route": route,
-                    "route_execution": execution,
+                    "route_execution": transport.execution_intent(
+                        route, route.new_backend, operation_id=record.plan_sha256
+                    ),
                     "old_runtime_identity": transport.old_runtime_identity,
+                    "predecessor_health": baseline,
                 }
             )
             record = self.save(record, application_readiness=readiness)
-        assert readiness.route is not None and readiness.route_execution is not None
-        route, execution = readiness.route, readiness.route_execution
-
+        else:
+            transport = application_route_transport(self.root, record)
         self.route_effect(record, lease, checkpoint, transport, inverse=False)
-        health = read_public_testing_health(lane.base_url, specification.health_path)
+        health = qualify_edge_health(
+            lambda: self.read_edge_health(
+                record, prospective=True, expected=readiness.runtime_identity
+            ),
+            readiness.runtime_identity,
+        )
+        predecessor = readiness.predecessor_health
+        predecessor_qualified = (
+            predecessor is not None
+            and predecessor.verified
+            and predecessor.status == "pass"
+            and predecessor.runtime_identity_status == "match"
+        )
+        if health.status != "pass" and not predecessor_qualified:
+            # An unhealthy original or an unqualified access gate cannot
+            # attribute a nonqualifying edge reply to this independent copy.
+            raise TestingActivationRefusal(
+                "The candidate edge remains unqualified; continue the original key."
+            )
         if not health.verified or health.status == "pending":
-            raise TestingActivationRefusal("The original public health response remains unknown.")
-        identity_status, identity_detail = compare_runtime_identity(
-            expected=readiness.runtime_identity, observed=health.observed_runtime_identity
-        )
-        health = health.model_copy(
-            update={
-                "runtime_identity_status": identity_status,
-                "runtime_identity_detail": identity_detail,
-            }
-        )
-        if health.status != "pass" or identity_status != "match":
-            health = health.model_copy(update={"status": "fail"})
+            raise TestingActivationRefusal("The original edge health response remains unknown.")
         record = self.save(
             record,
             application_readiness=readiness.model_copy(
@@ -1454,9 +1407,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 }
             ),
         )
-        if health.status == "fail":
+        if health.status != "pass":
             raise TestingActivationRefusal(
-                "The observed public candidate failed qualification.",
+                "The observed edge candidate failed qualification.",
                 code=TestingActivationRefusalCode.RECIPIENT_UNQUALIFIED,
             )
         return record
@@ -1532,6 +1485,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             recovery_guard()
             if not inverse:
                 self.require_unchanged(record)
+                self.require_private_ingress(record)
                 self.verify_provider(record)
 
         effects = TestingRouteEffects(
@@ -1700,6 +1654,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             or readiness.private_health.status != "pass"
         ):
             raise TestingActivationRefusal("The actual fresh runtime is not ready.")
+        self.require_private_ingress(record)
         checkpoint("publish_application_recipient")
         stamp = utc_now_timestamp()
         target = record.retained_target.model_copy(
@@ -1714,6 +1669,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 "updated_at": stamp,
                 "source_label": "service:testing-activation",
                 "pending_public_host_effects": (),
+                **({"domains": (), "public_hosts": ()} if record.retained_private_ingress else {}),
             }
         )
         target_id = DokployTargetIdRecord(
@@ -1727,7 +1683,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             target_record=target, target_id_record=target_id
         )
         binding = None
-        if readiness.route is not None:
+        if readiness.route is not None and not record.retained_private_ingress:
             old = record.retained_route_binding
             binding = EnvironmentRouteBindingRecord(
                 product=record.product,
@@ -1809,7 +1765,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 reason=record.failure.kind,
                 deployment_requested=bool(
                     record.state_recipient.get("application_deployment_id")
-                    or record.state_recipient.get("state_deployment_id")
                     or record.failure.kind == "candidate_deployment_failed"
                 ),
             ).model_dump(mode="json")
@@ -1828,13 +1783,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         if record.phase == "deploy_application_deployment_id":
             target_type, target_id, suffix = "application", record.target_id, " application"
             live = self.live(record)
-        elif record.phase == "deploy_state_deployment_id":
-            target_type, target_id, suffix = (
-                "compose",
-                record.state_recipient.get("target_id", ""),
-                " state",
-            )
-            live = self.state_live(record)
         else:
             return None
         if not target_id or live.get("domains") != []:
@@ -1897,10 +1845,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 raise TestingActivationRefusal("The answered original mount changed.")
         elif live.get("mounts") != []:
             raise TestingActivationRefusal("An unrequested candidate mount appeared.")
-        if record.state_recipient.get("application_configured") == "true":
+        if (
+            record.state_recipient.get("application_configured") == "true"
+            or live.get("sourceType") == "docker"
+        ):
             if (
                 live.get("sourceType") != "docker"
-                or live.get("dockerImage") != record.image_reference
+                or live.get("dockerImage") not in {None, "", record.image_reference}
                 or live.get("autoDeploy") is not False
             ):
                 raise TestingActivationRefusal("The answered original candidate source changed.")
@@ -1924,16 +1875,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 self.live(record),
             )
         ]
-        if record.state_recipient.get("target_id"):
-            targets.append(
-                (
-                    "compose",
-                    record.state_recipient["target_id"],
-                    " state",
-                    "state_deployment_id",
-                    self.state_live(record),
-                )
-            )
         for kind, target_id, suffix, key, live in targets:
             history = api.list_deployments_for_target(
                 host=host, token=token, target_type=kind, target_id=target_id, require_complete=True
@@ -1983,8 +1924,23 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             return True
         try:
             self.require_unchanged(record)
+            self.require_private_ingress(record)
         except TestingActivationRefusal as refusal:
             return refusal.code == TestingActivationRefusalCode.AUTHORITY_CHANGED
+        if (
+            readiness is not None
+            and readiness.route is None
+            and self.store.read_idempotency_record(
+                scope=record.scope,
+                route_path=f"/v1/products/{record.product}/testing-activation:route",
+                idempotency_key=record.plan_sha256 + ":route",
+            )
+            is None
+        ):
+            try:
+                self.preflight_application_route(record)
+            except ApplicationRouteAdmissionContradiction:
+                return True
         return False
 
     def refuse_after_failure(
@@ -2000,7 +1956,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         if current is None or current.failure is not None:
             return None
         assert isinstance(lease, ProviderEvidenceLease)
-        if undispatched_application_recipient(current, lease.evidence_reservation()):
+        if (
+            undispatched_application_recipient(current, lease.evidence_reservation())
+            and lease.evidence_reservation().provider_effect_phase
+        ):
             return self.refuse(
                 current, TestingActivationFailure(kind="authority_refused_before_recipient")
             )
@@ -2073,7 +2032,16 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         started = False
         with self.evidence(lease):
             record = self.current()
-            if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
+            if record.phase in {"restoring_application_route", "refusing_private_candidate"} or (
+                record.application_readiness is not None
+                and any(
+                    health is not None and health.verified and health.status == "fail"
+                    for health in (
+                        record.application_readiness.private_health,
+                        record.application_readiness.public_health,
+                    )
+                )
+            ):
                 try:
                     outcome = self.refuse_after_failure(provider_operation_key, lease)
                     if outcome is None:
@@ -2124,6 +2092,25 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             context=record.context,
                             check=old_check,
                         )
+                        if record.phase in {
+                            "create_project",
+                            "create_environment",
+                            "create_application",
+                        }:
+                            recovered = self.recover_placement(record)
+                            if recovered != record:
+                                record = self.save(
+                                    record,
+                                    **recovered.model_dump(
+                                        include={
+                                            "project_id",
+                                            "environment_id",
+                                            "target_id",
+                                            "phase",
+                                        }
+                                    ),
+                                )
+                        self.preflight_application_route(record)
                         inspect_retained_application_capabilities(
                             store=self.store,
                             root=self.root,
@@ -2138,9 +2125,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                         assert isinstance(resources, ApplicationTestingResources)
                         record = self.create_placement(record, checkpoint)
                         record = self.prepare_credentials(record)
-                        record = self.prepare_postgres(
-                            record, resources, provider_operation_key, checkpoint
-                        )
                         record = self.configure_application(record, resources, checkpoint)
                         record = self.deploy_owned_target(
                             record,

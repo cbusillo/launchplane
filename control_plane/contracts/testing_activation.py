@@ -33,6 +33,7 @@ class TestingApplicationReadiness(BaseModel):
     old_runtime_identity: RuntimeIdentity | None = None
     route: TestingLaneRoute | None = None
     route_execution: TestingRouteExecutionIntent | None = None
+    predecessor_health: HealthcheckEvidence | None = None
     public_health: HealthcheckEvidence | None = None
     observed_at: str = ""
 
@@ -148,6 +149,9 @@ class TestingActivationRecord(BaseModel):
     )
     application_readiness: TestingApplicationReadiness | None = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    retained_private_ingress: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
     )
     retained_route_binding: EnvironmentRouteBindingRecord | None = Field(
         default=None, exclude_if=lambda value: value is None

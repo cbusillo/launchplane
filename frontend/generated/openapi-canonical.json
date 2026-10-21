@@ -51885,42 +51885,18 @@
       "TestingApplicationState": {
         "additionalProperties": false,
         "properties": {
-          "connection_binding": {
-            "default": "",
-            "title": "Connection Binding",
-            "type": "string"
-          },
           "container_path": {
             "default": "",
             "title": "Container Path",
             "type": "string"
           },
-          "image_reference": {
-            "default": "",
-            "title": "Image Reference",
-            "type": "string"
-          },
           "kind": {
             "enum": [
               "none",
-              "volume",
-              "postgresql"
+              "volume"
             ],
             "title": "Kind",
             "type": "string"
-          },
-          "port": {
-            "anyOf": [
-              {
-                "maximum": 65535.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Port"
           }
         },
         "required": [

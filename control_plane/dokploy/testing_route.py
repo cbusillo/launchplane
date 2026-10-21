@@ -266,6 +266,48 @@ def compile_testing_route(
     application_file_sha256: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
 ) -> TestingLaneRoute:
+    route = _compile_testing_route(
+        product=product,
+        context=context,
+        host=host,
+        old_backend=old_backend,
+        old_backend_addresses=old_backend_addresses,
+        new_backend=new_backend,
+        raw=raw,
+        public_entrypoints=public_entrypoints,
+        owned_document=owned_document,
+        recorded_template=recorded_template,
+        application_document=application_document,
+        application_file_name=application_file_name,
+        application_file_sha256=application_file_sha256,
+        recorded_application_route=recorded_application_route,
+    )
+    assert route is not None
+    return route
+
+
+def admit_testing_route_predecessor(**arguments: Any) -> None:
+    """Validate retained source and applied authority without inventing a successor."""
+    _compile_testing_route(new_backend=None, **arguments)
+
+
+def _compile_testing_route(
+    *,
+    product: str,
+    context: str,
+    host: str,
+    old_backend: str,
+    old_backend_addresses: tuple[str, ...] = (),
+    new_backend: str | None,
+    raw: dict[str, Any],
+    public_entrypoints: tuple[str, ...],
+    owned_document: dict[str, Any] | None = None,
+    recorded_template: dict[str, Any] | None = None,
+    application_document: dict[str, Any] | None = None,
+    application_file_name: str = "",
+    application_file_sha256: str = "",
+    recorded_application_route: TestingLaneRoute | None = None,
+) -> TestingLaneRoute | None:
     """Bind actual predecessor authority; the caller proves backend physical custody.
 
     A later rebuild loads its template from the existing route-binding's original
@@ -353,6 +395,20 @@ def compile_testing_route(
         raise ValueError("Docker predecessor differs from its physically verified copy.")
     legacy_backend = next(iter(legacy_backends), "")
     if owned_document is not None:
+        if new_backend is None:
+            if (
+                recorded_application_route is None
+                or recorded_template != recorded_application_route.template
+            ):
+                raise ValueError("Owned testing route requires its original completed template.")
+            if (
+                observe_testing_route(recorded_application_route, raw, owned_document)
+                != old_backend
+            ):
+                raise ValueError(
+                    "The completed application route does not select its retained copy."
+                )
+            return None
         if recorded_template is None:
             raise ValueError("Owned testing route requires its recorded template authority.")
         plan = TestingLaneRoute(
@@ -479,6 +535,8 @@ def compile_testing_route(
         desired["priority"] = priority + 1
         routers[identifier + "-" + str(index)] = desired
         services = document["http"]["services"]
+    if new_backend is None:
+        return None
     plan = TestingLaneRoute(
         product=product,
         context=context,
