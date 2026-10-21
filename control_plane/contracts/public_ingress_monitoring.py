@@ -19,6 +19,7 @@ from control_plane.contracts.route_binding_record import RouteBindingTermination
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthEvidence
+from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
 
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
@@ -329,6 +330,11 @@ class PublicIngressTargetObservation(BaseModel):
     )
     summary: str
     dependency_health: RuntimeDependencyHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    sync: SyncCycleHealthEvidence | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},

@@ -20,6 +20,8 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
+
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -2725,6 +2727,9 @@ def _check_url(
         if is_health_response and target.dependency_expectations is not None
         else None
     )
+    sync = (
+        sync_cycle_health_evidence_from_payload(observation.payload) if is_health_response else None
+    )
     if not 200 <= observation.status_code < 300:
         return PublicIngressTargetObservation(
             target=target_kind,
@@ -2740,6 +2745,7 @@ def _check_url(
             redirect_count=observation.redirect_count,
             summary=f"HTTP {observation.status_code}",
             dependency_health=dependency_health,
+            sync=sync,
         )
     runtime_status: RuntimeIdentityStatus = "unchecked"
     runtime_detail = ""
@@ -2763,6 +2769,7 @@ def _check_url(
             ),
             summary="Expected runtime identity is unavailable.",
             dependency_health=dependency_health,
+            sync=sync,
         )
     if (
         target_kind in {"health_url", "private_health_url"}
@@ -2792,6 +2799,7 @@ def _check_url(
                 observed_runtime_identity=observed_runtime_identity,
                 summary=runtime_detail or "Runtime identity did not match expected deployment.",
                 dependency_health=dependency_health,
+                sync=sync,
             )
     dependency_failure: PublicIngressFailureCode | None = None
     summary = _successful_target_summary(target)
@@ -2816,6 +2824,7 @@ def _check_url(
         observed_runtime_identity=observed_runtime_identity,
         summary=summary,
         dependency_health=dependency_health,
+        sync=sync,
     )
 
 
