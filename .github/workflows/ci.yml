@@ -118,7 +118,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: cbusillo/codex-skills
-          ref: c28a756968fa0ccce2dd02ea5fedd6f988b1475d
+          ref: CODEX_SKILLS_PIN
           path: .test-quality-catalog
           persist-credentials: false
 
@@ -126,6 +126,11 @@ jobs:
         run: >-
           uv run --no-project --no-config
           .test-quality-catalog/scripts/check_test_quality.py --repo . --format github
+
+      - name: Check new comments and docstrings
+        run: >-
+          uv run --no-project --no-config
+          .test-quality-catalog/scripts/check_new_comments.py --repo . --base HEAD^1 --format github
 
   audit_policy:
     needs: candidate_ci
