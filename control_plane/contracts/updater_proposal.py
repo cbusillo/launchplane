@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 UPDATER_PROPOSAL_ROUTE = "/v1/source-control/updater-proposals"
 UPDATER_PROPOSAL_ACTION = "updater_proposal.create"
 UPDATER_PROPOSAL_MAX_BODY_BYTES = 1024 * 1024
-UPDATER_PROPOSAL_MAX_CHANGE_BYTES = 512 * 1024
+UPDATER_PROPOSAL_MAX_CHANGE_BYTES = 2 * 1024 * 1024
 UPDATER_PROPOSAL_MAX_FILES = 32
 
 
@@ -51,7 +51,7 @@ class UpdaterProposalRequest(BaseModel):
             raise ValueError("Updater file paths must be unique.")
         if any(other.startswith(path + "/") for path in paths for other in paths):
             raise ValueError("Updater file paths cannot overlap directories.")
-        if sum(len((change.content or "").encode("utf-8")) for change in self.files) > (
+        if sum(len((change.content or "").encode()) for change in self.files) > (
             UPDATER_PROPOSAL_MAX_CHANGE_BYTES
         ):
             raise ValueError("Updater change exceeds the content size limit.")
