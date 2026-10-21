@@ -2727,17 +2727,11 @@ return a typed blocked result rather than guessing a domain.
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for Launchplane UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
-  `product_config.apply` after review. Signed-in GitHub human admins can use
-  this route.
-  Trusted Director terminals can also use the dedicated
-  `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env`;
-  [authorization authority](authorization-authority.md) and the
+  `product_config.apply` after review. The
   [product-config route contract](service-boundary.md#product-profile-endpoints)
-  define admission. Director-agent
-  requests must include a non-empty `reason`, and Director-agent apply is rejected
-  until the service has recorded a matching dry-run. Terminal-agent bearer
-  credentials are refused by this route in both modes. The service
+  owns accepted identities, transport, reason, reviewed-request and replay
+  requirements. See [authorization authority](authorization-authority.md) for
+  identity-specific admission. The service
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. Both modes require
   the canonical DB-backed product id and a context/instance owned by that
