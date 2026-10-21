@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.contracts.odoo_walkthrough import (
@@ -148,7 +148,9 @@ def _testing_read(
             receive=frames.append,
             timeout_seconds=30,
         )
-    except NativeSourceUnavailable:
+    except ValueError:
+        # NativeSourceUnavailable and undecodable frames alike observed nothing.
+        # An explicit authorization denial is not a ValueError and propagates.
         return TestingRead.UNAVAILABLE
     if len(frames) != 1 or frames[0].get("type") != "complete":
         return TestingRead.UNAVAILABLE

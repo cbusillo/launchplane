@@ -1,6 +1,7 @@
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -426,6 +427,7 @@ class WalkthroughPlanTests(unittest.TestCase):
 
         for label, transport in (
             ("transport", NativeSourceUnavailable("private-provider.example unavailable")),
+            ("undecodable", json.JSONDecodeError("private frame", "private-detail", 0)),
             ("incomplete", no_frame),
             ("invalid", invalid_frame),
             ("contradictory", contradictory_frame),
