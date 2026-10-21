@@ -1140,8 +1140,9 @@ secret to the trusted local terminal agent out of band. Configure
 token label used by `terminal_agents` authz policy rules; both identity values
 are required whenever the bearer token is configured. The
 [standing-admission contract](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
-owns Director identity recognition, inherited authority and transport limits.
-Each native route retains its admission and safety checks.
+owns Director identity recognition and inherited authority.
+Each native route defines its accepted identities and retains its admission
+and safety checks.
 
 Trusted Director terminals that need to make Launchplane-owned admin mutations
 without a browser session can use separate Director-agent bearer credentials.

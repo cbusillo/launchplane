@@ -1428,7 +1428,7 @@ The #1049 compatibility cleanup removed stale
 workflows. Do not reintroduce those broad rules; keep those workflows paired
 with narrow managed actions such as `merge_train.policy_import`.
 
-The admin-managed desired set owns workflow and `local_operator` authority for
+The admin-managed desired set owns explicit workflow and `local_operator` policy rules for
 `Provider Target Operations`, product config, private health endpoints, and
 `Ingress Route Canary Apply`. Keep those rules explicitly scoped by product,
 context, instance, action, and immutable workflow identity as applicable. Use
@@ -2728,14 +2728,16 @@ return a typed blocked result rather than guessing a domain.
   authenticated service API for Launchplane UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
   `product_config.apply` after review. Signed-in GitHub human admins can use
-  this route when their session has the exact product/context/action grant.
+  this route.
   Trusted Director terminals can also use the dedicated
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env` when exact DB-backed
-  `local_operators` policy rules grant the product/context/action. Director-agent
+  `~/.config/launchplane/local-operator.env`;
+  [authorization authority](authorization-authority.md) and the
+  [product-config route contract](service-boundary.md#product-profile-endpoints)
+  define admission. Director-agent
   requests must include a non-empty `reason`, and Director-agent apply is rejected
-  until the service has recorded a matching dry-run. Terminal-agent read bearer
-  credentials stay read-only and cannot apply product config. The service
+  until the service has recorded a matching dry-run. Terminal-agent bearer
+  credentials are refused by this route in both modes. The service
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. Both modes require
   the canonical DB-backed product id and a context/instance owned by that
