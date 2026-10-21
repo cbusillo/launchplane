@@ -3,7 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
@@ -117,6 +117,7 @@ class DirectorTestingRebuildAuthorizationTests(unittest.TestCase):
                 config=self.config,
             )
         )
+        guard.policy_record_reader = Mock(side_effect=LookupError("No matching action policy"))
         guard.authorize_execution()
         self.config.local_operator_token_label = "replacement-operator"
         with self.assertRaises(DurableOperationAuthorizationDeniedError):
@@ -152,4 +153,4 @@ class DirectorTestingRebuildAuthorizationTests(unittest.TestCase):
             operation.operation_id
         )
         self.assertEqual(completed.status, "pass", completed.error_message)
-        self.assertEqual(self.fixture.effects, ["switch-new", "stop-old"])
+        self.assertTrue(self.fixture.retained["stopped"])

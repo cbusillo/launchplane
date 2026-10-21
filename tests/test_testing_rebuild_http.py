@@ -157,6 +157,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(saved.request, replacement)
         self.assertTrue(saved.is_native_testing_rebuild)
         self.assertEqual(self.fixture.effects, [])
+        cancelled = await request(
+            app,
+            "POST",
+            f"/v1/drivers/odoo/target-replacement/operations/{saved.operation_id}/cancel",
+            headers={"Authorization": "Bearer fixture-operator"},
+            payload={"reason": "Withdraw the pending testing rebuild"},
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                saved.operation_id
+            ).status,
+            "cancelled",
+        )
 
     async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
         self,

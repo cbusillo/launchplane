@@ -843,6 +843,10 @@ from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.testing_rebuild_authorization import (
     capture_director_testing_rebuild_authorization,
     director_testing_rebuild_allowed,
+    director_testing_rebuild_owner_allowed,
+)
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -10366,7 +10370,12 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Operation is not supported by this cancellation route.",
             )
-        if not resolved_authz_policy_runtime.allows(
+        director_rebuild_owner = isinstance(
+            operation, OdooStableTargetReplacementOperationRecord
+        ) and director_testing_rebuild_owner_allowed(
+            identity=identity, operation=operation, store=record_store
+        )
+        if not director_rebuild_owner and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=operation.product,

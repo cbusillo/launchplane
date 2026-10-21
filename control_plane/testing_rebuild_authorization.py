@@ -102,3 +102,20 @@ def director_testing_rebuild_authorization_allows(
             identity=identity, request=operation.request, context=operation.context, store=store
         )
     )
+
+
+def director_testing_rebuild_owner_allowed(
+    *,
+    identity: LaunchplaneIdentity,
+    operation: OdooStableTargetReplacementOperationRecord,
+    store: object,
+) -> bool:
+    authorization = operation.authorization
+    return (
+        authorization is not None
+        and authorization.grant == "director_testing_rebuild"
+        and authorization.caller == durable_operation_caller_identity(identity)
+        and director_testing_rebuild_allowed(
+            identity=identity, request=operation.request, context=operation.context, store=store
+        )
+    )

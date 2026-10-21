@@ -129,6 +129,16 @@ class DurableOperationAuthorizationGuard:
                     ),
                 )
             return
+        if self.authorization.grant == "director_testing_rebuild":
+            if (
+                self.director_testing_rebuild_allows is None
+                or not self.director_testing_rebuild_allows(self.authorization)
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_testing_rebuild_refused",
+                    message="The recorded Director operator no longer covers this native testing rebuild.",
+                )
+            return
         try:
             policy_record = self.policy_record_reader()
         except Exception as error:
@@ -147,16 +157,6 @@ class DurableOperationAuthorizationGuard:
                         "The active authorization policy no longer names the recorded caller "
                         "as its administrator."
                     ),
-                )
-            return
-        if self.authorization.grant == "director_testing_rebuild":
-            if (
-                self.director_testing_rebuild_allows is None
-                or not self.director_testing_rebuild_allows(self.authorization)
-            ):
-                raise DurableOperationAuthorizationDeniedError(
-                    code="operation_authorization_testing_rebuild_refused",
-                    message="The recorded Director operator no longer covers this native testing rebuild.",
                 )
             return
         if not durable_operation_authorization_allows(
