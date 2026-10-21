@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import click
-from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS, NOTHING_TO_TEST
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import (
@@ -415,6 +415,20 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertIn("missing", str(github.statuses[0]["description"]))
+
+    def test_near_miss_engineering_notes_name_the_fix_instead_of_waiting(self) -> None:
+        # odoo-tenant-cm#214 named the Client; the check waited for a review nobody asked for.
+        github = _GitHub(labels=())
+        github.body = (
+            "## Client test notes\n\nNothing for Justin to test. No screen, menu or data changes."
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertIn(NOTHING_TO_TEST, str(github.statuses[0]["description"]))
+
+        github.body = "## Client test notes\n\nNothing for the Client to test: no screen changes."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "neutral")
 
     def test_engineering_notes_replace_stale_failure_on_the_same_head(self) -> None:
         github = _GitHub(labels=())
