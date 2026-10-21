@@ -282,13 +282,9 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                 listener_ip if hostname == api_host.forward_host else public_ip
             )(hostname, port)
             self.assertEqual(self.fetch().status_code, 200)
-        self.assertEqual(
-            resolve.call_args_list,
-            [
-                (("edge-api.example.test", 443),),
-                ((api_host.forward_host, 443),),
-                (("edge-api.example.test", 443),),
-            ],
+        self.assertNotIn(
+            urlsplit(self.endpoint.url).hostname,
+            {call.args[0] for call in resolve.call_args_list},
         )
         destination = connect.call_args.args[0]
         self.assertEqual(destination.hostname, urlsplit(self.endpoint.url).hostname)
@@ -364,7 +360,11 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                 "control_plane.outbound_http._system_address_resolver",
                 side_effect=socket.gaierror,
             ):
-                self.assert_refused()
+                self.transport.reset_mock()
+                with self.assertRaises(PublicHttpDestinationError) as refusal:
+                    self.fetch()
+                self.assertEqual(refusal.exception.code, "dns_failure")
+                self.transport.assert_not_called()
             read = self.client.get_proxy_host
             with patch.object(
                 self.client,
@@ -428,7 +428,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                 side_effect=_resolver_for("93.184.216.34"),
             ) as resolve,
         ):
-            for change in ("upstream", "duplicate", "deleted", "dns_mode", "origin"):
+            for change in ("upstream", "duplicate", "deleted", "dns_mode", "dns_failure", "origin"):
                 with self.subTest(api_change=change):
 
                     def change_api(*args: Any, **kwargs: Any) -> PublicHttpResponse:
@@ -444,13 +444,19 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                             self.client.proxy_hosts.pop()
                         elif change == "dns_mode":
                             resolve.side_effect = _resolver_for("10.77.0.9")
+                        elif change == "dns_failure":
+                            resolve.side_effect = socket.gaierror
                         else:
                             os.environ[NPMPLUS_BASE_URL_ENV_KEY] = "https://foreign.example.test"
                         return response
 
                     self.transport.side_effect = change_api
-                    with self.assertRaises(PublicHttpDestinationError):
+                    with self.assertRaises(PublicHttpDestinationError) as refusal:
                         self.fetch()
+                    self.assertEqual(
+                        refusal.exception.code,
+                        "dns_failure" if change == "dns_failure" else "private_url",
+                    )
                     self.client.proxy_hosts = [self.client.proxy_hosts[0], api_host]
                     resolve.side_effect = _resolver_for("93.184.216.34")
 

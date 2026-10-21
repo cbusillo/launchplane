@@ -49,12 +49,8 @@ def _edge_health_origin(client: NpmplusClient, api_url: str) -> tuple[str, Npmpl
         # self-proxy may target loopback or a provider-local container instead.
         return api_url, None
     hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
-    if not hosts:
-        # Existing directly addressed private APIs still use the private-only
-        # resolver. No proxy record or public-address fallback is required.
-        return api_url, None
     if len(hosts) != 1:
-        raise ValueError("The edge API hostname is ambiguous.")
+        raise ValueError("No unique current edge API route.")
     host = client.get_proxy_host(hosts[0].id, public_only=True)
     if (
         host.id != hosts[0].id
@@ -168,6 +164,8 @@ def fetch_testing_private_health(
             != adapter._receipt_authority_sha256(cast(dict[str, object], snapshot["authority"]))
         ):
             raise ValueError("Private testing edge receipt changed.")
+    except PublicHttpDestinationError:
+        raise
     except (
         ValueError,
         FileNotFoundError,
@@ -197,6 +195,8 @@ def fetch_testing_private_health(
             or unresolved_effects()
         ):
             raise ValueError("Testing health authority changed during the probe.")
+    except PublicHttpDestinationError:
+        raise
     except (
         ValueError,
         FileNotFoundError,

@@ -295,6 +295,11 @@ provider write is needed.
 Selecting the directly addressed private origin is an address-admission check,
 not a health attempt. The health socket resolves and pins private addresses
 again; a connection, TLS or health failure never retries through another binding.
+Only an address-scope refusal permits selection from authenticated route
+metadata. A classified DNS failure aborts selection or readback with its DNS
+diagnostic; an unclassified provider or authority failure remains a verification
+refusal. A failed private admission without one exact API route refuses before
+the health request.
 
 The selected machine must resolve exclusively to the existing permitted private
 address ranges (RFC1918 or RFC6598), and reach the same edge's HTTPS listener.
