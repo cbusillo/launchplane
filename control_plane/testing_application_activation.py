@@ -13,7 +13,10 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_activation import (
     TestingActivationRecord,
     TestingActivationRefusal,
+    TestingActivationFailure,
+    TestingActivationRefusedResult,
 )
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.testing_activation import TestingApplicationReadiness
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.promotion_record import HealthcheckEvidence
@@ -33,6 +36,7 @@ from control_plane.provider_operations import (
 )
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
+    ProviderMutationRejectedError,
     ProviderMutationUnknownError,
     ProviderObservation,
     provider_operation_response_payload,
@@ -46,6 +50,139 @@ from control_plane.testing_activation import (
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.testing_separation_resources import preparation_binding
+
+APPLICATION_CAPABILITY_PHASE = "application_capability_inspection"
+
+
+def undispatched_application_recipient(
+    record: TestingActivationRecord, reservation: LaunchplaneIdempotencyRecord
+) -> bool:
+    """Only the fixed read-only capability program can precede first placement."""
+    return (
+        record.request.application is not None
+        and not any((record.project_id, record.environment_id, record.target_id, record.app_name))
+        and not record.state_recipient
+        and record.application_readiness is None
+        and record.phase in {"prepared", "create_project"}
+        and reservation.provider_effect_phase == APPLICATION_CAPABILITY_PHASE
+    )
+
+
+def require_retained_route_authority(store: Any, record: TestingActivationRecord) -> None:
+    """Corrections may refuse forward work, but cannot redirect this inverse."""
+    from control_plane.testing_candidate_runtime import testing_serving_target_authority
+    from control_plane.testing_publication_storage import testing_binding_authority
+
+    target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
+    target_id = store.read_dokploy_target_id_record(
+        context_name=record.context, instance_name="testing"
+    )
+    provider = store.read_provider_target_record(
+        context_name=record.context, instance_name="testing"
+    )
+    try:
+        binding = store.read_route_binding_record(
+            product=record.product, context_name=record.context, instance_name="testing"
+        )
+    except FileNotFoundError:
+        binding = None
+    if (
+        testing_serving_target_authority(target)
+        != testing_serving_target_authority(record.retained_target)
+        or target_id.target_id != record.retained_target_id.target_id
+        or provider.model_dump(exclude={"updated_at", "source_label"})
+        != record.retained_provider.model_dump(exclude={"updated_at", "source_label"})
+        or testing_binding_authority(binding)
+        != testing_binding_authority(record.retained_route_binding)
+    ):
+        raise TestingActivationRefusal("The original serving recipient or route authority changed.")
+
+
+def completed_application_inverse(store: Any, record: TestingActivationRecord) -> bool:
+    """The original inverse child binds the captured route, document and physical custody."""
+    from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+    from control_plane.dokploy.testing_route import route_document
+
+    readiness = record.application_readiness
+    if readiness is None or readiness.route is None or readiness.route_execution is None:
+        return False
+    inverse = store.read_idempotency_record(
+        scope=record.scope,
+        route_path=f"/v1/products/{record.product}/testing-activation:route-inverse",
+        idempotency_key=record.plan_sha256 + ":route-inverse",
+    )
+    if (
+        inverse is None
+        or inverse.state != "completed"
+        or inverse.reconciliation_key != readiness.route.digest
+    ):
+        return False
+    restored = TestingRouteExecutionIntent.model_validate(
+        store.read_original_mutation_intent(inverse).get("route_execution")
+    )
+    return restored == readiness.route_execution.model_copy(
+        update={
+            "backend": readiness.route.old_backend,
+            "document_sha256": canonical_json_sha256(
+                route_document(readiness.route, readiness.route.old_backend)
+            ),
+        }
+    )
+
+
+def restored_application_route(store: Any, record: TestingActivationRecord) -> Any:
+    """A refused activation may own the restored file without qualifying a product."""
+    from control_plane.dokploy.testing_route import route_document
+
+    equivalents = {}
+    for value in store.list_testing_application_activations(record.product, record.context):
+        previous = TestingActivationRecord.model_validate(value)
+        if (
+            previous.published
+            or previous.failure is None
+            or previous.failure.kind != "publication_refused"
+        ):
+            continue
+        parent = store.read_testing_application_activation_operation(
+            previous.product, previous.context, previous.scope, previous.request.preparation_key
+        )
+        result = parent.response_payload.get("result") if parent is not None else None
+        if (
+            parent is None
+            or parent.state != "completed"
+            or parent.reconciliation_key != previous.plan_sha256
+            or not isinstance(result, dict)
+            or result.get("plan_sha256") != previous.plan_sha256
+            or result.get("reason") != "publication_refused"
+            or result.get("separation_verified") is not False
+            or not completed_application_inverse(store, previous)
+        ):
+            continue
+        try:
+            require_retained_route_authority(store, previous)
+        except TestingActivationRefusal:
+            continue
+        readiness = previous.application_readiness
+        assert (
+            readiness is not None
+            and readiness.route is not None
+            and readiness.old_runtime_identity is not None
+        )
+        route = readiness.route
+        effective = canonical_json_sha256(
+            {
+                "document": route_document(route, route.old_backend),
+                "legacy": route.legacy_routers,
+                "legacy_backend": route.legacy_backend,
+                "entrypoints": route.public_entrypoints,
+                "application_file": (route.application_file_name, route.application_file_sha256),
+                "old_identity": readiness.old_runtime_identity.model_dump(exclude={"deployed_at"}),
+            }
+        )
+        equivalents[effective] = route
+    if len(equivalents) > 1:
+        raise TestingActivationRefusal("The restored original route custody is ambiguous.")
+    return next(iter(equivalents.values()), None)
 
 
 @dataclass
@@ -100,7 +237,14 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         binding, _old_key = preparation_binding(
             self.store, self.product, self.request.context, self.actor, self.root, specification
         )
-        if resources.operation_id != binding:
+        from control_plane.testing_separation_resources import ROUTE as PREPARATION_ROUTE
+
+        preparation = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=PREPARATION_ROUTE.format(product=self.product),
+            idempotency_key=self.request.preparation_key,
+        )
+        if preparation is None or preparation.reconciliation_key != binding:
             raise TestingActivationRefusal("Retained allocation authority changed.")
         self.require_independent_credential_plan()
         record = TestingActivationRecord(
@@ -1055,18 +1199,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         from control_plane.contracts.runtime_identity import compare_runtime_identity
         from control_plane.dokploy.testing_route import (
             compile_testing_route,
-            observe_testing_route,
             testing_ingress_entrypoints,
         )
         from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
         from control_plane.testing_application_capabilities import (
             retained_application_capability_spec,
         )
-        from control_plane.testing_route_effects import (
-            TestingRouteEffects,
-            TestingRouteFenceController,
-        )
-        from control_plane.provider_operations import run_durable_provider_operation
         from control_plane.testing_rebuild_service import read_public_testing_health
         from control_plane.testing_activation import completed_application_activation
 
@@ -1124,6 +1262,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                         "The original owned route template is unavailable."
                     )
                 previous_route = previous_readiness.route
+        if previous_route is None:
+            previous_route = restored_application_route(self.store, record)
         original_route = readiness.route or previous_route
         if original_route is not None and original_route.application_file_name:
             old_spec["route_file_name"] = original_route.application_file_name
@@ -1216,17 +1356,81 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         assert readiness.route is not None and readiness.route_execution is not None
         route, execution = readiness.route, readiness.route_execution
 
-        def present() -> bool:
-            observed = transport.read()
-            owned = (
-                json.loads(observed["owned_file"]) if observed["owned_file"] is not None else None
+        self.route_effect(record, lease, checkpoint, transport, inverse=False)
+        health = read_public_testing_health(lane.base_url, specification.health_path)
+        if (
+            health.status != "pass"
+            or not health.verified
+            or compare_runtime_identity(
+                expected=readiness.runtime_identity, observed=health.observed_runtime_identity
+            )[0]
+            != "match"
+        ):
+            raise TestingActivationRefusal(
+                "The unchanged public address has not proved the fresh recipient."
             )
-            return observe_testing_route(route, observed["raw"], owned) == route.new_backend
+        return self.save(
+            record,
+            application_readiness=readiness.model_copy(
+                update={
+                    "public_health": health,
+                    "observed_at": self.store.mutation_observation_timestamp(),
+                }
+            ),
+        )
+
+    def route_effect(
+        self,
+        record: TestingActivationRecord,
+        lease: ProviderOperationLease,
+        checkpoint: Callable[[str], None],
+        transport: Any,
+        *,
+        inverse: bool,
+        observe_only: bool = False,
+    ) -> None:
+        """Use one original child and physical writer per route direction."""
+        from control_plane.dokploy.testing_route import observe_testing_route
+        from control_plane.testing_route_effects import (
+            TestingRouteEffects,
+            TestingRouteFenceController,
+        )
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        assert isinstance(lease, ProviderEvidenceLease)
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        route = readiness.route
+        assert readiness.route_execution is not None
+        execution = (
+            transport.execution_intent(route, route.old_backend, operation_id=record.plan_sha256)
+            if inverse
+            else readiness.route_execution
+        )
+        desired = route.old_backend if inverse else route.new_backend
+        suffix = ":route-inverse" if inverse else ":route"
+        path = f"/v1/products/{record.product}/testing-activation" + suffix
+        key = record.plan_sha256 + suffix
+        prior = self.store.read_idempotency_record(
+            scope=record.scope, route_path=path, idempotency_key=key
+        )
+        if observe_only and prior is None:
+            return
+
+        def present() -> bool:
+            frame = transport.read()
+            owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
+            return observe_testing_route(route, frame["raw"], owned) == desired
+
+        def recovery_guard() -> None:
+            lease.assert_current()
+            require_retained_route_authority(self.store, record)
 
         def guard() -> None:
-            lease.assert_current()
-            self.require_unchanged(record)
-            self.verify_provider(record)
+            recovery_guard()
+            if not inverse:
+                self.require_unchanged(record)
+                self.verify_provider(record)
 
         effects = TestingRouteEffects(
             controller=TestingRouteFenceController(
@@ -1237,25 +1441,22 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 checkpoint=checkpoint,
                 lease_owner=lambda: lease.evidence_reservation().lease_owner,
             ),
-            phase="application-route",
+            phase="application-route-inverse" if inverse else "application-route",
             present=present,
             publish=lambda attempt, dispatch: transport.publish(
                 route,
-                route.new_backend,
-                expected_backend=route.old_backend,
+                desired,
+                expected_backend=route.new_backend if inverse else route.old_backend,
                 dispatch_guard=dispatch,
-                desired_runtime_identity=readiness.runtime_identity,
+                desired_runtime_identity=readiness.old_runtime_identity
+                if inverse
+                else readiness.runtime_identity,
                 execution=attempt.execution,
                 execution_key=attempt.key,
                 writer_attempt=attempt,
             ),
-            recovery_guard=guard,
-            inverse=False,
-        )
-        key = record.plan_sha256 + ":route"
-        path = f"/v1/products/{record.product}/testing-activation:route"
-        prior = self.store.read_idempotency_record(
-            scope=record.scope, route_path=path, idempotency_key=key
+            recovery_guard=recovery_guard,
+            inverse=inverse,
         )
 
         class Route:
@@ -1282,7 +1483,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     else ProviderObservation("unknown")
                 )
 
-        guard()
+        recovery_guard() if observe_only else guard()
         outcome = run_durable_provider_operation(
             store=self.store,
             scope=record.scope,
@@ -1292,28 +1493,83 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             lease_owner=lease.evidence_reservation().lease_owner,
             response_trace_id=self.trace_id,
             adapter=Route(),
+            allow_mutation=not observe_only,
             original_intent={"route_execution": execution.model_dump(mode="json")},
         )
-        if outcome.status not in {"completed", "adopted", "replayed"} or not present():
-            raise TestingActivationRefusal("The original addressed route remains unobserved.")
-        health = read_public_testing_health(lane.base_url, specification.health_path)
-        if (
-            health.status != "pass"
-            or not health.verified
-            or compare_runtime_identity(
-                expected=readiness.runtime_identity, observed=health.observed_runtime_identity
-            )[0]
-            != "match"
-        ):
+        if outcome.status not in {"completed", "adopted", "replayed"}:
             raise TestingActivationRefusal(
-                "The unchanged public address has not proved the fresh recipient."
+                "The original addressed route writer remains unobserved."
             )
-        return self.save(
-            record,
-            application_readiness=readiness.model_copy(
-                update={"public_health": health, "observed_at": utc_now_timestamp()}
-            ),
+        if not observe_only and not present():
+            raise TestingActivationRefusal("The original addressed route remains unobserved.")
+
+    def restore_application_route(
+        self,
+        record: TestingActivationRecord,
+        lease: ProviderOperationLease,
+        check: Callable[[], None],
+    ) -> None:
+        """Settle the original forward writer before restoring its captured predecessor."""
+        from urllib.parse import urlsplit
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        assert isinstance(lease, ProviderEvidenceLease)
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        assert record.request.application is not None
+        route, execution, identity = (
+            readiness.route,
+            readiness.route_execution,
+            readiness.old_runtime_identity,
         )
+        if execution is None or identity is None:
+            raise TestingActivationRefusal(
+                "The original route and runtime custody are unavailable."
+            )
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        old = urlsplit(route.old_backend)
+        transport = DokployTestingRouteTransport(
+            host=host,
+            token=token,
+            server_id=execution.server_id,
+            old_project="",
+            product=record.product,
+            context=record.context,
+            public_host=route.host,
+            entrypoints=route.public_entrypoints,
+            old_runtime_identity=identity,
+            old_application={
+                "name": old.hostname,
+                "port": old.port,
+                "product": record.product,
+                "context": record.context,
+                "deployments": {
+                    identity.deployment_record_id: {
+                        "artifact": identity.artifact_id,
+                        "source": identity.source_git_ref,
+                    }
+                },
+                "route_file_name": route.application_file_name,
+            },
+            new_application={
+                "name": record.app_name,
+                "port": record.request.application.runtime_port,
+                "service_id": readiness.service_id,
+                "task_id": readiness.task_id,
+            },
+        )
+        transport.payload["expected_application_file_sha256"] = route.application_file_sha256
+
+        def checkpoint(phase: str) -> None:
+            check()
+            lease.assert_current()
+            require_retained_route_authority(self.store, record)
+            lease.checkpoint_effect(phase)
+
+        # Observation settles the exact original writer; it cannot replay forward
+        # work under corrected authority. A still-running writer blocks inverse.
+        self.route_effect(record, lease, checkpoint, transport, inverse=False, observe_only=True)
+        self.route_effect(record, lease, checkpoint, transport, inverse=True)
 
     def publish_application(
         self,
@@ -1438,7 +1694,189 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         return published
 
     def result(self, record: TestingActivationRecord) -> dict[str, Any]:
+        if record.failure is not None:
+            return TestingActivationRefusedResult(
+                product=record.product,
+                context=record.context,
+                plan_sha256=record.plan_sha256,
+                source_commit=record.request.source_commit,
+                resource_namespace=record.namespace,
+                image_reference=record.image_reference,
+                host_ports=record.host_ports,
+                reason=record.failure.kind,
+                deployment_requested=record.failure.kind != "authority_refused_before_recipient",
+            ).model_dump(mode="json")
         return {**super().result(record), "deployment_requested": True}
+
+    def failed_candidate(
+        self, record: TestingActivationRecord, provider_operation_key: str
+    ) -> TestingActivationFailure | None:
+        """Observe only this original's terminal private job, never generic health errors."""
+        if (
+            record.published
+            or record.application_readiness is not None
+            and record.application_readiness.route is not None
+        ):
+            return None
+        if record.phase == "deploy_application_deployment_id":
+            target_type, target_id, suffix = "application", record.target_id, " application"
+            live = self.live(record)
+        elif record.phase == "deploy_state_deployment_id":
+            target_type, target_id, suffix = (
+                "compose",
+                record.state_recipient.get("target_id", ""),
+                " state",
+            )
+            live = self.state_live(record)
+        else:
+            return None
+        if not target_id or live.get("domains") != []:
+            return None
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        history = api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            require_complete=True,
+        )
+        if len(history) != 1:
+            return None
+        observed = history[0]
+        if (
+            observed.get("title") != provider_operation_title(provider_operation_key) + suffix
+            or not api.deployment_key(observed)
+            or api.deployment_status(observed) not in api._DEPLOYMENT_FAILURE_STATUSES
+        ):
+            return None
+        return TestingActivationFailure(
+            kind="candidate_deployment_failed",
+            target_type=cast(Any, target_type),
+            target_id=target_id,
+            deployment_id=api.deployment_key(observed),
+            deployment_status=api.deployment_status(observed),
+        )
+
+    def require_terminal_candidate(
+        self, record: TestingActivationRecord, operation_key: str
+    ) -> None:
+        """Retain running private recipients; only their original deployment jobs must be closed."""
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        targets = [
+            (
+                "application",
+                record.target_id,
+                " application",
+                "application_deployment_id",
+                self.live(record),
+            )
+        ]
+        if record.state_recipient.get("target_id"):
+            targets.append(
+                (
+                    "compose",
+                    record.state_recipient["target_id"],
+                    " state",
+                    "state_deployment_id",
+                    self.state_live(record),
+                )
+            )
+        for kind, target_id, suffix, key, live in targets:
+            history = api.list_deployments_for_target(
+                host=host, token=token, target_type=kind, target_id=target_id, require_complete=True
+            )
+            if (
+                live.get("domains") != []
+                or len(history) != 1
+                or history[0].get("title") != provider_operation_title(operation_key) + suffix
+                or api.deployment_key(history[0]) != record.state_recipient.get(key)
+                or api.deployment_status(history[0])
+                not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
+            ):
+                raise TestingActivationRefusal(
+                    "The original private deployment custody remains unobserved."
+                )
+
+    def refuse(
+        self, record: TestingActivationRecord, failure: TestingActivationFailure
+    ) -> ProviderMutationOutcome:
+        replacement = self.save(record, phase="refused", failure=failure)
+        return ProviderMutationOutcome(
+            202,
+            provider_operation_response_payload(
+                trace_id=self.trace_id, records={}, result=self.result(replacement)
+            ),
+        )
+
+    def candidate_refusal_ready(self, record: TestingActivationRecord) -> bool:
+        readiness = record.application_readiness
+        if (
+            record.published
+            or readiness is None
+            or readiness.private_health is None
+            or readiness.private_health.status != "pass"
+        ):
+            return False
+        if (
+            record.phase in {"restoring_application_route", "refusing_private_candidate"}
+            or readiness.public_health is not None
+        ):
+            return True
+        try:
+            self.require_unchanged(record)
+        except TestingActivationRefusal:
+            return True
+        return False
+
+    def refuse_after_failure(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome | None:
+        current = activation_record(
+            self.store,
+            self.product,
+            self.request.context,
+            scope=self.scope,
+            preparation_key=self.request.preparation_key,
+        )
+        if current is None or current.failure is not None:
+            return None
+        assert isinstance(lease, ProviderEvidenceLease)
+        if undispatched_application_recipient(current, lease.evidence_reservation()):
+            return self.refuse(
+                current, TestingActivationFailure(kind="authority_refused_before_recipient")
+            )
+        if self.candidate_refusal_ready(current):
+            from control_plane.workflows.generic_web_deploy_provider import (
+                generic_web_provider_target_key,
+            )
+            from control_plane.testing_event_deploy_recovery import (
+                testing_event_execution_lock_name,
+            )
+
+            key = generic_web_provider_target_key(
+                provider_id="dokploy",
+                context=current.context,
+                instance="testing",
+                target_type="application",
+                target_id=current.retained_target_id.target_id,
+            )
+            with self.store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(key)
+            ) as check:
+                if check is None:
+                    return None
+                require_retained_route_authority(self.store, current)
+                self.require_terminal_candidate(current, provider_operation_key)
+                assert current.application_readiness is not None
+                if current.application_readiness.route is not None:
+                    if current.phase != "restoring_application_route":
+                        current = self.save(current, phase="restoring_application_route")
+                    self.restore_application_route(current, lease, check)
+                elif current.phase != "refusing_private_candidate":
+                    current = self.save(current, phase="refusing_private_candidate")
+                return self.refuse(current, TestingActivationFailure(kind="publication_refused"))
+        failure = self.failed_candidate(current, provider_operation_key)
+        return self.refuse(current, failure) if failure is not None else None
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -1451,11 +1889,26 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             inspect_retained_application_capabilities,
         )
 
+        started = False
         with self.evidence(lease):
             try:
                 record = self.current()
                 if record.plan_sha256 != self.request.reviewed_plan_sha256:
                     raise TestingActivationRefusal("Review this exact original activation plan.")
+                if record.failure is not None:
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=self.trace_id, records={}, result=self.result(record)
+                        ),
+                    )
+                if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
+                    refused = self.refuse_after_failure(provider_operation_key, lease)
+                    if refused is None:
+                        raise TestingActivationRefusal(
+                            "The original route restoration remains unobserved."
+                        )
+                    return refused
                 key = generic_web_provider_target_key(
                     provider_id="dokploy",
                     context=record.context,
@@ -1470,10 +1923,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                         raise TestingActivationRefusal("The retained original executor is active.")
 
                     def checkpoint(phase: str) -> None:
+                        nonlocal started
                         old_check()
                         lease.assert_current()
                         self.require_unchanged(record)
                         lease.checkpoint_effect(phase)
+                        started = True
 
                     self.require_unchanged(record)
                     if record.published:
@@ -1491,7 +1946,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             product=record.product,
                             context=record.context,
                             namespace=record.namespace,
-                            before_effect=checkpoint,
+                            before_effect=lambda _phase: checkpoint(APPLICATION_CAPABILITY_PHASE),
                         )
                         resources, _ = preparation_resources(
                             self.store, self.product, self.request, self.scope
@@ -1521,6 +1976,18 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                         ),
                     )
             except Exception as error:
+                try:
+                    refused = self.refuse_after_failure(provider_operation_key, lease)
+                except Exception:
+                    refused = None
+                if refused is not None:
+                    return refused
+                if not started:
+                    raise ProviderMutationRejectedError(
+                        error
+                        if isinstance(error, TestingActivationRefusal)
+                        else ValueError("Activation refused before provider effects.")
+                    ) from error
                 raise ProviderMutationUnknownError(
                     "Retain the original application activation key, recipients and unknown predecessor custody."
                 ) from error
@@ -1535,6 +2002,32 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             record = self.current()
             if record.plan_sha256 != reconciliation_key:
                 return ProviderObservation("unknown")
+            if record.failure is not None:
+                return ProviderObservation(
+                    "present",
+                    202,
+                    provider_operation_response_payload(
+                        trace_id=self.trace_id, records={}, result=self.result(record)
+                    ),
+                )
+            parent = self.store.read_testing_application_activation_operation(
+                self.product, self.request.context, self.scope, self.request.preparation_key
+            )
+            if parent is not None and (
+                undispatched_application_recipient(record, parent)
+                or self.failed_candidate(record, provider_operation_key) is not None
+            ):
+                # Apply owns a fresh lease for the receipt-only refusal, even
+                # when current authority permanently refuses forward effects.
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
+            if self.candidate_refusal_ready(record):
+                require_retained_route_authority(self.store, record)
+                self.require_terminal_candidate(record, provider_operation_key)
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             self.require_unchanged(record)
             if record.published:
                 self.verify_provider(record)

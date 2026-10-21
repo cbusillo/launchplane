@@ -292,6 +292,28 @@ def preparation_resources(
         or (existing.retained_target_id.target_id if existing else old_id.target_id),
         namespace=f"lp-testing-{receipt.plan_sha256[:32]}",
     )
+    if request.application is not None and not receipt.allocation_operation_key:
+        raise TestingActivationRefusal("Application allocation has no original operation identity.")
+    if receipt.allocation_operation_key:
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.testing_separation_resources import application_resource_generation
+
+        if (
+            request.application is None
+            or receipt.allocation_operation_key
+            != build_provider_operation_key(
+                scope=row.scope,
+                route_path=row.route_path,
+                idempotency_key=row.idempotency_key,
+                request_fingerprint=row.request_fingerprint,
+                reconciliation_key=row.reconciliation_key,
+            )
+        ):
+            raise TestingActivationRefusal("Allocation belongs to a different original operation.")
+        generation = application_resource_generation(
+            receipt.plan_sha256, receipt.allocation_operation_key
+        )
+        values.update(operation_id=generation, namespace=f"lp-testing-{generation[:32]}")
     resources = (
         ApplicationTestingResources.model_validate(
             {**values, "state_kind": request.application.state.kind}

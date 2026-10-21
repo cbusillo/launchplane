@@ -41,6 +41,15 @@ from control_plane.workflows.generic_web_deploy_provider import generic_web_prov
 ROUTE = "/v1/products/{product}/testing-separation-resources"
 
 
+def application_resource_generation(binding: str, provider_operation_key: str) -> str:
+    """Bind fresh application state to its real original preparation, not only inputs."""
+    if not provider_operation_key:
+        raise ValueError("Application allocation requires its original operation identity.")
+    return canonical_json_sha256(
+        {"plan_sha256": binding, "provider_operation_key": provider_operation_key}
+    )
+
+
 class SeparationResourcesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -83,6 +92,7 @@ class SeparationResourcesResult(SeparationResourcesPlan):
     readback_schedule_id: str = ""
     qualified_at: AwareDatetime
     retained_target_id: str = Field(default="", exclude_if=lambda value: not value)
+    allocation_operation_key: str = Field(default="", exclude_if=lambda value: not value)
     application: TestingApplicationSpecification | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -225,7 +235,7 @@ class SeparationResourcesAdapter:
                         context=self.request.context,
                         check=check,
                     )
-                resources = self.resources(binding)
+                resources = self.resources(binding, provider_operation_key)
                 evidence = run_preparation_schedule(
                     root=self.root,
                     resources=resources,
@@ -244,7 +254,7 @@ class SeparationResourcesAdapter:
                         response_payload=provider_operation_response_payload(
                             trace_id=self.trace_id,
                             records={},
-                            result=self.result(resources, evidence),
+                            result=self.result(resources, evidence, provider_operation_key),
                         ),
                     )
         except Exception:
@@ -258,15 +268,20 @@ class SeparationResourcesAdapter:
             product=self.product, context=self.request.context, plan_sha256=binding
         ).model_dump(mode="json")
 
-    def resources(self, binding: str) -> OdooTestingResources:
+    def resources(self, binding: str, provider_operation_key: str = "") -> OdooTestingResources:
+        operation = (
+            application_resource_generation(binding, provider_operation_key)
+            if self.request.application is not None
+            else binding
+        )
         values = dict(
             product=self.product,
             context=self.request.context,
-            operation_id=binding,
+            operation_id=operation,
             target_id=self.store.read_dokploy_target_id_record(
                 context_name=self.request.context, instance_name="testing"
             ).target_id,
-            namespace=f"lp-testing-{binding[:32]}",
+            namespace=f"lp-testing-{operation[:32]}",
         )
         if self.request.application is not None:
             return ApplicationTestingResources.model_validate(
@@ -275,12 +290,15 @@ class SeparationResourcesAdapter:
         return GenericWebTestingResources.model_validate(values)
 
     def result(
-        self, resources: OdooTestingResources, evidence: dict[str, str]
+        self,
+        resources: OdooTestingResources,
+        evidence: dict[str, str],
+        provider_operation_key: str = "",
     ) -> dict[str, object]:
         return SeparationResourcesResult(
             product=self.product,
             context=self.request.context,
-            plan_sha256=resources.operation_id,
+            plan_sha256=self.request.reviewed_plan_sha256,
             resources_binding_sha256=resources.binding_sha256,
             volumes=resources.volumes,
             schedule_id=evidence.get("creation_schedule_id", evidence.get("schedule_id", "")),
@@ -290,6 +308,9 @@ class SeparationResourcesAdapter:
             qualified_at=datetime.now(timezone.utc),
             application=self.request.application,
             retained_target_id=resources.target_id if self.request.application is not None else "",
+            allocation_operation_key=provider_operation_key
+            if self.request.application is not None
+            else "",
         ).model_dump(mode="json")
 
     def apply(
@@ -338,7 +359,7 @@ class SeparationResourcesAdapter:
                         started = True
 
                 check()
-                resources = self.resources(binding)
+                resources = self.resources(binding, provider_operation_key)
                 if self.request.application is not None:
                     from control_plane.testing_application_capabilities import (
                         inspect_retained_application_capabilities,
@@ -359,7 +380,7 @@ class SeparationResourcesAdapter:
                     check()
                     if not resource_readback_passes(evidence, resources):
                         raise ValueError("Independent empty backing storage was not proved.")
-                    result = self.result(resources, evidence)
+                    result = self.result(resources, evidence, provider_operation_key)
                 return ProviderMutationOutcome(
                     202,
                     provider_operation_response_payload(

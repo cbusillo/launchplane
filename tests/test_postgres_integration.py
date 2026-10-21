@@ -12858,6 +12858,27 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def test_supported_application_route_original_intent_and_key_replay(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True)
 
+    def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
+
+    def test_in_progress_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, in_progress=True)
+
+    def test_refused_http_apply_readback_and_receipt_remain_unqualified(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, failed=True)
+
+    def test_pre_effect_refusal_releases_for_fresh_review(self) -> None:
+        self.fixture.test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key()
+
+    def test_post_inspector_permanent_refusal_keeps_custody_and_continues(self) -> None:
+        self.fixture.test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues()
+
+    def test_failed_private_candidate_retains_resources_for_distinct_generation(self) -> None:
+        self.fixture.test_lost_failed_private_application_keeps_resources_and_new_generation()
+
+    def test_publication_refusal_restores_route_before_next_generation(self) -> None:
+        self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
+
 
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:

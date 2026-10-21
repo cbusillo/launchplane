@@ -349,6 +349,7 @@ class ApplicationFlowTests(unittest.TestCase):
             ),
         )
         self.lost_image_reply = False
+        self.failed_image_type = ""
 
     def fresh(self, identifier: str, name: str, environment: str, project: str) -> dict[str, Any]:
         return {
@@ -617,6 +618,21 @@ class ApplicationFlowTests(unittest.TestCase):
             self.deployments.setdefault(identifier, []).append(row)
             payload["deployments"] = deepcopy(self.deployments[identifier])
             payload["applicationStatus" if "applicationId" in body else "composeStatus"] = "done"
+            if self.failed_image_type == ("application" if "applicationId" in body else "compose"):
+                from control_plane.dokploy.api import DokployDeploymentFailed
+
+                row["status"] = "error"
+                payload["deployments"] = deepcopy(self.deployments[identifier])
+                payload["applicationStatus" if "applicationId" in body else "composeStatus"] = (
+                    "error"
+                )
+                if not self.lost_image_reply:
+                    raise DokployDeploymentFailed(
+                        deployment_id=row["deploymentId"],
+                        deployment_status=row["status"],
+                        message_prefix="Fresh candidate failed",
+                        deployment=deepcopy(row),
+                    )
             if self.lost_image_reply:
                 self.lost_image_reply = False
                 raise OSError("Lost the original fresh image deployment reply")
@@ -634,6 +650,10 @@ class ApplicationFlowTests(unittest.TestCase):
             "Config": {
                 "Image": service["image"],
                 "Env": [key + "=" + value for key, value in service["environment"].items()],
+                "Labels": {
+                    "com.docker.compose.project": payload["appName"],
+                    "com.docker.compose.service": "postgres",
+                },
             },
             "State": {"Running": True},
             "HostConfig": {"PortBindings": {}},
@@ -648,7 +668,7 @@ class ApplicationFlowTests(unittest.TestCase):
             "NetworkSettings": {
                 "Networks": {
                     network: {
-                        "IPAddress": "10.0.0.80",
+                        "IPAddress": "10.0.0." + str(80 + len(self.state_containers)),
                         "NetworkID": "fixture-network-id",
                         "Aliases": service["networks"]["provider"]["aliases"],
                     }
@@ -658,12 +678,21 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def state_docker(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         args = arguments[1:]
-        state = next(iter(self.state_containers.values()))
+        state = next(
+            (row for identifier, row in self.state_containers.items() if identifier in args),
+            next(iter(self.state_containers.values())),
+        )
         environment = dict(row.split("=", 1) for row in state["Config"]["Env"])
         output: Any = ""
         if args[:2] == ["ps", "-aq"]:
             output = "\n".join(
-                self.state_containers
+                {
+                    key: row
+                    for key, row in self.state_containers.items()
+                    if "label=com.docker.compose.project="
+                    + row["Config"]["Labels"]["com.docker.compose.project"]
+                    in args
+                }
                 if "--filter" in args
                 else {**self.state_containers, **self.containers}
             )
@@ -674,7 +703,7 @@ class ApplicationFlowTests(unittest.TestCase):
             if self.state_alias_changed:
                 output[0]["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = []
         elif args[:2] == ["inspect", "--format"]:
-            container = self.containers[args[-1]]
+            container = {**self.containers, **self.state_containers}[args[-1]]
             networks = deepcopy(container["NetworkSettings"]["Networks"])
             if self.state_duplicate_alias:
                 networks["dokploy-network"]["Aliases"] = state["NetworkSettings"]["Networks"][
@@ -716,7 +745,13 @@ class ApplicationFlowTests(unittest.TestCase):
                     args[args.index("-h") + 1],
                     state["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"][0],
                 )
-                output = role + "|" + database + "|10.0.0.80"
+                output = (
+                    role
+                    + "|"
+                    + database
+                    + "|"
+                    + state["NetworkSettings"]["Networks"]["dokploy-network"]["IPAddress"]
+                )
             elif "rolname FROM pg_roles" in statement:
                 output = "\n".join(sorted([environment["POSTGRES_USER"], *self.state_roles]))
             elif "datname FROM pg_database" not in statement:
@@ -842,7 +877,7 @@ class ApplicationFlowTests(unittest.TestCase):
             self.storage.resources = kwargs["resources"]
             self.storage.containers = {
                 key: {"Config": value["Config"], "Mounts": value.get("Mounts", [])}
-                for key, value in self.containers.items()
+                for key, value in {**self.containers, **self.state_containers}.items()
             }
             status, evidence = self.storage.run_program(str(kwargs.get("mode", "prepare")))
             self.assertEqual(status, 0)
@@ -1273,7 +1308,9 @@ class ApplicationFlowTests(unittest.TestCase):
         with patch.object(self.store, "write_testing_activation", side_effect=correction):
             result = self.activate()
         self.assertTrue(corrected)
-        self.assertEqual(result.status, "reconcile_required")
+        self.assertEqual(result.status, "completed")
+        self.assertFalse(result.response_payload["result"]["applied"])
+        self.assertFalse(result.response_payload["result"]["separation_verified"])
         self.assertFalse(self.adapter.current().published)
         self.assertEqual(
             self.store.read_dokploy_target_record(
@@ -1329,7 +1366,9 @@ class ApplicationFlowTests(unittest.TestCase):
         with patch.object(self.store, "write_testing_activation", side_effect=correction):
             result = self.activate()
         self.assertTrue(observed)
-        self.assertEqual(result.status, "reconcile_required")
+        self.assertEqual(result.status, "completed")
+        self.assertFalse(result.response_payload["result"]["separation_verified"])
+        self.assertFalse(result.response_payload["result"]["applied"])
         self.assertFalse(self.adapter.current().published)
         self.assertFalse(self.projects)
         self.assertEqual(
@@ -1339,7 +1378,244 @@ class ApplicationFlowTests(unittest.TestCase):
             self.adapter.require_unchanged(self.adapter.current())
         self.assertEqual(self.canonical_password(), "retained-only-password")
 
-    def assert_supported_http_activation(self, *, native_apply: bool) -> None:
+    def test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key(self) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"updated_at": self.old.now(1)})
+        )
+        with self.assertRaises(TestingActivationRefusal):
+            self.activate()
+        self.assertFalse(self.projects)
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key="activation",
+            )
+        )
+        self.planned = self.adapter.current()
+        self.request.reviewed_plan_sha256 = self.planned.plan_sha256
+        self.activation_key = "fresh-reviewed-key"
+        self.assertEqual(self.activate().status, "completed")
+
+    def test_private_ready_candidate_configuration_refusal_allows_fresh_generation(self) -> None:
+        self.prepare()
+        write = self.store.write_testing_activation
+        corrected: list[Any] = []
+
+        def change(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"] and not corrected:
+                (runtime,) = self.store.list_runtime_environment_records(
+                    context_name=self.context, instance_name="testing"
+                )
+                runtime.env["APPLICATION_MODE"] = "permanent-correction"
+                self.store.write_runtime_environment_record(runtime)
+                corrected.append(runtime)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=change):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertEqual(result.response_payload["result"]["reason"], "publication_refused")
+        original_candidate = self.adapter.current().target_id
+        self.prepare("private-ready-successor")
+        self.activation_key = "private-ready-successor"
+        self.assertEqual(self.activate().status, "completed")
+        self.assertNotEqual(self.adapter.current().target_id, original_candidate)
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                context_name=self.context, instance_name="testing"
+            ),
+            tuple(corrected),
+        )
+
+    def test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues(
+        self,
+    ) -> None:
+        self.prepare()
+        write = self.store.write_testing_activation
+        corrected: list[Any] = []
+
+        def permanent_change(**kwargs: Any) -> None:
+            if kwargs["replacement"]["phase"] == "create_project" and not corrected:
+                (runtime,) = self.store.list_runtime_environment_records(
+                    context_name=self.context, instance_name="testing"
+                )
+                runtime.env["APPLICATION_MODE"] = "corrected-mode"
+                self.store.write_runtime_environment_record(runtime)
+                corrected.append(runtime)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=permanent_change):
+            refused = self.activate()
+        self.assertEqual(refused.status, "completed")
+        self.assertFalse(refused.response_payload["result"]["separation_verified"])
+        self.assertFalse(refused.response_payload["result"]["applied"])
+        first = self.adapter.current()
+        self.assertIsNotNone(first.failure)
+        self.assertFalse(self.projects)
+        parent = self.store.read_testing_application_activation_operation(
+            self.product, self.context, self.scope, "prepare"
+        )
+        assert parent is not None
+        from control_plane.testing_application_activation import APPLICATION_CAPABILITY_PHASE
+
+        self.assertEqual(parent.provider_effect_phase, APPLICATION_CAPABILITY_PHASE)
+        self.assertEqual(parent.state, "completed")
+        self.assertEqual(self.activate().status, "replayed")
+        self.activation_key = "corrected-generation"
+        self.prepare("corrected-preparation")
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+        self.assertTrue(completed.response_payload["result"]["separation_verified"])
+        self.assertNotEqual(self.adapter.current().namespace, first.namespace)
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                context_name=self.context, instance_name="testing"
+            ),
+            tuple(corrected),
+        )
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+
+    def assert_failed_private_candidate_continues(
+        self, *, state: bool = False, lost_reply: bool = False
+    ) -> None:
+        from pathlib import Path
+
+        if state:
+            self.use_postgres()
+        self.prepare()
+        self.failed_image_type = "compose" if state else "application"
+        self.lost_image_reply = lost_reply
+        result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertFalse(result.response_payload["result"]["separation_verified"])
+        self.assertFalse(result.response_payload["result"]["applied"])
+        first = self.adapter.current()
+        assert first.failure is not None
+        self.assertEqual(first.failure.target_type, self.failed_image_type)
+        self.assertFalse(first.published)
+        effects = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), effects)
+        from control_plane.testing_activation import preparation_resources
+
+        old_resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+        retained_files = []
+        for volume in old_resources.volumes.values():
+            retained = (
+                Path(str(self.storage.volumes[volume]["Mountpoint"])) / "retained-failed-candidate"
+            )
+            retained.write_text("Keep this candidate data")
+            retained_files.append(retained)
+        self.failed_image_type = ""
+        self.activation_key = "after-failed-candidate"
+        self.prepare("after-failed-preparation")
+        next_resources, _ = preparation_resources(
+            self.store, self.product, self.request, self.scope
+        )
+        self.assertTrue(
+            set(old_resources.volumes.values()).isdisjoint(next_resources.volumes.values())
+        )
+        self.assertNotEqual(first.namespace, self.planned.namespace)
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+        self.assertTrue(completed.response_payload["result"]["separation_verified"])
+        self.assertTrue(
+            all(path.read_text() == "Keep this candidate data" for path in retained_files)
+        )
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+
+    def test_answered_failed_private_application_keeps_resources_and_new_generation(self) -> None:
+        self.assert_failed_private_candidate_continues()
+
+    def test_lost_failed_private_application_keeps_resources_and_new_generation(self) -> None:
+        self.assert_failed_private_candidate_continues(lost_reply=True)
+
+    def test_failed_private_state_deployment_keeps_resources_and_new_generation(self) -> None:
+        self.assert_failed_private_candidate_continues(state=True)
+
+    def assert_unproved_candidate_stays_unknown(self, kind: str) -> None:
+        self.prepare()
+        self.lost_image_reply = True
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+        ):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        record = self.adapter.current()
+        rows = self.deployments[record.target_id]
+        if kind == "missing":
+            rows.clear()
+        elif kind == "duplicate":
+            rows[0]["status"] = "error"
+            rows.append(deepcopy(rows[0]) | {"deploymentId": "another-job"})
+        elif kind == "foreign":
+            rows[0].update(status="error", title="unrelated deployment")
+        else:
+            rows[0]["status"] = "running"
+        before = tuple(self.writes)
+        result = self.activate()
+        self.assertEqual(result.status, "reconcile_required", result)
+        self.assertEqual(tuple(self.writes), before)
+        self.assertIsNone(self.adapter.current().failure)
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+
+    def test_missing_candidate_job_never_completes_as_refused(self) -> None:
+        self.assert_unproved_candidate_stays_unknown("missing")
+
+    def test_duplicate_candidate_jobs_never_complete_as_refused(self) -> None:
+        self.assert_unproved_candidate_stays_unknown("duplicate")
+
+    def test_foreign_candidate_job_never_completes_as_refused(self) -> None:
+        self.assert_unproved_candidate_stays_unknown("foreign")
+
+    def test_running_candidate_job_never_completes_as_refused(self) -> None:
+        self.assert_unproved_candidate_stays_unknown("running")
+
+    def test_private_health_transport_error_stays_unknown_without_image_replay(self) -> None:
+        self.prepare()
+        with (
+            patch.object(
+                self.adapter, "qualify_application", side_effect=OSError("Health reply unavailable")
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            result = self.activate()
+        self.assertEqual(result.status, "reconcile_required")
+        self.assertIsNone(self.adapter.current().failure)
+        before = sum(path == "/api/application.deploy" for path, _ in self.writes)
+        self.assertIn(self.activate().status, {"completed", "adopted"})
+        self.assertEqual(sum(path == "/api/application.deploy" for path, _ in self.writes), before)
+
+    def assert_supported_http_activation(
+        self,
+        *,
+        native_apply: bool,
+        interrupted: bool = False,
+        in_progress: bool = False,
+        failed: bool = False,
+    ) -> None:
         import asyncio
         from control_plane.http_app import create_launchplane_fastapi_app
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
@@ -1368,7 +1644,64 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(planned.status_code, 202, planned.text)
         self.assertEqual(planned.json()["result"]["plan_sha256"], self.planned.plan_sha256)
         if native_apply:
-            applied = asyncio.run(post("apply"))
+            if failed:
+                self.failed_image_type = "application"
+            if interrupted:
+                self.lose_create = True
+                with patch.object(
+                    self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+                ):
+                    first = asyncio.run(post("apply"))
+                self.assertEqual(first.status_code, 409, first.text)
+                self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+            if in_progress:
+                from threading import Event
+                from tests.support.http import lifespan_client
+
+                started, release = Event(), Event()
+
+                def pause(**kwargs: Any) -> Any:
+                    if kwargs["path"] == "/api/project.create":
+                        started.set()
+                        if not release.wait(30):
+                            raise TimeoutError("The test did not release original placement.")
+                    return self.provider(**kwargs)
+
+                async def concurrent() -> Any:
+                    async with lifespan_client(app) as client:
+                        body = self.request.model_dump(mode="json") | {"mode": "apply"}
+                        headers = {
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "activation",
+                        }
+                        first = asyncio.create_task(
+                            request(
+                                client,
+                                "POST",
+                                ROUTE.format(product=self.product),
+                                headers=headers,
+                                payload=body,
+                            )
+                        )
+                        try:
+                            self.assertTrue(await asyncio.to_thread(started.wait, 10))
+                            second = await request(
+                                client,
+                                "POST",
+                                ROUTE.format(product=self.product),
+                                headers=headers,
+                                payload=body,
+                            )
+                            self.assertEqual(second.status_code, 409, second.text)
+                            self.assertEqual(second.json()["error"]["code"], "mutation_in_progress")
+                        finally:
+                            release.set()
+                        return await first
+
+                with patch("control_plane.dokploy.api.dokploy_request", side_effect=pause):
+                    applied = asyncio.run(concurrent())
+            else:
+                applied = asyncio.run(post("apply"))
             self.assertEqual(applied.status_code, 202, applied.text)
             self.assertEqual(asyncio.run(post("apply")).status_code, 202)
             before = tuple(self.writes)
@@ -1380,7 +1713,14 @@ class ApplicationFlowTests(unittest.TestCase):
         receipt = asyncio.run(post("receipt"))
         self.assertEqual(receipt.status_code, 202, receipt.text)
         self.assertTrue(receipt.json()["result"]["deployment_requested"])
-        self.assertTrue(receipt.json()["result"]["separation_verified"])
+        self.assertEqual(receipt.json()["result"]["separation_verified"], not failed)
+        if failed:
+            self.assertFalse(receipt.json()["result"]["applied"])
+            self.assertEqual(receipt.json()["result"]["reason"], "candidate_deployment_failed")
+            for mode in ("readback", "dry-run"):
+                observed = asyncio.run(post(mode))
+                self.assertEqual(observed.status_code, 202, observed.text)
+                self.assertEqual(observed.json()["result"], receipt.json()["result"])
         self.assertNotIn("retained-only-password", receipt.text)
 
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
@@ -1539,6 +1879,188 @@ class ApplicationFlowTests(unittest.TestCase):
         opener.open.side_effect = health
         self.enterContext(patch("urllib.request.build_opener", return_value=opener))
         return routing
+
+    def test_database_clock_stamps_fresh_route_observation_under_service_skew(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        self.addressed()
+        self.prepare()
+
+        def ahead() -> str:
+            return (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        with patch(
+            "control_plane.testing_application_activation.utc_now_timestamp", side_effect=ahead
+        ):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+
+    def test_addressed_publication_correction_restores_route_and_allows_fresh_generation(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing = self.addressed()
+        self.prepare()
+        write = self.store.write_testing_activation
+        corrected: list[Any] = []
+
+        def correct(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"] and not corrected:
+                record = self.adapter.current()
+                readiness = record.application_readiness
+                assert readiness is not None and readiness.route is not None
+                self.assertEqual(
+                    observe_testing_route(
+                        readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+                    ),
+                    readiness.backend,
+                )
+                (runtime,) = self.store.list_runtime_environment_records(
+                    context_name=self.context, instance_name="testing"
+                )
+                runtime.env["APPLICATION_MODE"] = "permanent-reviewed-correction"
+                self.store.write_runtime_environment_record(runtime)
+                corrected.append(runtime)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correct):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        assert record.failure is not None
+        self.assertEqual(record.failure.kind, "publication_refused")
+        self.assertFalse(record.published)
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        self.assertEqual(
+            observe_testing_route(
+                readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+            ),
+            readiness.route.old_backend,
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                context_name=self.context, instance_name="testing"
+            ),
+            (corrected[0],),
+        )
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
+        old_target = record.target_id
+        # A second refused generation restores the same effective authority;
+        # it must not make the next template selection artificially ambiguous.
+        self.prepare("second-route-refusal")
+        self.activation_key = "second-route-refusal"
+        with patch.object(
+            self.adapter, "publish_application", side_effect=OSError("Publication unavailable")
+        ):
+            second = self.activate()
+        self.assertEqual(second.status, "completed", second)
+        failure = self.adapter.current().failure
+        assert failure is not None
+        self.assertEqual(failure.kind, "publication_refused")
+        self.prepare("after-route-refusal")
+        self.activation_key = "after-route-refusal"
+        successor = self.activate()
+        self.assertEqual(successor.status, "completed", successor)
+        self.assertNotEqual(self.adapter.current().target_id, old_target)
+        self.assertTrue(self.adapter.current().published)
+
+    def test_lost_inverse_reply_settles_its_original_and_never_resumes_forward(self) -> None:
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing = self.addressed()
+        self.prepare()
+        native = routing.command
+        lost = False
+
+        def lose_inverse(arguments: list[str], **kwargs: Any) -> Any:
+            nonlocal lost
+            result = native(arguments, **kwargs)
+            record = self.adapter.current()
+            readiness = record.application_readiness
+            if (
+                readiness is not None
+                and readiness.route is not None
+                and not lost
+                and record.phase == "restoring_application_route"
+                and routing.route_file.exists()
+                and arguments[1:3] == ["exec", "-i"]
+                and observe_testing_route(
+                    readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+                )
+                == readiness.route.old_backend
+            ):
+                lost = True
+                raise subprocess.TimeoutExpired(arguments, 1)
+            return result
+
+        with (
+            patch.object(routing, "command", side_effect=lose_inverse),
+            patch.object(
+                self.adapter, "publish_application", side_effect=OSError("Publication unavailable")
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertTrue(lost)
+        self.assertEqual(first.status, "reconcile_required", first)
+        self.assertEqual(self.adapter.current().phase, "restoring_application_route")
+        before = tuple(self.writes)
+        result = self.activate()
+        self.assertIn(result.status, {"completed", "adopted"}, result)
+        failure = self.adapter.current().failure
+        assert failure is not None
+        self.assertEqual(failure.kind, "publication_refused")
+        self.assertEqual(tuple(self.writes), before)
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+
+    def test_newer_serving_target_blocks_inverse_without_overwriting_correction(self) -> None:
+        routing = self.addressed()
+        self.prepare()
+        write = self.store.write_testing_activation
+        corrected: list[Any] = []
+
+        def correct(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"] and not corrected:
+                target_id = self.store.read_dokploy_target_id_record(
+                    context_name=self.context, instance_name="testing"
+                )
+                correction = target_id.model_copy(
+                    update={"target_id": "independent-newer-recipient"}
+                )
+                self.store.write_dokploy_target_id_record(correction)
+                corrected.append(correction)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correct):
+            result = self.activate()
+        self.assertEqual(result.status, "reconcile_required", result)
+        self.assertIsNone(self.adapter.current().failure)
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            corrected[0],
+        )
+        self.assertTrue(routing.route_file.exists())
+        self.assertEqual(self.canonical_password(), "retained-only-password")
 
     def test_addressed_native_physical_writer_keeps_origin_and_final_product_check_pending(
         self,

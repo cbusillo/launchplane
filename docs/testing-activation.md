@@ -23,7 +23,7 @@ Use `scripts/stage-testing-separation.py resources-dry-run` and
 `resources-apply` with `--application-file <private-specification.json>` for
 preparation. Put that identical object in the activation request's `application`
 field, then use `scripts/activate-generic-web-testing.py --request-file ...`
-through the installed operator transport. Keep both reviews and original keys.
+through the installed admin transport. Keep both reviews and original keys.
 
 The reviewed specification supplies the profile's actual `runtime_port` and
 `health_path`, the existing provider network name and one explicit state shape:
@@ -97,7 +97,39 @@ identity/job readback; absence is not permission to repeat. Final target,
 runtime-binding and custody publication is one transaction, including lease,
 predecessor inventory/deployment and route-authority checks. Failed publication
 leaves the old canonical target and runtime delivery intact and reuses the
-original staged credential versions.
+original staged credential versions. Application storage names bind the actual
+original preparation operation as well as its reviewed authority. A new
+preparation key therefore allocates independent resources after a refused
+candidate; replaying the original key keeps its original resources. Legacy
+Compose allocation names retain their existing contract.
+
+A refusal before the first provider checkpoint releases that unused activation
+reservation, so a fresh review and key can proceed. After the fixed read-only
+retained-capability inspection, a refusal before recipient creation instead
+completes a negative original receipt while preserving that inspection's schedule
+custody. An exactly attributed failed private application or state deployment
+can also complete negatively while retaining its recipient, credentials and
+volumes. Neither outcome says that a running process stopped or that old unknown
+work became terminal. Missing, foreign, duplicate or running deployment evidence
+and ordinary health/transport errors retain the original unknown fence.
+
+If addressed routing changed before canonical publication refused, apply first
+records its restoration decision, settles the original forward writer, and uses
+a separate original inverse writer to restore the captured predecessor. The old
+executor lock, serving-target authority, route file, runtime identity and native
+writer custody remain required. A newer serving target or foreign route pauses
+recovery instead of restoring over a correction. An interrupted inverse resumes
+only that inverse under the original activation key. A completed inverse can
+supply the exact restored route template to another generation without qualifying
+the refused activation for lifecycle or hold lifting.
+
+These completed negative outcomes return `outcome: refused`, `applied: false`
+and `separation_verified: false` from apply, receipt and readback. The supported
+client saves that result truthfully. Keep its evidence and retained resources;
+review a new independent preparation and activation key to continue. Corrected
+configuration and staff-use records stay unchanged. A staff-use observation must
+permit testing before any new forward attempt. Public readiness observation and
+publication freshness use the same database clock.
 
 The exact completed activation permits an ordinary forward deployment to start
 with a fresh lifecycle baseline on the new application. It skips only the

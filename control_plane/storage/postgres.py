@@ -12052,7 +12052,42 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             before = TestingActivationRecord.model_validate(expected) if expected else None
-            if before is None or not before.published:
+            refused = record.failure is not None
+            restoring = record.phase in {
+                "restoring_application_route",
+                "refusing_private_candidate",
+            }
+            receipt_only = refused or restoring
+            if restoring and (
+                record.request.application is None
+                or record.published
+                or bundle is not None
+                or before is None
+                or before.published
+                or before.failure is not None
+                or before.application_readiness is None
+                or before.application_readiness.private_health is None
+                or before.application_readiness.private_health.status != "pass"
+                or (before.application_readiness.route is not None)
+                != (record.phase == "restoring_application_route")
+                or before.model_dump(exclude={"phase"}) != record.model_dump(exclude={"phase"})
+            ):
+                raise ValueError(
+                    "Route restoration can only preserve original unpublished custody."
+                )
+            if refused and (
+                record.request.application is None
+                or record.published
+                or record.phase != "refused"
+                or bundle is not None
+                or before is None
+                or before.published
+                or before.failure is not None
+                or before.model_dump(exclude={"phase", "failure"})
+                != record.model_dump(exclude={"phase", "failure"})
+            ):
+                raise ValueError("Refusal can only append original unpublished custody evidence.")
+            if not receipt_only and (before is None or not before.published):
                 safety_row = session.get(
                     LaunchplaneDisposableLaneSafetyRow,
                     (record.product, record.context, "testing"),
@@ -12069,7 +12104,7 @@ class PostgresRecordStore(HumanSessionStore):
 
                 if before is None:
                     raise ValueError("Application custody starts in its real original intent.")
-                if not before.published:
+                if not before.published and not receipt_only:
                     target_row = session.get(
                         LaunchplaneDokployTargetRow,
                         (record.context, "testing"),
@@ -12095,17 +12130,18 @@ class PostgresRecordStore(HumanSessionStore):
                         != before.retained_target_id
                     ):
                         raise ValueError("The retained application target authority changed.")
-                if configuration_digest(
+                if not receipt_only and configuration_digest(
                     self, record.product, record.context, version=record.configuration_version
                 ) != (before.generated_configuration_sha256 or before.configuration_sha256):
                     raise ValueError("Application configuration changed before custody committed.")
-                profile = self.read_product_profile_record(record.product)
                 assert record.request.application is not None
-                if (profile.runtime_port, profile.health_path) != (
-                    record.request.application.runtime_port,
-                    record.request.application.health_path,
-                ):
-                    raise ValueError("The application runtime contract changed.")
+                if not receipt_only:
+                    profile = self.read_product_profile_record(record.product)
+                    if (profile.runtime_port, profile.health_path) != (
+                        record.request.application.runtime_port,
+                        record.request.application.health_path,
+                    ):
+                        raise ValueError("The application runtime contract changed.")
             if bundle is not None:
                 self._write_product_authority_bundle(
                     bundle, write_session=session, commit=False, write_transaction_started=True
@@ -12123,6 +12159,72 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError(
                         "Application custody belongs to a different original operation."
                     )
+                if restoring:
+                    from control_plane.testing_application_activation import (
+                        require_retained_route_authority,
+                    )
+
+                    assert before is not None
+                    require_retained_route_authority(self, before)
+                if refused:
+                    from control_plane.testing_application_activation import (
+                        undispatched_application_recipient,
+                    )
+
+                    assert before is not None and record.failure is not None
+                    failure = record.failure
+                    if failure.kind == "authority_refused_before_recipient":
+                        if not undispatched_application_recipient(before, reservation):
+                            raise ValueError("Recipient dispatch cannot be excluded.")
+                    elif failure.kind == "publication_refused":
+                        from control_plane.testing_application_activation import (
+                            require_retained_route_authority,
+                            completed_application_inverse,
+                        )
+
+                        require_retained_route_authority(self, before)
+                        readiness = before.application_readiness
+                        if (
+                            readiness is None
+                            or readiness.private_health is None
+                            or readiness.private_health.status != "pass"
+                        ):
+                            raise ValueError("The original private readiness is unavailable.")
+                        if readiness.route is not None:
+                            if (
+                                before.phase != "restoring_application_route"
+                                or not completed_application_inverse(self, before)
+                            ):
+                                raise ValueError("The original inverse route is not completed.")
+                        elif before.phase != "refusing_private_candidate":
+                            raise ValueError(
+                                "The original private refusal decision is unavailable."
+                            )
+                    else:
+                        from control_plane.dokploy.api import _DEPLOYMENT_FAILURE_STATUSES
+
+                        target_type = (
+                            "application"
+                            if before.phase == "deploy_application_deployment_id"
+                            else "compose"
+                            if before.phase == "deploy_state_deployment_id"
+                            else ""
+                        )
+                        target_id = (
+                            before.target_id
+                            if target_type == "application"
+                            else before.state_recipient.get("target_id", "")
+                        )
+                        if (
+                            not target_type
+                            or failure.target_type != target_type
+                            or failure.target_id != target_id
+                            or not failure.deployment_id
+                            or failure.deployment_status not in _DEPLOYMENT_FAILURE_STATUSES
+                            or before.application_readiness is not None
+                            and before.application_readiness.route is not None
+                        ):
+                            raise ValueError("The original private failed deployment is unproved.")
                 row = session.scalar(
                     self._idempotency_statement(
                         scope=reservation.scope,
@@ -12255,6 +12357,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "state_recipient",
                     "application_readiness",
                     "published_route_binding",
+                    "failure",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")

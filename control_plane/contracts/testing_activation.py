@@ -93,6 +93,20 @@ class TestingActivationRequest(BaseModel):
     )
 
 
+class TestingActivationFailure(BaseModel):
+    """Original-operation refusal evidence, without a process-cessation claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[
+        "authority_refused_before_recipient", "candidate_deployment_failed", "publication_refused"
+    ]
+    target_type: Literal["", "application", "compose"] = ""
+    target_id: str = ""
+    deployment_id: str = ""
+    deployment_status: str = ""
+
+
 class TestingActivationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +155,9 @@ class TestingActivationRecord(BaseModel):
     published_route_binding: EnvironmentRouteBindingRecord | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    failure: TestingActivationFailure | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class TestingActivationPlan(BaseModel):
@@ -167,3 +184,13 @@ class TestingActivationResult(TestingActivationPlan):
     applied: Literal[True] = True
     separation_verified: Literal[True] = True
     qualified_at: str
+
+
+class TestingActivationRefusedResult(TestingActivationPlan):
+    outcome: Literal["refused"] = "refused"
+    applied: Literal[False] = False
+    separation_verified: Literal[False] = False
+    reason: Literal[
+        "authority_refused_before_recipient", "candidate_deployment_failed", "publication_refused"
+    ]
+    resources_retained: Literal[True] = True

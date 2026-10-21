@@ -566,6 +566,13 @@ hold and historical fence. Its exact-receipt hold continuation is the bounded
 exception to the ordinary Director-agent staging-lift refusal described above.
 It proves separation before requesting normal testing reconciliation.
 
+Application resource allocations bind their original preparation operation, so
+a distinct reviewed preparation creates fresh storage even when the lane's
+configuration is unchanged. A refused activation retains those resources and
+its truthful negative receipt; it does not clear unknown historical work. See
+[activation recovery](testing-activation.md) for private failed candidates and
+addressed route restoration before another independent generation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
