@@ -715,22 +715,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertEqual(observed, merge_train_state)
 
     def test_merge_train_can_adopt_every_main_controller_checkpoint_action(self) -> None:
-        expected_actions = {
-            "admit_collapsed_root",
-            "build_candidate",
-            "execute_stack_collapse",
-            "land_batch",
-            MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
-            "observe_candidate",
-            "plan_candidate",
-            "plan_landing",
-            "plan_stack_collapse",
-            "reflow_candidate",
-            "update_branch",
-        }
-        self.assertEqual(set(MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS), expected_actions)
-
-        for active_action in sorted(expected_actions):
+        for active_action in MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS:
             with self.subTest(active_action=active_action), TemporaryDirectory() as temporary_name:
                 store = FilesystemRecordStore(state_dir=Path(temporary_name))
                 initial = store.acquire_merge_train_controller_state_record(

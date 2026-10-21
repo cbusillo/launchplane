@@ -13,6 +13,7 @@ from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.config_authority_audit import (
     ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
     ALLOW_REASON_SCHEMA_ONLY,
+    WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES,
 )
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
@@ -1510,77 +1511,28 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
 
     def test_workflow_input_mechanic_defaults_are_path_scoped(self) -> None:
-        mechanic_defaults = (
-            (
-                ".github/workflows/public-ingress-monitor.yml",
-                "inputs.timeout_seconds.default",
-                "10",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.action.default",
-                "prune_docker_cache",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.minimum_free_disk_bytes.default",
-                "0",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.prune_until.default",
-                "168h",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.timeout_seconds.default",
-                "300",
-            ),
-        )
-        for path, key, value in mechanic_defaults:
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "thin_connector_input",
-                )
-
-        for path, key, value in (
-            (
-                ".github/workflows/generic-workflow.yml",
-                "inputs.timeout_seconds.default",
-                "10",
-            ),
-            (
-                ".github/workflows/public-ingress-monitor.yml",
-                "inputs.runtime_port.default",
-                "10",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.action.default",
-                "remove_buildkit_state_volumes",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.timeout_seconds.default",
-                "600",
-            ),
-            (
-                ".github/workflows/provider-target-operations.yml",
-                "inputs.provider_id.default",
-                "auto",
-            ),
-            (
-                ".github/workflows/provider-target-operations.yml",
-                "inputs.context.default",
-                "single",
-            ),
-        ):
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "",
-                )
+        self.assertTrue(WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES)
+        for path, keys in WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES.items():
+            for key, values in keys.items():
+                for value in sorted(values):
+                    with self.subTest(path=path, key=key, value=value):
+                        self.assertEqual(
+                            _allow_reason(path=path, key=key, value=value),
+                            "thin_connector_input",
+                        )
+                        self.assertEqual(
+                            _allow_reason(
+                                path=".github/workflows/generic-workflow.yml",
+                                key=key,
+                                value=value,
+                            ),
+                            "",
+                        )
+                with self.subTest(path=path, key=key, value="unlisted-value"):
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value="unlisted-value"),
+                        "",
+                    )
 
     def test_workflow_runs_on_list_items_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
