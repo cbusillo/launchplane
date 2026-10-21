@@ -394,6 +394,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 request_fingerprint=reservation.request_fingerprint,
                 reconciliation_key=reservation.reconciliation_key,
             )
+            provider.original_operation_key = operation
             record, _records, _result = build_observed_generic_web_deploy(
                 record_store=first,
                 profile=profile,
