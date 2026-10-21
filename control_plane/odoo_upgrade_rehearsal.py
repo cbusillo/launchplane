@@ -14,6 +14,12 @@ from typing import cast
 import click
 
 from control_plane import secrets
+from control_plane._odoo_rehearsal_business_validation import (
+    business_entrypoint_check_script,
+    business_entrypoint_schedule,
+    final_business_database,
+    BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
+)
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_stable_target_replacement import artifact_odoo_version
@@ -262,10 +268,6 @@ def rehearsal_inputs(
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if request.business_validation is not None and (
-            request.business_validation.source_commit != previous.target_artifact.source_commit
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
         if (
             request.action == "verify"
             and previous.business_validations
@@ -418,6 +420,19 @@ def rehearsal_resource(record: OdooUpgradeRehearsalRecord) -> OdooRehearsalResou
         target_id=record.compose_id,
         namespace=record.rehearsal_id,
     )
+
+
+def business_validation_identity(
+    record: OdooUpgradeRehearsalRecord, operation_key: str
+) -> dict[str, str]:
+    return {
+        "product": record.product,
+        "rehearsal_id": record.rehearsal_id,
+        "artifact_id": record.target_artifact.artifact_id,
+        "source_commit": record.target_artifact.source_commit,
+        "database": final_business_database(record.rehearsal_id),
+        "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
+    }
 
 
 def rehearsal_host_program() -> str:
@@ -599,6 +614,35 @@ class OdooRehearsalAdapter:
             }
         ).binding_sha256
 
+    def can_retry_empty_prepare(self, record: OdooUpgradeRehearsalRecord, phase: str) -> bool:
+        from control_plane.dokploy import post_deploy
+        from control_plane.dokploy.sandbox_placement import created_placement
+
+        if (
+            self.request.action != "prepare"
+            or phase
+            or record.state != "planned"
+            or any((record.project_id, record.environment_id, record.compose_id))
+            or record.credential_bindings_sha256
+            or record.copies
+            or record.elapsed_seconds
+        ):
+            return False
+        fresh, _, _ = self.inputs()
+        if fresh != record or any(created_placement(self.root, record.rehearsal_id)):
+            return False
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        name, app_name = business_entrypoint_schedule(record.rehearsal_id)
+        schedule = api.find_matching_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=record.server_id,
+            schedule_type="server",
+            schedule_name=name,
+            app_name=app_name,
+        )
+        return not post_deploy._has_running_schedule_deployment(schedule)
+
     def partial_prepare_project(self, record: OdooUpgradeRehearsalRecord, phase: str) -> str:
         from control_plane.dokploy.sandbox_placement import observe_empty_isolated_project
 
@@ -692,9 +736,12 @@ class OdooRehearsalAdapter:
         reason = "operation_not_recoverable"
         if journal["operation_state"] == "reconcile_required" and not record.compose_id:
             try:
-                self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
+                if self.can_retry_empty_prepare(record, str(journal["provider_effect_phase"])):
+                    reason = "empty_original_placement_observed"
+                else:
+                    self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
+                    reason = "empty_original_project_observed"
                 disposition = "continue_original_prepare"
-                reason = "empty_original_project_observed"
             except api.DokployRequestFailed as error:
                 if error.status_code in {401, 403}:
                     raise
@@ -1009,14 +1056,7 @@ class OdooRehearsalAdapter:
         return rehearsal_inputs(self.root, self.store, self.product, self.request, self.principal)
 
     def reviewed_binding(self, record: OdooUpgradeRehearsalRecord) -> str:
-        if self.request.business_validation is None:
-            return record.binding_sha256
-        return canonical_json_sha256(
-            {
-                "record": record.binding_sha256,
-                "validation": self.request.business_validation.sha256,
-            }
-        )
+        return record.binding_sha256
 
     def run_script(
         self, record: OdooUpgradeRehearsalRecord, script: str, checkpoint: Callable[[], None]
@@ -1095,6 +1135,72 @@ class OdooRehearsalAdapter:
             on_observation=self.checkpoint_remote_job if self._cooperative_wait else None,
         )
 
+    def check_business_entrypoint(
+        self, record: OdooUpgradeRehearsalRecord, operation_key: str, checkpoint: Callable[[], None]
+    ) -> None:
+        """Check the pinned image on its bound server before allocating a copy."""
+        from control_plane.dokploy import post_deploy
+
+        image = record.target_artifact.image.repository + "@" + record.target_artifact.image.digest
+        binding = {
+            "intent_sha256": record.intent_sha256,
+            "record_binding_sha256": record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
+            "image": image,
+        }
+        script = business_entrypoint_check_script(image, binding)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        name, app_name = business_entrypoint_schedule(record.rehearsal_id)
+        schedule = api.find_matching_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=record.server_id,
+            schedule_type="server",
+            schedule_name=name,
+            app_name=app_name,
+        )
+        if post_deploy._has_running_schedule_deployment(schedule):
+            raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE)
+        evidence = post_deploy.run_manual_data_schedule(
+            host=host,
+            token=token,
+            target_definition=source.DokployTargetDefinition(
+                context=record.rehearsal_id, instance="rehearsal"
+            ),
+            schedule_lookup_id=record.server_id,
+            schedule_type="server",
+            schedule_name=name,
+            schedule_app_name=app_name,
+            schedule_payload={
+                "name": name,
+                "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+                "appName": app_name,
+                "shellType": "bash",
+                "scheduleType": "server",
+                "command": "control-plane isolated candidate capability check",
+                "script": script,
+                "serverId": record.server_id,
+                "enabled": False,
+                "timezone": "UTC",
+            },
+            resolved_schedule_execution_timeout_seconds=BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
+            before_provider_mutation=lambda _phase: checkpoint(),
+        )
+        try:
+            result = json.loads(bytes.fromhex(evidence["rehearsal_result"]))
+        except (KeyError, ValueError):
+            raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE) from None
+        if (
+            not isinstance(result, dict)
+            or set(result) != {*binding, "status"}
+            or any(result[key] != value for key, value in binding.items())
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if result["status"] == "entrypoint_unavailable":
+            raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
+        if result["status"] != "available":
+            raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE)
+
     def host_script(
         self,
         record: OdooUpgradeRehearsalRecord,
@@ -1121,14 +1227,9 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
-        if self.request.business_validation is not None:
-            from control_plane._odoo_rehearsal_business_validation import business_validation_runner
-
-            plan = self.request.business_validation
-            spec["business_validation"] = plan.model_dump(mode="json")
-            spec["business_validation_sha256"] = plan.sha256
-            spec["business_validation_runner"] = business_validation_runner(
-                plan.model_dump(mode="json")
+        if self.request.action == "validate-business":
+            spec["business_validation_identity"] = business_validation_identity(
+                record, operation_key
             )
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
@@ -1254,7 +1355,7 @@ class OdooRehearsalAdapter:
             if (
                 not isinstance(pending, dict)
                 or mode != "observe"
-                or self.request.business_validation is None
+                or self.request.action != "validate-business"
                 or result["completed"] is not False
                 or result["business_validation"] is not None
                 or result["business_validation_postcheck_verified"] is not False
@@ -1265,7 +1366,7 @@ class OdooRehearsalAdapter:
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             result["diagnostics_private"] = True
-        if self.request.business_validation is not None and (
+        if self.request.action == "validate-business" and (
             result.get("completed") is True or pending is not None
         ):
             validation = (
@@ -1273,22 +1374,9 @@ class OdooRehearsalAdapter:
                 if isinstance(pending, dict)
                 else result.get("business_validation")
             )
-            plan = self.request.business_validation
-            if not isinstance(validation, dict) or (
-                validation["validation_sha256"] != plan.sha256
-                or validation["database"] != plan.database
-                or validation["source_commit"] != record.target_artifact.source_commit
-                or validation["attempt_sha256"]
-                != canonical_json_sha256({"operation_key": operation_key})
-                or [step["key"] for step in validation["steps"]]
-                != [step.key for step in plan.steps][: len(validation["steps"])]
-                or (
-                    validation["passed"]
-                    and (
-                        len(validation["steps"]) != len(plan.steps)
-                        or not all(step["passed"] for step in validation["steps"])
-                    )
-                )
+            expected = business_validation_identity(record, operation_key)
+            if not isinstance(validation, dict) or any(
+                validation[key] != value for key, value in expected.items()
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result
@@ -1414,6 +1502,14 @@ class OdooRehearsalAdapter:
                 ):
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
+                if self.request.action == "prepare" and not provider_effect_phase:
+                    if (
+                        record.binding_sha256 != self.request.reviewed_plan_sha256
+                        or not self.can_retry_empty_prepare(record, provider_effect_phase)
+                    ):
+                        return ProviderObservation("unknown")
+                    check()
+                    return ProviderObservation("absent", retry_safe=True)
                 if self.request.action == "prepare" and provider_effect_phase == "project_id":
                     if self.initial_prepare_binding(record) != self.request.reviewed_plan_sha256:
                         return ProviderObservation("unknown")
@@ -1580,6 +1676,21 @@ class OdooRehearsalAdapter:
                         ) from None
                     except BridgeNetworkCapacityRefused as error:
                         raise ProviderMutationRejectedError(error) from None
+                    try:
+                        self.check_business_entrypoint(record, provider_operation_key, checkpoint)
+                    except api.DokployRequestFailed as error:
+                        raise ProviderMutationRejectedError(
+                            RehearsalPreparationReadRefused(error)
+                        ) from None
+                    except (ValueError, OSError, click.ClickException, RehearsalRefused) as error:
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=error.code
+                                if isinstance(error, RehearsalRefused)
+                                else RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                            )
+                        ) from None
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
                 prepare_rehearsal_local_credentials(

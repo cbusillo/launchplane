@@ -15,7 +15,6 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_rehearsal_business_validation import (
-    BusinessValidation,
     BusinessValidationReceipt,
 )
 
@@ -113,24 +112,9 @@ class OdooUpgradeRehearsalRequest(BaseModel):
     storage: OdooTestingDrillStorageBudget
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
-    business_validation: BusinessValidation | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @model_validator(mode="after")
-    def validation_action(self) -> "OdooUpgradeRehearsalRequest":
-        if (self.action == "validate-business") != (self.business_validation is not None):
-            raise ValueError("Only validate-business requires a product-owned batch.")
-        if self.business_validation is not None and self.business_validation.database != (
-            self.rehearsal_id.replace("-", "_") + "_final_upgrade"
-        ):
-            raise ValueError("Validation requires this rehearsal's final copied database.")
-        return self
 
     def intent(self) -> dict[str, object]:
-        return self.model_dump(
-            mode="json", exclude={"mode", "action", "reviewed_plan_sha256", "business_validation"}
-        )
+        return self.model_dump(mode="json", exclude={"mode", "action", "reviewed_plan_sha256"})
 
 
 class RehearsalCopyReceipt(BaseModel):
@@ -431,7 +415,9 @@ class RehearsalHostResult(BaseModel):
         Literal["reference_present", "reference_not_found", "unavailable", "incomplete"] | None
     ) = None
     refusal_code: Literal[
-        "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
+        "",
+        "rehearsal_storage_capacity_insufficient",
+        "rehearsal_precheck_refused",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     business_validation: BusinessValidationReceipt | None = None
