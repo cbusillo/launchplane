@@ -66,7 +66,10 @@ from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
     build_protected_artifact_set,
 )
-from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
+from control_plane.contracts.repo_product_mapping_read_model import (
+    RepoProductMapping,
+    build_repo_product_mapping_service_payload,
+)
 from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
@@ -104,10 +107,6 @@ from control_plane.tenant_admission_status import (
     TENANT_ADMISSION_STATUS_READ_ACTION,
     require_tenant_admission_status_store,
 )
-from control_plane.work_graph_service import (
-    WorkGraphPlanningFactsProvider,
-    build_repo_product_mapping_service_payload,
-)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -115,7 +114,6 @@ from control_plane.workflows.ship import utc_now_timestamp
 class ProductReadRouteDependencies:
     common: ReadRouteDependencies
     read_product_profile_list_identity: Callable[..., LaunchplaneIdentity | None]
-    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None
     workflow_credentials_ready: Callable[[str, str], bool]
     control_plane_root: FileSystemPath
     github_token: Callable[..., str]
@@ -1021,32 +1019,12 @@ def register_agent_context_read_routes(
             else None
         )
 
-        def action_allowed(
-            requested_action: str,
-            requested_product: str,
-            requested_context: str,
-            requested_instances: tuple[str, ...],
-        ) -> bool:
-            return common.authorization_allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-                target=(
-                    AuthorizationTarget(scope="instance", instances=requested_instances)
-                    if requested_instances
-                    else AuthorizationTarget(scope="context")
-                ),
-            )
-
         context_payload = build_agent_context_service_payload(
             generated_at=utc_now_timestamp(),
             repository=repository,
             product_store=context_store,
             work_request_store=context_store,
             preview_readiness_store=context_store,
-            action_allowed=action_allowed,
-            planning_facts_provider=dependencies.work_graph_planning_facts_provider,
             tenant_admission_section=tenant_admission_section,
         )
         return AgentContextResponse(trace_id=trace_id, context=context_payload)

@@ -860,7 +860,6 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     if normalized_action in {
         "agent_write_intent.plan",
         "authz_diagnostic.evaluate",
-        "work_graph.rank",
     } or (normalized_action.endswith(".read")):
         return "read"
     if (

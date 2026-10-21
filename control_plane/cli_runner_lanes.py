@@ -103,28 +103,28 @@ from control_plane.workflows.runner_host_hygiene_qualification import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-def register_runner_lane_commands(work_graph: click.Group) -> None:
-    work_graph.add_command(runner_inventory, name="runner-inventory")
-    work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
-    work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
-    work_graph.add_command(runner_control_plan, name="runner-control-plan")
-    work_graph.add_command(runner_maintainer_plan, name="runner-maintainer-plan")
-    work_graph.add_command(
+def register_runner_lane_commands(main: click.Group) -> None:
+    main.add_command(runner_inventory, name="runner-inventory")
+    main.add_command(runner_queue_wait, name="runner-queue-wait")
+    main.add_command(runner_baseline_observe, name="runner-baseline-observe")
+    main.add_command(runner_control_plan, name="runner-control-plan")
+    main.add_command(runner_maintainer_plan, name="runner-maintainer-plan")
+    main.add_command(
         runner_lane_registration_executor,
         name="runner-lane-registration-executor",
     )
-    work_graph.add_command(
+    main.add_command(
         runner_lane_retirement_executor,
         name="runner-lane-retirement-executor",
     )
-    work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
-    work_graph.add_command(runner_host_hygiene_qualify)
-    work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
-    work_graph.add_command(
+    main.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
+    main.add_command(runner_host_hygiene_qualify)
+    main.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
+    main.add_command(
         runner_host_hygiene_adapter_boundary_plan,
         name="runner-host-hygiene-adapter-boundary-plan",
     )
-    work_graph.add_command(
+    main.add_command(
         runner_host_hygiene_executor,
         name="runner-host-hygiene-executor",
     )

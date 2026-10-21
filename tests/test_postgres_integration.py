@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
@@ -72,6 +73,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
+from tests import test_legacy_odoo_preview_reconciliation as legacy_odoo_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -12808,6 +12810,313 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
+    """Application custody lives in the real original intent, including JSONB progress."""
+
+    def setUp(self) -> None:
+        from tests.test_testing_application_flow import ApplicationFlowTests
+
+        database = _head_postgres_database()
+        self.fixture = ApplicationFlowTests()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+        policy = testing_activation.activation_hold_policy(
+            self.fixture.product, self.fixture.context
+        )
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:application-activation",
+                updated_at=self.fixture.old.now(),
+                policy=policy,
+            )
+        )
+
+    def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.contracts.ingress_route_audit_record import (
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+        )
+        from contextlib import ExitStack
+
+        fixture = self.fixture
+        _, ingress, _ = fixture.private_addressed()
+        fixture.prepare()
+        store = fixture.store
+        edge = store.read_edge_endpoint_record(ingress.request.edge_endpoint_key)
+        audit = store.list_ingress_route_audit_records(
+            product=fixture.product, context_name=fixture.context
+        )[0]
+        writers = [PostgresRecordStore(database_url=store.database_url) for _ in range(3)]
+        for writer in writers:
+            self.addCleanup(writer.close)
+        publishing, locked, release = threading.Event(), threading.Event(), threading.Event()
+        attempted = [threading.Event() for _ in writers]
+        backend_pids: list[int] = []
+        original_write, publication_lock = (
+            store.write_testing_activation,
+            store._lock_product_authority_bundle_write,
+        )
+
+        def write(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                publishing.set()
+                try:
+                    original_write(**kwargs)
+                finally:
+                    publishing.clear()
+            else:
+                original_write(**kwargs)
+
+        deadline = 0.0
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def hold_publication(session: Any) -> None:
+            publication_lock(session)
+            if publishing.is_set():
+                locked.set()
+                if not release.wait(remaining()):
+                    raise TimeoutError(
+                        "Shared concurrency budget expired before the test released publication."
+                    )
+
+        def blocked_writer(index: int, session: Any) -> None:
+            backend_pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+            attempted[index].set()
+            locks[index](session)
+
+        locks = [writer._lock_product_authority_bundle_write for writer in writers]
+        actions = [
+            lambda: writers[0].write_edge_endpoint_record(
+                edge.model_copy(update={"source_label": "test:concurrent-edge"})
+            ),
+            lambda: writers[1].write_ingress_route_audit_record(
+                audit.model_copy(
+                    update={
+                        "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit",
+                        "recorded_at": fixture.old.now(1),
+                    }
+                )
+            ),
+            lambda: writers[2].reserve_mutation(
+                scope="private-concurrent",
+                route_path="/fixture-private-reservation",
+                idempotency_key="private-concurrent",
+                request_fingerprint="private-concurrent",
+                lease_owner="private-concurrent",
+                reconciliation_key="private-concurrent",
+                provider_target_key=ingress.target_key(),
+            ),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(store, "write_testing_activation", side_effect=write))
+            stack.enter_context(
+                patch.object(
+                    store, "_lock_product_authority_bundle_write", side_effect=hold_publication
+                )
+            )
+            for index, writer in enumerate(writers):
+                stack.enter_context(
+                    patch.object(
+                        writer,
+                        "_lock_product_authority_bundle_write",
+                        side_effect=lambda session, index=index: blocked_writer(index, session),
+                    )
+                )
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                deadline = time.monotonic() + 60
+                publication = workers.submit(fixture.activate)
+
+                def require_publication_pending(stage: str) -> None:
+                    if publication.done():
+                        outcome = publication.result()
+                        self.fail(
+                            "Publication finished "
+                            + stage
+                            + ": status="
+                            + str(outcome.status)
+                            + "; phase="
+                            + fixture.adapter.current().phase
+                        )
+
+                try:
+                    while not locked.wait(min(0.05, remaining())):
+                        require_publication_pending("before its checkpoint")
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before the publication checkpoint; phase="
+                                + fixture.adapter.current().phase
+                            )
+                    require_publication_pending("before contender observation")
+                    contenders = [workers.submit(action) for action in actions]
+                    while not all(event.is_set() for event in attempted):
+                        require_publication_pending("before all writer lock callbacks")
+                        for contender in contenders:
+                            if contender.done():
+                                contender.result()
+                                self.fail(
+                                    "A private writer completed before the held publication was released."
+                                )
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before all private writer lock callbacks."
+                            )
+                        time.sleep(min(0.01, remaining()))
+                    blocked = False
+                    while remaining():
+                        require_publication_pending("before PostgreSQL blocking witnesses")
+                        with store._engine.connect() as connection:
+                            blocked = all(
+                                bool(
+                                    connection.scalar(
+                                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                        {"pid": pid},
+                                    )
+                                )
+                                for pid in backend_pids
+                            )
+                        if blocked:
+                            break
+                        time.sleep(min(0.01, remaining()))
+                    self.assertTrue(
+                        blocked,
+                        "Shared concurrency budget expired before all three PostgreSQL blocking witnesses.",
+                    )
+                    require_publication_pending("while private writers were blocked")
+                    self.assertFalse(any(contender.done() for contender in contenders))
+                finally:
+                    release.set()
+                try:
+                    self.assertEqual(publication.result(timeout=remaining()).status, "completed")
+                except TimeoutError:
+                    if publication.done():
+                        raise
+                    self.fail("Shared concurrency budget expired while publication committed.")
+                for contender in contenders:
+                    try:
+                        contender.result(timeout=remaining())
+                    except TimeoutError:
+                        if contender.done():
+                            raise
+                        self.fail(
+                            "Shared concurrency budget expired while a private writer committed."
+                        )
+        self.assertTrue(fixture.adapter.current().published)
+        self.assertEqual(
+            store.read_edge_endpoint_record(edge.endpoint_key).source_label, "test:concurrent-edge"
+        )
+        self.assertIsNotNone(
+            store.read_ingress_route_audit_record(
+                TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit"
+            )
+        )
+        self.assertTrue(
+            any(
+                row.provider_target_key == ingress.target_key()
+                for row in store.list_held_provider_target_reservations()
+            )
+        )
+
+    def test_unfinished_preparing_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_unfinished_private_forward_recovers_and_successor("preparing")
+
+    def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")
+
+    def test_private_same_address_lineage_monitor_and_second_generation(self) -> None:
+        self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
+
+    def test_original_intent_progress_and_native_forward_continuation(self) -> None:
+        self.fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+    def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
+        self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()
+
+    def test_expired_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_expired_execution_rolls_back_target_and_delivery()
+
+    def test_replaced_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_replaced_execution_rolls_back_target_and_delivery()
+
+    def test_later_supported_hold_correction_prevents_publication(self) -> None:
+        self.fixture.test_later_supported_hold_correction_refuses_final_publication()
+
+    def test_new_staff_use_prevents_fresh_creation(self) -> None:
+        self.fixture.test_new_staff_use_refuses_before_fresh_creation()
+
+    def test_supported_application_route_original_intent_and_key_replay(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
+
+    def test_in_progress_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, in_progress=True)
+
+    def test_refused_http_apply_readback_and_receipt_remain_unqualified(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, failed=True)
+
+    def test_pre_effect_refusal_releases_for_fresh_review(self) -> None:
+        self.fixture.test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key()
+
+    def test_post_inspector_permanent_refusal_keeps_custody_and_continues(self) -> None:
+        self.fixture.test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues()
+
+    def test_failed_private_candidate_retains_resources_for_distinct_generation(self) -> None:
+        self.fixture.test_lost_failed_private_application_keeps_resources_and_new_generation()
+
+    def test_publication_refusal_restores_route_before_next_generation(self) -> None:
+        self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
+
+    def test_terminal_private_job_correction_before_health_keeps_original_custody(self) -> None:
+        self.fixture.test_terminal_private_candidate_correction_does_not_require_passing_health()
+
+    def test_answered_unused_placement_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_placement_correction_retains_unused_candidate()
+
+    def test_staged_private_inputs_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_staged_private_inputs_correction_retains_unused_candidate()
+
+    def test_answered_mount_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_mount_correction_retains_unused_candidate()
+
+    def test_answered_configuration_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_configuration_correction_retains_unused_candidate()
+
+    def test_generic_publication_error_continues_original_forward(self) -> None:
+        self.fixture.test_addressed_generic_publication_error_retries_forward_without_route_rewrite()
+
+    def test_staff_use_pauses_forward_until_reviewed_clear(self) -> None:
+        self.fixture.test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse()
+
+    def test_verified_public_failure_restores_original(self) -> None:
+        self.fixture.test_verified_public_http_failure_restores_original_and_allows_successor()
+
+    def test_verified_private_failure_retains_candidate(self) -> None:
+        self.fixture.test_verified_private_http_failure_retains_candidate_and_allows_successor()
+
+    def test_proxy_restart_before_inverse_preserves_original_directions(self) -> None:
+        self.fixture.test_proxy_restart_before_inverse_retains_distinct_inverse_custody()
+
+    def test_proxy_restart_after_lost_inverse_preserves_original_child(self) -> None:
+        self.fixture.test_proxy_restart_after_lost_inverse_reply_reuses_original_child()
+
+    def test_staff_use_pauses_persisted_inverse_until_reviewed_clear(self) -> None:
+        self.fixture.test_persisted_inverse_pauses_for_staff_use_then_restores_original()
+
+    def test_route_restores_before_foreign_job_holds_negative_receipt(self) -> None:
+        self.fixture.test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt()
+
+
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient_qualification as qualification
@@ -15406,3 +15715,268 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
             saved.record_id,
         )
         self.assertEqual(waiter_store.list_deployment_records(), ())
+
+
+class RealPostgresGenericSiblingOwnershipTests(
+    generic_sibling_tests.LegacyGenericSiblingOwnershipTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        with self.provider_inventory():
+            plan = await self.plan()
+            with peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                    .with_for_update()
+                )
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+            self.assertEqual((await self.apply(plan)).status_code, 202)
+
+
+class RealPostgresLegacyOdooPreviewReconciliationTests(
+    legacy_odoo_tests.LegacyOdooPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_receipt_contention_refuses_without_authority_lock_cycle(self) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = self.produced_sibling()
+        self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+        plan = await self.plan()
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+        )
+        bound = bind_legacy_preview(self.store, request)
+        self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        for identifier in bound.sibling_receipt_ids:
+            with self.subTest(receipt=identifier), peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                    .with_for_update()
+                )
+                # A writer that owns the receipt can need authority next. Apply
+                # must fail immediately rather than waiting in the inverse order.
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
+        self,
+    ) -> None:
+        original = self.historical_generation().model_copy(
+            update={
+                "runtime_identity": None,
+                "state": "verifying",
+                "finished_at": "",
+                "ready_at": "",
+            }
+        )
+        latest = original.model_copy(update={"generation_id": "latest-interrupted", "sequence": 2})
+        for generation in (original, latest):
+            self.store.write_preview_generation_record(generation)
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "state": "pending",
+                    "active_generation_id": latest.generation_id,
+                    "serving_generation_id": "",
+                    "latest_generation_id": latest.generation_id,
+                }
+            )
+        )
+        closed = await self.closed_preview()
+        self.assertEqual(closed.state, "destroyed")
+        self.assertEqual(closed.active_generation_id, "")
+        self.assertEqual(closed.serving_generation_id, "")
+        self.assertEqual(closed.latest_generation_id, latest.generation_id)
+        for generation in (original, latest):
+            self.assertEqual(
+                self.store.read_preview_generation_record(generation.generation_id), generation
+            )
+
+    async def test_actual_odoo_executor_held_elsewhere_blocks_before_provider_observation(
+        self,
+    ) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.contracts.preview_execution import (
+            odoo_preview_target_key,
+            preview_execution_lock_name,
+        )
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product,
+                preview_id=self.preview.preview_id,
+                reason="fixture",
+            ),
+        )
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        name = preview_execution_lock_name(
+            odoo_preview_target_key(
+                context=self.profile.preview.context,
+                compose_name=bound.application_name,
+            )
+        )
+        with peer.testing_replacement_execution_lock(name) as check:
+            self.assertIsNotNone(check)
+            response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.reads)
+        self.assertTrue((await self.plan())["apply_eligible"])
+
+    async def test_custom_physical_executor_shares_logical_preview_fence(self) -> None:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from datetime import datetime, timedelta, timezone
+        from control_plane.workflows.launchplane import generate_preview_id
+
+        now = datetime.now(timezone.utc)
+        await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
+        self.reads.clear()
+        fake = FakePreviewProvider()
+        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        entered = threading.Event()
+        release = threading.Event()
+        execute = fake.execute_apply
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        owner_pid: list[int] = []
+
+        def blocked_execute(**kwargs: Any) -> dict[str, object]:
+            entry = next(
+                item
+                for item in self.store._preview_execution_context.held
+                if item[0] == logical and not item[1]
+            )
+            owner_pid.append(entry[2].scalar(text("SELECT pg_backend_pid()")))
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test provider release was not delivered.")
+            return execute(**kwargs)
+
+        operation.adapter._execute_apply = blocked_execute
+        with patch.object(operation.adapter, "capture_schedule_binding"):
+            execution = asyncio.create_task(asyncio.to_thread(operation.run, self.store))
+            inspection = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                inspection = asyncio.create_task(self.call("inspect"))
+                waiting = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        waiting = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks owner JOIN pg_locks waiter "
+                                    "ON waiter.locktype = owner.locktype AND waiter.database = owner.database "
+                                    "AND waiter.classid = owner.classid AND waiter.objid = owner.objid "
+                                    "AND waiter.objsubid = owner.objsubid "
+                                    "WHERE owner.locktype = 'advisory' AND owner.granted "
+                                    "AND owner.pid = :owner_pid AND NOT waiter.granted"
+                                ),
+                                {"owner_pid": owner_pid[0]},
+                            )
+                        )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(
+                    waiting, "Reconciliation never waited for the actual logical executor"
+                )
+                self.assertFalse(self.reads)
+            finally:
+                release.set()
+                tasks = [execution] + ([inspection] if inspection is not None else [])
+                outcomes = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), 10
+                )
+            result = outcomes[0]
+            if isinstance(result, BaseException):
+                raise result
+            self.assertEqual(result.response_status_code, 202, result.response_payload)
+            self.assertEqual(result.response_payload["result"]["status"], "pass")
+            self.assertEqual(
+                result.response_payload["records"]["lifecycle_evidence_status"], "applied"
+            )
+            runtime = operation.adapter._runtime_identity
+            assert runtime is not None
+            preview = self.store.read_preview_record(self.preview.preview_id)
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, runtime.preview_generation_id)
+            generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.runtime_identity, runtime)
+            response = outcomes[1]
+            if isinstance(response, BaseException):
+                raise response
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertFalse(self.reads)
+
+    def test_lost_logical_transaction_cannot_reacquire_proof_after_autobegin(self) -> None:
+        from control_plane.workflows.launchplane import generate_preview_id
+        from control_plane.legacy_preview_reconciliation import (
+            serialize_legacy_preview_operation,
+            LegacyPreviewReconciliationRequest,
+            bind_legacy_preview,
+        )
+
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product,
+            preview_id=self.preview.preview_id,
+            reason="fixture",
+        )
+        with serialize_legacy_preview_operation(self.store, request):
+            entry = next(
+                value for value in self.store._preview_execution_context.held if value[0] == logical
+            )
+            session = entry[2]
+            session.rollback()
+            session.execute(text("SELECT 1"))
+            with self.assertRaises(ValueError):
+                self.store.preview_refresh_is_excluded(preview_id=logical)
+            with self.assertRaises(ValueError):
+                bind_legacy_preview(self.store, request)
+        self.assertFalse(self.reads)

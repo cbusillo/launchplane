@@ -35,6 +35,11 @@ class PreviewRecord(BaseModel):
     serving_generation_id: str = ""
     latest_generation_id: str = ""
     latest_manifest_fingerprint: str = ""
+    reconciliation_receipt_id: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PreviewRecord":

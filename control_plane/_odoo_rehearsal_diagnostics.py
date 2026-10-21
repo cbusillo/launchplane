@@ -82,7 +82,7 @@ def command_failure_scope(spec,root):
             if isinstance(cause,RehearsalCommandFailure):
                 diagnostic=cause.diagnostic
             cause=cause.__context__
-        if (root/(spec['action']+'.started')).is_file():
+        if (root/(spec.get('receipt_action',spec['action'])+'.started')).is_file():
             try:
                 retain_command_failure(spec,root,diagnostic)
             except OSError:
@@ -126,7 +126,7 @@ def command_diagnostic(arguments,result,environment):
 
 
 def command_failure_path(spec,root):
-    return root/(spec['action']+'-command-failure.json')
+    return root/(spec.get('receipt_action',spec['action'])+'-command-failure.json')
 
 
 def bound_command_failure(spec,diagnostic):

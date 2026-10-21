@@ -7,10 +7,6 @@ import click
 from pydantic import ValidationError
 
 from control_plane.contracts.merge_train_policy import load_merge_train_policy
-from control_plane.contracts.work_graph_read_model import (
-    WorkGraphSnapshot,
-    build_work_graph_queue,
-)
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     build_merge_train_dry_run_result,
@@ -30,29 +26,10 @@ from control_plane.workflows.merge_train_worker import (
 _MERGE_TRAIN_GITHUB_TOKEN_ENV_KEY = "GH_TOKEN"
 
 
-def register_work_graph_core_commands(work_graph: click.Group) -> None:
-    work_graph.add_command(work_graph_rank, name="rank")
-    work_graph.add_command(merge_train_policy, name="merge-train-policy")
-    work_graph.add_command(merge_train_dry_run, name="merge-train-dry-run")
-    work_graph.add_command(merge_train_run_once, name="merge-train-run-once")
-
-
-@click.command("rank")
-@click.option(
-    "--snapshot-file",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="Operator-provided Code Plans/GitHub work graph snapshot JSON.",
-)
-@click.option("--limit", type=click.IntRange(min=1), default=25, show_default=True)
-def work_graph_rank(snapshot_file: Path, limit: int) -> None:
-    try:
-        snapshot_payload = json.loads(snapshot_file.read_text())
-        snapshot = WorkGraphSnapshot.model_validate(snapshot_payload)
-        queue = build_work_graph_queue(snapshot, limit=limit)
-    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
-        raise click.ClickException(str(error)) from error
-    click.echo(json.dumps(queue.model_dump(mode="json"), indent=2, sort_keys=True))
+def register_merge_train_commands(main: click.Group) -> None:
+    main.add_command(merge_train_policy, name="merge-train-policy")
+    main.add_command(merge_train_dry_run, name="merge-train-dry-run")
+    main.add_command(merge_train_run_once, name="merge-train-run-once")
 
 
 @click.command("merge-train-policy")

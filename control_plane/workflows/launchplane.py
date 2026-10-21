@@ -854,8 +854,9 @@ def build_preview_generation_record_from_request(
     *,
     record_store: PreviewMutationRecordStore,
     request: PreviewGenerationMutationRequest,
+    preview_record: PreviewRecord | None = None,
 ) -> PreviewGenerationRecord:
-    preview = find_preview_record(
+    preview = preview_record or find_preview_record(
         record_store=record_store,
         context_name=request.context,
         anchor_repo=request.anchor_repo,
@@ -865,6 +866,12 @@ def build_preview_generation_record_from_request(
         raise click.ClickException(
             f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
+    if (preview.context, preview.anchor_repo, preview.anchor_pr_number) != (
+        request.context,
+        request.anchor_repo,
+        request.anchor_pr_number,
+    ):
+        raise ValueError("Generation request does not match its preview anchor.")
 
     existing_generations = record_store.list_preview_generation_records(
         preview_id=preview.preview_id

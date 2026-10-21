@@ -58,11 +58,11 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.assertEqual(health.observed_runtime_identity, self.identity)
         self.assertEqual(health.urls, (self.base_url + "/launchplane/health",))
 
-    def test_redirect_is_a_failed_same_origin_probe_and_is_never_followed(self) -> None:
+    def test_redirect_remains_pending_and_is_never_followed(self) -> None:
         self.status = 302
         health = read_public_testing_health(self.base_url, "/health")
-        self.assertEqual(health.status, "fail")
-        self.assertTrue(health.verified)
+        self.assertEqual(health.status, "pending")
+        self.assertFalse(health.verified)
         self.assertEqual(self.requests, ["/health"])
 
     def test_unparseable_body_does_not_become_a_verified_failure_or_success(self) -> None:
@@ -70,6 +70,16 @@ class TestingPublicHealthTests(unittest.TestCase):
         health = read_public_testing_health(self.base_url, "/health")
         self.assertFalse(health.verified)
         self.assertEqual(health.status, "pending")
+
+    def test_nonmapping_is_unknown_and_malformed_mapping_preserves_classification(self) -> None:
+        self.body = b"[]"
+        health = read_public_testing_health(self.base_url, "/health", self.identity)
+        self.assertFalse(health.verified)
+        self.assertEqual(health.status, "pending")
+        self.body = b'{"runtime_identity":null}'
+        health = read_public_testing_health(self.base_url, "/health", self.identity)
+        self.assertTrue(health.verified)
+        self.assertEqual(health.runtime_identity_status, "malformed")
 
     def private_health_exit_code(self) -> int:
         import base64
