@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerLaneBaselineViolationCode = Literal[
@@ -92,13 +93,13 @@ class RunnerLaneBaselineObservation(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_observation(self) -> "RunnerLaneBaselineObservation":
-        self.runner_name = _required_text(
+        self.runner_name = require_text(
             self.runner_name, "runner lane baseline observation requires runner_name"
         )
         self.labels = _normalized_tokens(self.labels)
         self.service_user = _normalized_token(self.service_user)
         self.home_directory = _normalized_path(self.home_directory)
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at, "runner lane baseline observation requires observed_at"
         )
         return self
@@ -113,12 +114,10 @@ class RunnerLaneBaselineViolation(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_violation(self) -> "RunnerLaneBaselineViolation":
-        self.runner_name = _required_text(
+        self.runner_name = require_text(
             self.runner_name, "runner lane baseline violation requires runner_name"
         )
-        self.message = _required_text(
-            self.message, "runner lane baseline violation requires message"
-        )
+        self.message = require_text(self.message, "runner lane baseline violation requires message")
         return self
 
 
@@ -137,9 +136,7 @@ class RunnerLaneBaselineReadiness(BaseModel):
         self.violations = tuple(
             sorted(self.violations, key=lambda violation: (violation.runner_name, violation.code))
         )
-        self.summary = _required_text(
-            self.summary, "runner lane baseline readiness requires summary"
-        )
+        self.summary = require_text(self.summary, "runner lane baseline readiness requires summary")
         return self
 
 
@@ -349,10 +346,3 @@ def _version_parts(value: str) -> tuple[int, int, int] | None:
     while len(parts) < 3:
         parts.append(0)
     return (parts[0], parts[1], parts[2])
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

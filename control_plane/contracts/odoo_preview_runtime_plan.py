@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 OdooPreviewRuntimeOperation = Literal["refresh", "destroy"]
@@ -69,7 +70,7 @@ class OdooPreviewRuntimeBindingEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_binding(self) -> "OdooPreviewRuntimeBindingEvidence":
-        self.key = _required_text(self.key, "Odoo preview runtime binding requires key")
+        self.key = require_text(self.key, "Odoo preview runtime binding requires key")
         return self
 
 
@@ -86,16 +87,14 @@ class OdooPreviewRuntimeTargetEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_target(self) -> "OdooPreviewRuntimeTargetEvidence":
-        self.target_id = _required_text(
+        self.target_id = require_text(
             self.target_id, "Odoo preview runtime target requires target_id"
         )
-        self.target_name = _required_text(
+        self.target_name = require_text(
             self.target_name, "Odoo preview runtime target requires target_name"
         )
-        self.context = _required_text(self.context, "Odoo preview runtime target requires context")
-        self.instance = _required_text(
-            self.instance, "Odoo preview runtime target requires instance"
-        )
+        self.context = require_text(self.context, "Odoo preview runtime target requires context")
+        self.instance = require_text(self.instance, "Odoo preview runtime target requires instance")
         self.domain = self.domain.strip().lower()
         return self
 
@@ -122,11 +121,11 @@ class OdooPreviewRuntimePlanRequest(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewRuntimePlanRequest":
-        self.product = _required_text(self.product, "Odoo preview runtime plan requires product")
-        self.repository = _required_text(
+        self.product = require_text(self.product, "Odoo preview runtime plan requires product")
+        self.repository = require_text(
             self.repository, "Odoo preview runtime plan requires repository"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview runtime plan requires preview_slug"
         )
         self.preview_url = self.preview_url.strip()
@@ -144,7 +143,7 @@ class OdooPreviewRuntimeBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "OdooPreviewRuntimeBlocker":
-        self.message = _required_text(self.message, "Odoo preview runtime blocker requires message")
+        self.message = require_text(self.message, "Odoo preview runtime blocker requires message")
         return self
 
 
@@ -156,8 +155,8 @@ class OdooPreviewRuntimeAction(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_action(self) -> "OdooPreviewRuntimeAction":
-        self.action = _required_text(self.action, "Odoo preview runtime action requires action")
-        self.target = _required_text(self.target, "Odoo preview runtime action requires target")
+        self.action = require_text(self.action, "Odoo preview runtime action requires action")
+        self.target = require_text(self.target, "Odoo preview runtime action requires target")
         return self
 
 
@@ -181,16 +180,16 @@ class OdooPreviewRuntimePlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "OdooPreviewRuntimePlan":
-        self.product = _required_text(self.product, "Odoo preview runtime plan requires product")
-        self.repository = _required_text(
+        self.product = require_text(self.product, "Odoo preview runtime plan requires product")
+        self.repository = require_text(
             self.repository, "Odoo preview runtime plan requires repository"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview runtime plan requires preview_slug"
         )
         self.preview_url = self.preview_url.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
-        self.summary = _required_text(self.summary, "Odoo preview runtime plan requires summary")
+        self.summary = require_text(self.summary, "Odoo preview runtime plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready Odoo preview runtime plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -406,13 +405,6 @@ def _target_label(*, request: OdooPreviewRuntimePlanRequest) -> str:
 
 def _blocker(code: OdooPreviewRuntimeBlockerCode, message: str) -> OdooPreviewRuntimeBlocker:
     return OdooPreviewRuntimeBlocker(code=code, message=message)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _normalized_unique_texts(values: tuple[str, ...]) -> tuple[str, ...]:

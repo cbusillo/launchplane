@@ -13,6 +13,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_retirement
+from control_plane.contracts.text_fields import require_text
 from control_plane.github_payload import repository_full_name
 from control_plane.workflows.runner_lane_registration_executor import AuditPoster
 from control_plane.workflows.runner_lane_registration_executor import RemoteCommandRunner
@@ -46,16 +47,16 @@ class RunnerLaneRetirementExecutorRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneRetirementExecutorRequest":
         self.repository = repository_full_name(self.repository)
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane retirement executor requires host_name"
         ).lower()
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane, "runner lane retirement executor requires execution_lane"
         ).lower()
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user, "runner lane retirement executor requires service_user"
         )
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane retirement executor requires lane_name"
         ).lower()
         _validate_slug(
@@ -71,12 +72,12 @@ class RunnerLaneRetirementExecutorRequest(BaseModel):
             "runner lane retirement executor lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
         self.registration_root = _normalized_path(
-            _required_text(
+            require_text(
                 self.registration_root,
                 "runner lane retirement executor requires registration_root",
             )
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner lane retirement executor requires audit_record_key",
         )
@@ -507,13 +508,6 @@ def _normalized_path(value: str) -> str:
     if not segments:
         raise ValueError("runner lane retirement executor requires scoped absolute root")
     return "/" + "/".join(segments)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _validate_slug(value: str, message: str) -> None:
