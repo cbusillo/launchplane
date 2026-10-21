@@ -16,6 +16,7 @@ import click
 from control_plane import secrets
 from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_check_script,
+    business_entrypoint_schedule,
     final_business_database,
     BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
 )
@@ -631,13 +632,14 @@ class OdooRehearsalAdapter:
         if fresh != record or any(created_placement(self.root, record.rehearsal_id)):
             return False
         host, token = source.read_dokploy_config(control_plane_root=self.root)
+        name, app_name = business_entrypoint_schedule(record.rehearsal_id)
         schedule = api.find_matching_dokploy_schedule(
             host=host,
             token=token,
             target_id=record.server_id,
             schedule_type="server",
-            schedule_name="Launchplane rehearsal entrypoint check",
-            app_name=record.rehearsal_id + "-entrypoint-check",
+            schedule_name=name,
+            app_name=app_name,
         )
         return not post_deploy._has_running_schedule_deployment(schedule)
 
@@ -1146,10 +1148,9 @@ class OdooRehearsalAdapter:
             "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
             "image": image,
         }
-        script = business_entrypoint_check_script(image, record.rehearsal_id, binding)
+        script = business_entrypoint_check_script(image, binding)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        name = "Launchplane rehearsal entrypoint check"
-        app_name = record.rehearsal_id + "-entrypoint-check"
+        name, app_name = business_entrypoint_schedule(record.rehearsal_id)
         schedule = api.find_matching_dokploy_schedule(
             host=host,
             token=token,
@@ -1182,8 +1183,7 @@ class OdooRehearsalAdapter:
                 "enabled": False,
                 "timezone": "UTC",
             },
-            resolved_schedule_execution_timeout_seconds=2
-            * BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+            resolved_schedule_execution_timeout_seconds=BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
             + 60,
             before_provider_mutation=lambda _phase: checkpoint(),
         )

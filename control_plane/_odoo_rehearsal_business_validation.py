@@ -61,32 +61,37 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 
 
 def check_business_entrypoint(spec):
     status='provider_unavailable'
+    deadline=time.monotonic()+__COMMAND_TIMEOUT__
     def run(arguments):
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            raise subprocess.TimeoutExpired('candidate capability check',__COMMAND_TIMEOUT__)
         return subprocess.run(arguments,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-            timeout=__COMMAND_TIMEOUT__,check=False).returncode
+            timeout=remaining,check=False).returncode
     try:
-        if run(['docker','container','inspect',spec['container_name']])==0:
-            return {**spec['binding'],'status':status}
         if run(['docker','image','inspect',spec['image']]) and run(['docker','pull',spec['image']]):
             return {**spec['binding'],'status':status}
         with tempfile.TemporaryDirectory(prefix='lp-entrypoint-') as temporary:
             cid=Path(temporary)/'container-id'
+            finished=False
             try:
-                code=run(['docker','run','--pull','never','--name',spec['container_name'],
+                code=run(['docker','run','--rm','--pull','never',
                     '--cidfile',str(cid),'--network','none','--read-only','--cap-drop','ALL',
                     '--security-opt','no-new-privileges','--entrypoint','python3',spec['image'],
                     spec['entrypoint'],'--check'])
-                status='available' if code==0 else 'provider_unavailable' if code in {125,126,127} else 'entrypoint_unavailable'
+                finished=True
+                status='available' if code==0 else 'provider_unavailable' if code==125 else 'entrypoint_unavailable'
             finally:
                 if cid.exists():
                     identifier=cid.read_text().strip()
                     if not re.fullmatch('[a-f0-9]{64}',identifier):
                         status='provider_unavailable'
-                    else:
+                    elif not finished:
                         cleaned=subprocess.run(['docker','rm','-f',identifier],stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,timeout=30,check=False).returncode
                         if cleaned:
@@ -99,12 +104,15 @@ def check_business_entrypoint(spec):
 """.replace("__COMMAND_TIMEOUT__", str(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS))
 
 
-def business_entrypoint_check_script(image: str, rehearsal_id: str, binding: dict[str, str]) -> str:
+def business_entrypoint_schedule(rehearsal_id: str) -> tuple[str, str]:
+    return "Launchplane rehearsal entrypoint check", rehearsal_id + "-entrypoint-check"
+
+
+def business_entrypoint_check_script(image: str, binding: dict[str, str]) -> str:
     import json
 
     spec = {
         "image": image,
-        "container_name": rehearsal_id + "-entrypoint-check",
         "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT,
         "binding": binding,
     }

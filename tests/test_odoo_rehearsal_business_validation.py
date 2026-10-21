@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_ENTRYPOINT,
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
     BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
     BUSINESS_ENTRYPOINT_CHECK_LIBRARY,
     final_business_database,
@@ -16,7 +17,10 @@ from control_plane._odoo_rehearsal_business_validation import (
 )
 from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRequest
+from control_plane.contracts.odoo_upgrade_rehearsal import (
+    OdooUpgradeRehearsalRequest,
+    RehearsalPrerequisite,
+)
 from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter, RehearsalRefused
 from tests import test_odoo_upgrade_rehearsal as rehearsal_tests
 
@@ -95,20 +99,30 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
 
         namespace: dict[str, Any] = {}
         exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
-        for outcome in ("available", "missing", "docker", "pull", "timeout", "occupied"):
+        for outcome in (
+            "available",
+            "missing",
+            "python",
+            "docker",
+            "pull",
+            "timeout",
+            "empty-cid",
+            "bad-cid",
+            "cleanup",
+        ):
             calls: list[list[str]] = []
 
             def run(arguments: list[str], **kwargs: Any) -> Any:
                 calls.append(arguments)
                 self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
                 self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
-                if arguments[1:3] == ["container", "inspect"]:
-                    return SimpleNamespace(returncode=0 if outcome == "occupied" else 1)
                 if arguments[1:3] == ["image", "inspect"]:
                     return SimpleNamespace(returncode=1 if outcome == "pull" else 0)
                 if arguments[1] == "pull":
                     return SimpleNamespace(returncode=125)
                 if arguments[1] == "run":
+                    self.assertIn("--rm", arguments)
+                    self.assertNotIn("--name", arguments)
                     self.assertEqual(arguments[arguments.index("--network") + 1], "none")
                     self.assertEqual(arguments[arguments.index("--pull") + 1], "never")
                     self.assertTrue(
@@ -119,16 +133,20 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
                     )
                     self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, arguments)
                     self.assertIn(spec["image"], arguments)
-                    Path(arguments[arguments.index("--cidfile") + 1]).write_text("a" * 64)
-                    if outcome == "timeout":
+                    if outcome != "empty-cid":
+                        Path(arguments[arguments.index("--cidfile") + 1]).write_text(
+                            "bad" if outcome == "bad-cid" else "a" * 64
+                        )
+                    if outcome in {"timeout", "cleanup"}:
                         raise subprocess.TimeoutExpired("fixed check", 1)
-                    return SimpleNamespace(returncode={"missing": 2, "docker": 125}.get(outcome, 0))
+                    return SimpleNamespace(
+                        returncode={"missing": 2, "python": 127, "docker": 125}.get(outcome, 0)
+                    )
                 self.assertEqual(arguments[1:], ["rm", "-f", "a" * 64])
-                return SimpleNamespace(returncode=0)
+                return SimpleNamespace(returncode=1 if outcome == "cleanup" else 0)
 
             spec: dict[str, Any] = {
                 "image": "fixture@sha256:" + "b" * 64,
-                "container_name": "fixture-check",
                 "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT,
                 "binding": {"attempt": "fixture"},
             }
@@ -138,12 +156,37 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
                 "available"
                 if outcome == "available"
                 else "entrypoint_unavailable"
-                if outcome == "missing"
+                if outcome in {"missing", "python"}
                 else "provider_unavailable"
             )
             self.assertEqual(result, {**spec["binding"], "status": expected})
             removals = [call for call in calls if call[1] == "rm"]
-            self.assertEqual(bool(removals), outcome not in {"pull", "occupied"})
+            self.assertEqual(bool(removals), outcome in {"timeout", "cleanup"})
+
+    def test_probe_uses_one_deadline_across_image_pull_and_invocation(self) -> None:
+        import subprocess
+        import time
+        from types import SimpleNamespace
+
+        namespace: dict[str, Any] = {}
+        exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
+        limit = BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        with (
+            patch.object(time, "monotonic", side_effect=[0, limit / 3, limit * 2 / 3, limit + 1]),
+            patch.object(
+                subprocess,
+                "run",
+                side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)],
+            ) as run,
+        ):
+            result = namespace["check_business_entrypoint"](
+                {"image": "fixture", "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT, "binding": {}}
+            )
+        self.assertEqual(result["status"], "provider_unavailable")
+        self.assertLess(
+            run.call_args_list[-1].kwargs["timeout"], run.call_args_list[0].kwargs["timeout"]
+        )
+        self.assertFalse(any(call.args[0][1] == "run" for call in run.call_args_list))
 
     def test_rejected_probe_precedes_allocation_and_a_new_key_can_retry(self) -> None:
         from control_plane import odoo_upgrade_rehearsal as rehearsal_module
@@ -157,17 +200,15 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
         binding: dict[str, str] = {}
         renderer = business_entrypoint_check_script
 
-        def render(image: str, identifier: str, expected: dict[str, str]) -> str:
+        def render(image: str, expected: dict[str, str]) -> str:
             binding.clear()
             binding.update(expected)
-            return renderer(image, identifier, expected)
+            return renderer(image, expected)
 
         outcome = "entrypoint_unavailable"
 
         def schedule(**kwargs: Any) -> dict[str, str]:
             self.assertEqual(kwargs["schedule_lookup_id"], fixture.record.server_id)
-            self.assertEqual(kwargs["schedule_type"], "server")
-            self.assertEqual(kwargs["target_definition"].target_id, "")
             return {"rehearsal_result": json.dumps({**binding, "status": outcome}).encode().hex()}
 
         with (
@@ -195,6 +236,12 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
             for outcome in ("entrypoint_unavailable", "provider_unavailable"):
                 with self.subTest(outcome=outcome), self.assertRaises(RehearsalRefused):
                     fixture.run_operation(adapter, outcome)
+                with self.assertRaises(RehearsalRefused) as readback:
+                    adapter.prepare_readback(fixture.record, outcome)
+                self.assertEqual(
+                    readback.exception.code,
+                    RehearsalPrerequisite.OPERATION_UNAVAILABLE,
+                )
                 credentials.assert_not_called()
                 placement.assert_not_called()
                 storage.assert_not_called()
@@ -233,7 +280,11 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
             self.assertEqual(adapter.observe("original", "", "").outcome, "absent")
             readback = adapter.prepare_readback(fixture.record, "interrupted")
             self.assertEqual(readback["recovery_disposition"], "continue_original_prepare")
-            schedule.return_value = {"deployments": [{"status": "running"}]}
+            from control_plane.dokploy.post_deploy import DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
+
+            schedule.return_value = {
+                "deployments": [{"status": next(iter(DOKPLOY_RUNNING_DEPLOYMENT_STATUSES))}]
+            }
             self.assertEqual(adapter.observe("original", "", "").outcome, "unknown")
             schedule.return_value = None
             with patch(

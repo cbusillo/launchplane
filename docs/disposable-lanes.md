@@ -2900,8 +2900,14 @@ placement or storage are allocated. It pulls the pinned image explicitly and
 then checks with `--pull never`. Product failure is an artifact prerequisite;
 Docker/registry failure or unavailable evidence is a provider prerequisite.
 Either stops the fresh prepare before allocation and permits a fresh review/key.
-The probe cleans up only the container id its own invocation created. It never
-deletes a colliding existing container. After an interrupted preflight, the
+The probe uses an anonymous automatically removed container, so a leftover
+cannot reserve the name for a later attempt. On observer interruption it removes
+only the exact id its own invocation created. Image inspection, pull and the
+check share one 900-second deadline, followed by at most 30 seconds of cleanup;
+the provider wait allows 960 seconds. Docker exit 125 is reserved as a provider
+failure; exit 126/127 (including a missing image Python) is an artifact failure.
+The disabled server probe schedule and its deployment logs remain as operational
+evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
 original key can retry only after observing an empty placement and an idle
 probe, with the unchanged reviewed record and no credential binding. Unknown
 observations keep that key held. Partial prepare and host continuation
