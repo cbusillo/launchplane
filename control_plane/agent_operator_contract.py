@@ -101,6 +101,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "GET",
+        "/v1/products/{product}/environments/{environment}/health-history",
+        "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         DISCUSSION_TOPICS_ROUTE,
         "Read a product's discussion topics within existing product-profile read access.",
         ("service_api",),

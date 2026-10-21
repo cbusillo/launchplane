@@ -39,6 +39,25 @@ def ingress() -> None:
     """Ingress route control commands."""
 
 
+@ingress.command("health-history-summary")
+@click.option(
+    "--page", "pages", required=True, multiple=True, type=click.Path(exists=True, path_type=Path)
+)
+def health_history_summary(pages: tuple[Path, ...]) -> None:
+    """Account for one lane's saved GET health-history pages, in cursor order."""
+    from control_plane.lane_health_history import LaneHealthHistoryResponse, summarize_history_pages
+
+    try:
+        history = [
+            LaneHealthHistoryResponse.model_validate_json(page.read_bytes()).history
+            for page in pages
+        ]
+        result = summarize_history_pages(history)
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(result.model_dump_json(indent=2))
+
+
 @ingress.command("private-testing-plan")
 @click.option("--service-url", required=True)
 @click.option("--bearer-token-env", default="LAUNCHPLANE_SERVICE_TOKEN", show_default=True)

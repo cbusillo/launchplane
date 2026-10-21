@@ -48,6 +48,33 @@
       {
         "idempotency": "none",
         "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_product_environment_health_history",
+        "path": "/v1/products/{product}/environments/{environment}/health-history",
+        "purpose": "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "29adc4075f38325d0f365026f8223fb1cd7a27fad6f9e112b8714fa39447f914",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
           "read_owner_review_identity"
         ],
         "method": "GET",
@@ -967,8 +994,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "eb8a8f88ae19b4fec13a27bfba538003a7254f92"
+    "source_commit_sha": "af3845ab89faada94eabad2f00b7018d7907e7fe"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "c93aef0e2431420ab345c19ad9056ccc4597133886bdf0f2620ea6d7287da147"
+  "semantic_digest_sha256": "553bcd5431c90399744a8bcb68502894443a82d53ce4e39f0bf3b65f3a9a9d0f"
 }

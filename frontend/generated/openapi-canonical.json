@@ -14369,6 +14369,255 @@
         "title": "HistoricalCompletionPreflightResult",
         "type": "object"
       },
+      "HistoryIdentity": {
+        "additionalProperties": false,
+        "description": "Artifact/deployment references, without image locations or provider details.",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "image_digest": {
+            "title": "Image Digest",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deployment_record_id",
+          "artifact_id",
+          "source_git_ref",
+          "image_digest"
+        ],
+        "title": "HistoryIdentity",
+        "type": "object"
+      },
+      "HistoryObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "check_kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider",
+              "tls"
+            ],
+            "title": "Check Kind",
+            "type": "string"
+          },
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "expected_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
+                  "production_delivery_failed",
+                  "testing_delivery_failed",
+                  "connection_timeout",
+                  "deploy_fence_held",
+                  "dns_failure",
+                  "health_status_error",
+                  "http_error",
+                  "invalid_url",
+                  "private_endpoint_disabled",
+                  "private_endpoint_mismatch",
+                  "private_endpoint_not_found",
+                  "private_url",
+                  "monitoring_intent_changed",
+                  "monitor_run_missed",
+                  "provider_check_unavailable",
+                  "redirect_loop",
+                  "self_redirect",
+                  "tls_chain_failure",
+                  "tls_expired",
+                  "tls_expiring",
+                  "tls_failure",
+                  "tls_hostname_mismatch",
+                  "tls_self_signed",
+                  "tls_unsupported",
+                  "wrong_runtime_identity",
+                  "unknown_error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "incident_id": {
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "probe",
+              "reconciliation"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryTarget"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "record_id",
+          "check_name",
+          "check_kind",
+          "purpose",
+          "observed_at",
+          "status",
+          "failure_code",
+          "expected_runtime_identity",
+          "targets",
+          "incident_id"
+        ],
+        "title": "HistoryObservation",
+        "type": "object"
+      },
+      "HistoryTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
+                  "production_delivery_failed",
+                  "testing_delivery_failed",
+                  "connection_timeout",
+                  "deploy_fence_held",
+                  "dns_failure",
+                  "health_status_error",
+                  "http_error",
+                  "invalid_url",
+                  "private_endpoint_disabled",
+                  "private_endpoint_mismatch",
+                  "private_endpoint_not_found",
+                  "private_url",
+                  "monitoring_intent_changed",
+                  "monitor_run_missed",
+                  "provider_check_unavailable",
+                  "redirect_loop",
+                  "self_redirect",
+                  "tls_chain_failure",
+                  "tls_expired",
+                  "tls_expiring",
+                  "tls_failure",
+                  "tls_hostname_mismatch",
+                  "tls_self_signed",
+                  "tls_unsupported",
+                  "wrong_runtime_identity",
+                  "unknown_error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "observed_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_identity_status": {
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "enum": [
+              "base_url",
+              "health_url",
+              "private_health_url",
+              "monitoring_intent",
+              "provider",
+              "tls_domain"
+            ],
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "status",
+          "failure_code",
+          "runtime_identity_status",
+          "observed_runtime_identity"
+        ],
+        "title": "HistoryTarget",
+        "type": "object"
+      },
       "HostNetworkCapacityObservation": {
         "additionalProperties": false,
         "properties": {
@@ -15379,6 +15628,91 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LaneHealthHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cursor"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "since",
+          "until",
+          "cursor",
+          "next_cursor",
+          "observations"
+        ],
+        "title": "LaneHealthHistory",
+        "type": "object"
+      },
+      "LaneHealthHistoryResponse": {
+        "properties": {
+          "history": {
+            "$ref": "#/components/schemas/LaneHealthHistory"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "history"
+        ],
+        "title": "LaneHealthHistoryResponse",
+        "type": "object"
+      },
       "LaneServiceRestartPlan": {
         "additionalProperties": false,
         "properties": {
@@ -91014,6 +91348,177 @@
           }
         },
         "summary": "Plan or apply product environment config"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/health-history": {
+      "get": {
+        "operationId": "read_product_environment_health_history",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Since",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Until",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaneHealthHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read retained lane health and runtime identity observations"
       }
     },
     "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics": {
