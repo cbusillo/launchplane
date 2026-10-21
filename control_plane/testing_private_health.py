@@ -15,8 +15,10 @@ from control_plane.contracts.private_health_endpoint_record import (
 from control_plane.outbound_http import (
     PublicHttpDestinationError,
     PublicHttpResponse,
+    _parse_http_url,
     request_private_edge_health,
 )
+from control_plane.npmplus import NpmplusClient, NpmplusProxyHost
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_private_ingress import (
     TestingPrivateIngressAdapter,
@@ -27,6 +29,50 @@ from control_plane.workflows.ingress_provider import (
     NPMPLUS_BASE_URL_ENV_KEY,
     build_npmplus_ingress_client_from_env,
 )
+
+
+def _edge_health_origin(client: NpmplusClient, api_url: str) -> tuple[str, NpmplusProxyHost | None]:
+    parsed, hostname, port = _parse_http_url(api_url)
+    if parsed.query or parsed.fragment:
+        raise ValueError("The edge API origin is ambiguous.")
+    if port != (443 if parsed.scheme == "https" else 80):
+        return api_url, None
+    hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
+    if not hosts:
+        # Existing directly addressed private APIs still use the private-only
+        # resolver. No proxy record or public-address fallback is required.
+        return api_url, None
+    if len(hosts) != 1:
+        raise ValueError("The edge API hostname is ambiguous.")
+    host = client.get_proxy_host(hosts[0].id, public_only=True)
+    if (
+        host.id != hosts[0].id
+        or host.domain_names != (hostname,)
+        or not host.enabled
+        or host.locations
+        or host.advanced_config.strip()
+        or host.npmplus_auth_request != "none"
+        or host.forward_scheme not in {"http", "https"}
+        or host.forward_port is None
+        or (
+            parsed.scheme == "https"
+            and (not isinstance(host.certificate_id, int) or host.certificate_id < 1)
+        )
+        or hostname in client.list_other_host_domains()
+    ):
+        raise ValueError("The edge API needs an exact loaded ordinary proxy route.")
+    origin = f"https://{host.forward_host}"
+    forward, _hostname, _port = _parse_http_url(origin)
+    if (
+        forward.port is not None
+        or forward.path
+        or forward.query
+        or forward.fragment
+        or forward.netloc != host.forward_host
+        or any(marker in host.forward_host for marker in ("*", "~", "\\"))
+    ):
+        raise ValueError("The edge API upstream must name one host.")
+    return origin, host
 
 
 def fetch_testing_private_health(
@@ -53,7 +99,9 @@ def fetch_testing_private_health(
             or private_health_endpoint_record_sha256(endpoint) != endpoint_sha256
         ):
             raise ValueError("Testing health endpoint changed.")
+        api_url = os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, "")
         client = build_npmplus_ingress_client_from_env()
+        edge_origin = _edge_health_origin(client, api_url)
         hostname = urlsplit(url).hostname
         hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
         if len(hosts) != 1:
@@ -122,12 +170,14 @@ def fetch_testing_private_health(
         ) from None
     response = request_private_edge_health(
         url,
-        edge_api_url=os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, ""),
+        edge_url=edge_origin[0],
         timeout_seconds=timeout_seconds,
     )
     try:
         if (
-            adapter._snapshot()[0] != snapshot
+            os.environ.get(NPMPLUS_BASE_URL_ENV_KEY, "") != api_url
+            or _edge_health_origin(client, api_url) != edge_origin
+            or adapter._snapshot()[0] != snapshot
             or latest_testing_private_ingress_receipt(
                 store, product=product, context=context, host_id=host.id
             )

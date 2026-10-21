@@ -278,13 +278,24 @@ history fails, the replacement and provider effects do not proceed.
 Deleted historical hosts are not queried
 as current candidates. Missing or changed current evidence fails the probe.
 
-The health request connects to the configured NPMplus API origin's machine on
-HTTPS port 443. That origin must resolve exclusively to the existing permitted
-private address ranges (RFC1918 or RFC6598), and must reach the same edge's HTTPS
-listener. Socket addresses are validated and pinned before connecting, while
+The health request connects to the existing edge's private HTTPS listener on
+port 443. A directly addressed private API still identifies that machine. For
+an API hostname on the standard HTTP/HTTPS listener, its authenticated provider
+inventory may instead supply one exact, enabled, loaded proxy route with no
+aliases, custom locations/configuration or delegated authentication. Its normal
+HTTP(S) backend host identifies the private machine; its admin scheme and port
+do not become the health scheme or port. Other hosts and wildcard routes never
+supply that binding. The exact API route and its uniqueness are checked again
+after the probe, along with existing endpoint, receipt and application authority.
+Changed API configuration invalidates the result. No new record, credential or
+provider write is needed.
+
+The selected machine must resolve exclusively to the existing permitted private
+address ranges (RFC1918 or RFC6598), and reach the same edge's HTTPS listener.
+Socket addresses are validated and pinned before connecting, while
 Host, SNI and ordinary certificate/name verification use the endpoint hostname.
 Endpoint DNS is never used to select this socket, so wildcard DNS changes cannot
-redirect it; a public or mixed answer for the configured edge origin refuses.
+redirect it; a public or mixed answer for the selected listener refuses.
 No DNS record or shared trust store changes. A provider API hosted separately
 from its HTTPS listener does not qualify through this transport.
 
