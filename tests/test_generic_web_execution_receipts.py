@@ -14,7 +14,10 @@ import click
 from urllib.error import HTTPError, URLError
 
 from control_plane.dokploy import api
-from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    ApplicationTaskObservation,
+)
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_source_qualification import (
@@ -82,6 +85,7 @@ from control_plane.workflows.generic_web_execution import (
     RecordedScheduleExecution,
     EXECUTION_EVIDENCE_KEY,
     evidence_digest,
+    execution_receipt,
     observe_execution,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
@@ -1264,7 +1268,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
         )
 
     def test_unproved_original_image_deadlines_keep_recovery_fenced(self) -> None:
-        for cause in ("incomplete", "updating", "failed_job"):
+        for cause in ("incomplete", "updating", "failed_job", "empty_success", "empty_failed_job"):
             with self.subTest(cause=cause):
                 self.assert_unproved_original_image_remains_fenced(cause)
 
@@ -1276,7 +1280,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
         )
         adapter = self.normal_adapter()
         provider = cast(_FakeGenericWebDeployProvider, adapter._deploy_provider)
-        if cause == "failed_job":
+        if cause in {"failed_job", "empty_failed_job"}:
             provider.deploy_error = GenericWebProviderDeploymentFailed(
                 provider.observation.model_copy(update={"deployment_status": "error"})
             )
@@ -1286,6 +1290,21 @@ class ExecutionRecoveryTests(unittest.TestCase):
 
         def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
             assert provider.application_runtime is not None
+            if cause.startswith("empty_"):
+                return replace(
+                    provider.application_runtime,
+                    rollout_state="",
+                    running_container_images=(("fixture.invalid/previous:old",),),
+                    running_container_deployment_record_ids=("previous-deployment",),
+                    running_container_health=("healthy",),
+                    tasks=(
+                        ApplicationTaskObservation(
+                            image="fixture.invalid/previous:old",
+                            deployment_record_id="previous-deployment",
+                            state="running",
+                        ),
+                    ),
+                )
             return replace(
                 provider.application_runtime,
                 rollout_state="completed" if cause == "incomplete" else "updating",
@@ -1306,6 +1325,9 @@ class ExecutionRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome.status, "reconcile_required")
         saved = self.normal_record(outcome)
         self.assertEqual(saved.deploy.status, "fail")
+        receipt = execution_receipt(saved)
+        assert receipt is not None
+        self.assertFalse(receipt.settled_image_deployment_id)
         held = self.store.list_held_provider_target_reservations()
         self.assertTrue(held)
         with (

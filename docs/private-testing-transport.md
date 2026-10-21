@@ -220,7 +220,15 @@ deployment-record identity, replica count and configured container health. This
 also applies to application lanes without managed inputs. The provider job and
 runtime wait share the original deployment timeout. Unknown or updating runtime
 remains fenced; missing or unreadable task/container evidence is also unknown at
-the original deadline. A complete observation of settled nonconvergence may fail
+the original deadline. Missing Swarm update status is not negative settlement
+proof: a newly accepted spec clears it before the asynchronous updater starts.
+Neither job failure, elapsed timeout nor an observed task makes that missing
+status terminal. The full native service read can separately prove first creation
+when both PreviousSpec and UpdateStatus are absent; an accepted update atomically
+adds PreviousSpec. That value-free fact defaults to unproved for other observers
+and preserves first-deployment failure handling. Fully matching healthy runtime
+may still qualify without update status.
+A complete observation of explicitly completed nonconvergence may fail
 qualification at that deadline. A correlated terminal rollback or failed
 qualification never receives delivery credit. Recovery adds the same
 current-runtime check while retaining exact-original execution receipts,
@@ -248,7 +256,8 @@ with a compatible rollback reader or a fixed forward build. Keep the retained
 proof when reverting unrelated code.
 
 Ordinary sweeps check current application runtime before returning
-`already_deployed`. Positively stable service drift permits one normal
+`already_deployed`. Missing update status without the native first-creation fact
+also leaves drift unverified. Positively stable service drift permits one normal
 same-artifact repair bound to existing artifact, authority, managed inputs and
 starting inventory. Pending or unreadable observations wait. Failed repairs
 replay the same operation; successful repairs advance inventory so later drift

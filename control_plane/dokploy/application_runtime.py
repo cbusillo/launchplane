@@ -72,6 +72,16 @@ class ApplicationRuntimeObservation:
     pending_task_count: int
     task_evidence_complete: bool = True
     tasks: tuple[ApplicationTaskObservation, ...] = ()
+    initial_service: bool = False
+
+    @property
+    def rollout_settled(self) -> bool:
+        return self.rollout_state in {
+            "completed",
+            "paused",
+            "rollback_completed",
+            "rollback_paused",
+        } or (self.initial_service and not self.rollout_state)
 
     @property
     def ready(self) -> bool:
@@ -163,6 +173,7 @@ def application_runtime_settled_spec_matches(
     return (
         observed.task_evidence_complete
         and observed.desired_replicas > 0
+        and observed.rollout_settled
         and observed.rollout_state in {"", "completed"}
         and observed.service_deployment_record_id == deployment_record_id
         and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
@@ -177,13 +188,7 @@ def application_runtime_drift_fingerprint(
     deployment_record_id: str,
 ) -> str:
     """Only a stable, positively different service permits a deterministic repair."""
-    if observed.rollout_state not in {
-        "",
-        "completed",
-        "paused",
-        "rollback_completed",
-        "rollback_paused",
-    }:
+    if not observed.rollout_settled:
         return ""
     if (
         _service_image_matches(observed.service_image, artifact_reference, provider_reference)
@@ -479,4 +484,7 @@ def _fetch_application_runtime(
         pending_task_count=pending,
         task_evidence_complete=task_evidence_complete,
         tasks=tuple(task_observations),
+        # A normal service update writes PreviousSpec before its async updater
+        # writes UpdateStatus. Only the full native create shape lacks both.
+        initial_service="PreviousSpec" not in service and "UpdateStatus" not in service,
     )

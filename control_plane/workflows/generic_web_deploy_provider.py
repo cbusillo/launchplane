@@ -651,13 +651,7 @@ def qualify_testing_application_observation(
             )
             if runtime.application_id != target.resolved_target.target_id:
                 raise ValueError("Runtime observation belongs to another target.")
-            if observation.deployment_status in {"error", "failed"} and runtime.rollout_state in {
-                "",
-                "completed",
-                "rollback_completed",
-                "paused",
-                "rollback_paused",
-            }:
+            if observation.deployment_status in {"error", "failed"} and runtime.rollout_settled:
                 # A pull/login failure can end before any service update. This
                 # proves a failed, currently settled effect, never its absence.
                 return GenericWebProviderDeploymentFailed(observation).observation

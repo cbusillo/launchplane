@@ -482,6 +482,11 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         first = fingerprint(observed)
         self.assertTrue(first)
         self.assertFalse(fingerprint(replace(observed, rollout_state="updating")))
+        self.assertFalse(fingerprint(replace(observed, rollout_state="")))
+        self.service.pop("UpdateStatus")
+        self.assertTrue(fingerprint(self.read()))
+        self.service["PreviousSpec"] = deepcopy(self.service["Spec"])
+        self.assertFalse(fingerprint(self.read()))
 
     def test_terminal_failed_job_settles_old_service_without_crediting_success(self) -> None:
         from control_plane.workflows.generic_web_deploy_provider import (
@@ -499,7 +504,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         provider = DokployGenericWebDeployProvider()
         target = _application_target()
         for status, state, expected in (
-            ("error", "", "present"),
+            ("error", "", "unknown"),
             ("failed", "completed", "present"),
             ("error", "rollback_completed", "present"),
             ("error", "paused", "present"),
@@ -749,7 +754,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 if expected == "present":
                     self.assertEqual(qualified.deployment_status, "unhealthy")
 
-    def test_initial_settled_service_proves_qualification_failure_only_at_original_deadline(
+    def test_absent_update_status_cannot_prove_failure_at_original_deadline(
         self,
     ) -> None:
         from control_plane.workflows.generic_web_deploy_provider import (
@@ -758,6 +763,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             qualify_testing_application_observation,
         )
 
+        self.service["PreviousSpec"] = deepcopy(self.service["Spec"])
         self.service.pop("UpdateStatus")
         self.task["Status"] = {"State": "failed"}
         self.task["DesiredState"] = "shutdown"
@@ -800,15 +806,23 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 sleeper.assert_not_called()
                 return result
 
+        self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.assertEqual(qualify(wait=False).outcome, "unknown")
+        previous_specs: tuple[object, ...] = (None, {}, "unreadable")
+        for previous in previous_specs:
+            self.service["PreviousSpec"] = previous
+            self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.service.pop("PreviousSpec")
         self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
         self.assertEqual(qualify(wait=False).outcome, "unknown")
+        self.service["PreviousSpec"] = deepcopy(self.service["Spec"])
         original_spec = deepcopy(self.task["Spec"])
         for state in ("rejected",):
             self.task["Status"] = {"State": state}
-            self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+            self.assertEqual(qualify(wait=True).outcome, "unknown")
         for state in ("starting", "shutdown"):
             self.task["Status"] = {"State": state}
-            self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+            self.assertEqual(qualify(wait=True).outcome, "unknown")
         self.task["Status"] = {"State": "failed"}
         for spec in (
             {},
@@ -817,7 +831,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 self.task["Spec"] = {"ContainerSpec": spec}
-                self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+                self.assertEqual(qualify(wait=True).outcome, "unknown")
         self.task["Spec"] = original_spec
         self.tasks.append({"containerId": "old-task"})
         self.vanished_tasks.add("old-task")
@@ -829,3 +843,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         )
         self.vanished_tasks.add(_CONTAINER_ID)
         self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.vanished_tasks.remove(_CONTAINER_ID)
+        self.assertEqual(qualify(wait=True), job)
+        self.assertEqual(qualify(wait=False), job)
