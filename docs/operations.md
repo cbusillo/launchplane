@@ -2065,14 +2065,18 @@ Never copy credentials into existing session rows. Expiring and long-lived
 GitHub tokens are both supported without changing the app's expiration setting.
 
 OAuth ciphertext and verification time live in the existing DB session payload;
-there is no schema migration. Logout and revocation remove the row and its credential. New sign-ins and
+there is no schema migration. Logout and local revocation remove the row and its
+credential; they do not revoke a GitHub token. See the
+[credential retirement contract](service-boundary.md#human-oauth-credential-retirement)
+for provider isolation and historical-backup limits. New sign-ins and
 provider-refresh attempts opportunistically purge expired rows, skipping locked
 rows until the next pass. An unused service performs no sweep; its encrypted
 expired rows remain until the next sign-in or refresh. Database backups may retain ciphertext under
 their existing retention policy; keep the bootstrap secret out of those exports.
 The scrubbed stored-record export excludes the session table entirely. A normal
 bootstrap-secret rotation invalidates both old cookies and credential custody,
-so affected people sign in again. Do not change production session secrets by
+so affected people sign in again. It does not invalidate GitHub credentials or
+prevent decryption of an old backup using its original root. Do not change production session secrets by
 hand for this feature. Rollback to the previous image needs no data repair:
 older code ignores the added payload fields and resumes its original 24-hour
 absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
