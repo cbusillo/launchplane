@@ -715,6 +715,9 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertEqual(observed, merge_train_state)
 
     def test_merge_train_can_adopt_every_main_controller_checkpoint_action(self) -> None:
+        self.assertIn(
+            MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION, MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS
+        )
         for active_action in MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS:
             with self.subTest(active_action=active_action), TemporaryDirectory() as temporary_name:
                 store = FilesystemRecordStore(state_dir=Path(temporary_name))

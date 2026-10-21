@@ -13,6 +13,7 @@ from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.config_authority_audit import (
     ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
     ALLOW_REASON_SCHEMA_ONLY,
+    PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX,
     WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES,
 )
 from control_plane.config_authority_audit import build_config_authority_audit
@@ -1528,6 +1529,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                             ),
                             "",
                         )
+                        # Reusable product-driver workflows allow input defaults by their own rule.
+                        if not path.startswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX):
+                            self.assertEqual(
+                                _allow_reason(
+                                    path=path, key="inputs.unlisted_input.default", value=value
+                                ),
+                                "",
+                            )
                 with self.subTest(path=path, key=key, value="unlisted-value"):
                     self.assertEqual(
                         _allow_reason(path=path, key=key, value="unlisted-value"),
