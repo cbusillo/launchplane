@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "./state";
 
-async function setup(page: Page, dropped = false, role = "admin") {
+async function setup(page: Page, dropped: boolean | "denied" = false, role = "admin") {
   const requests: { body: Record<string, unknown>; key: string }[] = [];
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -13,6 +13,10 @@ async function setup(page: Page, dropped = false, role = "admin") {
     expect(route.request().headers()["x-csrf-token"]).toBe("csrf-fixture");
     const body = route.request().postDataJSON();
     requests.push({ body, key: route.request().headers()["idempotency-key"] });
+    if (dropped === "denied") {
+      await route.fulfill({ status: 403, json: { error: "authorization_denied", message: "Fixture denial", trace_id: "denied-sweep" } });
+      return;
+    }
     if (dropped && requests.length === 1) { await route.abort("failed"); return; }
     await route.fulfill({ status: 202, json: {
       status: "accepted", trace_id: "sweep-trace", result: {
@@ -62,11 +66,17 @@ for (const apply of [false, true]) {
     const panel = page.getByRole("region", { name: "Preview cleanup controls" });
     if (apply) await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
     await panel.getByRole("button", { name: apply ? "Apply cleanup" : "Report", exact: true }).click();
-    await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeEnabled();
+    await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
     await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toHaveCount(0);
+    // Recovery must not depend on any separately saved form draft.
+    await page.evaluate(() => {
+      for (const key of Object.keys(sessionStorage)) {
+        if (!key.startsWith("launchplane.browser-operation.")) sessionStorage.removeItem(key);
+      }
+    });
     await page.reload();
-    await panel.getByRole("button", { name: "Retry original sweep" }).click();
+    await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
     await expect(panel.getByRole("heading", { name: `${apply ? "Cleanup" : "Report"} result: fail` })).toBeVisible();
     expect(fixture.requests).toHaveLength(2);
     expect(fixture.requests[1]).toEqual(fixture.requests[0]);
@@ -74,34 +84,25 @@ for (const apply of [false, true]) {
   });
 }
 
-for (const corruption of ["changed", "missing"] as const) {
-  test(`${corruption} retained request cannot dispatch a different sweep`, async ({ page }) => {
-    const fixture = await setup(page, true);
-    await page.goto("/ui/engineering/preview-lifecycle");
-    const panel = page.getByRole("region", { name: "Preview cleanup controls" });
-    await panel.getByRole("button", { name: "Report", exact: true }).click();
-    await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeEnabled();
-    await page.evaluate(mode => {
-      const key = Object.keys(sessionStorage).find(key => key.startsWith("launchplane:preview-lifecycle-draft:"))!;
-      if (mode === "missing") sessionStorage.removeItem(key);
-      else {
-        const body = JSON.parse(sessionStorage.getItem(key)!);
-        body.apply = true;
-        sessionStorage.setItem(key, JSON.stringify(body));
-      }
-    }, corruption);
-    await page.reload();
-    if (corruption === "missing") {
-      await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeDisabled();
-      await expect(panel.getByRole("alert")).toContainText("exact original request is unavailable");
-    } else {
-      await panel.getByRole("button", { name: "Retry original sweep" }).click();
-      await expect(panel.getByText("Preview sweep uncertain", { exact: true })).toBeVisible();
-    }
-    await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
-    expect(fixture.requests).toHaveLength(1);
+test("an unrecognized retained fingerprint cannot dispatch a different sweep", async ({ page }) => {
+  const fixture = await setup(page, true);
+  await page.goto("/ui/engineering/preview-lifecycle");
+  const panel = page.getByRole("region", { name: "Preview cleanup controls" });
+  await panel.getByRole("button", { name: "Report", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "Retry original report" })).toBeEnabled();
+  await page.evaluate(() => {
+    const key = Object.keys(sessionStorage).find(key => key.startsWith("launchplane.browser-operation.v2."))!;
+    const state = JSON.parse(sessionStorage.getItem(key)!);
+    state.identity.requestFingerprint = "unrecognized-fixture-fingerprint";
+    sessionStorage.setItem(key, JSON.stringify(state));
   });
-}
+  await page.reload();
+  await expect(panel.getByRole("alert")).toContainText("original request could not be recovered");
+  await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeDisabled();
+  await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toHaveCount(0);
+  expect(fixture.requests).toHaveLength(1);
+});
 
 test("read-only browser sessions have no sweep controls", async ({ page }) => {
   const fixture = await setup(page, false, "read_only");
@@ -111,8 +112,21 @@ test("read-only browser sessions have no sweep controls", async ({ page }) => {
   expect(fixture.requests).toEqual([]);
 });
 
+test("a refused cleanup consumes its delete confirmation", async ({ page }) => {
+  const fixture = await setup(page, "denied");
+  await page.goto("/ui/engineering/preview-lifecycle");
+  const panel = page.getByRole("region", { name: "Preview cleanup controls" });
+  const confirmation = panel.getByLabel("Delete orphaned previews across all preview-enabled products.");
+  await confirmation.check();
+  await panel.getByRole("button", { name: "Apply cleanup", exact: true }).click();
+  await expect(panel.getByText("Preview sweep failed", { exact: true })).toBeVisible();
+  await expect(confirmation).not.toBeChecked();
+  await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toBeDisabled();
+  expect(fixture.requests).toHaveLength(1);
+});
 
-test("operation-key storage failure prevents a sweep even when payload storage works", async ({ page }) => {
+
+test("operation-key storage failure prevents a sweep", async ({ page }) => {
   const fixture = await setup(page);
   await page.addInitScript(() => {
     const setItem = Storage.prototype.setItem;
@@ -174,11 +188,11 @@ test("a retired page preparing a fingerprint cannot erase its successor's uncert
   await page.getByRole("navigation", { name: "Engineering Ops views" }).getByRole("link", { name: "Preview cleanup", exact: true }).click();
   await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
   await panel.getByRole("button", { name: "Apply cleanup", exact: true }).click();
-  await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
   await page.evaluate(() => (window as unknown as { releaseRetiredFingerprint: () => Promise<void> }).releaseRetiredFingerprint());
   await page.reload();
-  await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeEnabled();
-  await panel.getByRole("button", { name: "Retry original sweep" }).click();
+  await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
+  await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
   await expect(panel.getByRole("heading", { name: "Cleanup result: fail" })).toBeVisible();
   expect(fixture.requests).toHaveLength(2);
   expect(fixture.requests[1]).toEqual(fixture.requests[0]);

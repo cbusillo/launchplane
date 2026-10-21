@@ -1,5 +1,5 @@
 import { Wrench } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { LaunchplaneApiError, sweepPreviewLifecycle } from "./api";
 import { recoverBrowserOperationState, stableRequestFingerprint } from "./browser-operation";
@@ -18,17 +18,6 @@ function sweepRequest(apply: boolean): SweepRequest {
   return { apply, source: "launchplane-preview-lifecycle" };
 }
 
-function savedRequest(key: string): SweepRequest | null {
-  try {
-    const candidate: unknown = JSON.parse(sessionStorage.getItem(key) || "null");
-    const fields = record(candidate);
-    if (typeof fields.apply !== "boolean") return null;
-    const expected = sweepRequest(fields.apply);
-    return Object.keys(fields).length === Object.keys(expected).length &&
-      Object.entries(expected).every(([name, value]) => fields[name] === value) ? expected : null;
-  } catch { return null; }
-}
-
 export function EngineeringPreviewLifecycleRoute({ actorId, admin, fixtureMode }: {
   actorId: number; admin: boolean; fixtureMode: DevFixtureMode;
 }) {
@@ -41,10 +30,9 @@ export function EngineeringPreviewLifecycleRoute({ actorId, admin, fixtureMode }
 
 function SweepControls({ actorId }: { actorId: number }) {
   const scope = `github:${actorId}:preview-lifecycle-sweep`;
-  const storageKey = `launchplane:preview-lifecycle-draft:${scope}`;
   const submitting = useRef(false);
   const [running, setRunning] = useState(false);
-  const [saved, setSaved] = useState<SweepRequest | null>(() => savedRequest(storageKey));
+  const [recovery, setRecovery] = useState<{ fingerprint: string; payload: SweepRequest } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState("");
   const [response, setResponse] = useState<AcceptedEvidenceResponse | null>(null);
@@ -68,30 +56,43 @@ function SweepControls({ actorId }: { actorId: number }) {
   });
   const busy = running || ["queued", "submitting"].includes(operation.state.phase);
   const uncertain = operation.state.requiresIdempotencyContinuity && !busy;
+  const fingerprint = operation.state.identity?.requestFingerprint;
+  const saved = recovery?.fingerprint === fingerprint ? recovery?.payload : null;
+
+  useEffect(() => {
+    if (!uncertain || !fingerprint) return;
+    let active = true;
+    setRecovery(null);
+    setError("");
+    void (async () => {
+      // These are the only two requests this page can send. Match the retained
+      // fingerprint instead of relying on a separately persisted form draft.
+      for (const apply of [false, true]) {
+        const payload = sweepRequest(apply);
+        if (await stableRequestFingerprint({ request: payload, scope }) === fingerprint) {
+          if (active) setRecovery({ fingerprint, payload });
+          return;
+        }
+      }
+      throw new Error("The retained fingerprint does not match either supported sweep request.");
+    })().catch(() => {
+      if (active) setError("The original request could not be recovered. Keep the operation key and inspect its service receipt before another sweep.");
+    });
+    return () => { active = false; };
+  }, [uncertain, fingerprint, scope]);
 
   async function run(apply: boolean) {
     if (submitting.current || busy || uncertain && !saved || !uncertain && apply && !confirmed) return;
     submitting.current = true;
     setRunning(true);
+    setConfirmed(false);
     try {
       const payload = uncertain ? saved! : sweepRequest(apply);
       setError("");
-      try {
-        const serialized = JSON.stringify(payload);
-        sessionStorage.setItem(storageKey, serialized);
-        if (sessionStorage.getItem(storageKey) !== serialized) throw new Error("Draft not retained");
-      } catch {
-        setError("The request could not be retained for recovery. Nothing was sent; allow session storage and retry.");
-        return;
-      }
-      setSaved(payload);
       setResponse(null);
       const result = await operation.run(payload);
       if (!result) return;
       setResponse(result);
-      setConfirmed(false);
-      setSaved(null);
-      try { sessionStorage.removeItem(storageKey); } catch { /* The completed operation is settled. */ }
     } finally {
       submitting.current = false;
       setRunning(false);
@@ -105,8 +106,9 @@ function SweepControls({ actorId }: { actorId: number }) {
     {error ? <InlineFormError message={error} /> : null}
     {uncertain ? <>
       <p role="status">The {saved?.apply ? "cleanup" : saved ? "report" : "original"} result is uncertain. Retry the retained request with its original operation key before starting another sweep.</p>
-      {!saved ? <p role="alert">The exact original request is unavailable. Keep the operation key and investigate the original result.</p> : null}
-      <button className="button" type="button" disabled={busy || !saved} onClick={() => void run(false)}>Retry original sweep</button>
+      <button className="button" type="button" disabled={busy || !saved} onClick={() => void run(false)}>
+        {saved ? `Retry original ${saved.apply ? "cleanup" : "report"}` : "Retry original sweep"}
+      </button>
     </> : <>
       <label className="preview-lifecycle-confirm"><input type="checkbox" checked={confirmed} disabled={busy}
         onChange={event => setConfirmed(event.target.checked)} />Delete orphaned previews across all preview-enabled products.</label>
