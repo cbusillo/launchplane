@@ -17,6 +17,7 @@ from control_plane.outbound_http import (
     PublicHttpResponse,
     _parse_http_url,
     request_private_edge_health,
+    resolve_private_http_destination,
 )
 from control_plane.npmplus import NpmplusClient, NpmplusProxyHost
 from control_plane.storage.postgres import PostgresRecordStore
@@ -36,6 +37,16 @@ def _edge_health_origin(client: NpmplusClient, api_url: str) -> tuple[str, Npmpl
     if parsed.query or parsed.fragment:
         raise ValueError("The edge API origin is ambiguous.")
     if port != (443 if parsed.scheme == "https" else 80):
+        return api_url, None
+    health_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    try:
+        resolve_private_http_destination(f"https://{health_hostname}")
+    except PublicHttpDestinationError as error:
+        if error.code != "private_url":
+            raise
+    else:
+        # Preserve an already-private API's existing listener identity. Its
+        # self-proxy may target loopback or a provider-local container instead.
         return api_url, None
     hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
     if not hosts:

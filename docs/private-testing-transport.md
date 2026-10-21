@@ -279,8 +279,10 @@ Deleted historical hosts are not queried
 as current candidates. Missing or changed current evidence fails the probe.
 
 The health request connects to the existing edge's private HTTPS listener on
-port 443. A directly addressed private API still identifies that machine. For
-an API hostname on the standard HTTP/HTTPS listener, its authenticated provider
+port 443. An API origin that already resolves exclusively privately still
+identifies that machine, even if its self-proxy uses a provider-local backend
+or custom configuration. Otherwise, for an API hostname on the standard
+HTTP/HTTPS listener, its authenticated provider
 inventory may instead supply one exact, enabled, loaded proxy route with no
 aliases, custom locations/configuration or delegated authentication. Its normal
 HTTP(S) backend host identifies the private machine; its admin scheme and port
@@ -290,14 +292,19 @@ after the probe, along with existing endpoint, receipt and application authority
 Changed API configuration invalidates the result. No new record, credential or
 provider write is needed.
 
+Selecting the directly addressed private origin is an address-admission check,
+not a health attempt. The health socket resolves and pins private addresses
+again; a connection, TLS or health failure never retries through another binding.
+
 The selected machine must resolve exclusively to the existing permitted private
 address ranges (RFC1918 or RFC6598), and reach the same edge's HTTPS listener.
 Socket addresses are validated and pinned before connecting, while
 Host, SNI and ordinary certificate/name verification use the endpoint hostname.
 Endpoint DNS is never used to select this socket, so wildcard DNS changes cannot
 redirect it; a public or mixed answer for the selected listener refuses.
-No DNS record or shared trust store changes. A provider API hosted separately
-from its HTTPS listener does not qualify through this transport.
+No DNS record or shared trust store changes. The selected API origin or backend
+host must identify that same edge's HTTPS listener from Launchplane's network;
+a provider-local bridge or container address alone does not prove that identity.
 
 This continuation sends only an unauthenticated `GET /health`, with no request
 body, query, API credentials, cookies or redirects. It requires the monitor's

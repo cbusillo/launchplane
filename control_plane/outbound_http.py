@@ -418,7 +418,7 @@ def request_private_edge_health(
 ) -> PublicHttpResponse:
     """GET one health path at the configured edge, retaining its TLS name.
 
-    The caller must independently verify current testing route ownership. The
+    The caller must independently verify current testing route ownership.
     Verified provider metadata identifies the edge machine, never an upstream application.
     Only private addresses of that machine may receive the health request;
     endpoint DNS, redirects, API cookies and API credentials are never used.

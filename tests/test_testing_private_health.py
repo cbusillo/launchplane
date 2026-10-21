@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 import os
+import socket
 from typing import Any, cast
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
@@ -218,6 +219,34 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
             forward_port=81,
         )
         self.client.proxy_hosts.append(api_host)
+        self.transport.side_effect = outbound_http.request_private_edge_health
+        with (
+            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            patch(
+                "control_plane.outbound_http._system_address_resolver",
+                _resolver_for("10.77.0.9"),
+            ),
+            patch(
+                "control_plane.outbound_http._private_http_connection",
+                side_effect=lambda *args: _FakeConnection(_FakeResponse(status=200)),
+            ),
+        ):
+            for direct_fields in (
+                {"forward_host": "127.0.0.1"},
+                {"forward_host": "npm-container"},
+                {"advanced_config": "proxy_set_header Upgrade $http_upgrade;"},
+                {"domain_names": (*api_host.domain_names, "alias.example.test")},
+            ):
+                with self.subTest(direct_fields=direct_fields):
+                    self.client.proxy_hosts[-1] = api_host.model_copy(update=direct_fields)
+                    self.transport.reset_mock()
+                    self.assertEqual(self.fetch().status_code, 200)
+                    self.transport.assert_called_once_with(
+                        self.endpoint.url,
+                        edge_url=os.environ[NPMPLUS_BASE_URL_ENV_KEY],
+                        timeout_seconds=3,
+                    )
+        self.client.proxy_hosts[-1] = api_host
         connection = _FakeConnection(_FakeResponse(status=200))
         listener_ip, public_ip = "10.77.0.9", "93.184.216.34"
         resolve = Mock(
@@ -253,7 +282,14 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                 listener_ip if hostname == api_host.forward_host else public_ip
             )(hostname, port)
             self.assertEqual(self.fetch().status_code, 200)
-        resolve.assert_called_once_with(api_host.forward_host, 443)
+        self.assertEqual(
+            resolve.call_args_list,
+            [
+                (("edge-api.example.test", 443),),
+                ((api_host.forward_host, 443),),
+                (("edge-api.example.test", 443),),
+            ],
+        )
         destination = connect.call_args.args[0]
         self.assertEqual(destination.hostname, urlsplit(self.endpoint.url).hostname)
         self.assertEqual(str(destination.addresses[0].ip), listener_ip)
@@ -287,7 +323,13 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
             forward_port=81,
         )
         self.client.proxy_hosts.append(api_host)
-        with patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}):
+        with (
+            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            patch(
+                "control_plane.outbound_http._system_address_resolver",
+                _resolver_for("93.184.216.34"),
+            ),
+        ):
             self.assertEqual(self.fetch().status_code, 200)
             for api_fields in (
                 {"enabled": False},
@@ -318,6 +360,11 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                     self.client.proxy_hosts[-1] = api_host.model_copy(update=api_fields)
                     self.assert_refused()
             self.client.proxy_hosts[-1] = api_host
+            with patch(
+                "control_plane.outbound_http._system_address_resolver",
+                side_effect=socket.gaierror,
+            ):
+                self.assert_refused()
             read = self.client.get_proxy_host
             with patch.object(
                 self.client,
@@ -374,8 +421,14 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
             domain_names=("edge-api.example.test",), forward_host="edge.internal", forward_port=81
         )
         self.client.proxy_hosts.append(api_host)
-        with patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}):
-            for change in ("upstream", "duplicate", "deleted", "origin"):
+        with (
+            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "https://edge-api.example.test"}),
+            patch(
+                "control_plane.outbound_http._system_address_resolver",
+                side_effect=_resolver_for("93.184.216.34"),
+            ) as resolve,
+        ):
+            for change in ("upstream", "duplicate", "deleted", "dns_mode", "origin"):
                 with self.subTest(api_change=change):
 
                     def change_api(*args: Any, **kwargs: Any) -> PublicHttpResponse:
@@ -389,6 +442,8 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                             )
                         elif change == "deleted":
                             self.client.proxy_hosts.pop()
+                        elif change == "dns_mode":
+                            resolve.side_effect = _resolver_for("10.77.0.9")
                         else:
                             os.environ[NPMPLUS_BASE_URL_ENV_KEY] = "https://foreign.example.test"
                         return response
@@ -397,6 +452,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
                     with self.assertRaises(PublicHttpDestinationError):
                         self.fetch()
                     self.client.proxy_hosts = [self.client.proxy_hosts[0], api_host]
+                    resolve.side_effect = _resolver_for("93.184.216.34")
 
     async def test_monitor_uses_verified_edge_and_preserves_identity_check(self) -> None:
         from control_plane.contracts.environment_inventory import EnvironmentInventory
