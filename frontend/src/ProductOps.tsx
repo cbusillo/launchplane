@@ -26,7 +26,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -365,13 +365,15 @@ function DirectoryLane({
 }) {
   const tone = environmentOperationalTone(environment);
   const headline = environment ? ingressHeadline(environment) : "Not recorded";
+  const reasons = operationalAttentionReasons(environment);
   return (
     <span className="directory-lane" data-lane={lane} data-operational={tone}>
       <span className="lane-name">{lane === "prod" ? "Production" : "Testing"}</span>
       <strong>
-        {tone === "danger" ? "Issue · " : tone === "warning" ? "Warning · " : ""}
+        {tone === "warning" ? "Warning · " : ""}
         {headline}
       </strong>
+      {reasons.length ? <small className="directory-attention">{reasons.join(" · ")}</small> : null}
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
       <small className="directory-evidence-detail">
         {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
@@ -724,6 +726,7 @@ function EnvironmentRow({
     (candidate) => candidate.role === "primary",
   ) ?? environment.topology.observed.tls_domains[0];
   const topologyWarnings = environment.topology.warnings;
+  const attentionReasons = operationalAttentionReasons(environment);
 
   return (
     <article
@@ -756,7 +759,12 @@ function EnvironmentRow({
               environment.topology.desired.public_website === "none" ? "Not applicable" : domain
             )}
           </dd>
-          <small>{ingressHeadline(environment)}</small>
+          {attentionReasons.length ? (
+            <>
+              <small className="environment-attention">{attentionReasons.join(" · ")}</small>
+              {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
+            </>
+          ) : <small>{ingressHeadline(environment)}</small>}
         </div>
         <div>
           <dt>TLS evidence</dt>
@@ -1248,13 +1256,24 @@ function compareEnvironments(
   );
 }
 
+// A no-website lane may retain an older public observation; it is history, not current health.
+function recordedPublicObservation(environment: ProductEnvironmentSummary): string | null {
+  if (environment.topology.desired.public_website !== "none" || !environment.public_ingress.observed_at) return null;
+  return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
+}
+
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
+  // No summary, current or retained, may stand as the headline of a red lane.
+  if (environmentOperationalTone(environment) === "danger") {
+    return "Needs attention";
+  }
+  const retained = recordedPublicObservation(environment);
+  if (retained) {
+    return retained;
+  }
   if (environment.topology.desired.public_website === "none") {
-    if (environment.public_ingress.observed_at) {
-      return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
-    }
     const tone = environmentOperationalTone(environment);
-    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
+    return tone === "verified" ? "Private checks passed" : "Verification incomplete";
   }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {
