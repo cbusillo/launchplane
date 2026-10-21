@@ -192,6 +192,13 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                 "Schema-v2 Odoo stable target replacement operation requires authorization provenance."
             )
         if self.authorization is not None:
+            if (
+                self.authorization.grant == "director_testing_rebuild"
+                and not self.is_native_testing_rebuild
+            ):
+                raise ValueError(
+                    "Director testing rebuild provenance requires the native lifecycle."
+                )
             if self.schema_version != 2:
                 raise ValueError(
                     "Odoo target replacement authorization provenance requires schema version 2."

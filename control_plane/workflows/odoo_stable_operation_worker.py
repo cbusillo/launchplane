@@ -2257,6 +2257,11 @@ def _execute_target_replacement_with_checkpoint(
     heartbeat_seconds: int,
     execution_checkpoint: Callable[[str], None] | None = None,
 ) -> bool:
+    from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.testing_rebuild_authorization import (
+        director_testing_rebuild_authorization_allows,
+    )
+
     stop_event = Event()
     heartbeat_lost_event = Event()
     heartbeat_thread = _start_target_replacement_heartbeat(
@@ -2279,6 +2284,14 @@ def _execute_target_replacement_with_checkpoint(
                 context=operation.context,
                 instances=(operation.instance,),
                 record_store=record_store,
+            )
+        ),
+        director_testing_rebuild_allows=lambda authorization: (
+            director_testing_rebuild_authorization_allows(
+                authorization=authorization,
+                operation=operation,
+                store=record_store,
+                config=_bearer_identity_config_from_env(),
             )
         ),
     )

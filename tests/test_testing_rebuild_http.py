@@ -106,6 +106,58 @@ class TestingRebuildHttpFixture(unittest.TestCase):
 
 
 class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_director_operator_can_queue_native_testing_without_an_apply_rule(self) -> None:
+        from control_plane.service_auth import BearerIdentityConfig
+        from control_plane.odoo_target_replacement_apply_http import (
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+        )
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="fixture-operator",
+                local_operator_subject="fixture-agent",
+                local_operator_token_label="fixture-agent-token",
+            ),
+        )
+        replacement = self.fixture.operation.request.model_copy(
+            update={"reason": "Rebuild the disposable testing copy"}
+        )
+        ordinary = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers={"Authorization": "Bearer fixture-operator", "Idempotency-Key": "ordinary"},
+            payload={
+                "product": self.product,
+                "replacement": replacement.model_copy(
+                    update={"strategy": "recreate-in-place"}
+                ).model_dump(mode="json"),
+            },
+        )
+        self.assertEqual(ordinary.status_code, 403, ordinary.text)
+        response = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers={
+                "Authorization": "Bearer fixture-operator",
+                "Idempotency-Key": "native-director-rebuild",
+            },
+            payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        saved = next(
+            item for item in operations if item.idempotency_key == "native-director-rebuild"
+        )
+        self.assertEqual(saved.request, replacement)
+        self.assertTrue(saved.is_native_testing_rebuild)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
         self,
     ) -> None:

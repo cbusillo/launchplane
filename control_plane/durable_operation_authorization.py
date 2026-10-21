@@ -62,6 +62,7 @@ class DurableOperationAuthorizationGuard:
     # Likewise, only a worker path a Client release or temporary hotfix may queue
     # passes this; every other guard refuses a release decision grant.
     client_release_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
+    director_testing_rebuild_allows: Callable[[DurableOperationAuthorization], bool] | None = None
 
     def authorize_execution(self) -> None:
         try:
@@ -146,6 +147,16 @@ class DurableOperationAuthorizationGuard:
                         "The active authorization policy no longer names the recorded caller "
                         "as its administrator."
                     ),
+                )
+            return
+        if self.authorization.grant == "director_testing_rebuild":
+            if (
+                self.director_testing_rebuild_allows is None
+                or not self.director_testing_rebuild_allows(self.authorization)
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_testing_rebuild_refused",
+                    message="The recorded Director operator no longer covers this native testing rebuild.",
                 )
             return
         if not durable_operation_authorization_allows(
