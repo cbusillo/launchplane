@@ -104,9 +104,13 @@ operation custody. A lost writer reply must settle that original native journal;
 it never permits a second blind route publication.
 
 A completed original forward exclusion selects recovery rather than another
-forward attempt. Apply proves the original route through its exact inverse and,
-when the original candidate job is terminal, retains an honest
-`publication_refused` result with all resources intact. Correcting that candidate
+forward attempt. Recovery can also close the exact original child when positive
+observation proves no route publication started, including a returned busy
+writer. It never starts another forward attempt to finish a refused plan. Apply
+proves the original route through its exact inverse and, when the original
+candidate job is
+terminal, retains an honest `publication_refused` result with all resources
+intact. Correcting that candidate
 does not reopen the terminal plan. Continue with a fresh reviewed preparation and
 activation key. Staff use, unknown writer outcomes and unknown or foreign
 candidate jobs retain their existing custody instead of inventing completion.

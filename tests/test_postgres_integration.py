@@ -12873,13 +12873,18 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
             else:
                 original_write(**kwargs)
 
+        deadline = 0.0
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         def hold_publication(session: Any) -> None:
             publication_lock(session)
             if publishing.is_set():
                 locked.set()
-                if not release.wait(15):
+                if not release.wait(remaining()):
                     raise TimeoutError(
-                        "The concurrent private writers did not reach the native fence."
+                        "Shared concurrency budget expired before the test released publication."
                     )
 
         def blocked_writer(index: int, session: Any) -> None:
@@ -12926,28 +12931,48 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                     )
                 )
             with ThreadPoolExecutor(max_workers=4) as workers:
+                deadline = time.monotonic() + 60
                 publication = workers.submit(fixture.activate)
                 contenders = []
+
+                def require_publication_pending(stage: str) -> None:
+                    if publication.done():
+                        outcome = publication.result()
+                        self.fail(
+                            "Publication finished "
+                            + stage
+                            + ": status="
+                            + str(outcome.status)
+                            + "; phase="
+                            + fixture.adapter.current().phase
+                        )
+
                 try:
-                    checkpoint_deadline = time.monotonic() + 60
-                    while not locked.wait(0.05):
-                        if publication.done():
-                            outcome = publication.result()
+                    while not locked.wait(min(0.05, remaining())):
+                        require_publication_pending("before its checkpoint")
+                        if not remaining():
                             self.fail(
-                                "Publication finished before its checkpoint: status="
-                                + str(outcome.status)
-                                + "; phase="
+                                "Shared concurrency budget expired before the publication checkpoint; phase="
                                 + fixture.adapter.current().phase
                             )
-                        if time.monotonic() >= checkpoint_deadline:
-                            self.fail(
-                                "Publication did not reach its checkpoint within the bounded budget; phase="
-                                + fixture.adapter.current().phase
-                            )
+                    require_publication_pending("before contender observation")
                     contenders = [workers.submit(action) for action in actions]
-                    self.assertTrue(all(event.wait(5) for event in attempted))
-                    deadline, blocked = time.monotonic() + 10, False
-                    while time.monotonic() < deadline:
+                    while not all(event.is_set() for event in attempted):
+                        require_publication_pending("before all writer lock callbacks")
+                        for contender in contenders:
+                            if contender.done():
+                                contender.result()
+                                self.fail(
+                                    "A private writer completed before the held publication was released."
+                                )
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before all private writer lock callbacks."
+                            )
+                        time.sleep(min(0.01, remaining()))
+                    blocked = False
+                    while remaining():
+                        require_publication_pending("before PostgreSQL blocking witnesses")
                         with store._engine.connect() as connection:
                             blocked = all(
                                 bool(
@@ -12960,16 +12985,30 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                             )
                         if blocked:
                             break
-                        time.sleep(0.01)
+                        time.sleep(min(0.01, remaining()))
                     self.assertTrue(
-                        blocked, "All three private authority writers must wait in PostgreSQL."
+                        blocked,
+                        "Shared concurrency budget expired before all three PostgreSQL blocking witnesses.",
                     )
+                    require_publication_pending("while private writers were blocked")
                     self.assertFalse(any(contender.done() for contender in contenders))
                 finally:
                     release.set()
-                self.assertEqual(publication.result(timeout=30).status, "completed")
+                try:
+                    self.assertEqual(publication.result(timeout=remaining()).status, "completed")
+                except TimeoutError:
+                    if publication.done():
+                        raise
+                    self.fail("Shared concurrency budget expired while publication committed.")
                 for contender in contenders:
-                    contender.result(timeout=15)
+                    try:
+                        contender.result(timeout=remaining())
+                    except TimeoutError:
+                        if contender.done():
+                            raise
+                        self.fail(
+                            "Shared concurrency budget expired while a private writer committed."
+                        )
         self.assertTrue(fixture.adapter.current().published)
         self.assertEqual(
             store.read_edge_endpoint_record(edge.endpoint_key).source_label, "test:concurrent-edge"
@@ -12985,6 +13024,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                 for row in store.list_held_provider_target_reservations()
             )
         )
+
+    def test_unfinished_preparing_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_unfinished_private_forward_recovers_and_successor("preparing")
 
     def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
         self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")

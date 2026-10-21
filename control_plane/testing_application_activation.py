@@ -1538,6 +1538,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         from control_plane.testing_route_effects import (
             TestingRouteEffects,
             TestingRouteFenceController,
+            ROUTE_PREPARING,
+            ROUTE_WRITING,
         )
         from control_plane.provider_operations import run_durable_provider_operation
 
@@ -1642,11 +1644,29 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 provider_effect_phase: str,
                 reconciliation_key: str,
             ) -> ProviderObservation:
-                return (
-                    effects.observe(provider_effect_phase, prior.attempt)
-                    if prior is not None
-                    else ProviderObservation("unknown")
-                )
+                if prior is None:
+                    return ProviderObservation("unknown")
+                observation = effects.observe(provider_effect_phase, prior.attempt)
+                if (
+                    observe_only
+                    and not inverse
+                    and observation.outcome == "absent"
+                    and observation.retry_safe
+                    and (
+                        provider_effect_phase in {"", ROUTE_PREPARING}
+                        or provider_effect_phase == ROUTE_WRITING
+                        and effects.writer_was_busy(prior.attempt)
+                    )
+                    and self.store.read_idempotency_record(
+                        scope=record.scope, route_path=path, idempotency_key=key
+                    )
+                    == prior
+                ):
+                    recovery_guard()
+                    # Adoption CAS fences this exact preparer; no forward send
+                    # or new attempt is permitted while restoring authority.
+                    return ProviderObservation("present", 200, {"route_write_not_started": True})
+                return observation
 
         recovery_guard() if observe_only else guard()
         outcome = run_durable_provider_operation(

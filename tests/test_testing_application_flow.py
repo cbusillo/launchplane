@@ -1384,6 +1384,243 @@ class ApplicationFlowTests(unittest.TestCase):
         with patch.object(self, "docker", side_effect=change_scope), self.assertRaises(ValueError):
             self.adapter.route_admission(record)
 
+    def unfinished_private_forward(self, problem: str) -> tuple[Any, Any, Any]:
+        """Stop the actual original child at a positively undispatched boundary."""
+        import fcntl
+
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.testing_route_effects import (
+            ROUTE_PREPARING,
+            ROUTE_WRITING,
+            TestingRouteEffects,
+            TestingRouteFenceController,
+        )
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        injected: list[bool] = []
+        checkpoints: list[Any] = []
+        held: list[Any] = []
+        apply = TestingRouteEffects.apply
+        ensure = TestingRouteFenceController.ensure
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+        path = ROUTE.format(product=self.product) + ":route"
+
+        def remember(**kwargs: Any) -> Any:
+            result = checkpoint(**kwargs)
+            if kwargs["reservation"].route_path == path and result.record is not None:
+                checkpoints.append(result.record)
+            return result
+
+        def empty(effects: Any, lease: Any) -> Any:
+            if not effects.inverse and not injected:
+                effects.controller.guard()
+                injected.append(True)
+                raise NativeSourceUnavailable("Original guard answered before preparing checkpoint")
+            return apply(effects, lease)
+
+        def preparing(controller: Any, *args: Any, **kwargs: Any) -> Any:
+            if not injected:
+                injected.append(True)
+                raise NativeSourceUnavailable(
+                    "Original preparing read unavailable before initializer"
+                )
+            return ensure(controller, *args, **kwargs)
+
+        def busy() -> None:
+            def hold_original_lock() -> None:
+                handle = (routing.root / ("." + routing.route_file.name + ".lock")).open("rb")
+                held.append(handle)
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                injected.append(True)
+
+            # The real native writer runs after its guarded WRITING checkpoint.
+            routing.before_native = hold_original_lock
+
+        routing.before_publish = busy if problem == "busy" else None
+        try:
+            with (
+                patch.object(TestingRouteEffects, "apply", empty if problem == "empty" else apply),
+                patch.object(
+                    TestingRouteFenceController,
+                    "ensure",
+                    preparing if problem == "preparing" else ensure,
+                ),
+                patch.object(
+                    self.store, "checkpoint_mutation_provider_effect", side_effect=remember
+                ),
+                patch.object(
+                    self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+                ),
+            ):
+                self.assertEqual(self.activate().status, "reconcile_required")
+        finally:
+            routing.before_publish = None
+            for handle in held:
+                handle.close()
+        self.assertTrue(injected)
+        record = self.adapter.current()
+        child = self.store.read_idempotency_record(
+            scope=record.scope, route_path=path, idempotency_key=record.plan_sha256 + ":route"
+        )
+        assert child is not None
+        self.assertEqual(child.state, "reconcile_required")
+        self.assertEqual(
+            child.provider_effect_phase,
+            {"empty": "", "preparing": ROUTE_PREPARING, "busy": ROUTE_WRITING}[problem],
+        )
+        self.assertFalse(routing.route_file.exists())
+        return routing, child, checkpoints[-1] if checkpoints else None
+
+    def assert_unfinished_private_forward_recovers_and_successor(self, problem: str) -> None:
+        from control_plane.testing_application_activation import (
+            completed_application_forward_exclusion,
+            completed_application_inverse,
+        )
+        from control_plane.testing_route_effects import ROUTE_WRITING
+
+        routing, child, stale = self.unfinished_private_forward(problem)
+        intent = self.store.read_original_mutation_intent(child)
+        effects = routing.effect_count
+        projects = deepcopy(self.projects)
+        self.correct_runtime()
+        result = self.activate()
+        self.assertIn(result.status, {"completed", "adopted"}, result)
+        refused = self.adapter.current()
+        assert refused.failure is not None
+        self.assertEqual(refused.failure.kind, "publication_refused")
+        self.assertTrue(completed_application_forward_exclusion(self.store, refused))
+        self.assertTrue(completed_application_inverse(self.store, refused))
+        self.assertFalse(routing.route_file.exists())
+        self.assertEqual(routing.effect_count, effects)
+        self.assertEqual(self.projects, projects)
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+        completed = self.store.read_idempotency_record(
+            scope=child.scope, route_path=child.route_path, idempotency_key=child.idempotency_key
+        )
+        assert completed is not None
+        self.assertEqual(completed.attempt, child.attempt)
+        self.assertEqual(self.store.read_original_mutation_intent(completed), intent)
+        if stale is not None:
+            checkpoint = self.store.checkpoint_mutation_provider_effect(
+                reservation=stale, effect_phase=ROUTE_WRITING
+            )
+            self.assertNotEqual(checkpoint.status, "updated")
+        self.assertEqual(self.activate().status, "replayed")
+        self.activation_key = "after-unfinished-forward"
+        self.prepare(self.activation_key)
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=child.scope,
+                route_path=child.route_path,
+                idempotency_key=child.idempotency_key,
+            ),
+            completed,
+        )
+
+    def test_unfinished_private_forward_recovery_and_fresh_successor(self) -> None:
+        for problem in ("empty", "preparing", "busy"):
+            with self.subTest(problem=problem):
+                fixture = ApplicationFlowTests()
+                fixture.setUp()
+                try:
+                    fixture.assert_unfinished_private_forward_recovers_and_successor(problem)
+                finally:
+                    fixture.doCleanups()
+
+    def test_unfinished_forward_adoption_loses_to_actual_new_writing_attempt(self) -> None:
+        from control_plane.testing_route_effects import ROUTE_WRITING
+
+        for timing in ("active", "before-observe", "before-adopt"):
+            with self.subTest(timing=timing):
+                fixture = ApplicationFlowTests()
+                fixture.setUp()
+                try:
+                    routing, child, _ = fixture.unfinished_private_forward("busy")
+                    fixture.correct_runtime()
+                    effects = routing.effect_count
+                    reserve = fixture.store.reserve_mutation
+                    adopt = fixture.store.adopt_reconciled_mutation
+                    advanced = []
+                    adoptions = []
+
+                    def advance() -> None:
+                        retried = fixture.store.retry_reconciled_mutation(
+                            reservation=child, lease_owner="competing-original-worker"
+                        )
+                        fixture.assertEqual(retried.status, "acquired")
+                        assert retried.record is not None
+                        writing = fixture.store.checkpoint_mutation_provider_effect(
+                            reservation=retried.record, effect_phase=ROUTE_WRITING
+                        )
+                        fixture.assertEqual(writing.status, "updated")
+                        assert writing.record is not None
+                        current = writing.record
+                        if timing != "active":
+                            fenced = fixture.store.mark_mutation_reconcile_required(
+                                reservation=current, reconciliation_key=current.reconciliation_key
+                            )
+                            fixture.assertEqual(fenced.status, "updated")
+                            assert fenced.record is not None
+                            current = fenced.record
+                        advanced.append(current)
+
+                    def racing_reserve(**kwargs: Any) -> Any:
+                        if kwargs["route_path"] == child.route_path and not advanced:
+                            advance()
+                        return reserve(**kwargs)
+
+                    def racing_adopt(**kwargs: Any) -> Any:
+                        if kwargs["reservation"].route_path == child.route_path:
+                            if not advanced:
+                                advance()
+                            result = adopt(**kwargs)
+                            adoptions.append(result)
+                            return result
+                        return adopt(**kwargs)
+
+                    with (
+                        patch.object(fixture.store, "reserve_mutation", side_effect=racing_reserve)
+                        if timing in {"active", "before-observe"}
+                        else nullcontext(),
+                        patch.object(
+                            fixture.store, "adopt_reconciled_mutation", side_effect=racing_adopt
+                        ),
+                    ):
+                        fixture.assertEqual(fixture.activate().status, "reconcile_required")
+                    fixture.assertTrue(advanced)
+                    fixture.assertEqual(bool(adoptions), timing == "before-adopt")
+                    for result in adoptions:
+                        fixture.assertEqual(result.status, "reservation_mismatch")
+                    current = fixture.store.read_idempotency_record(
+                        scope=child.scope,
+                        route_path=child.route_path,
+                        idempotency_key=child.idempotency_key,
+                    )
+                    fixture.assertEqual(current, advanced[0])
+                    fixture.assertFalse(routing.route_file.exists())
+                    fixture.assertEqual(routing.effect_count, effects)
+                    fixture.assertIsNone(
+                        fixture.store.read_idempotency_record(
+                            scope=child.scope,
+                            route_path=child.route_path + "-inverse",
+                            idempotency_key=child.idempotency_key + "-inverse",
+                        )
+                    )
+                    fixture.assertEqual(fixture.canonical_password(), "retained-only-password")
+                finally:
+                    fixture.doCleanups()
+
     def test_private_candidate_must_remain_running_at_native_dispatch(self) -> None:
         for problem in ("no-container", "exited-container"):
             with self.subTest(problem=problem):
