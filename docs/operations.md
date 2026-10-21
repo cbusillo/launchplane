@@ -2575,10 +2575,12 @@ reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
 typed generic-web contract does not fit, and use `Dokploy Target Setup` for
 adoption, production, compose, or repair operations.
 
-Conventional onboarding creates new products only. Existing-product changes,
-including a missing or changed preview base URL, use the bounded profile or
-advanced manifest apply path; see [new product setup](new-product-repo.md#launchplane-records)
-and [runtime environment contracts](#runtime-environment-contracts). A completed
+Conventional onboarding creates new products only. To repair or change an
+existing product's preview base URL, use service-backed product-config dry-run
+and apply for `LAUNCHPLANE_PREVIEW_BASE_URL` on its preview context; see
+[runtime environment contracts](#runtime-environment-contracts). Existing-product
+record changes use the bounded profile or advanced manifest apply path described
+in [new product setup](new-product-repo.md#launchplane-records). A completed
 same-key request replay does not authorize onboarding with changed inputs.
 
 - Promotions and deploys reference explicit artifact identifiers.

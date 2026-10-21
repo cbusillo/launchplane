@@ -802,7 +802,9 @@ waiting.
 Each route's authentication dependency selects its accepted identities;
 see the dependency definitions and route wiring in
 [`http_app.py`](../control_plane/http_app.py) and
-[`http_routes/`](../control_plane/http_routes/). Browser-capable mutations use
+[`http_routes/`](../control_plane/http_routes/), with wiring and CSRF coverage in
+the [browser mutation tests](../tests/test_http_app_browser_mutation.py).
+Browser-capable mutations use
 the CSRF boundary above and still enforce their route-specific authorization.
 On routes that also accept bearer identities, bearer requests retain their
 existing verification rather than using browser origin, fetch-metadata, or CSRF

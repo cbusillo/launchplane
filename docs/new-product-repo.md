@@ -122,8 +122,9 @@ pull request events itself, verifies the build, and deploys previews and the
 `testing` lane; see [event-driven-deploys.md](event-driven-deploys.md).
 
 Existing products still using caller workflows follow the transitional
-[preview workflow contract](preview-workflow-contract.md) until migration. New
-products use the event-driven path above.
+[preview workflow contract](preview-workflow-contract.md) and
+[caller path contract](product-repo-contract.md#repo-metadata-boundary) until
+migration. New products use the event-driven path above.
 
 Product-owned smoke tests manage their own dynamic fixtures. They do not use a
 Launchplane maintenance route or a generated Launchplane smoke client.
