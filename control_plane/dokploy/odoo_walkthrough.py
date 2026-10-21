@@ -228,6 +228,7 @@ spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 # The receipt carries only a fixed reason; exception text never leaves this host.
 class Refused(Exception): pass
 reason='unavailable'
+journal_unsettled=False
 try:
     if spec.get('mode')=='quiescence':
         if not re.fullmatch('[a-f0-9]{64}',spec['dispatch_id']): raise RuntimeError('Invalid dispatch')
@@ -239,6 +240,7 @@ try:
                 raise ValueError('Untrusted journal')
             value=json.loads(path.read_text())
             if value.get('finished') is True and value.get('needs_quiescence') is not True: reason='clear'
+            else: journal_unsettled=value.get('finished') is False or value.get('needs_quiescence') is True
         except (OSError,ValueError):
             pass
     if reason=='clear':
@@ -262,7 +264,8 @@ try:
         if not isinstance(response,dict) or set(response)!={'reason'} or response['reason'] not in __PROBE_READS__:
             raise RuntimeError('Invalid probe receipt')
         reason=response['reason']
-    elif spec.get('mode')=='quiescence':
+    elif journal_unsettled:
+        # Only a trusted, readable unfinished journal is observed; absence is not.
         reason='dispatch_unsettled'
 except Refused as refusal:
     reason=refusal.args[0]

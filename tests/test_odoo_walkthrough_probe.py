@@ -274,17 +274,38 @@ class NativeProbeTests(unittest.TestCase):
     def run_probe(self) -> bool:
         return self.host.run(ACCOUNT_JOURNAL_READ_PROGRAM, dict(self.spec))["clear"] is True
 
+    def read(self) -> object:
+        return self.host.run(ACCOUNT_JOURNAL_READ_PROGRAM, dict(self.spec))["reason"]
+
     def test_absent_journal_settles_only_after_deadline_and_actual_transaction_quiescence(
         self,
     ) -> None:
         self.spec["dispatch_deadline"] = int(time.time()) + 60
-        self.assertFalse(self.run_probe())
+        # Nothing was observed: no journal and no database read before the deadline.
+        self.assertEqual(self.read(), TestingRead.UNAVAILABLE)
+        self.host.journal.mkdir(mode=0o700)
+        journal = self.host.journal / (self.spec["dispatch_id"] + ".json")
+        for content, expected in (
+            ("not-json", TestingRead.UNAVAILABLE),
+            (json.dumps({"finished": False}), TestingRead.DISPATCH_UNSETTLED),
+            (
+                json.dumps({"finished": True, "needs_quiescence": True}),
+                TestingRead.DISPATCH_UNSETTLED,
+            ),
+            (json.dumps({"finished": True}), TestingRead.CLEAR),
+        ):
+            with self.subTest(content):
+                journal.write_text(content)
+                self.assertEqual(self.read(), expected)
+        self.host.journal.chmod(0o755)
+        self.assertEqual(self.read(), TestingRead.UNAVAILABLE)
+        journal.unlink()
         self.assertEqual(self.database_reads, 0)
         self.spec["dispatch_deadline"] = int(time.time()) - 1
         self.connection.free = False
-        self.assertFalse(self.run_probe())
+        self.assertEqual(self.read(), TestingRead.DISPATCH_UNSETTLED)
         self.connection.free = True
-        self.assertTrue(self.run_probe())
+        self.assertEqual(self.read(), TestingRead.CLEAR)
         self.assertTrue(self.connection.readonly)
         self.assertTrue(self.connection.closed)
 
