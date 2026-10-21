@@ -5,7 +5,11 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from unittest.mock import patch
 
-from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter, RehearsalRefused
+from control_plane.odoo_upgrade_rehearsal import (
+    OdooRehearsalAdapter,
+    RehearsalRefused,
+    rehearsal_credential_bindings,
+)
 from control_plane.testing_local_credentials import prepare_rehearsal_local_credentials
 from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
 from tests import test_odoo_upgrade_rehearsal as rehearsal
@@ -600,7 +604,491 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             self.retirement("replacement-key").plan()
 
 
+class LaterPhaseRetirementTests(unittest.TestCase):
+    """A completed later phase is disposed under the key that published it."""
+
+    def setUp(self) -> None:
+        self.fixture = rehearsal.RehearsalScenario()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.store = self.fixture.store
+        prepared = self.fixture.record.model_copy(
+            update={
+                "state": "prepared",
+                "compose_id": "own-compose",
+                "project_id": "own-project",
+                "environment_id": "own-environment",
+            }
+        )
+        prepare_rehearsal_local_credentials(
+            self.store, self.fixture.identifier, actor=self.fixture.principal
+        )
+        prepared = prepared.model_copy(
+            update={
+                "credential_bindings_sha256": rehearsal_credential_bindings(
+                    self.store, self.fixture.identifier
+                )
+            }
+        )
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, prepared)
+        copies: list[Any] = []
+
+        def host(adapter: Any, record: Any, mode: str, checkpoint: Any, **_: Any) -> Any:
+            checkpoint()
+            action = adapter.request.action
+            copies.append(
+                self.fixture.copy({"execute": "source", "simulate-final": "final_source"}[action])
+            )
+            return {
+                "intent_sha256": record.intent_sha256,
+                "state": {"execute": "upgraded", "simulate-final": "switched"}[action],
+                "copies": [copy.model_dump(mode="json") for copy in copies],
+                "elapsed_seconds": {**record.elapsed_seconds, action: 0.1},
+                "resources_preserved": True,
+                "public_route": False,
+                "business_host_frozen": False,
+            }
+
+        # Both upgrade phases complete under their own keys, as C11's did.
+        with patch.object(OdooRehearsalAdapter, "host", autospec=True, side_effect=host):
+            for action, key in (("execute", "initial-execute"), ("simulate-final", "final")):
+                outcome = self.fixture.run_operation(self.fixture.adapter(action), key)
+                self.assertEqual(outcome.status, "completed")
+        switched = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert switched is not None and switched.state == "switched"
+        self.switched = switched
+
+    def journal(self, key: str) -> Any:
+        return self.store.read_idempotency_record(
+            scope=self.fixture.principal,
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+            idempotency_key=key,
+        )
+
+    def retirement(self, key: str = "final") -> Any:
+        from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+
+        return IncompleteRehearsalRetirement(self.fixture.adapter("retire-incomplete"), key)
+
+    def run_retirement(self, operation: Any) -> Any:
+        return IncompleteRehearsalRetirementTests.run_retirement(cast(Any, self), operation)
+
+    def native(self, snapshots: Any = None, key: str = "final") -> dict[str, object]:
+        native = native_fixture(self.switched, key, "e" * 64)
+        native["recovery_snapshots"] = [
+            copy.model_dump(mode="json")
+            for copy in (self.switched.copies if snapshots is None else snapshots)
+        ]
+        return native
+
+    @staticmethod
+    def host(native: dict[str, object]) -> Any:
+        absence = ("containers_absent", "volumes_absent", "network_absent", "raw_source_absent")
+        return lambda mode, check: {
+            **native,
+            **{key: mode != "dry-run" for key in ("disposed", *absence)},
+        }
+
+    def test_completed_switched_rehearsal_disposes_snapshots_and_keeps_custody_records(
+        self,
+    ) -> None:
+        original = self.journal("final")
+        operation = self.retirement()
+        with (
+            patch.object(type(operation), "host", side_effect=self.host(self.native())) as host,
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            self.assertTrue(plan["disposes_recovery_snapshots"])
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            outcome = self.run_retirement(operation)
+            self.assertEqual(outcome.status, "completed")
+            result = outcome.response_payload["result"]
+            recorded = [copy.model_dump(mode="json") for copy in self.switched.copies]
+            # The tuples stay recorded; only their bytes and runtime are disposed.
+            self.assertEqual(result["copies"], recorded)
+            self.assertEqual(result["host_disposal"]["recovery_snapshots"], recorded)
+            self.assertIsNone(result["host_disposal"]["initial_source_snapshot"])
+            self.assertFalse(result["recovery_tuples_produced"])
+            count = host.call_count
+            self.assertEqual(operation.readback(), result)
+            replay = self.run_retirement(operation)
+            self.assertEqual(replay.status, "replayed")
+            self.assertEqual(replay.response_payload["result"], result)
+            self.assertEqual(host.call_count, count)
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert retired is not None
+        self.assertEqual(retired.state, "retired")
+        self.assertEqual(retired.copies, self.switched.copies)
+        # The completed upgrade journal is custody evidence, never rewritten.
+        self.assertEqual(self.journal("final"), original)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_provider_target_record(
+                context_name=self.fixture.identifier, instance_name="rehearsal"
+            )
+
+    def hold_uncertain_writer(self) -> None:
+        """Leave a started, unsettled operation on the rehearsal's own target."""
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.provider_operations import (
+            ProviderObservation,
+            run_durable_provider_operation,
+        )
+
+        identifier = self.fixture.identifier
+
+        class UncertainWriter:
+            def target_key(self) -> str:
+                return identifier
+
+            def reconciliation_key(self) -> str:
+                return canonical_json_sha256(
+                    {"rehearsal": identifier, "action": "validate-business"}
+                )
+
+            def apply(self, key: str, lease: Any) -> Any:
+                lease.checkpoint_effect("validate-business")
+                raise TimeoutError("observation lost after the writer started")
+
+            def observe(self, *args: Any) -> Any:
+                return ProviderObservation("unknown")
+
+        with self.assertRaises(TimeoutError):
+            run_durable_provider_operation(
+                store=self.store,
+                scope=self.fixture.principal,
+                route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                idempotency_key="uncertain-validation",
+                request_fingerprint="uncertain-validation",
+                lease_owner="validation-worker",
+                response_trace_id="validation-trace",
+                adapter=cast(Any, UncertainWriter()),
+            )
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+
+    def test_unattributed_or_active_later_phase_refuses_before_host_effects(self) -> None:
+        for case in ("earlier-key", "unknown-key", "verified", "held-writer"):
+            with self.subTest(case=case):
+                record = self.switched
+                if case == "verified":
+                    record = record.model_copy(update={"state": "verified"})
+                    self.store.compare_and_write_odoo_upgrade_rehearsal(self.switched, record)
+                if case == "held-writer":
+                    self.hold_uncertain_writer()
+                operation = self.retirement(
+                    {"earlier-key": "initial-execute", "unknown-key": "never-sent"}.get(
+                        case, "final"
+                    )
+                )
+                with patch.object(type(operation), "host") as host:
+                    with self.assertRaises(RehearsalRefused):
+                        operation.plan()
+                    host.assert_not_called()
+                if case == "verified":
+                    self.store.compare_and_write_odoo_upgrade_rehearsal(record, self.switched)
+        self.assertEqual(
+            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.switched
+        )
+
+    def test_publication_refuses_an_operation_that_became_unsettled(self) -> None:
+        # Publication rechecks inside its transaction, after every earlier check.
+        self.hold_uncertain_writer()
+        with self.assertRaises(ValueError):
+            self.store.complete_incomplete_rehearsal_retirement(
+                expected=self.switched,
+                replacement=self.switched.model_copy(update={"state": "retired"}),
+                original=self.journal("final"),
+                trace_id="retirement-trace",
+                result={"action": "retire-incomplete", "disposed": True},
+            )
+        self.assertEqual(
+            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.switched
+        )
+        self.store.read_provider_target_record(
+            context_name=self.fixture.identifier, instance_name="rehearsal"
+        )
+
+    def test_host_must_bind_exactly_the_recorded_recovery_snapshots(self) -> None:
+        import json
+
+        operation = self.retirement()
+        for snapshots in (self.switched.copies[:1], ()):
+            evidence = {"rehearsal_result": json.dumps(self.native(snapshots)).encode().hex()}
+            with (
+                self.subTest(count=len(snapshots)),
+                patch.object(OdooRehearsalAdapter, "host_script", return_value="fixture"),
+                patch.object(OdooRehearsalAdapter, "validate_apply_script"),
+                patch.object(OdooRehearsalAdapter, "run_script", return_value=evidence),
+            ):
+                with self.assertRaises(RehearsalRefused):
+                    operation.host("dry-run", lambda: None)
+
+    def test_completed_business_validation_key_retires_with_its_validations(self) -> None:
+        from tests.test_odoo_rehearsal_business_validation import identity, receipt
+
+        validation = receipt({**identity(self.switched), "attempt_sha256": "c" * 64})
+
+        def host(adapter: Any, record: Any, mode: str, checkpoint: Any, **_: Any) -> Any:
+            checkpoint()
+            return {
+                "intent_sha256": record.intent_sha256,
+                "state": "switched",
+                "copies": [copy.model_dump(mode="json") for copy in record.copies],
+                "elapsed_seconds": {**record.elapsed_seconds, "validate-business": 0.1},
+                "resources_preserved": True,
+                "public_route": False,
+                "business_host_frozen": False,
+                "business_validation": validation,
+            }
+
+        with patch.object(OdooRehearsalAdapter, "host", autospec=True, side_effect=host):
+            outcome = self.fixture.run_operation(
+                self.fixture.adapter("validate-business"), "validation"
+            )
+        self.assertEqual(outcome.status, "completed")
+        validated = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert validated is not None and validated.business_validations
+        self.switched = validated
+        operation = self.retirement("validation")
+        with (
+            patch.object(
+                type(operation), "host", side_effect=self.host(self.native(key="validation"))
+            ),
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            result = self.run_retirement(operation).response_payload["result"]
+            self.assertEqual(result["business_validations"], [validation])
+            self.assertEqual(operation.readback(), result)
+        with self.assertRaises(RehearsalRefused):
+            # The earlier simulate-final key no longer published this phase.
+            self.retirement("final").plan()
+
+    def test_production_alias_refuses_a_later_phase_retirement(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        prod = next(lane for lane in self.fixture.profile.lanes if lane.instance == "prod")
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=prod.context,
+                instance="prod",
+                target_id=self.switched.compose_id,
+                updated_at=self.switched.updated_at.isoformat(),
+            )
+        )
+        operation = self.retirement()
+        with patch.object(type(operation), "host") as host:
+            with self.assertRaises(RehearsalRefused):
+                operation.plan()
+            host.assert_not_called()
+
+
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def recovery_snapshot(self, role: str) -> dict[str, Any]:
+        import hashlib
+        import json
+        from datetime import datetime, timezone
+
+        names = self.fixture.host["database_names"](self.spec)
+        snapshot = self.root / names[role]
+        snapshot.mkdir()
+        (snapshot / "database.dump").write_bytes(b"verified database " + role.encode())
+        (snapshot / "filestore.tar").write_bytes(b"verified filestore " + role.encode())
+        receipt = {
+            "database": names[role],
+            "witness_sha256": self.fixture.host["witness"](self.spec, names[role]),
+            "database_sha256": hashlib.sha256(
+                (snapshot / "database.dump").read_bytes()
+            ).hexdigest(),
+            "filestore_sha256": hashlib.sha256(
+                (snapshot / "filestore.tar").read_bytes()
+            ).hexdigest(),
+            "source_capture_sha256": hashlib.sha256(
+                (self.root / "capture.json").read_bytes()
+            ).hexdigest(),
+            "sanitized": True,
+            "odoo_version": "18.0.1.3",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (snapshot / "receipt.json").write_text(json.dumps(receipt))
+        return receipt
+
+    def later_phase(self) -> list[dict[str, Any]]:
+        """Recreate C11's host custody: switched, with both source snapshots."""
+        import hashlib
+        import json
+
+        names = self.fixture.host["database_names"](self.spec)
+        record = self.spec["record"]
+        record["source_odoo_version"] = "18.0"
+        record["source_binding_sha256"] = hashlib.sha256(b"source").hexdigest()
+        (self.root / "capture.json").write_text(
+            json.dumps({"source_binding_sha256": record["source_binding_sha256"]})
+        )
+        # Launchplane serializes the same instant with a Z suffix.
+        copies = [
+            {**receipt, "captured_at": receipt["captured_at"].replace("+00:00", "Z")}
+            for receipt in (
+                self.recovery_snapshot("source"),
+                self.recovery_snapshot("final_source"),
+            )
+        ]
+        record.update(state="switched", copies=copies)
+        for action, state, published in (
+            ("prepare", "prepared", []),
+            ("execute", "upgraded", copies[:1]),
+            ("simulate-final", "switched", copies),
+        ):
+            (self.root / (action + ".started")).touch()
+            (self.root / (action + ".json")).write_text(
+                json.dumps(
+                    {"intent_sha256": record["intent_sha256"], "state": state, "copies": published}
+                )
+            )
+        for container in self.fixture.fixture.containers.values():
+            container["ExecIDs"] = None
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + names["final_upgrade"]
+                if value.startswith("ODOO_DB_NAME=")
+                else value
+                for value in container["Config"]["Env"]
+            ]
+        # The private web served the switched copy; only an exec is a writer.
+        self.fixture.fixture.containers["web"]["State"]["Running"] = True
+        return copies
+
+    def test_later_phase_disposal_binds_recorded_snapshots_and_stops_private_web(self) -> None:
+        copies = self.later_phase()
+        plan = self.fixture.run_host(self.spec)
+        self.assertFalse(plan["disposed"])
+        self.assertEqual(plan["recovery_snapshots"], copies)
+        self.assertIsNone(plan["initial_source_snapshot"])
+        self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        applied = self.fixture.run_host(self.spec)
+        self.assertTrue(applied["disposed"])
+        self.assertEqual(applied["recovery_snapshots"], copies)
+        self.assertFalse(self.fixture.fixture.containers)
+        self.assertFalse(self.fixture.fixture.volumes)
+        for copy in copies:
+            self.assertFalse((self.root / copy["database"]).exists())
+        self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
+        self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+
+    def test_interrupted_later_phase_apply_reproves_custody_before_resuming(self) -> None:
+        for changed in (
+            "none",
+            "exec-session",
+            "unrecorded-snapshot",
+            "corrupt",
+            "uncertain-effect",
+        ):
+            with self.subTest(changed=changed):
+                native = IncompleteRetirementHostTests()
+                native.setUp()
+                self.addCleanup(native.doCleanups)
+                copies = native.later_phase()
+                names = native.fixture.host["database_names"](native.spec)
+                native.admit(native.fixture.run_host(native.spec))
+                native.spec["mode"] = "apply"
+                docker = native.fixture.host["docker"]
+
+                def interrupted(*args: str, stdin: bytes | None = None) -> bytes:
+                    if args[0] == "stop":
+                        raise RuntimeError("Interrupted after the disposal manifest")
+                    return cast(bytes, docker(*args, stdin=stdin))
+
+                native.fixture.host["docker"] = interrupted
+                with self.assertRaises(RuntimeError):
+                    native.fixture.run_host(native.spec)
+                self.assertTrue((native.root / "incomplete-retirement.json").is_file())
+                native.fixture.host["docker"] = docker
+                if changed == "exec-session":
+                    native.fixture.fixture.containers["script-runner"]["ExecIDs"] = ["active"]
+                elif changed == "unrecorded-snapshot":
+                    (native.root / names["final_upgrade"]).mkdir()
+                elif changed == "corrupt":
+                    (native.root / names["final_source"] / "database.dump").write_bytes(b"x")
+                elif changed == "uncertain-effect":
+                    (native.root / ("validate-business-" + "a" * 64 + ".started")).touch()
+                native.calls.clear()
+                if changed == "none":
+                    self.assertTrue(native.fixture.run_host(native.spec)["disposed"])
+                    continue
+                with self.assertRaises(RuntimeError):
+                    native.fixture.run_host(native.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in native.calls))
+                for copy in copies:
+                    self.assertTrue((native.root / copy["database"] / "database.dump").exists())
+
+    def test_later_phase_refuses_uncertain_or_unattributed_custody(self) -> None:
+        import fcntl
+        import json
+
+        for changed in (
+            "uncertain-effect",
+            "exec-session",
+            "unrecorded-snapshot",
+            "corrupt",
+            "aliased-snapshot",
+            "receipt-differs",
+            "no-producer",
+            "verified",
+            "busy",
+        ):
+            with self.subTest(changed=changed):
+                native = IncompleteRetirementHostTests()
+                native.setUp()
+                self.addCleanup(native.doCleanups)
+                copies = native.later_phase()
+                names = native.fixture.host["database_names"](native.spec)
+                if changed == "uncertain-effect":
+                    (native.root / ("validate-business-" + "a" * 64 + ".started")).touch()
+                elif changed == "exec-session":
+                    native.fixture.fixture.containers["script-runner"]["ExecIDs"] = ["active"]
+                elif changed == "unrecorded-snapshot":
+                    (native.root / names["final_upgrade"]).mkdir()
+                elif changed == "corrupt":
+                    (native.root / names["final_source"] / "database.dump").write_bytes(b"x")
+                elif changed == "aliased-snapshot":
+                    # Validation through a link would let disposal leave the bytes behind.
+                    path = native.root / names["final_source"]
+                    path.rename(native.outside / "relocated")
+                    path.symlink_to(native.outside / "relocated")
+                    copies = copies[:1]
+                elif changed == "receipt-differs":
+                    native.spec["record"]["copies"][1] = {**copies[1], "odoo_version": "18.0.9"}
+                elif changed == "no-producer":
+                    (native.root / "simulate-final.json").write_text(
+                        json.dumps(
+                            {
+                                "intent_sha256": native.spec["record"]["intent_sha256"],
+                                "state": "switched",
+                                "copies": copies[:1],
+                            }
+                        )
+                    )
+                elif changed == "verified":
+                    native.spec["record"]["state"] = "verified"
+                if changed == "busy":
+                    with (native.root / ".execution.lock").open("r") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        with self.assertRaises(BlockingIOError):
+                            native.fixture.run_host(native.spec)
+                else:
+                    with self.assertRaises((RuntimeError, OSError)):
+                        native.fixture.run_host(native.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in native.calls))
+                for copy in copies:
+                    self.assertTrue((native.root / copy["database"] / "database.dump").exists())
+
     def initial_snapshot(self, *, switched: bool = True) -> dict[str, Any]:
         import hashlib
         import json

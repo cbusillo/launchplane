@@ -7023,22 +7023,6 @@ def require_merge_train_controller_state_record_store(
     raise TypeError("record store does not support merge train controller state records")
 
 
-def active_merge_train_controller_state_record(
-    *,
-    record_store: MergeTrainControllerStateRecordStore,
-    repository: str,
-    base_branch: str,
-) -> MergeTrainControllerStateRecord | None:
-    record = latest_merge_train_controller_state_record(
-        record_store=record_store,
-        repository=repository,
-        base_branch=base_branch,
-    )
-    if record is None or record.status != "running":
-        return None
-    return record
-
-
 def update_merge_train_controller_state(
     *,
     record_store: MergeTrainControllerStateRecordStore,

@@ -2,7 +2,6 @@
 
 import base64
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -126,11 +125,6 @@ def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingRes
         evidence.get("testing_resources_ok") == "true"
         and evidence.get("testing_resources_binding_sha256") == resources.binding_sha256
     )
-
-
-def validate_resource_namespace(namespace: str) -> None:
-    if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
-        raise ValueError("Replacement requires its service-allocated resource namespace.")
 
 
 # The program runs on the selected Docker host, outside every application

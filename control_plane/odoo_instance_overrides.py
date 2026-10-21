@@ -476,18 +476,3 @@ def build_preview_website_bootstrap_environment(
     # Preview website bootstrap carries only bootstrap intent. Preview integration-key
     # enforcement is tracked separately and is not decided by this payload.
     return build_post_deploy_environment(preview_record, clear_undeclared_shopify=False)
-
-
-def render_post_deploy_environment(
-    record: OdooInstanceOverrideRecord,
-    *,
-    workflow_intent: PostDeployWorkflowIntent = "deploy",
-    protected_shopify_store_keys: tuple[str, ...] = (),
-    record_store: object | None = None,
-) -> dict[str, str]:
-    return build_post_deploy_environment(
-        record,
-        workflow_intent=workflow_intent,
-        protected_shopify_store_keys=protected_shopify_store_keys,
-        record_store=record_store,
-    ).inline_environment

@@ -7,7 +7,6 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewGenerationState,
@@ -27,8 +26,6 @@ from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.drivers.dispatch import (
     _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope,
-    _ResolvedProductDriverContext,
-    ProductDriverMismatchError,
     _image_reference_tail,
     _normalize_preview_verification_checked_urls,
     _normalize_release_status,
@@ -41,7 +38,6 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
 )
-from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
@@ -260,31 +256,6 @@ def _preview_generation_mutation_store(
     raise TypeError("record store does not support Launchplane preview generation mutations")
 
 
-def _validate_generic_web_preview_profile(
-    request: _ProductRouteEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del request, record_store, control_plane_root_path
-    profile = resolved_context.profile
-    if profile is None:
-        raise ProductDriverMismatchError("Generic web preview routes require a product profile.")
-    if not product_profile_uses_generic_web_base(profile):
-        raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
-            "not generic-web or a generic-web based driver."
-        )
-    if not profile.preview.enabled:
-        raise click.ClickException(
-            f"Product {profile.product!r} does not have generic-web previews enabled."
-        )
-    if not profile.preview.context.strip():
-        raise click.ClickException(
-            f"Product {profile.product!r} does not define a preview context."
-        )
-
-
 def _write_preview_inventory_scan_if_supported(
     *,
     record_store: object,
@@ -311,15 +282,6 @@ def _write_preview_inventory_scan_if_supported(
         )
     )
     return scan_id
-
-
-def _write_preview_desired_state_if_supported(
-    *, record_store: object, record: PreviewDesiredStateRecord
-) -> str:
-    if not hasattr(record_store, "write_preview_desired_state_record"):
-        return ""
-    getattr(record_store, "write_preview_desired_state_record")(record)
-    return record.desired_state_id
 
 
 def _generic_web_preview_manifest_fingerprint(

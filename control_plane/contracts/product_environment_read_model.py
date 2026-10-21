@@ -2016,11 +2016,6 @@ def _profile_provenance(profile: LaunchplaneProductProfileRecord) -> DataProvena
     )
 
 
-def _first_lane_context(profile: LaunchplaneProductProfileRecord) -> str:
-    first_lane = next(iter(profile.lanes), None)
-    return first_lane.context if first_lane is not None else ""
-
-
 def _profile_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
     _owner, separator, repo = profile.repository.strip().partition("/")
     if separator and repo.strip() and "/" not in repo.strip():

@@ -10,7 +10,6 @@ from control_plane.cli_shared import (
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
     require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
 )
-from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -623,15 +622,6 @@ def target_id_map(
     target_id_records: tuple[DokployTargetIdRecord, ...],
 ) -> dict[tuple[str, str], str]:
     return {dokploy_target_route(record): record.target_id for record in target_id_records}
-
-
-def record_to_provider_target(
-    *, record: DokployTargetRecord, target_id_record: DokployTargetIdRecord
-) -> ProviderTargetRecord:
-    return ProviderTargetRecord.from_dokploy_records(
-        target_record=record,
-        target_id_record=target_id_record,
-    )
 
 
 def _write_dokploy_target_with_provider_target(
