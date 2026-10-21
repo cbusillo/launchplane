@@ -1115,7 +1115,26 @@ planner and the locked write both enforce that boundary. See the
 A `local_operators`
 caller may set an ordinary protective testing hold. Lifting an ordinary staff
 hold remains an administrator action because it requests testing reconciliation,
-which can deploy. The authenticated Director agent has the separate bounded
+which can deploy. The product's testing overview exposes **Review lift** and
+**Lift testing hold** only to the service-verified signed-in administrator.
+The existing testing-hold endpoints accept that browser session, with origin,
+fetch-metadata and single-use CSRF protection on the review and apply requests.
+The card displays the stored reason, recorder, time and an HTTPS issue link
+recorded in the reason. Missing historical metadata is shown as not recorded.
+The administrator
+reviews the current hold, supplies an audit reason and confirms that testing
+can deploy before submitting its digest-bound lift. The existing authenticated
+idempotency receipt retains the original hold, lift reason, actor scope, time
+and trace. A lost response retains the original reviewed request and key for
+retry, including after reloading the tab. If that request cannot settle, an
+administrator can explicitly start a separate review of the current hold;
+the earlier key is shown as unverified in this tab across reloads. Closing the
+tab or clearing its storage discards this local history, not the service's audit
+receipt. This does not claim the earlier request failed or succeeded.
+Isolation staging interlocks retain
+their separate activation flow.
+The Director's agent can set a testing hold but not lift one.
+The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
 the service must have marked its original hold as a qualified rehearsal, and
 the original actor, current safety evidence, bindings and unresolved-effect
