@@ -1,4 +1,5 @@
 import type {
+  ApplyTestingHoldData,
   SetupDokployTargetData,
   ReconcileRouteBindingData,
   SubmitTestingRebuildData,
@@ -41,6 +42,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  testingHoldApply: "/v1/product-config/testing-hold/apply" satisfies ApplyTestingHoldData["url"],
   domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],
   routeBindingRepair: "/v1/route-bindings/reconcile" satisfies ReconcileRouteBindingData["url"],
   testingRebuild: "/v1/products/{product}/testing-rebuild" satisfies SubmitTestingRebuildData["url"],
