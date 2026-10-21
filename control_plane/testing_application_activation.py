@@ -13,12 +13,18 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_activation import (
     TestingActivationRecord,
     TestingActivationRefusal,
+    TestingActivationRefusalCode,
     TestingActivationFailure,
     TestingActivationRefusedResult,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.testing_activation import TestingApplicationReadiness
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    runtime_identity_env,
+    parse_runtime_identity_payload,
+    compare_runtime_identity,
+)
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source, compose
 from control_plane.dokploy.fresh_application import require_fresh_application_runtime
@@ -66,6 +72,39 @@ def undispatched_application_recipient(
         and record.phase in {"prepared", "create_project"}
         and reservation.provider_effect_phase == APPLICATION_CAPABILITY_PHASE
     )
+
+
+def unstarted_application_recipient(
+    record: TestingActivationRecord, reservation: LaunchplaneIdempotencyRecord
+) -> bool:
+    """Exact answered metadata markers exclude any original image deployment."""
+    specification = record.request.application
+    readiness = record.application_readiness
+    if (
+        specification is None
+        or specification.state.kind not in {"none", "volume"}
+        or record.published
+        or not all((record.project_id, record.environment_id, record.target_id, record.app_name))
+        or any(
+            record.state_recipient.get(key)
+            for key in ("target_id", "application_deployment_id", "state_deployment_id")
+        )
+        or (
+            readiness is not None
+            and (readiness.route is not None or readiness.private_health is not None)
+        )
+    ):
+        return False
+    stage = {
+        "create_application": "recipient_ready",
+        "create_application_mount": "create_application_mount"
+        if record.state_recipient.get("mount_verified") == "true"
+        else "",
+        "configure_application": "configure_application"
+        if record.state_recipient.get("application_configured") == "true"
+        else "",
+    }.get(reservation.provider_effect_phase, "")
+    return bool(stage) and record.phase in {stage, "refusing_private_candidate", "refused"}
 
 
 def require_retained_route_authority(store: Any, record: TestingActivationRecord) -> None:
@@ -120,7 +159,7 @@ def completed_application_inverse(store: Any, record: TestingActivationRecord) -
     restored = TestingRouteExecutionIntent.model_validate(
         store.read_original_mutation_intent(inverse).get("route_execution")
     )
-    return restored == readiness.route_execution.model_copy(
+    expected = readiness.route_execution.model_copy(
         update={
             "backend": readiness.route.old_backend,
             "document_sha256": canonical_json_sha256(
@@ -128,6 +167,7 @@ def completed_application_inverse(store: Any, record: TestingActivationRecord) -
             ),
         }
     )
+    return restored.model_dump(exclude={"custody"}) == expected.model_dump(exclude={"custody"})
 
 
 def restored_application_route(store: Any, record: TestingActivationRecord) -> Any:
@@ -316,7 +356,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             specification.runtime_port,
             specification.health_path,
         ):
-            raise TestingActivationRefusal("The application runtime contract changed.")
+            raise TestingActivationRefusal(
+                "The application runtime contract changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
         if not record.published:
             try:
                 inventory = self.store.read_environment_inventory(
@@ -325,13 +368,19 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             except FileNotFoundError:
                 inventory = None
             if inventory != record.retained_inventory:
-                raise TestingActivationRefusal("The exact predecessor inventory changed.")
+                raise TestingActivationRefusal(
+                    "The exact predecessor inventory changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
             if (
                 record.retained_deployment is not None
                 and self.store.read_deployment_record(record.retained_deployment.record_id)
                 != record.retained_deployment
             ):
-                raise TestingActivationRefusal("The exact predecessor deployment changed.")
+                raise TestingActivationRefusal(
+                    "The exact predecessor deployment changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
             from control_plane.testing_publication_storage import testing_binding_authority
 
             try:
@@ -343,7 +392,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             if testing_binding_authority(binding) != testing_binding_authority(
                 record.retained_route_binding
             ):
-                raise TestingActivationRefusal("The original serving route authority changed.")
+                raise TestingActivationRefusal(
+                    "The original serving route authority changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
         if record.state_recipient:
             from control_plane.testing_application_credentials import state_password
 
@@ -970,8 +1022,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
         """Accept only the original Docker source, exact managed env and supported mount."""
-        from copy import deepcopy
-
         specification = record.request.application
         assert specification is not None
         live = self.live(record)
@@ -1000,6 +1050,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 raise TestingActivationRefusal("The independent application mount changed.")
         elif mounts != []:
             raise TestingActivationRefusal("The application has an unrequested state mount.")
+        self.verify_provider_options(record, live)
+
+    def verify_provider_options(
+        self, record: TestingActivationRecord, live: api.JsonObject
+    ) -> None:
+        from copy import deepcopy
+
         # Reapply the existing vanilla-runtime checker to every uncontrolled field.
         # Its initial-only fields are replaced only after separately proving their
         # exact original activation values above and the actual runtime below.
@@ -1146,7 +1203,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         return record
 
     def qualify_application(self, record: TestingActivationRecord) -> TestingActivationRecord:
-        from control_plane.testing_application_runtime import inspect_application_runtime
+        from control_plane.testing_application_runtime import (
+            inspect_application_runtime,
+            VerifiedApplicationRuntimeFailure,
+        )
 
         specification = record.request.application
         readiness = record.application_readiness
@@ -1154,20 +1214,28 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         self.verify_provider(record)
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        frame = inspect_application_runtime(
-            host=host,
-            token=token,
-            server_id=str(self.live(record).get("serverId") or ""),
-            application=record.app_name,
-            runtime_port=specification.runtime_port,
-            network=specification.network_name,
-            image=record.image_reference,
-            identity=readiness.runtime_identity,
-            values=self.application_values(record),
-            volume=resources.volumes.get("state", ""),
-            volume_binding=resources.binding_sha256,
-            mount_path=specification.state.container_path,
-            health_path=specification.health_path,
+        failure = None
+        try:
+            frame = inspect_application_runtime(
+                host=host,
+                token=token,
+                server_id=str(self.live(record).get("serverId") or ""),
+                application=record.app_name,
+                runtime_port=specification.runtime_port,
+                network=specification.network_name,
+                image=record.image_reference,
+                identity=readiness.runtime_identity,
+                values=self.application_values(record),
+                volume=resources.volumes.get("state", ""),
+                volume_binding=resources.binding_sha256,
+                mount_path=specification.state.container_path,
+                health_path=specification.health_path,
+            )
+        except VerifiedApplicationRuntimeFailure as error:
+            frame, failure = error.evidence, error
+        health_identity = parse_runtime_identity_payload(frame.get("health_identity"))
+        identity_status, identity_detail = compare_runtime_identity(
+            expected=readiness.runtime_identity, observed=health_identity
         )
         replacement = readiness.model_copy(
             update={
@@ -1176,18 +1244,24 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 "container_id": frame["container_id"],
                 "backend": frame["backend"],
                 "private_health": HealthcheckEvidence(
-                    status="pass",
+                    status="fail" if failure is not None else "pass",
                     verified=True,
                     urls=(frame["health_url"],),
                     timeout_seconds=10,
-                    runtime_identity_status="match",
-                    observed_runtime_identity=readiness.runtime_identity,
+                    runtime_identity_status=identity_status,
+                    runtime_identity_detail=identity_detail,
+                    observed_runtime_identity=health_identity,
                 ),
             }
         )
-        if replacement == readiness:
-            return record
-        return self.save(record, application_readiness=replacement)
+        if replacement != readiness:
+            record = self.save(record, application_readiness=replacement)
+        if failure is not None:
+            raise TestingActivationRefusal(
+                "The verified private candidate failed.",
+                code=TestingActivationRefusalCode.RECIPIENT_UNQUALIFIED,
+            ) from failure
+        return record
 
     def switch_application_route(
         self,
@@ -1358,18 +1432,20 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
         self.route_effect(record, lease, checkpoint, transport, inverse=False)
         health = read_public_testing_health(lane.base_url, specification.health_path)
-        if (
-            health.status != "pass"
-            or not health.verified
-            or compare_runtime_identity(
-                expected=readiness.runtime_identity, observed=health.observed_runtime_identity
-            )[0]
-            != "match"
-        ):
-            raise TestingActivationRefusal(
-                "The unchanged public address has not proved the fresh recipient."
-            )
-        return self.save(
+        if not health.verified or health.status == "pending":
+            raise TestingActivationRefusal("The original public health response remains unknown.")
+        identity_status, identity_detail = compare_runtime_identity(
+            expected=readiness.runtime_identity, observed=health.observed_runtime_identity
+        )
+        health = health.model_copy(
+            update={
+                "runtime_identity_status": identity_status,
+                "runtime_identity_detail": identity_detail,
+            }
+        )
+        if health.status != "pass" or identity_status != "match":
+            health = health.model_copy(update={"status": "fail"})
+        record = self.save(
             record,
             application_readiness=readiness.model_copy(
                 update={
@@ -1378,6 +1454,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 }
             ),
         )
+        if health.status == "fail":
+            raise TestingActivationRefusal(
+                "The observed public candidate failed qualification.",
+                code=TestingActivationRefusalCode.RECIPIENT_UNQUALIFIED,
+            )
+        return record
 
     def route_effect(
         self,
@@ -1390,7 +1472,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         observe_only: bool = False,
     ) -> None:
         """Use one original child and physical writer per route direction."""
-        from control_plane.dokploy.testing_route import observe_testing_route
+        from control_plane.dokploy.testing_route import observe_testing_route, route_document
         from control_plane.testing_route_effects import (
             TestingRouteEffects,
             TestingRouteFenceController,
@@ -1402,11 +1484,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         assert readiness is not None and readiness.route is not None
         route = readiness.route
         assert readiness.route_execution is not None
-        execution = (
-            transport.execution_intent(route, route.old_backend, operation_id=record.plan_sha256)
-            if inverse
-            else readiness.route_execution
-        )
         desired = route.old_backend if inverse else route.new_backend
         suffix = ":route-inverse" if inverse else ":route"
         path = f"/v1/products/{record.product}/testing-activation" + suffix
@@ -1414,6 +1491,30 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         prior = self.store.read_idempotency_record(
             scope=record.scope, route_path=path, idempotency_key=key
         )
+        if inverse and prior is not None:
+            from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+
+            execution = TestingRouteExecutionIntent.model_validate(
+                self.store.read_original_mutation_intent(prior).get("route_execution")
+            )
+            expected = readiness.route_execution.model_copy(
+                update={
+                    "backend": route.old_backend,
+                    "document_sha256": canonical_json_sha256(
+                        route_document(route, route.old_backend)
+                    ),
+                }
+            )
+            if execution.model_dump(exclude={"custody"}) != expected.model_dump(
+                exclude={"custody"}
+            ):
+                raise TestingActivationRefusal("The original inverse intent changed.")
+        else:
+            execution = (
+                transport.execution_intent(route, desired, operation_id=record.plan_sha256)
+                if inverse
+                else readiness.route_execution
+            )
         if observe_only and prior is None:
             return
 
@@ -1424,6 +1525,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
         def recovery_guard() -> None:
             lease.assert_current()
+            self.require_recovery_unused(record)
             require_retained_route_authority(self.store, record)
 
         def guard() -> None:
@@ -1563,6 +1665,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         def checkpoint(phase: str) -> None:
             check()
             lease.assert_current()
+            self.require_recovery_unused(record)
             require_retained_route_authority(self.store, record)
             lease.checkpoint_effect(phase)
 
@@ -1704,7 +1807,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 image_reference=record.image_reference,
                 host_ports=record.host_ports,
                 reason=record.failure.kind,
-                deployment_requested=record.failure.kind != "authority_refused_before_recipient",
+                deployment_requested=bool(
+                    record.state_recipient.get("application_deployment_id")
+                    or record.state_recipient.get("state_deployment_id")
+                    or record.failure.kind == "candidate_deployment_failed"
+                ),
             ).model_dump(mode="json")
         return {**super().result(record), "deployment_requested": True}
 
@@ -1757,6 +1864,52 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             deployment_status=api.deployment_status(observed),
         )
 
+    def require_unstarted_candidate(self, record: TestingActivationRecord) -> None:
+        """Read back the original private placement without replaying any effect."""
+        live = self.live(record)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        old = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.retained_target_id.target_id,
+        )
+        if (
+            live.get("serverId") != old.get("serverId")
+            or live.get("domains") != []
+            or live.get("deployments") != []
+            or live.get("applicationStatus") != "idle"
+            or api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="application",
+                target_id=record.target_id,
+                require_complete=True,
+            )
+        ):
+            raise TestingActivationRefusal(
+                "The original unused candidate is not proven private and idle."
+            )
+        if record.state_recipient.get("mount_verified") == "true":
+            resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+            assert isinstance(resources, ApplicationTestingResources)
+            if not self.mount_matches(record, live, resources):
+                raise TestingActivationRefusal("The answered original mount changed.")
+        elif live.get("mounts") != []:
+            raise TestingActivationRefusal("An unrequested candidate mount appeared.")
+        if record.state_recipient.get("application_configured") == "true":
+            if (
+                live.get("sourceType") != "docker"
+                or live.get("dockerImage") != record.image_reference
+                or live.get("autoDeploy") is not False
+            ):
+                raise TestingActivationRefusal("The answered original candidate source changed.")
+            self.verify_provider_options(record, live)
+        else:
+            require_fresh_application_runtime(
+                live, environment_id=record.environment_id, project_id=record.project_id
+            )
+
     def require_terminal_candidate(
         self, record: TestingActivationRecord, operation_key: str
     ) -> None:
@@ -1808,24 +1961,30 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             ),
         )
 
+    def require_recovery_unused(self, record: TestingActivationRecord) -> None:
+        protection = self.store.read_disposable_lane_safety(
+            record.product, record.context, "testing"
+        )
+        if protection is not None and protection.usage == "in_use":
+            raise TestingActivationRefusal("Staff use pauses original route recovery.")
+
     def candidate_refusal_ready(self, record: TestingActivationRecord) -> bool:
-        readiness = record.application_readiness
-        if (
-            record.published
-            or readiness is None
-            or readiness.private_health is None
-            or readiness.private_health.status != "pass"
-        ):
+        """Only a deliberate positive refusal may abandon an original candidate."""
+        if record.published:
             return False
-        if (
-            record.phase in {"restoring_application_route", "refusing_private_candidate"}
-            or readiness.public_health is not None
+        self.require_recovery_unused(record)
+        if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
+            return True
+        readiness = record.application_readiness
+        if readiness is not None and any(
+            health is not None and health.verified and health.status == "fail"
+            for health in (readiness.private_health, readiness.public_health)
         ):
             return True
         try:
             self.require_unchanged(record)
-        except TestingActivationRefusal:
-            return True
+        except TestingActivationRefusal as refusal:
+            return refusal.code == TestingActivationRefusalCode.AUTHORITY_CHANGED
         return False
 
     def refuse_after_failure(
@@ -1845,6 +2004,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             return self.refuse(
                 current, TestingActivationFailure(kind="authority_refused_before_recipient")
             )
+        failure = self.failed_candidate(current, provider_operation_key)
+        if failure is not None:
+            return self.refuse(current, failure)
         if self.candidate_refusal_ready(current):
             from control_plane.workflows.generic_web_deploy_provider import (
                 generic_web_provider_target_key,
@@ -1866,17 +2028,36 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if check is None:
                     return None
                 require_retained_route_authority(self.store, current)
-                self.require_terminal_candidate(current, provider_operation_key)
-                assert current.application_readiness is not None
-                if current.application_readiness.route is not None:
+                lease.assert_current()
+                check()
+                self.require_recovery_unused(current)
+                readiness = current.application_readiness
+                unstarted = unstarted_application_recipient(current, lease.evidence_reservation())
+                if readiness is None and not unstarted:
+                    return None
+                if readiness is not None and readiness.route is not None:
                     if current.phase != "restoring_application_route":
                         current = self.save(current, phase="restoring_application_route")
                     self.restore_application_route(current, lease, check)
-                elif current.phase != "refusing_private_candidate":
-                    current = self.save(current, phase="refusing_private_candidate")
+                else:
+                    # Before a private-health result, require the answered original
+                    # application job; unresolved create/mount/bootstrap phases stay held.
+                    if unstarted:
+                        self.require_unstarted_candidate(current)
+                    else:
+                        self.require_terminal_candidate(current, provider_operation_key)
+                        if not current.state_recipient.get("application_deployment_id"):
+                            return None
+                    if current.phase != "refusing_private_candidate":
+                        current = self.save(current, phase="refusing_private_candidate")
+                # A foreign or unknown candidate job may hold this receipt, but
+                # cannot prevent restoring the proven original serving route.
+                if unstarted:
+                    self.require_unstarted_candidate(current)
+                else:
+                    self.require_terminal_candidate(current, provider_operation_key)
                 return self.refuse(current, TestingActivationFailure(kind="publication_refused"))
-        failure = self.failed_candidate(current, provider_operation_key)
-        return self.refuse(current, failure) if failure is not None else None
+        return None
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -1891,8 +2072,18 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
         started = False
         with self.evidence(lease):
+            record = self.current()
+            if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
+                try:
+                    outcome = self.refuse_after_failure(provider_operation_key, lease)
+                    if outcome is None:
+                        raise TestingActivationRefusal("Original recovery remains unobserved.")
+                    return outcome
+                except Exception as recovery_error:
+                    raise ProviderMutationUnknownError(
+                        "Continue the original recovery only."
+                    ) from recovery_error
             try:
-                record = self.current()
                 if record.plan_sha256 != self.request.reviewed_plan_sha256:
                     raise TestingActivationRefusal("Review this exact original activation plan.")
                 if record.failure is not None:
@@ -1902,13 +2093,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             trace_id=self.trace_id, records={}, result=self.result(record)
                         ),
                     )
-                if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
-                    refused = self.refuse_after_failure(provider_operation_key, lease)
-                    if refused is None:
-                        raise TestingActivationRefusal(
-                            "The original route restoration remains unobserved."
-                        )
-                    return refused
                 key = generic_web_provider_target_key(
                     provider_id="dokploy",
                     context=record.context,
@@ -1978,8 +2162,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             except Exception as error:
                 try:
                     refused = self.refuse_after_failure(provider_operation_key, lease)
-                except Exception:
-                    refused = None
+                except Exception as recovery_error:
+                    raise ProviderMutationUnknownError(
+                        "Original recovery requires observation."
+                    ) from recovery_error
                 if refused is not None:
                     return refused
                 if not started:
@@ -2024,7 +2210,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 )
             if self.candidate_refusal_ready(record):
                 require_retained_route_authority(self.store, record)
-                self.require_terminal_candidate(record, provider_operation_key)
+                if parent is not None and unstarted_application_recipient(record, parent):
+                    self.require_unstarted_candidate(record)
+                elif record.application_readiness is None:
+                    return ProviderObservation("unknown")
+                elif record.application_readiness.route is None:
+                    self.require_terminal_candidate(record, provider_operation_key)
                 return ProviderObservation(
                     "absent", retry_safe=True, preserve_effect_checkpoint=True
                 )

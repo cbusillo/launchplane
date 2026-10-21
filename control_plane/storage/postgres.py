@@ -12058,6 +12058,18 @@ class PostgresRecordStore(HumanSessionStore):
                 "refusing_private_candidate",
             }
             receipt_only = refused or restoring
+            unstarted = False
+            if receipt_only and before is not None and record.request.application is not None:
+                from control_plane.testing_application_activation import (
+                    unstarted_application_recipient,
+                )
+
+                original_reader = getattr(
+                    self._provider_evidence_context, "reservation_reader", None
+                )
+                unstarted = original_reader is not None and unstarted_application_recipient(
+                    before, self.require_current_provider_execution(session, original_reader())
+                )
             if restoring and (
                 record.request.application is None
                 or record.published
@@ -12065,10 +12077,24 @@ class PostgresRecordStore(HumanSessionStore):
                 or before is None
                 or before.published
                 or before.failure is not None
-                or before.application_readiness is None
-                or before.application_readiness.private_health is None
-                or before.application_readiness.private_health.status != "pass"
-                or (before.application_readiness.route is not None)
+                or (before.application_readiness is None and not unstarted)
+                or (
+                    record.phase == "restoring_application_route"
+                    and (
+                        before.application_readiness is None
+                        or before.application_readiness.private_health is None
+                        or before.application_readiness.private_health.status != "pass"
+                    )
+                )
+                or (
+                    record.phase == "refusing_private_candidate"
+                    and not before.state_recipient.get("application_deployment_id")
+                    and not unstarted
+                )
+                or (
+                    before.application_readiness is not None
+                    and before.application_readiness.route is not None
+                )
                 != (record.phase == "restoring_application_route")
                 or before.model_dump(exclude={"phase"}) != record.model_dump(exclude={"phase"})
             ):
@@ -12087,7 +12113,11 @@ class PostgresRecordStore(HumanSessionStore):
                 != record.model_dump(exclude={"phase", "failure"})
             ):
                 raise ValueError("Refusal can only append original unpublished custody evidence.")
-            if not receipt_only and (before is None or not before.published):
+            if (
+                not receipt_only
+                or restoring
+                or (record.failure is not None and record.failure.kind == "publication_refused")
+            ) and (before is None or not before.published):
                 safety_row = session.get(
                     LaunchplaneDisposableLaneSafetyRow,
                     (record.product, record.context, "testing"),
@@ -12184,13 +12214,22 @@ class PostgresRecordStore(HumanSessionStore):
 
                         require_retained_route_authority(self, before)
                         readiness = before.application_readiness
-                        if (
+                        if not unstarted and (
                             readiness is None
-                            or readiness.private_health is None
-                            or readiness.private_health.status != "pass"
+                            or (
+                                readiness.route is not None
+                                and (
+                                    readiness.private_health is None
+                                    or readiness.private_health.status != "pass"
+                                )
+                            )
+                            or (
+                                readiness.route is None
+                                and not before.state_recipient.get("application_deployment_id")
+                            )
                         ):
                             raise ValueError("The original private readiness is unavailable.")
-                        if readiness.route is not None:
+                        if readiness is not None and readiness.route is not None:
                             if (
                                 before.phase != "restoring_application_route"
                                 or not completed_application_inverse(self, before)

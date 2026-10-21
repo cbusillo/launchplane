@@ -110,26 +110,54 @@ completes a negative original receipt while preserving that inspection's schedul
 custody. An exactly attributed failed private application or state deployment
 can also complete negatively while retaining its recipient, credentials and
 volumes. Neither outcome says that a running process stopped or that old unknown
-work became terminal. Missing, foreign, duplicate or running deployment evidence
-and ordinary health/transport errors retain the original unknown fence.
+work became terminal. A terminal original private job can also be retained after
+a permanent authority correction, without requiring a passing private-health
+result. Before any image deployment, exact answered placement, mount or
+configuration markers can instead prove an unused private recipient. These
+markers remain bound to the original database checkpoint and complete empty
+deployment history; staged local credentials do not authorize deployment. This
+bounded path covers stateless and local-volume recipients, reports that no
+deployment was requested, and preserves every allocated resource.
+Unsettled create, mount, configuration or host-program outcomes remain unknown. A stable
+original task/container with the expected image, environment and state may prove
+a failed task, HTTP error or health-identity mismatch. Empty task inventory,
+startup pending, transport failures and unreadable responses prove no failure.
+Missing, foreign, duplicate or running deployment evidence keeps the negative
+receipt pending.
 
 If addressed routing changed before canonical publication refused, apply first
 records its restoration decision, settles the original forward writer, and uses
 a separate original inverse writer to restore the captured predecessor. The old
 executor lock, serving-target authority, route file, runtime identity and native
-writer custody remain required. A newer serving target or foreign route pauses
+writer custody remain required. A verified public HTTP failure or identity
+mismatch after the original forward switch also selects this recovery. Generic
+publication errors, pending health and lost replies continue observation on the
+original key. A newer serving target or foreign route pauses
 recovery instead of restoring over a correction. An interrupted inverse resumes
 only that inverse under the original activation key. A completed inverse can
 supply the exact restored route template to another generation without qualifying
-the refused activation for lifecycle or hold lifting.
+the refused activation for lifecycle or hold lifting. The inverse keeps its own
+immutable original intent across proxy restarts; each physical attempt still
+uses the native fence. Candidate job custody is checked for the final negative
+receipt after restoring the owned route.
 
 These completed negative outcomes return `outcome: refused`, `applied: false`
 and `separation_verified: false` from apply, receipt and readback. The supported
 client saves that result truthfully. Keep its evidence and retained resources;
 review a new independent preparation and activation key to continue. Corrected
-configuration and staff-use records stay unchanged. A staff-use observation must
-permit testing before any new forward attempt. Public readiness observation and
+configuration and staff-use records stay unchanged. Recorded staff use pauses
+both forward changes and route recovery, including an already selected inverse,
+until an explicit reviewed clear. Its expiry does not clear that protection.
+Public readiness observation and
 publication freshness use the same database clock.
+
+Private HTTP checks send one bounded request through the existing proxy's numeric
+TCP client and parse the complete response without following redirects. The
+selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
+the emitted program against that actual binary for healthy, redirect, HTTP
+failure, malformed, truncated and wrong-identity responses. Set the existing
+`LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
+locally. Its Swarm topology remains a finite fixture; it is no live-lane proof.
 
 The exact completed activation permits an ordinary forward deployment to start
 with a fresh lifecycle baseline on the new application. It skips only the

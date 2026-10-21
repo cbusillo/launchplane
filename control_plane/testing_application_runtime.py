@@ -8,6 +8,14 @@ from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.testing_application_capabilities import runtime_capability_program_header
 
 
+class VerifiedApplicationRuntimeFailure(ValueError):
+    """A stable, attributed original runtime answered with a definite failure."""
+
+    def __init__(self, evidence: dict[str, Any]) -> None:
+        super().__init__("The attributed original application failed private qualification.")
+        self.evidence = evidence
+
+
 def inspect_application_runtime(
     *,
     host: str,
@@ -53,14 +61,16 @@ def inspect_application_runtime(
     result: dict[str, Any] = dict(frames[0])
     observed = RuntimeIdentity.model_validate(result["identity"])
     if compare_runtime_identity(expected=identity, observed=observed)[0] != "match":
-        raise ValueError("The private health identity changed.")
+        raise ValueError("The attributed runtime identity is unavailable.")
+    if result.get("verified_failure") is True:
+        raise VerifiedApplicationRuntimeFailure(result)
     return result
 
 
 APPLICATION_RUNTIME_PROGRAM = (
     runtime_capability_program_header()
     + r"""
-import base64,hashlib,json,subprocess,sys
+import base64,hashlib,http.client,io,ipaddress,json,subprocess,sys
 
 def docker(*arguments):
     result=subprocess.run(['docker',*arguments],capture_output=True,text=True,timeout=45,check=True)
@@ -91,15 +101,17 @@ try:
     task_ids=docker('service','ps','--no-trunc','-q',spec['application']).splitlines()
     tasks=[one('inspect','--type','task',identifier) for identifier in task_ids]
     active=[item for item in tasks if item.get('DesiredState')=='running']
-    if len(active)!=1: raise ValueError('single running task unavailable')
-    task=active[0]
-    if task.get('ServiceID')!=service['ID'] or task.get('Status',{}).get('State')!='running': raise ValueError('task not ready')
+    failed=[item for item in tasks if item.get('Status',{}).get('State') in {'failed','rejected'}]
+    task=active[0] if len(active)==1 else failed[0] if not active and len(failed)==1 else None
+    if task is None or task.get('ServiceID')!=service['ID']: raise ValueError('single original task unavailable')
+    task_failed=task.get('Status',{}).get('State') in {'failed','rejected'}
+    if not task_failed and task.get('Status',{}).get('State')!='running': raise ValueError('task not ready')
     identifier=task['Status']['ContainerStatus']['ContainerID']
     container=one('inspect',identifier)
     labels=container.get('Config',{}).get('Labels') or {}
     if (container.get('Id')!=identifier or labels.get('com.docker.swarm.service.id')!=service['ID']
         or labels.get('com.docker.swarm.task.id')!=task['ID'] or labels.get('com.docker.swarm.service.name')!=spec['application']
-        or container.get('State',{}).get('Status')!='running' or container['State'].get('Paused') or container['State'].get('Restarting')):
+        or (not task_failed and container.get('State',{}).get('Status')!='running') or container['State'].get('Paused') or container['State'].get('Restarting')):
         raise ValueError('container ownership changed')
     for config in (task['Spec']['ContainerSpec'],container['Config']):
         values=environment(config)
@@ -123,24 +135,50 @@ try:
             or (volume.get('Labels') or {}).get('io.launchplane.testing-resources')!=spec['volume_binding']
             or mounts[0].get('Source')!=volume.get('Mountpoint')):
             raise ValueError('runtime state backing provenance changed')
-    networks=container.get('NetworkSettings',{}).get('Networks',{})
-    endpoint=networks.get(spec['network'])
-    if not isinstance(endpoint,dict) or not endpoint.get('IPAddress'): raise ValueError('runtime network unavailable')
     if container.get('HostConfig',{}).get('PortBindings'): raise ValueError('runtime publishes a host port')
-    proxies=docker('ps','-q','--filter','name=^/dokploy-traefik$').splitlines()
-    if len(proxies)!=1: raise ValueError('private health transport unavailable')
-    proxy=one('inspect',proxies[0])
-    if proxy.get('State',{}).get('Status')!='running' or spec['network'] not in proxy.get('NetworkSettings',{}).get('Networks',{}):
-        raise ValueError('private health network unavailable')
-    address='http://'+endpoint['IPAddress']+':'+str(spec['port'])+spec['health_path']
-    health=json.loads(docker('exec',proxies[0],'wget','-q','-T','10','-Y','off','--max-redirect','0','-O','-',address))
-    identity=next((health[key] for key in ('runtime_identity','launchplane_runtime_identity','launchplaneRuntimeIdentity','LAUNCHPLANE_RUNTIME_IDENTITY_JSON') if key in health),None)
-    if isinstance(identity,str): identity=json.loads(identity)
-    if identity!=spec['identity']: raise ValueError('private health identity changed')
+    address='http://'+spec['application']+':'+str(spec['port'])+spec['health_path']
+    failed=task_failed
+    identity=None
+    if not failed:
+        networks=container.get('NetworkSettings',{}).get('Networks',{})
+        endpoint=networks.get(spec['network'])
+        if not isinstance(endpoint,dict) or not endpoint.get('IPAddress'): raise ValueError('runtime network unavailable')
+        proxies=docker('ps','-q','--filter','name=^/dokploy-traefik$').splitlines()
+        if len(proxies)!=1: raise ValueError('private health transport unavailable')
+        proxy=one('inspect',proxies[0])
+        if proxy.get('State',{}).get('Status')!='running' or spec['network'] not in proxy.get('NetworkSettings',{}).get('Networks',{}):
+            raise ValueError('private health network unavailable')
+        address='http://'+endpoint['IPAddress']+':'+str(spec['port'])+spec['health_path']
+        endpoint_address=str(ipaddress.ip_address(endpoint['IPAddress']))
+        if ':' in endpoint_address or not isinstance(spec['port'],int) or not 1<=spec['port']<=65535:
+            raise ValueError('private HTTP endpoint unavailable')
+        path=spec['health_path']
+        if not isinstance(path,str) or not path.startswith('/') or path.startswith('//') or any(character.isspace() for character in path) or '?' in path or '#' in path:
+            raise ValueError('private HTTP path unavailable')
+        request=('GET '+path+' HTTP/1.1\r\nHost: '+endpoint_address+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
+        reply=subprocess.run(['docker','exec','-i',proxies[0],'nc','-n','-w','10',endpoint_address,str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
+        if len(reply.stdout)>327680: raise ValueError('private HTTP response exceeds bound')
+        class Socket:
+            def makefile(self,*arguments): return io.BytesIO(reply.stdout)
+        response=http.client.HTTPResponse(Socket())
+        response.begin()
+        body=response.read()
+        if len(body)>262144: raise ValueError('private HTTP body exceeds bound')
+        if 400<=response.status<600:
+            failed=True
+        elif not 200<=response.status<300:
+            raise ValueError('private HTTP response is not qualifying')
+        else:
+            health=json.loads(body)
+            if not isinstance(health,dict): raise ValueError('private health document unavailable')
+            identity=next((health[key] for key in ('runtime_identity','launchplane_runtime_identity','launchplaneRuntimeIdentity','LAUNCHPLANE_RUNTIME_IDENTITY_JSON') if key in health),None)
+            if isinstance(identity,str): identity=json.loads(identity)
+            failed=identity!=spec['identity']
     if (one('service','inspect',spec['application'])!=service or one('inspect',identifier)!=container
         or docker('service','ps','--no-trunc','-q',spec['application']).splitlines()!=task_ids): raise ValueError('runtime changed during proof')
     print(sys.argv[2]+json.dumps({'type':'complete','service_id':service['ID'],'task_id':task['ID'],'container_id':identifier,
-        'backend':'http://'+spec['application']+':'+str(spec['port']),'identity':identity,'health_url':address}))
+        'backend':'http://'+spec['application']+':'+str(spec['port']),'identity':spec['identity'],'health_url':address,
+        'verified_failure':failed,'health_identity':identity}))
 except Exception:
     print(sys.argv[2]+json.dumps({'type':'refused'}))
     sys.exit(1)

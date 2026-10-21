@@ -581,3 +581,222 @@ class ApplicationCredentialTests(unittest.TestCase):
             patch.object(flow, "state_docker", side_effect=database),
         ):
             flow.test_postgres_state_native_flow_publishes_only_application_credentials()
+
+
+class ApplicationRuntimeImageTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("LAUNCHPLANE_TEST_TRAEFIK_IMAGE"),
+        "Select an already-local immutable Traefik rehearsal image.",
+    )
+    def test_private_http_program_uses_selected_proxy_without_following_redirects(self) -> None:
+        """Actual proxy binary/HTTP framing; Swarm ownership remains a finite fixture."""
+        import shlex
+        from control_plane.testing_application_runtime import (
+            inspect_application_runtime,
+            VerifiedApplicationRuntimeFailure,
+        )
+        from control_plane.testing_activation import preparation_resources
+        from tests.test_testing_application_flow import ApplicationFlowTests
+
+        image = os.environ["LAUNCHPLANE_TEST_TRAEFIK_IMAGE"]
+        self.assertRegex(image, r"@sha256:[a-f0-9]{64}$")
+        native_run = subprocess.run
+
+        def command(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            return native_run(arguments, capture_output=True, check=True, timeout=25, **kwargs)
+
+        context = command(["docker", "context", "show"]).stdout.decode().strip()
+        endpoint = json.loads(
+            command(
+                [
+                    "docker",
+                    "context",
+                    "inspect",
+                    context,
+                    "--format",
+                    "{{json .Endpoints.docker.Host}}",
+                ]
+            ).stdout
+        )
+        self.assertTrue(endpoint.startswith("unix://"), "Use the owned local Docker daemon.")
+        self.assertEqual(
+            command(["docker", "info", "--format", "{{.OSType}}"]).stdout.strip(), b"linux"
+        )
+        command(["docker", "image", "inspect", image])
+        created = command(
+            [
+                "docker",
+                "create",
+                "--pull=never",
+                "--name",
+                "lp-application-http-" + uuid4().hex,
+                "--label",
+                "launchplane.fixture=application-http",
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--no-healthcheck",
+                "--tmpfs",
+                "/fixture:rw,nosuid,nodev,size=1m,mode=0700",
+                "--entrypoint",
+                "sleep",
+                image,
+                "300",
+            ]
+        )
+        identifier = created.stdout.decode().strip()
+        self.assertRegex(identifier, r"^[a-f0-9]{64}$")
+
+        def cleanup() -> None:
+            command(["docker", "rm", "--force", "--volumes", identifier])
+            absent = native_run(
+                ["docker", "inspect", identifier], capture_output=True, timeout=25, check=False
+            )
+            self.assertNotEqual(absent.returncode, 0)
+            self.assertTrue(
+                b"no such object" in absent.stderr.lower()
+                or b"no such container" in absent.stderr.lower()
+            )
+
+        self.addCleanup(cleanup)
+        command(["docker", "start", identifier])
+        flow = ApplicationFlowTests()
+        flow.setUp()
+        self.addCleanup(flow.doCleanups)
+        flow.prepare()
+        self.assertEqual(flow.activate().status, "completed")
+        record = flow.adapter.current()
+        assert record.application_readiness is not None
+        readiness = record.application_readiness
+        resources, _ = preparation_resources(flow.store, flow.product, flow.request, flow.scope)
+        values = flow.adapter.application_values(record)
+        specification = flow.specification
+        private = flow.containers[readiness.container_id]["NetworkSettings"]["Networks"][
+            specification.network_name
+        ]["IPAddress"]
+        identity = readiness.runtime_identity.model_dump(mode="json")
+        cases = [
+            ("healthy", 200, {"runtime_identity": identity}, None),
+            ("redirect", 302, b"", ValueError),
+            ("http_failure", 503, b"", VerifiedApplicationRuntimeFailure),
+            ("malformed", 200, b"{", ValueError),
+            ("truncated", 200, b"{}", ValueError),
+            (
+                "identity_mismatch",
+                200,
+                {"runtime_identity": {**identity, "artifact_id": "different-image"}},
+                VerifiedApplicationRuntimeFailure,
+            ),
+        ]
+        fixture_docker = flow.docker
+        for index, (kind, status, payload, expected_error) in enumerate(cases):
+            with self.subTest(kind=kind):
+                body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+                length = len(body) + (5 if kind == "truncated" else 0)
+                response = (
+                    "HTTP/1.1 "
+                    + str(status)
+                    + " Fixture\r\nContent-Length: "
+                    + str(length)
+                    + "\r\nConnection: close\r\n"
+                    + (
+                        "Location: http://127.0.0.1:19999/never-contacted\r\n"
+                        if kind == "redirect"
+                        else ""
+                    )
+                    + "\r\n"
+                ).encode() + body
+                script = (
+                    "#!/bin/sh\nIFS= read -r request || exit 1\nprintf %s "
+                    + shlex.quote(response.decode())
+                    + "\n"
+                )
+                command(
+                    ["docker", "exec", "-i", identifier, "tee", "/fixture/reply"],
+                    input=script.encode(),
+                )
+                command(["docker", "exec", identifier, "chmod", "0700", "/fixture/reply"])
+                port = str(18080 + index)
+                server = subprocess.Popen(
+                    [
+                        "docker",
+                        "exec",
+                        identifier,
+                        "nc",
+                        "-l",
+                        "-p",
+                        port,
+                        "-w",
+                        "10",
+                        "-e",
+                        "/bin/sh",
+                        "/fixture/reply",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    deadline = time.monotonic() + 8
+                    while True:
+                        tables = command(
+                            ["docker", "exec", identifier, "cat", "/proc/net/tcp", "/proc/net/tcp6"]
+                        ).stdout.decode()
+                        if any(
+                            ":" + format(int(port), "04X") in line and " 0A " in line
+                            for line in tables.splitlines()
+                        ):
+                            break
+                        self.assertIsNone(server.poll(), "The owned one-shot listener exited.")
+                        self.assertLess(
+                            time.monotonic(), deadline, "The owned listener did not become ready."
+                        )
+                        time.sleep(0.1)
+                    calls = []
+
+                    def actual_http(arguments: list[str], **kwargs: Any) -> Any:
+                        if arguments[1:5] != ["exec", "-i", "proxy", "nc"]:
+                            return fixture_docker(arguments, **kwargs)
+                        self.assertEqual(arguments[-2:], [private, str(specification.runtime_port)])
+                        calls.append(arguments)
+                        actual = [*arguments]
+                        actual[3], actual[-2], actual[-1] = identifier, "127.0.0.1", port
+                        return native_run(actual, **kwargs)
+
+                    def inspect() -> dict[str, Any]:
+                        return inspect_application_runtime(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            server_id="server",
+                            application=record.app_name,
+                            runtime_port=specification.runtime_port,
+                            network=specification.network_name,
+                            image=record.image_reference,
+                            identity=readiness.runtime_identity,
+                            values=values,
+                            volume=resources.volumes.get("state", ""),
+                            volume_binding=resources.binding_sha256,
+                            mount_path=specification.state.container_path,
+                            health_path=specification.health_path,
+                        )
+
+                    with patch.object(flow, "docker", side_effect=actual_http):
+                        if expected_error is None:
+                            self.assertFalse(inspect()["verified_failure"])
+                        else:
+                            with self.assertRaises(expected_error) as raised:
+                                inspect()
+                            self.assertEqual(
+                                isinstance(raised.exception, VerifiedApplicationRuntimeFailure),
+                                expected_error is VerifiedApplicationRuntimeFailure,
+                            )
+                    self.assertEqual(len(calls), 1)
+                    server.communicate(timeout=15)
+                    self.assertEqual(server.returncode, 0)
+                finally:
+                    if server.poll() is None:
+                        server.terminate()
+                        server.communicate(timeout=15)

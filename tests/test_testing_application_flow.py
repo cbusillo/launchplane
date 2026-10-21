@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from typing import cast
 import unittest
 from unittest.mock import patch
@@ -762,7 +762,7 @@ class ApplicationFlowTests(unittest.TestCase):
             arguments, 0, output if isinstance(output, str) else json.dumps(output), ""
         )
 
-    def docker(self, arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def docker(self, arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
         args = arguments[1:]
         if args[:2] == ["service", "inspect"]:
             value: Any = [self.services[args[2]]]
@@ -797,10 +797,8 @@ class ApplicationFlowTests(unittest.TestCase):
                     "NetworkSettings": {"Networks": {"dokploy-network": {}}},
                 }
             ]
-        elif args[:2] == ["exec", "proxy"]:
-            from urllib.parse import urlsplit
-
-            address = urlsplit(args[-1]).hostname
+        elif args[:4] == ["exec", "-i", "proxy", "nc"]:
+            address = args[-2]
             container = next(
                 row
                 for row in self.containers.values()
@@ -810,11 +808,37 @@ class ApplicationFlowTests(unittest.TestCase):
                 )
             )
             env = dict(value.split("=", 1) for value in container["Config"]["Env"])
-            value = {"runtime_identity": json.loads(env["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])}
+            body = json.dumps(
+                {"runtime_identity": json.loads(env["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])}
+            ).encode()
+            return self.http_response(arguments, body=body)
         else:
             raise AssertionError(arguments)
         return subprocess.CompletedProcess(
             arguments, 0, value if isinstance(value, str) else json.dumps(value), ""
+        )
+
+    @staticmethod
+    def http_response(
+        arguments: list[str],
+        *,
+        body: bytes = b"",
+        status: int = 200,
+        declared_length: int | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        length = len(body) if declared_length is None else declared_length
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            (
+                "HTTP/1.1 "
+                + str(status)
+                + " Fixture\r\nContent-Length: "
+                + str(length)
+                + "\r\nConnection: close\r\n\r\n"
+            ).encode()
+            + body,
+            b"",
         )
 
     def host_schedule(self, **kwargs: Any) -> dict[str, str]:
@@ -855,7 +879,12 @@ class ApplicationFlowTests(unittest.TestCase):
             patch.object(subprocess, "run", side_effect=self.docker),
             patch("sys.stdout", output),
         ):
-            exec(kwargs["program"], {})
+            try:
+                exec(kwargs["program"], {})
+            except SystemExit as error:
+                # The real remote reader reports a refused/nonzero program as
+                # an unavailable proof, rather than terminating this test worker.
+                raise ValueError("Runtime program did not supply a completed proof") from error
         kwargs["receive"](json.loads(output.getvalue().removeprefix("frame:")))
 
     def prepare(self, key: str = "prepare") -> None:
@@ -1434,6 +1463,390 @@ class ApplicationFlowTests(unittest.TestCase):
             tuple(corrected),
         )
 
+    def assert_answered_before_deploy_refuses(self, boundary: str) -> None:
+        if boundary == "placement":
+            self.specification = self.specification.model_copy(
+                update={"state": TestingApplicationState(kind="none")}
+            )
+        self.prepare()
+        changed = False
+        method = (
+            "save_state"
+            if boundary in {"staged", "mount"}
+            else "create_placement"
+            if boundary == "placement"
+            else "configure_application"
+        )
+        original = getattr(self.adapter, method)
+
+        def correction(record: Any, *args: Any, **values: str) -> Any:
+            nonlocal changed
+            result = original(record, *args, **values)
+            marker = "registry_sha256" if boundary == "staged" else "mount_verified"
+            if not changed and (boundary in {"placement", "configured"} or marker in values):
+                changed = True
+                self.correct_runtime()
+            return result
+
+        with patch.object(self.adapter, method, side_effect=correction):
+            result = self.activate()
+        self.assertTrue(changed)
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        assert record.failure is not None
+        self.assertEqual(record.failure.kind, "publication_refused")
+        self.assertFalse(result.response_payload["result"]["deployment_requested"])
+        self.assertFalse(any(path.endswith(".deploy") for path, _ in self.writes))
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+        self.prepare("after-answered-" + boundary)
+        self.activation_key = "after-answered-" + boundary
+        self.assertEqual(self.activate().status, "completed")
+
+    def test_answered_placement_correction_retains_unused_candidate(self) -> None:
+        self.assert_answered_before_deploy_refuses("placement")
+
+    def test_staged_private_inputs_correction_retains_unused_candidate(self) -> None:
+        self.assert_answered_before_deploy_refuses("staged")
+
+    def test_answered_mount_correction_retains_unused_candidate(self) -> None:
+        self.assert_answered_before_deploy_refuses("mount")
+
+    def test_answered_configuration_correction_retains_unused_candidate(self) -> None:
+        self.assert_answered_before_deploy_refuses("configured")
+
+    def test_unanswered_configuration_correction_keeps_original_unknown(self) -> None:
+        self.prepare()
+        provider = self.provider
+
+        def uncertain(**kwargs: Any) -> Any:
+            result = provider(**kwargs)
+            if kwargs["path"] == "/api/application.saveDockerProvider":
+                self.correct_runtime()
+                raise OSError("The original source update reply was lost")
+            return result
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=uncertain):
+            result = self.activate()
+        self.assertEqual(result.status, "reconcile_required", result)
+        record = self.adapter.current()
+        self.assertEqual(record.phase, "configure_application")
+        self.assertNotIn("application_configured", record.state_recipient)
+        self.assertIsNone(record.failure)
+        self.assertFalse(any(path.endswith(".deploy") for path, _ in self.writes))
+
+    def test_terminal_private_candidate_correction_does_not_require_passing_health(self) -> None:
+        self.prepare()
+        qualify = self.adapter.qualify_application
+
+        def corrected(record: Any) -> Any:
+            self.correct_runtime()
+            return qualify(record)
+
+        with patch.object(self.adapter, "qualify_application", side_effect=corrected):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        completed = self.adapter.current()
+        assert completed.failure is not None
+        self.assertEqual(completed.failure.kind, "publication_refused")
+        assert completed.application_readiness is not None
+        self.assertIsNone(completed.application_readiness.private_health)
+        self.prepare("corrected-private-successor")
+        self.activation_key = "corrected-private-successor"
+        self.assertEqual(self.activate().status, "completed")
+
+    def correct_runtime(self) -> None:
+        (runtime,) = self.store.list_runtime_environment_records(
+            context_name=self.context, instance_name="testing"
+        )
+        runtime.env["APPLICATION_MODE"] = (
+            str(runtime.env.get("APPLICATION_MODE", "")) + "-corrected"
+        )
+        self.store.write_runtime_environment_record(runtime)
+
+    def corrected_publication(self, record: Any, checkpoint: Any) -> Any:
+        self.correct_runtime()
+        self.adapter.require_unchanged(record)
+        raise AssertionError("The actual correction must refuse publication")
+
+    def record_staff_usage(self, usage: Literal["in_use", "unused"]) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+
+        binding = resolve_disposable_observation_binding(
+            self.store, product=self.product, context=self.context, instance="testing"
+        )
+        if usage == "unused":
+            from control_plane.disposable_lanes import disposable_lane_observation_sha256
+
+            previous = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+            self.store.clear_reviewed_disposable_lane_safety(
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                preview_id="",
+                expected_binding_sha256=binding.binding_sha256,
+                expected_observation_sha256=disposable_lane_observation_sha256(previous),
+            )
+        now = datetime.now(timezone.utc)
+        self.assertTrue(
+            self.store.publish_collected_disposable_lane_safety(
+                DisposableLaneSafety(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                    observed_by=self.actor,
+                    observer_kind="director_agent",
+                    binding_sha256=binding.binding_sha256,
+                    usage=usage,
+                    usage_evidence="An explicit current staff-use observation.",
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+            )
+        )
+
+    def test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse(self) -> None:
+        routing = self.addressed()
+        self.prepare()
+        publish = self.adapter.publish_application
+
+        def staff_use(record: Any, checkpoint: Any) -> Any:
+            self.record_staff_usage("in_use")
+            return publish(record, checkpoint)
+
+        with (
+            patch.object(self.adapter, "publish_application", side_effect=staff_use),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required", first)
+        self.assertIsNone(self.adapter.current().failure)
+        inode, content = routing.route_file.stat().st_ino, routing.route_file.read_bytes()
+        self.record_staff_usage("unused")
+        self.assertIn(self.activate().status, {"completed", "adopted"})
+        self.assertEqual(
+            (routing.route_file.stat().st_ino, routing.route_file.read_bytes()), (inode, content)
+        )
+
+    def assert_public_health_outcome(
+        self, *, unavailable: bool = False, mismatch: bool = False
+    ) -> None:
+        from control_plane.contracts.promotion_record import HealthcheckEvidence
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing = self.addressed()
+        self.prepare()
+
+        def health(*_args: Any) -> Any:
+            readiness = self.adapter.current().application_readiness
+            assert readiness is not None
+            return HealthcheckEvidence(
+                status="pending" if unavailable else "pass" if mismatch else "fail",
+                verified=not unavailable,
+                timeout_seconds=5,
+                urls=("https://" + routing.plan.host + "/health",),
+                observed_runtime_identity=readiness.runtime_identity.model_copy(
+                    update={"artifact_id": "wrong-image"}
+                )
+                if mismatch
+                else None,
+            )
+
+        with (
+            patch(
+                "control_plane.testing_rebuild_service.read_public_testing_health",
+                side_effect=health,
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            result = self.activate()
+        record = self.adapter.current()
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        if unavailable:
+            self.assertEqual(result.status, "reconcile_required", result)
+            self.assertIsNone(record.failure)
+            self.assertEqual(
+                observe_testing_route(
+                    readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+                ),
+                readiness.backend,
+            )
+            before = routing.route_file.read_bytes(), routing.route_file.stat().st_ino
+            self.assertIn(self.activate().status, {"completed", "adopted"})
+            self.assertEqual(
+                (routing.route_file.read_bytes(), routing.route_file.stat().st_ino), before
+            )
+        else:
+            self.assertEqual(result.status, "completed", result)
+            assert record.failure is not None and readiness.public_health is not None
+            self.assertEqual(record.failure.kind, "publication_refused")
+            self.assertTrue(readiness.public_health.verified)
+            self.assertEqual(readiness.public_health.status, "fail")
+            self.assertEqual(
+                observe_testing_route(
+                    readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+                ),
+                readiness.route.old_backend,
+            )
+            self.prepare("healthy-public-successor")
+            self.activation_key = "healthy-public-successor"
+            self.assertEqual(self.activate().status, "completed")
+
+    def test_verified_public_http_failure_restores_original_and_allows_successor(self) -> None:
+        self.assert_public_health_outcome()
+
+    def test_verified_public_identity_mismatch_restores_original(self) -> None:
+        self.assert_public_health_outcome(mismatch=True)
+
+    def test_public_transport_unknown_keeps_original_forward_for_retry(self) -> None:
+        self.assert_public_health_outcome(unavailable=True)
+
+    def assert_private_health_outcome(self, kind: str) -> None:
+        self.prepare()
+        docker = self.docker
+
+        def observed(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "-i", "proxy", "nc"]:
+                if kind == "http":
+                    return self.http_response(arguments, status=503)
+                if kind == "identity":
+                    readiness = self.adapter.current().application_readiness
+                    assert readiness is not None
+                    identity = readiness.runtime_identity
+                    return self.http_response(
+                        arguments,
+                        body=json.dumps(
+                            {
+                                "runtime_identity": identity.model_copy(
+                                    update={"artifact_id": "different-image"}
+                                ).model_dump(mode="json")
+                            }
+                        ).encode(),
+                    )
+                if kind == "transport":
+                    raise subprocess.CalledProcessError(1, arguments, stderr="connection timed out")
+                if kind == "parse":
+                    return self.http_response(arguments, body=b"{")
+                if kind == "shape":
+                    return self.http_response(arguments, body=b"[]")
+                if kind == "truncated":
+                    return self.http_response(arguments, body=b"{}", declared_length=10)
+            if (
+                kind == "empty"
+                and arguments[1:3] == ["service", "ps"]
+                and arguments[-1] != "old-app"
+            ):
+                return subprocess.CompletedProcess(arguments, 0, "", "")
+            result = docker(arguments, **kwargs)
+            if kind in {"task", "exited_task"} and arguments[1:4] == ["inspect", "--type", "task"]:
+                rows = json.loads(result.stdout)
+                rows[0].update(
+                    DesiredState="shutdown", Status={**rows[0]["Status"], "State": "failed"}
+                )
+                result.stdout = json.dumps(rows)
+            if (
+                kind == "exited_task"
+                and arguments[1:2] == ["inspect"]
+                and arguments[2] in self.containers
+                and arguments[2] != "proxy"
+            ):
+                rows = json.loads(result.stdout)
+                rows[0]["State"]["Status"] = "exited"
+                rows[0]["NetworkSettings"]["Networks"] = {}
+                result.stdout = json.dumps(rows)
+            return result
+
+        with (
+            patch.object(self, "docker", side_effect=observed),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            result = self.activate()
+            if kind not in {"transport", "parse", "shape", "truncated", "empty"}:
+                from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+                # Identical persisted evidence remains a failure; no new save
+                # should be needed and it must never return a usable candidate.
+                with self.assertRaises(TestingActivationRefusal):
+                    self.adapter.qualify_application(self.adapter.current())
+        if kind in {"transport", "parse", "shape", "truncated", "empty"}:
+            self.assertEqual(result.status, "reconcile_required", result)
+            self.assertIsNone(self.adapter.current().failure)
+            self.assertIn(self.activate().status, {"completed", "adopted"})
+        else:
+            self.assertEqual(result.status, "completed", result)
+            record = self.adapter.current()
+            assert record.failure is not None and record.application_readiness is not None
+            assert record.application_readiness.private_health is not None
+            self.assertEqual(record.failure.kind, "publication_refused")
+            self.assertEqual(record.application_readiness.private_health.status, "fail")
+            self.prepare("healthy-private-successor")
+            self.activation_key = "healthy-private-successor"
+            self.assertEqual(self.activate().status, "completed")
+
+    def test_verified_private_http_failure_retains_candidate_and_allows_successor(self) -> None:
+        self.assert_private_health_outcome("http")
+
+    def test_verified_private_identity_failure_retains_candidate(self) -> None:
+        self.assert_private_health_outcome("identity")
+
+    def test_attributed_failed_task_retains_candidate_without_claiming_empty_inventory(
+        self,
+    ) -> None:
+        self.assert_private_health_outcome("task")
+
+    def test_attributed_exited_task_failure_needs_no_live_network_endpoint(self) -> None:
+        self.assert_private_health_outcome("exited_task")
+
+    def test_private_health_parse_error_keeps_original_unknown(self) -> None:
+        self.assert_private_health_outcome("parse")
+
+    def test_private_health_non_mapping_keeps_original_unknown(self) -> None:
+        self.assert_private_health_outcome("shape")
+
+    def test_private_health_truncated_body_keeps_original_unknown(self) -> None:
+        self.assert_private_health_outcome("truncated")
+
+    def test_empty_swarm_task_inventory_keeps_original_unknown(self) -> None:
+        self.assert_private_health_outcome("empty")
+
+    def test_private_http_transport_error_is_not_a_verified_failure(self) -> None:
+        self.assert_private_health_outcome("transport")
+
+    def test_addressed_generic_publication_error_retries_forward_without_route_rewrite(
+        self,
+    ) -> None:
+        routing = self.addressed()
+        self.prepare()
+        with (
+            patch.object(self.adapter, "publish_application", side_effect=OSError("Unavailable")),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required", first)
+        self.assertIsNone(self.adapter.current().failure)
+        inode, document = routing.route_file.stat().st_ino, routing.route_file.read_bytes()
+        self.assertIn(self.activate().status, {"completed", "adopted"})
+        self.assertEqual(routing.route_file.stat().st_ino, inode)
+        self.assertEqual(routing.route_file.read_bytes(), document)
+
     def test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues(
         self,
     ) -> None:
@@ -1966,7 +2379,7 @@ class ApplicationFlowTests(unittest.TestCase):
         self.prepare("second-route-refusal")
         self.activation_key = "second-route-refusal"
         with patch.object(
-            self.adapter, "publish_application", side_effect=OSError("Publication unavailable")
+            self.adapter, "publish_application", side_effect=self.corrected_publication
         ):
             second = self.activate()
         self.assertEqual(second.status, "completed", second)
@@ -1981,6 +2394,12 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertTrue(self.adapter.current().published)
 
     def test_lost_inverse_reply_settles_its_original_and_never_resumes_forward(self) -> None:
+        self.assert_lost_inverse_reentry()
+
+    def test_proxy_restart_after_lost_inverse_reply_reuses_original_child(self) -> None:
+        self.assert_lost_inverse_reentry(restart=True)
+
+    def assert_lost_inverse_reentry(self, *, restart: bool = False) -> None:
         from control_plane.dokploy.testing_route import observe_testing_route
 
         routing = self.addressed()
@@ -2012,7 +2431,7 @@ class ApplicationFlowTests(unittest.TestCase):
         with (
             patch.object(routing, "command", side_effect=lose_inverse),
             patch.object(
-                self.adapter, "publish_application", side_effect=OSError("Publication unavailable")
+                self.adapter, "publish_application", side_effect=self.corrected_publication
             ),
             patch.object(
                 self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
@@ -2022,6 +2441,9 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertTrue(lost)
         self.assertEqual(first.status, "reconcile_required", first)
         self.assertEqual(self.adapter.current().phase, "restoring_application_route")
+        if restart:
+            routing.process_start.write_text("200")
+            routing.containers["proxy"]["State"]["StartedAt"] = "successor-proxy-start"
         before = tuple(self.writes)
         result = self.activate()
         self.assertIn(result.status, {"completed", "adopted"}, result)
@@ -2029,6 +2451,89 @@ class ApplicationFlowTests(unittest.TestCase):
         assert failure is not None
         self.assertEqual(failure.kind, "publication_refused")
         self.assertEqual(tuple(self.writes), before)
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+
+    def test_proxy_restart_before_inverse_retains_distinct_inverse_custody(self) -> None:
+        routing = self.addressed()
+        self.prepare()
+
+        def correction(record: Any, checkpoint: Any) -> Any:
+            routing.process_start.write_text("200")
+            routing.containers["proxy"]["State"]["StartedAt"] = "before-inverse-proxy-start"
+            return self.corrected_publication(record, checkpoint)
+
+        with patch.object(self.adapter, "publish_application", side_effect=correction):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        completed = self.adapter.current()
+        assert completed.failure is not None
+        self.assertEqual(completed.failure.kind, "publication_refused")
+
+    def test_persisted_inverse_pauses_for_staff_use_then_restores_original(self) -> None:
+        routing = self.addressed()
+        self.prepare()
+        restore = self.adapter.restore_application_route
+
+        def pause(*args: Any) -> Any:
+            self.record_staff_usage("in_use")
+            return restore(*args)
+
+        with (
+            patch.object(
+                self.adapter, "publish_application", side_effect=self.corrected_publication
+            ),
+            patch.object(self.adapter, "restore_application_route", side_effect=pause),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required", first)
+        self.assertEqual(self.adapter.current().phase, "restoring_application_route")
+        before = routing.route_file.read_bytes(), routing.effect_count
+        self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertEqual((routing.route_file.read_bytes(), routing.effect_count), before)
+        self.record_staff_usage("unused")
+        self.assertIn(self.activate().status, {"completed", "adopted"})
+        completed = self.adapter.current()
+        assert completed.failure is not None
+        self.assertEqual(completed.failure.kind, "publication_refused")
+
+    def test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt(self) -> None:
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing = self.addressed()
+        self.prepare()
+
+        def correction(record: Any, checkpoint: Any) -> Any:
+            self.deployments[record.target_id].append(
+                {
+                    "deploymentId": "foreign-job",
+                    "title": "Unrelated manual job",
+                    "status": "done",
+                }
+            )
+            return self.corrected_publication(record, checkpoint)
+
+        with (
+            patch.object(self.adapter, "publish_application", side_effect=correction),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            result = self.activate()
+        self.assertEqual(result.status, "reconcile_required", result)
+        record = self.adapter.current()
+        self.assertIsNone(record.failure)
+        self.assertEqual(record.phase, "restoring_application_route")
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        self.assertEqual(
+            observe_testing_route(
+                readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+            ),
+            readiness.route.old_backend,
+        )
         self.assertEqual(self.canonical_password(), "retained-only-password")
 
     def test_newer_serving_target_blocks_inverse_without_overwriting_correction(self) -> None:

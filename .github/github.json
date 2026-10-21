@@ -87,7 +87,7 @@
       "local": "uv run --extra dev python -m unittest {modules}",
       "localSafety": "uv run --extra dev python -m unittest {safety_modules}",
       "odooStartupRehearsal": "LAUNCHPLANE_TEST_STARTUP_IMAGE=\"${LAUNCHPLANE_TEST_STARTUP_IMAGE:?select an already-local immutable image}\" uv run --extra dev python -m unittest tests.test_odoo_slot_startup_rehearsal -v",
-      "testingRouteReaderRehearsal": "LAUNCHPLANE_TEST_TRAEFIK_IMAGE=\"${LAUNCHPLANE_TEST_TRAEFIK_IMAGE:?select an already-local immutable Traefik image}\" uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port -v",
+      "testingRouteReaderRehearsal": "LAUNCHPLANE_TEST_TRAEFIK_IMAGE=\"${LAUNCHPLANE_TEST_TRAEFIK_IMAGE:?select an already-local immutable Traefik image}\" uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port tests.test_testing_application_activation.ApplicationRuntimeImageTests.test_private_http_program_uses_selected_proxy_without_following_redirects -v",
       "dokployComposeEnvironment": "bash scripts/qualify-dokploy-compose-environment.sh",
       "ci": "uv run --extra dev launchplane ci unittest-shard local",
       "serviceRestartRehearsal": "LP_REHEARSAL_OPERATOR_HELPER=<installed-launchplane-skill>/scripts/launchplane-write-action.py uv run --extra dev python scripts/qualify-lane-service-restart.py",

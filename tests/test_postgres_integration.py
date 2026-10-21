@@ -12879,6 +12879,45 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def test_publication_refusal_restores_route_before_next_generation(self) -> None:
         self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
 
+    def test_terminal_private_job_correction_before_health_keeps_original_custody(self) -> None:
+        self.fixture.test_terminal_private_candidate_correction_does_not_require_passing_health()
+
+    def test_answered_unused_placement_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_placement_correction_retains_unused_candidate()
+
+    def test_staged_private_inputs_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_staged_private_inputs_correction_retains_unused_candidate()
+
+    def test_answered_mount_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_mount_correction_retains_unused_candidate()
+
+    def test_answered_configuration_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_configuration_correction_retains_unused_candidate()
+
+    def test_generic_publication_error_continues_original_forward(self) -> None:
+        self.fixture.test_addressed_generic_publication_error_retries_forward_without_route_rewrite()
+
+    def test_staff_use_pauses_forward_until_reviewed_clear(self) -> None:
+        self.fixture.test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse()
+
+    def test_verified_public_failure_restores_original(self) -> None:
+        self.fixture.test_verified_public_http_failure_restores_original_and_allows_successor()
+
+    def test_verified_private_failure_retains_candidate(self) -> None:
+        self.fixture.test_verified_private_http_failure_retains_candidate_and_allows_successor()
+
+    def test_proxy_restart_before_inverse_preserves_original_directions(self) -> None:
+        self.fixture.test_proxy_restart_before_inverse_retains_distinct_inverse_custody()
+
+    def test_proxy_restart_after_lost_inverse_preserves_original_child(self) -> None:
+        self.fixture.test_proxy_restart_after_lost_inverse_reply_reuses_original_child()
+
+    def test_staff_use_pauses_persisted_inverse_until_reviewed_clear(self) -> None:
+        self.fixture.test_persisted_inverse_pauses_for_staff_use_then_restores_original()
+
+    def test_route_restores_before_foreign_job_holds_negative_receipt(self) -> None:
+        self.fixture.test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt()
+
 
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
