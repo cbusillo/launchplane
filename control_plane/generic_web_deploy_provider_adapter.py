@@ -31,6 +31,7 @@ from control_plane.generic_web_testing_settlement import (
     testing_pre_image_settlement_required,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleBaselineChanged,
     has_recorded_application_lifecycle,
     generic_web_provider_deployment_record_id,
     recorded_application_lifecycle,
@@ -1616,7 +1617,12 @@ class GenericWebDeployProviderMutationAdapter:
             ) from error
 
     def _proved_no_effect_lifecycle_retry(
-        self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
+        self,
+        operation_key: str,
+        lease: ProviderOperationLease,
+        recorder: ExecutionRecorder | None,
+        *,
+        match_current_declarations: bool = True,
     ) -> bool:
         if recorder is None or recorder.expected_record is None:
             return False
@@ -1652,22 +1658,32 @@ class GenericWebDeployProviderMutationAdapter:
             and (snapshot.artifact_id, snapshot.source_git_ref)
             == (target.ship_request.artifact_id, target.ship_request.source_git_ref)
             and snapshot.provider_id == self._deploy_provider.provider_id
-            and snapshot.extensions == self._lane.generic_web_extensions
+            and (
+                not match_current_declarations
+                or snapshot.extensions == self._lane.generic_web_extensions
+            )
         )
 
     def _record_no_effect_lifecycle_refusal(
         self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
     ) -> None:
-        if (
-            not self._standing_testing_permission
-            or recorder is None
-            or recorder.expected_record is None
+        if recorder is None or recorder.expected_record is None:
+            return
+        snapshot = recorded_application_lifecycle(recorder.expected_record)
+        if snapshot is None or recorder.expected_record.deploy.status != "pending":
+            return
+        if not isinstance(lease, ProviderEvidenceLease):
+            raise ProviderMutationUnknownError("Original no-effect lease is unavailable.")
+        lease.assert_current()
+        reservation = lease.evidence_reservation()
+        if reservation.provider_effect_phase or reservation.provider_effect_started_at:
+            return
+        if not self._proved_no_effect_lifecycle_retry(
+            operation_key, lease, recorder, match_current_declarations=False
         ):
-            return
-        if recorded_application_lifecycle(recorder.expected_record) is None:
-            return
-        if not self._proved_no_effect_lifecycle_retry(operation_key, lease, recorder):
             raise ProviderMutationUnknownError("Original no-effect retirement is not proved.")
+        if snapshot.state == "not_started":
+            return
         assert recorder is not None and recorder.expected_record is not None
         assert isinstance(lease, ProviderEvidenceLease)
         record = recorder.expected_record
@@ -1876,6 +1892,18 @@ class GenericWebDeployProviderMutationAdapter:
 
         try:
             resolved_target = self._resolve_deploy_target()
+            if recorder is not None and recorder.expected_record is not None:
+                original = recorded_application_lifecycle(recorder.expected_record)
+                if (
+                    original is not None
+                    and original.extensions != self._lane.generic_web_extensions
+                    and self._proved_no_effect_lifecycle_retry(
+                        provider_operation_key, lease, recorder, match_current_declarations=False
+                    )
+                ):
+                    raise ApplicationLifecycleBaselineChanged(
+                        "The current declarations differ from the unstarted original."
+                    )
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -1907,7 +1935,7 @@ class GenericWebDeployProviderMutationAdapter:
                 proved_no_effect_retry=self._proved_no_effect_lifecycle_retry(
                     provider_operation_key, lease, recorder
                 ),
-                check_unproved_predecessor=self._standing_testing_permission,
+                established_testing_predecessor=self._standing_testing_permission,
             )
         except TimeoutError as error:
             if self._lane.generic_web_cutover is not None:

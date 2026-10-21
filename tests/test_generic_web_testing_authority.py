@@ -31,7 +31,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, MutationEffectAdmissionRefusedError
 from control_plane.provider_operations import ProviderMutationUnknownError, ProviderObservation
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
@@ -145,11 +145,19 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
         record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
         self.app = self.make_app(LaunchplaneAuthzPolicy())
 
-    def make_app(self, policy: LaunchplaneAuthzPolicy) -> Any:
+    def make_app(
+        self,
+        policy: LaunchplaneAuthzPolicy,
+        *,
+        subject: str = "local-owner-agent",
+        token_label: str = "local-owner-read",
+    ) -> Any:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=policy,
-            bearer_identity_config=_local_operator_bearer_config(),
+            bearer_identity_config=_local_operator_bearer_config(
+                token_label=token_label
+            ).model_copy(update={"local_operator_subject": subject}),
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
         )
@@ -177,6 +185,47 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 "Idempotency-Key": key,
             },
         )
+
+    def foreign_capture(self, *, legacy: bool = True) -> DeploymentRecord:
+        original_app = self.app
+        previous_ids = {row.record_id for row in self.store.list_deployment_records()}
+        self.app = self.make_app(
+            local_operator_policy(
+                actions=("generic_web_deploy.execute",),
+                products=(self.profile.product,),
+                contexts=(self.lane.context,),
+                token_label="earlier-admin",
+            ),
+            subject="earlier-admin",
+            token_label="earlier-admin",
+        )
+        try:
+            with (
+                patch.object(
+                    self.store,
+                    "checkpoint_mutation_provider_effect",
+                    side_effect=MutationEffectAdmissionRefusedError(
+                        ValueError("Pre-effect refusal")
+                    ),
+                ),
+                patch.object(
+                    GenericWebDeployProviderMutationAdapter,
+                    "_record_no_effect_lifecycle_refusal",
+                    return_value=None,
+                )
+                if legacy
+                else nullcontext(),
+            ):
+                status, payload = self.deploy(key="foreign-original")
+            self.assertEqual(status, 400, payload)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            return next(
+                row
+                for row in self.store.list_deployment_records()
+                if row.record_id not in previous_ids
+            )
+        finally:
+            self.app = original_app
 
     @contextmanager
     def lifecycle_provider(
@@ -593,6 +642,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             self.assertEqual(held.state, "held")
             self.assertFalse(schedules[definition.name]["enabled"])
             self.assertEqual(provider.effects, ["image"])
+            prepared = self.foreign_capture()
             status, payload = self.deploy(key="held-fix-forward")
             self.assertEqual(status, 202, payload)
             completed = self.store.read_deployment_record(
@@ -602,6 +652,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             assert snapshot is not None
             self.assertEqual(snapshot.state, "qualified")
             self.assertEqual(snapshot.originals[definition.name], original)
+            self.assertEqual(self.store.read_deployment_record(prepared.record_id), prepared)
             self.assertEqual(provider.effects, ["image", "image"])
 
     def test_no_effect_proof_cannot_be_forged_after_a_stored_effect_checkpoint(self) -> None:
@@ -639,6 +690,14 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             snapshot = recorded_application_lifecycle(self.store.list_deployment_records()[0])
             assert snapshot is not None
             self.assertEqual(snapshot.state, "prepared")
+            status, payload = self.deploy(key="new-key-after-effectful-original")
+            self.assertEqual(status, 409, payload)
+            self.assertIn(
+                payload["error"]["code"],
+                ("mutation_in_progress", "mutation_reconciliation_required"),
+            )
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
 
     def test_no_effect_marker_rejects_generic_consumption_and_execution_credit(self) -> None:
         with self.lifecycle_provider() as (_provider, _schedules, _writes):
@@ -713,50 +772,19 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             self.assertEqual(provider.effects, [])
             self.assertEqual(writes, [])
 
-    def test_legacy_unmarked_original_requires_its_own_proof_before_fresh_baseline(self) -> None:
-        with self.lifecycle_provider() as (provider, schedules, writes):
-            checkpoint = self.store.checkpoint_mutation_provider_effect
-
-            def refuse(**arguments: Any) -> Any:
-                record_safety(
-                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
-                )
-                return checkpoint(**arguments)
-
-            # Simulate the earlier version, which released a no-effect
-            # refusal without recording its historical provenance.
-            with (
-                patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refuse),
-                patch.object(
-                    GenericWebDeployProviderMutationAdapter,
-                    "_record_no_effect_lifecycle_refusal",
-                    return_value=None,
-                ),
-            ):
-                status, payload = self.deploy(key="legacy-original")
-            self.assertEqual(status, 409, payload)
-            pending = self.store.list_deployment_records()[0]
+    def test_foreign_prepared_intent_does_not_supply_a_new_standing_inverse(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, _writes):
+            pending = self.foreign_capture()
             snapshot = recorded_application_lifecycle(pending)
             assert snapshot is not None
             self.assertEqual(snapshot.state, "prepared")
             self.assertEqual(self.store.list_held_provider_target_reservations(), ())
             definition = self.lane.generic_web_extensions.schedules[0]
-            edited = schedule_payload(definition, provider.target_id, enabled=False)
+            edited = {
+                **schedule_payload(definition, provider.target_id, enabled=False),
+                "command": "./owner-edit",
+            }
             schedules[definition.name] = edited
-            record_safety(self.store, self.profile.product, self.lane.context, "testing")
-            status, payload = self.deploy(key="fresh-original")
-            self.assertEqual(status, 409, payload)
-            self.assertEqual(payload["error"]["code"], "testing_deploy_original_required")
-            self.assertEqual(provider.effects, [])
-            self.assertEqual(writes, [])
-            status, payload = self.deploy(key="legacy-original")
-            self.assertEqual(status, 409, payload)
-            self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
-            retired = recorded_application_lifecycle(
-                self.store.read_deployment_record(pending.record_id)
-            )
-            assert retired is not None
-            self.assertEqual(retired.state, "not_started")
             status, payload = self.deploy(key="fresh-original")
             self.assertEqual(status, 202, payload)
             fresh = recorded_application_lifecycle(
@@ -764,6 +792,103 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             )
             assert fresh is not None
             self.assertEqual(fresh.originals[definition.name], edited)
+            self.assertEqual(self.store.read_deployment_record(pending.record_id), pending)
+            self.assertEqual(provider.effects, ["image"])
+            lifecycle = DokployApplicationLifecycle(
+                "https://fixture.invalid",
+                "fixture-only",
+                provider.target_id,
+                fresh,
+                lambda _phase: None,
+                lambda: None,
+            )
+            lifecycle.restore()
+            self.assertEqual(schedules[definition.name], edited)
+
+    def test_foreign_prepared_declarations_do_not_acquire_schedule_ownership(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, writes):
+            pending = self.foreign_capture()
+            definition = self.lane.generic_web_extensions.schedules[0]
+            edited = schedule_payload(definition, provider.target_id, enabled=False)
+            schedules[definition.name] = edited
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        row.model_copy(
+                            update={
+                                "generic_web_extensions": row.generic_web_extensions.model_copy(
+                                    update={"schedules": ()}
+                                )
+                            }
+                        )
+                        if row.instance == "testing"
+                        else row
+                        for row in self.profile.lanes
+                    )
+                }
+            )
+            self.lane = next(row for row in self.profile.lanes if row.instance == "testing")
+            self.store.write_product_profile_record(self.profile)
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            status, payload = self.deploy(key="new-declarations")
+            self.assertEqual(status, 202, payload)
+            self.assertEqual(schedules[definition.name], edited)
+            self.assertEqual(writes, [])
+            self.assertEqual(provider.effects, ["image"])
+            self.assertEqual(self.store.read_deployment_record(pending.record_id), pending)
+
+    def test_explicit_admin_no_effect_refusal_records_the_same_historical_proof(self) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, writes):
+            pending = self.foreign_capture(legacy=False)
+            snapshot = recorded_application_lifecycle(pending)
+            assert snapshot is not None
+            self.assertEqual(snapshot.state, "not_started")
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+
+    def test_changed_declarations_on_an_unstarted_original_support_a_fresh_operation(self) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, writes):
+            with patch.object(
+                self.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=MutationEffectAdmissionRefusedError(ValueError("Pre-effect refusal")),
+            ):
+                status, payload = self.deploy(key="original-declarations")
+            self.assertEqual(status, 400, payload)
+            original = self.store.list_deployment_records()[0]
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        row.model_copy(
+                            update={
+                                "generic_web_extensions": row.generic_web_extensions.model_copy(
+                                    update={
+                                        "schedules": tuple(
+                                            item.model_copy(update={"command": "./changed-command"})
+                                            for item in row.generic_web_extensions.schedules
+                                        )
+                                    }
+                                )
+                            }
+                        )
+                        if row.instance == "testing"
+                        else row
+                        for row in self.profile.lanes
+                    )
+                }
+            )
+            self.lane = next(row for row in self.profile.lanes if row.instance == "testing")
+            self.store.write_product_profile_record(self.profile)
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            status, payload = self.deploy(key="original-declarations")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
+            self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+            status, payload = self.deploy(key="fresh-declarations")
+            self.assertEqual(status, 202, payload)
             self.assertEqual(provider.effects, ["image"])
 
     def test_new_original_restores_its_fresh_baseline_after_no_effect_refusal(self) -> None:

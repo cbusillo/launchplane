@@ -524,7 +524,7 @@ def execute_generic_web_deploy(
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
     proved_no_effect_retry: bool = False,
-    check_unproved_predecessor: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -649,7 +649,7 @@ def execute_generic_web_deploy(
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
             proved_no_effect_retry=proved_no_effect_retry,
-            check_unproved_predecessor=check_unproved_predecessor,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -678,7 +678,7 @@ def _execute_generic_web_deploy_unserialized(
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
     proved_no_effect_retry: bool = False,
-    check_unproved_predecessor: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -985,6 +985,7 @@ def _execute_generic_web_deploy_unserialized(
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
             proved_no_effect_retry=proved_no_effect_retry,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -1002,8 +1003,6 @@ def _execute_generic_web_deploy_unserialized(
         if application_lifecycle is not None:
             application_lifecycle.capture(
                 require_unchanged_baseline=proved_no_effect_retry,
-                check_unproved_predecessor=check_unproved_predecessor
-                and not proved_pre_image_retry,
             )
             if hasattr(application_lifecycle, "execution_recorder"):
                 application_lifecycle.execution_recorder = execution_recorder

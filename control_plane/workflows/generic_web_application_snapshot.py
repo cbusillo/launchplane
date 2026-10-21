@@ -18,10 +18,6 @@ APPLICATION_LIFECYCLE_EVIDENCE_KEY = "generic_web_application_lifecycle"
 class ApplicationLifecycleBaselineChanged(ValueError):
     """An unstarted original no longer matches its captured provider baseline."""
 
-    def __init__(self, message: str, *, original_retry_required: bool = False) -> None:
-        super().__init__(message)
-        self.original_retry_required = original_retry_required
-
 
 class ApplicationLifecycleSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,7 +44,6 @@ class ApplicationLifecycleSnapshot(BaseModel):
     current_originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
     restore_current_on_pre_image_failure: bool = False
     resume_from_hold: bool = False
-    unproved_predecessor_baseline: bool = False
     restore_declared: bool = False
 
     def evidence(self) -> dict[str, str]:
@@ -111,6 +106,7 @@ def application_snapshot_for_deploy(
     rollback: bool,
     proved_pre_image_retry: bool = False,
     proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
     previous_deployment_record_id: str = "",
@@ -137,6 +133,13 @@ def application_snapshot_for_deploy(
             )
         return value
 
+    same_attempt = read_snapshot(deployment_record_id)
+    excluded_predecessor_states = {"not_started"}
+    if established_testing_predecessor and not rollback and same_attempt is None:
+        # Another prepared declaration does not establish this operation's
+        # ownership. Preserve that original for exact-key recovery. Its live
+        # native reservation, if any, still fences this new operation.
+        excluded_predecessor_states.add("prepared")
     previous_artifact = previous_source = ""
     prior: ApplicationLifecycleSnapshot | None = None
     if callable(getattr(store, "read_environment_inventory", None)):
@@ -175,10 +178,7 @@ def application_snapshot_for_deploy(
         prior = read_snapshot(previous_deployment_record_id)
         if prior is not None:
             previous_artifact, previous_source = prior.artifact_id, prior.source_git_ref
-    # A positively retired no-effect original owns no provider changes. Keep
-    # the earlier effective predecessor, including its protective hold.
-    retired_predecessor = prior is not None and prior.state == "not_started"
-    if retired_predecessor:
+    if prior is not None and prior.state in excluded_predecessor_states:
         prior = None
     receipts: list[ApplicationLifecycleSnapshot] = []
     if callable(getattr(store, "list_deployment_records", None)):
@@ -191,7 +191,7 @@ def application_snapshot_for_deploy(
             candidate = recorded_application_lifecycle(record)
             if (
                 candidate is not None
-                and candidate.state != "not_started"
+                and candidate.state not in excluded_predecessor_states
                 and (
                     candidate.product,
                     candidate.provider_id,
@@ -203,13 +203,10 @@ def application_snapshot_for_deploy(
         latest = max(receipts, key=lambda item: item.captured_at, default=None)
         if (
             latest is not None
-            and (retired_predecessor or latest.state != "qualified")
+            and latest.state != "qualified"
             and (prior is None or latest.captured_at >= prior.captured_at)
         ):
             prior = latest
-            if retired_predecessor and latest.state == "qualified":
-                previous_artifact, previous_source = latest.artifact_id, latest.source_git_ref
-    same_attempt = read_snapshot(deployment_record_id)
     if same_attempt is not None:
         if same_attempt.extensions != extensions and not rollback:
             raise click.ClickException(
@@ -361,9 +358,6 @@ def application_snapshot_for_deploy(
         originals=originals,
         managed_names=tuple(sorted(names)),
         resume_from_hold=held,
-        unproved_predecessor_baseline=prior is not None
-        and prior.state == "prepared"
-        and (not prior.resume_from_hold or prior.unproved_predecessor_baseline),
         previous_owned_names=(prior.previous_owned_names if carry_baseline else prior.owned_names)
         if prior
         else (),

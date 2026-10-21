@@ -1321,17 +1321,6 @@ def build_generic_web_write_route_handlers(
                 reconcile_message=("The generic web deploy requires reconciliation before retry."),
             )
         except ApplicationLifecycleBaselineChanged as error:
-            if error.original_retry_required:
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="testing_deploy_original_required",
-                    message=(
-                        "An earlier prepared deployment has a changed schedule baseline. Retry "
-                        "its original operation first. A proved no-effect refusal records it as "
-                        "not started; a new operation can then capture the current baseline."
-                    ),
-                ) from error
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,

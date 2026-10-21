@@ -14,7 +14,7 @@ The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
 Director agent's `local_operator` transport for an active product's exact testing
 lane without a per-product deploy grant. This alternative does not extend the
 mixed production/testing action's policy or other callers' permissions. Explicitly
-authorized administrators retain their existing manual-deployment behavior,
+authorized administrators retain their existing manual-deployment authority,
 including deliberate deployments during a testing hold.
 
 New standing deployments consume the existing bound, unexpired disposable-lane
@@ -29,25 +29,27 @@ authority. Completed replay and read-only
 original observation do not require fresh execution qualification. An unresolved
 original continues to fence another key or caller.
 
-An exact pending lifecycle baseline can be reused after a proved no-effect
+For every application-testing caller, an exact pending lifecycle baseline can be reused after a proved no-effect
 refusal only under its current execution lease and record comparison. The
 service rereads the actual application schedules before proceeding. A changed
 baseline returns `409 testing_deploy_baseline_changed` before any forward or
 restore effect; it never rewrites the original receipt or restores stale values.
 Before releasing a proved no-effect refusal, the service records `not_started`
 under the exact current original lease and record comparison. Ordinary evidence
-corrections cannot create that proof. A new deployment operation excludes only
-those inert receipts from predecessor selection, retains earlier effective
+corrections cannot create that proof. A fresh native standing operation derives
+ownership from established qualified or protective lifecycle state, not another
+operation's prepared declarations. It preserves that earlier intent for its
+original observation/recovery, retains effective
 ownership or protective holds, and captures its own current schedule baseline.
 This is the supported continuation after a changed-baseline refusal; the old
 original and its immutable baseline remain recorded. Failure to publish the
 no-effect fact retains the original's reconciliation fence. Actual held or
 partially restored attempts keep their existing fix-forward behavior.
-For legacy prepared receipts without that durable proof, a changed inherited
-baseline returns `409 testing_deploy_original_required`. Retry the original
-operation first so its exact current execution can prove a no-effect refusal
-and record the marker before a fresh operation captures the edited baseline.
-An empty receipt alone is never no-effect proof.
+This also permits a fresh native operation after a foreign legacy capture without
+switching identity or claiming that capture had no effects. Live native original
+reservations still fence it. An empty receipt alone is never no-effect proof.
+Changed declarations on a proved no-effect original likewise require a fresh
+operation; they do not rewrite its stored intent or manufacture a restore.
 Existing proved pre-image recovery and inverse rollback keep their separate
 authority. Recovery dry-run/apply still require their existing explicit policy;
 [own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)
