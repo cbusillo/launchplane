@@ -27,7 +27,6 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
     DokployTargetStaffTestingHold,
     TestingHoldRehearsal,
-    normalize_testing_hold_issue_url,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -144,17 +143,12 @@ class TestingHoldApplyRequest(BaseModel):
     purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing"
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
-    issue_url: str | None = Field(
-        default=None, max_length=2048, exclude_if=lambda value: value is None
-    )
     reviewed_plan_sha256: str = ""
     activation_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
     @model_validator(mode="after")
     def _validate_request(self) -> TestingHoldApplyRequest:
         normalize_reviewed_lane_request(self, label="Testing hold")
-        if self.issue_url is not None:
-            self.issue_url = normalize_testing_hold_issue_url(self.issue_url)
         if self.rehearsal and (self.purpose != "staff_testing" or self.activation_plan_sha256):
             raise ValueError("A rehearsal request cannot use a staging or activation interlock.")
         return self
@@ -214,13 +208,11 @@ def _read_target_record(
 
 def _hold_terms(
     hold: DokployTargetStaffTestingHold | None,
-) -> tuple[str, ...] | None:
+) -> tuple[str, str] | tuple[str, str, str] | None:
     if hold is None:
         return None
     terms = (hold.reason, hold.purpose)
-    result = (*terms, hold.rehearsal.model_dump_json()) if hold.rehearsal else terms
-    # Preserve existing hold digests when no link was recorded.
-    return (*result, f"issue_url:{hold.issue_url}") if hold.issue_url else result
+    return (*terms, hold.rehearsal.model_dump_json()) if hold.rehearsal else terms
 
 
 def _desired_hold(
@@ -242,13 +234,6 @@ def _desired_hold(
         purpose=request.purpose,
         recorded_by=actor,
         recorded_at=utc_now_timestamp(),
-        issue_url=(
-            request.issue_url
-            if request.issue_url is not None
-            else existing.issue_url
-            if existing is not None
-            else ""
-        ),
         rehearsal=rehearsal,
     )
     if (

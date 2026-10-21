@@ -136,9 +136,6 @@ class StaffTestingHoldContractTests(unittest.TestCase):
                 DokployTargetStaffTestingHold(reason=reason)
         with self.assertRaises(ValidationError):
             DokployTargetStaffTestingHold.model_validate({"reason": "r", "until": _TIMESTAMP})
-        for issue_url in ("javascript:alert(1)", "https://user:password@issues.example/42"):
-            with self.subTest(issue_url=issue_url), self.assertRaises(ValidationError):
-                DokployTargetStaffTestingHold(reason="Diagnosis", issue_url=issue_url)
 
     def test_records_without_a_hold_still_load(self) -> None:
         record = DokployTargetRecord.model_validate(
@@ -149,30 +146,6 @@ class StaffTestingHoldContractTests(unittest.TestCase):
 
 
 class TestingHoldPlanTests(unittest.TestCase):
-    def test_issue_link_round_trips_and_is_bound_to_the_review(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory))
-            _seed_target(store)
-            request = TestingHoldApplyRequest.model_validate(
-                _payload() | {"issue_url": "https://issues.example/diagnosis/42"}
-            )
-            plan, _ = build_testing_hold_plan(record_store=store, request=request, actor="agent")
-            changed = request.model_copy(
-                update={"issue_url": "https://issues.example/diagnosis/43"}
-            )
-            other, _ = build_testing_hold_plan(record_store=store, request=changed, actor="agent")
-            self.assertNotEqual(plan.plan_sha256, other.plan_sha256)
-            applied = apply_testing_hold_plan(
-                record_store=store,
-                request=request.model_copy(
-                    update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
-                ),
-                actor="agent",
-            )
-            self.assertIsNotNone(applied.read_back)
-            assert applied.read_back is not None
-            self.assertEqual(applied.read_back.issue_url, request.issue_url)
-
     def test_dry_run_plans_the_hold_without_writing(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -440,8 +413,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             store = self._store(root)
             original = DokployTargetStaffTestingHold(
-                reason=_HOLD_REASON,
-                issue_url="https://issues.example/diagnosis/42",
+                reason=f"{_HOLD_REASON} https://issues.example/diagnosis/42",
                 recorded_by="diagnosis-agent",
                 recorded_at=_TIMESTAMP,
             )
@@ -480,7 +452,9 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read.status_code, 200, read.text)
             self.assertEqual(read.json()["result"]["hold"], original.model_dump(mode="json"))
 
-            async def post(payload: dict[str, object], *, protected: bool = True) -> Response:
+            async def post(
+                request_payload: dict[str, object], *, protected: bool = True
+            ) -> Response:
                 headers = (
                     _browser_mutation_headers(manager, session)
                     if protected
@@ -490,7 +464,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     TESTING_HOLD_APPLY_ROUTE,
-                    payload=payload,
+                    payload=request_payload,
                     headers=headers | {"Idempotency-Key": "admin-lift"},
                 )
 

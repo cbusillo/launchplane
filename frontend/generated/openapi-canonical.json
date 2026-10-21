@@ -6958,13 +6958,6 @@
         "additionalProperties": false,
         "description": "A deployment interlock for staff testing or resource-isolation staging.",
         "properties": {
-          "issue_url": {
-            "default": "",
-            "maxLength": 2048,
-            "title": "Issue Url",
-            "type": "string",
-            "x-launchplane-optional-response": true
-          },
           "purpose": {
             "default": "staff_testing",
             "enum": [
@@ -84070,18 +84063,6 @@
                   "instance": {
                     "title": "Instance",
                     "type": "string"
-                  },
-                  "issue_url": {
-                    "anyOf": [
-                      {
-                        "maxLength": 2048,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "title": "Issue Url"
                   },
                   "mode": {
                     "default": "dry-run",

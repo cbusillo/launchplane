@@ -1119,15 +1119,17 @@ which can deploy. The product's testing overview exposes **Review lift** and
 **Lift testing hold** only to the service-verified signed-in administrator.
 The existing testing-hold endpoints accept that browser session, with origin,
 fetch-metadata and single-use CSRF protection on the review and apply requests.
-The card displays the stored reason, recorder, time and optional `issue_url`.
-Hold-setting requests may record an HTTPS issue link; omitted links preserve
-existing metadata and legacy digests. Missing historical metadata is shown as
-not recorded. The administrator
+The card displays the stored reason, recorder, time and an HTTPS issue link
+recorded in the reason. Missing historical metadata is shown as not recorded.
+The administrator
 reviews the current hold, supplies an audit reason and confirms that testing
 can deploy before submitting its digest-bound lift. The existing authenticated
 idempotency receipt retains the original hold, lift reason, actor scope, time
 and trace. A lost response retains the original reviewed request and key for
-retry, including after reloading the tab. Isolation staging interlocks retain
+retry, including after reloading the tab. If that request cannot settle, an
+administrator can explicitly start a separate review of the current hold;
+the earlier key remains recorded as unverified. This does not claim that the
+earlier request failed or succeeded. Isolation staging interlocks retain
 their separate activation flow.
 The Director's agent can set a testing hold but not lift one.
 The authenticated Director agent has the separate bounded

@@ -14,9 +14,9 @@ test("hold reads preserve evidence and reject missing or mismatched lane evidenc
 });
 
 test("linked evidence accepts ordinary web links and excludes credentials and executable URLs", () => {
-  assert.equal(testingHoldIssueLink({ ...hold, issue_url: "https://issues.example/42" }), "https://issues.example/42");
-  for (const issue_url of [undefined, "javascript:alert(1)", "https://user:password@issues.example/42"]) {
-    assert.equal(testingHoldIssueLink({ ...hold, issue_url }), null);
+  assert.equal(testingHoldIssueLink(hold), "https://issues.example/42");
+  for (const reason of ["No issue recorded", "javascript:alert(1)", "https://user:password@issues.example/42"]) {
+    assert.equal(testingHoldIssueLink({ ...hold, reason }), null);
   }
 });
 

@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { applyTestingHold, readAuthSession, readTestingHold } from "./api";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { InlineFormError, isOperationBusy, OperationNotice } from "./ProductConfigForms";
-import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
+import { productConfigFailureCertainty, productConfigOperationFailure, ProductConfigRecoveryStorageUnavailable } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
 import { restoredTestingHoldRequest, testingHoldFromResponse, testingHoldIssueLink, testingHoldPlanFromResponse,
   type TestingHold, type TestingHoldRequest, type TestingHoldReview, type TestingHoldScope } from "./testing-hold";
@@ -31,6 +31,13 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
   const id = useId();
   const operationScope = `testing-hold:${actor}:${scope.product}:${scope.context}:${scope.instance}`;
   const storageKey = `${operationScope}:request`;
+  const historyKey = `${operationScope}:unverified-keys`;
+  const [earlierKeys, setEarlierKeys] = useState<string[]>(() => {
+    try {
+      const value: unknown = JSON.parse(sessionStorage.getItem(historyKey) ?? "[]");
+      return Array.isArray(value) ? value.filter((key): key is string => typeof key === "string") : [];
+    } catch { return []; }
+  });
   const [pending, setPending] = useState<TestingHoldRequest | null>(() => {
     try {
       return recoverBrowserOperationState(operationScope).requiresIdempotencyContinuity
@@ -49,8 +56,14 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
     failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure,
   });
   const apply = useBrowserOperationController<TestingHoldRequest, ApplyTestingHoldResponse>({
-    scope: operationScope, execute: async (request, options) => {
-      const response = await applyTestingHold(request, options);
+    scope: operationScope, allowUncertainAbandon: true, execute: async (request, options) => {
+      const response = await applyTestingHold(request, { ...options, onDispatch: () => {
+        options.onDispatch?.();
+        const retained = recoverBrowserOperationState(operationScope);
+        if (!retained.requiresIdempotencyContinuity || retained.identity?.idempotencyKey !== options.idempotencyKey) {
+          throw new ProductConfigRecoveryStorageUnavailable("The operation key could not be preserved. No lift was sent.");
+        }
+      } });
       const result = response.result;
       if (!result || result.product !== scope.product || result.context !== scope.context || result.instance !== scope.instance ||
           result.read_back_matches !== true || result.reconcile_requested !== true || result.read_back != null) {
@@ -75,7 +88,7 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
 
   async function inspect() {
     if (!loaded || !hold || busy || recovering || !reason.trim()) return;
-    setReview(null); setConfirmed(false); setError("");
+    setPending(null); setReview(null); setConfirmed(false); setError("");
     const response = await plan.run({ ...scope, mode: "dry-run", hold: false, reason: reason.trim() });
     if (response) {
       try { const next = testingHoldPlanFromResponse(response, scope); setHold(next.before); setReview(next); }
@@ -84,7 +97,7 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
   }
   async function lift() {
     if (busy || recovering && !pending || !recovering && (!review || !confirmed)) return;
-    const request = pending ?? { ...scope, mode: "apply", hold: false, reason: reason.trim(), reviewed_plan_sha256: review!.plan_sha256 } satisfies TestingHoldRequest;
+    const request = recovering ? pending! : { ...scope, mode: "apply", hold: false, reason: reason.trim(), reviewed_plan_sha256: review!.plan_sha256 } satisfies TestingHoldRequest;
     try {
       const saved = JSON.stringify(request);
       sessionStorage.setItem(storageKey, saved);
@@ -98,24 +111,37 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
       try { sessionStorage.removeItem(storageKey); } catch { /* Settled controller ignores old drafts. */ }
       onRefresh();
     } else {
-      // The controller persists uncertainty before run returns; retain the exact draft/key.
-      if (!recoverBrowserOperationState(operationScope).requiresIdempotencyContinuity) setPending(null);
       setReload(value => value + 1);
     }
+  }
+  function separateReview() {
+    const key = apply.state.identity?.idempotencyKey;
+    if (!recovering || busy || !loaded || !key) return;
+    const keys = [...new Set([...earlierKeys, key])];
+    try {
+      const saved = JSON.stringify(keys);
+      sessionStorage.setItem(historyKey, saved);
+      if (sessionStorage.getItem(historyKey) !== saved) throw new Error();
+    } catch { setError("The earlier operation key could not be preserved. Keep the original request."); return; }
+    if (!apply.abandon()) return;
+    setEarlierKeys(keys); setPending(null); setReview(null); setConfirmed(false); setError("");
+    setReload(value => value + 1);
   }
   const issueLink = hold ? testingHoldIssueLink(hold) : null;
   return <section className="promotion-control" aria-labelledby={`${id}-title`}>
     <h2 id={`${id}-title`}>Testing hold</h2>
     <p>Lifting this hold resumes testing reconciliation and can deploy the newest verified build.</p>
     {error ? <InlineFormError message={error} /> : null}
+    {!loaded && !error ? <p role="status">Reading the current testing hold…</p> : null}
     {loaded && !hold ? <p>No testing hold is currently recorded.</p> : null}
     {hold ? <dl className="evidence-fact-list">
       <div><dt>Reason</dt><dd>{hold.reason}</dd></div>
       <div><dt>Set by</dt><dd>{hold.recorded_by || "Not recorded"}</dd></div>
       <div><dt>Set at</dt><dd>{hold.recorded_at ? <time dateTime={hold.recorded_at}>{new Date(hold.recorded_at).toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" })}</time> : "Not recorded"}</dd></div>
-      <div><dt>Linked issue</dt><dd>{issueLink ? <a href={issueLink} target="_blank" rel="noreferrer">Linked issue</a> : "Not recorded"}</dd></div>
+      <div><dt>Linked issue</dt><dd>{issueLink ? <a href={issueLink} target="_blank" rel="noreferrer"><u>Linked issue</u></a> : "Not recorded"}</dd></div>
     </dl> : null}
-    {hold?.purpose === "isolation_staging" ? <p>This is an isolation staging interlock. Use its supported activation flow.</p> : loaded && hold || recovering ? <>
+    {hold?.purpose === "isolation_staging" ? <p>This is an isolation staging interlock. Use its supported activation flow.</p> : null}
+    {loaded && hold && hold.purpose !== "isolation_staging" || recovering ? <>
       <label className="promotion-field"><span>Reason for lifting</span><input value={reason} maxLength={1000}
         disabled={busy || recovering} onChange={event => { setReason(event.target.value); setReview(null); setConfirmed(false); }} /></label>
       {!recovering ? <button className="button" disabled={busy || !loaded || !reason.trim()} type="button" onClick={() => void inspect()}>Review lift</button> : null}
@@ -126,12 +152,15 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
       {recovering ? <>
         <p>The previous lift has not settled. Retain its original request and operation key.</p>
         {pending ? <button className="button" disabled={busy} type="button" onClick={() => void lift()}>Retry original lift</button>
-          : <p>The reviewed request is unavailable in this tab. Keep its operation key and inspect the original receipt before another lift.</p>}
+          : <p>The reviewed request is unavailable in this tab. Keep its operation key; the earlier outcome remains unverified.</p>}
+        <p>A separate review reads the current hold again. It does not resolve the earlier lift's outcome.</p>
+        <button className="button" disabled={busy || !loaded} type="button" onClick={separateReview}>Review current hold separately</button>
       </> : null}
     </> : null}
     <OperationNotice state={plan.state} label="Review lift" />
     <OperationNotice state={apply.state} label="Lift" />
     {apply.state.phase === "succeeded" ? <p role="status">Testing hold lifted. Testing reconciliation requested. Audit trace: {apply.state.receipt?.traceId}</p> : null}
+    {earlierKeys.map(key => <p key={key}>Earlier lift outcome remains unverified. Original operation key: <code>{key}</code></p>)}
     {!busy && !recovering ? <button className="button" type="button" onClick={() => setReload(value => value + 1)}>Refresh hold</button> : null}
   </section>;
 }

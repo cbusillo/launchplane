@@ -1,6 +1,5 @@
 import re
 from typing import Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -83,21 +82,6 @@ class TestingHoldRehearsal(BaseModel):
     target_source_label: str
 
 
-def normalize_testing_hold_issue_url(value: str) -> str:
-    if not value:
-        return value
-    parts = urlsplit(value)
-    if (
-        parts.scheme != "https"
-        or not parts.hostname
-        or parts.username is not None
-        or parts.password is not None
-        or any(char.isspace() or ord(char) < 32 for char in value)
-    ):
-        raise ValueError("Testing hold issue links require HTTPS without credentials.")
-    return value
-
-
 class DokployTargetStaffTestingHold(BaseModel):
     """A deployment interlock for staff testing or resource-isolation staging."""
 
@@ -111,12 +95,6 @@ class DokployTargetStaffTestingHold(BaseModel):
     )
     recorded_by: str = ""
     recorded_at: str = ""
-    issue_url: str = Field(
-        default="",
-        max_length=2048,
-        exclude_if=lambda value: not value,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
     rehearsal: TestingHoldRehearsal | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -130,7 +108,6 @@ class DokployTargetStaffTestingHold(BaseModel):
         self.recorded_at = self.recorded_at.strip()
         if not self.reason:
             raise ValueError("A staff-testing hold requires a reason.")
-        self.issue_url = normalize_testing_hold_issue_url(self.issue_url)
         return self
 
 

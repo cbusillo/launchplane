@@ -7,7 +7,6 @@ export interface TestingHold {
   reason: string;
   recorded_by: string;
   recorded_at: string;
-  issue_url?: string;
   purpose?: "staff_testing" | "isolation_staging";
 }
 export interface TestingHoldReview {
@@ -29,7 +28,6 @@ function scopedResult(response: { result: unknown }, scope: TestingHoldScope) {
 function checkedHold(value: unknown): TestingHold {
   const hold = object(value);
   if (typeof hold.reason !== "string" || !hold.reason.trim() || typeof hold.recorded_by !== "string" || typeof hold.recorded_at !== "string" ||
-      hold.issue_url !== undefined && typeof hold.issue_url !== "string" ||
       hold.purpose !== undefined && hold.purpose !== "staff_testing" && hold.purpose !== "isolation_staging") {
     throw new Error("Testing hold evidence is incomplete.");
   }
@@ -49,8 +47,12 @@ export function testingHoldPlanFromResponse(response: { result: unknown }, scope
   return { before, plan_sha256: result.plan_sha256 };
 }
 export function testingHoldIssueLink(hold: TestingHold): string | null {
-  const url = safeExternalUrl(hold.issue_url ?? "");
-  return url?.protocol === "https:" && !url.username && !url.password ? url.href : null;
+  // Display a link as recorded in the reason; it grants no authority over the hold.
+  for (const value of hold.reason.match(/https:\/\/[^\s<>]+/g) ?? []) {
+    const url = safeExternalUrl(value.replace(/[),.;]+$/, ""));
+    if (url?.protocol === "https:" && !url.username && !url.password) return url.href;
+  }
+  return null;
 }
 export function restoredTestingHoldRequest(raw: string | null, scope: TestingHoldScope): TestingHoldRequest | null {
   try {
