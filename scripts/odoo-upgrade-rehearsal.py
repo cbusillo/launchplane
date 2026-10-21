@@ -64,7 +64,11 @@ def main() -> int:
             parser.error("Initial planning and prepare require their original stable key.")
         intent = {
             "product": args.product,
-            "request": draft.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            "request": {
+                key: value
+                for key, value in draft.payload().items()
+                if key not in {"mode", "reviewed_plan_sha256"}
+            },
             "key": args.idempotency_key,
         }
     helper = args.operator_helper.expanduser().resolve(strict=True)
@@ -105,7 +109,11 @@ def main() -> int:
             print(json.dumps(public))
             return 0
         assert draft is not None
-        if args.mode == "apply":
+        if args.mode == "apply" or (
+            draft.action == "validate-business" and args.mode == "readback"
+        ):
+            if evidence is None:
+                raise ValueError("Business readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
             if saved["intent"] != intent or saved["plan"]["applied"] is not False:
                 raise ValueError("Review belongs to another intent.")
@@ -114,7 +122,7 @@ def main() -> int:
             service_url=settings["service_url"],
             path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=quote(args.product, safe="")),
             settings=settings,
-            body=draft.model_dump(mode="json"),
+            body=draft.payload(),
             timeout=7200,
             idempotency_key=args.idempotency_key,
         )
@@ -171,7 +179,9 @@ def main() -> int:
         print(
             json.dumps(
                 {
-                    "status": "verified",
+                    "status": "failed"
+                    if result.get("business_validation", {}).get("passed") is False
+                    else "verified",
                     "mode": args.mode,
                     "action": draft.action,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
@@ -179,7 +189,7 @@ def main() -> int:
                 }
             )
         )
-        return 0
+        return 1 if result.get("business_validation", {}).get("passed") is False else 0
     except urllib.error.HTTPError as error:
         try:
             failure = json.loads(error.read())

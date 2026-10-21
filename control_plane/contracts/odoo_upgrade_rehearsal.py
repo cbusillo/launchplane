@@ -14,6 +14,10 @@ from control_plane._odoo_rehearsal_diagnostics import (
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.contracts.odoo_rehearsal_business_validation import (
+    BusinessValidation,
+    BusinessValidationReceipt,
+)
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
@@ -25,7 +29,13 @@ REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
 RehearsalAction = Literal[
-    "prepare", "execute", "simulate-final", "verify", "retire", "retire-incomplete"
+    "prepare",
+    "execute",
+    "simulate-final",
+    "validate-business",
+    "verify",
+    "retire",
+    "retire-incomplete",
 ]
 RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
 RehearsalBackingRole = Literal[
@@ -103,9 +113,31 @@ class OdooUpgradeRehearsalRequest(BaseModel):
     storage: OdooTestingDrillStorageBudget
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    business_validation: BusinessValidation | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validation_action(self) -> "OdooUpgradeRehearsalRequest":
+        if (self.action == "validate-business") != (self.business_validation is not None):
+            raise ValueError("Only validate-business requires a product-owned batch.")
+        if self.business_validation is not None and self.business_validation.database != (
+            self.rehearsal_id.replace("-", "_") + "_final_upgrade"
+        ):
+            raise ValueError("Validation requires this rehearsal's final copied database.")
+        return self
 
     def intent(self) -> dict[str, object]:
-        return self.model_dump(mode="json", exclude={"mode", "action", "reviewed_plan_sha256"})
+        return self.model_dump(
+            mode="json", exclude={"mode", "action", "reviewed_plan_sha256", "business_validation"}
+        )
+
+    def payload(self) -> dict[str, object]:
+        """Preserve original lifecycle fingerprints for already retained rehearsals."""
+        return self.model_dump(
+            mode="json",
+            exclude={"business_validation"} if self.business_validation is None else set(),
+        )
 
 
 class RehearsalCopyReceipt(BaseModel):
@@ -121,6 +153,9 @@ class RehearsalCopyReceipt(BaseModel):
     sanitized: Literal[True]
     odoo_version: str = Field(min_length=1)
     captured_at: datetime
+    business_validation_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: value == ""
+    )
 
     @model_validator(mode="after")
     def aware(self) -> "RehearsalCopyReceipt":
@@ -231,6 +266,9 @@ class OdooUpgradeRehearsalRecord(BaseModel):
     compose_id: str = ""
     state: RehearsalState = "planned"
     copies: tuple[RehearsalCopyReceipt, ...] = ()
+    business_validation: BusinessValidationReceipt | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
@@ -395,6 +433,7 @@ class RehearsalHostResult(BaseModel):
         "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    business_validation: BusinessValidationReceipt | None = None
 
 
 def rehearsal_identity(product: str, principal: str, key: str) -> str:

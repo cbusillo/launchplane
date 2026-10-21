@@ -2866,14 +2866,79 @@ key and new evidence file:
 2. `simulate-final` uses the already sanitized source copy. It simulates the
    final capture and switches only the rehearsal web's database to the final
    upgraded copy. It never recaptures or fences the real business system.
-3. `verify` probes health identity and the login page inside the private
+3. `validate-business` runs a reviewed, product-owned synthetic batch on the
+   switched final upgraded copy, as described below. It neither repeats an
+   upgrade nor seals a snapshot.
+4. `verify` probes health identity and the login page inside the private
    network, stops the disposable web writer, and preserves the final upgraded
    database/filestore tuple. Product business validation remains part of the
    consuming rehearsal; health/login proof is not Client acceptance.
-4. `retire` stops web, runner and database and preserves all recovery custody.
+5. `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
    volumes, provider placement, snapshots or keys. Their custodian carries them
    into the rollback rehearsal before a separately reviewed physical disposal.
+
+#### Private product business validation
+
+After `simulate-final` and before `verify`, use the same supported client with
+`action: validate-business`. Keep the original rehearsal intent fields and add
+`business_validation`, whose schema is
+[`BusinessValidation`](../control_plane/contracts/odoo_rehearsal_business_validation.py).
+It names the exact `lp_rehearsal_<identity>_final_upgrade` database and candidate
+`source_commit`, and contains an ordered `steps` array. Product repositories own
+the business scenario, fixture values and expected results. Launchplane owns
+this bounded transport and its isolation, review and custody checks.
+
+Each step has a unique `key`:
+
+- `create`: supplies an allowed standard Odoo business `model` and JSON
+  `values`. `{"$ref": "earlier_create_key"}` in a value resolves to that
+  synthetic record's id, including in nested Odoo create commands.
+- `call`: names an earlier created `record` and a supported standard business
+  `method`. The schema permits sales confirmation and inventory application
+  or delivery validation. It accepts no method arguments or context overrides.
+- `assert`: names an earlier created `record`, one `field`, an `expected`
+  JSON value and optional `comparison: truthy` (default `equals`). Relations
+  compare as id lists, or as a boolean for `truthy`. No field value is returned.
+
+A batch requires creates and assertions, with at most 64 steps and 64 KiB of
+JSON. It accepts neither Python/SQL nor arbitrary methods, model names, commands,
+HTTP destinations, credentials or an existing record as an operation target.
+Synthetic order lines can be nested creates; an inventory batch can create its
+own product, internal location and quant before applying an adjustment. Use
+product-owned cases that test both order workflow and persisted stock effects;
+a successful trivial batch is not proof of those cases or Client acceptance.
+
+Take the intent through `dry-run`, inspect the private review, then `apply
+--reviewed-dry-run` with that exact evidence file and a distinct stable key.
+The review digest binds both the current rehearsal record and the complete
+batch. The existing Director-agent apply authority is unchanged; no new grant,
+public endpoint, local password or SSH credential is needed. Planning reads no
+live source or local credential. Immediately before and after the batch the
+native operation checks the private runtime, exact copy witness, candidate
+identity and connection isolation. It uses the candidate image's existing
+Odoo shell configuration and fixed ORM code inside the isolated runner.
+
+Only step keys, synthetic record ids and booleans leave the runner. Raw Odoo
+output, errors and copied database values are withheld. A passing batch commits
+and reads its assertions again after cache invalidation. A failed assertion or
+exception rolls back the current transaction and returns `passed: false`; the
+client exits nonzero. This is a completed failed validation, not an uncertain
+transport outcome. Preserve its evidence and diagnose the product case. A
+separately reviewed corrected batch may use a new key after that known result.
+An interruption or unavailable result retains the original operation and must
+never be replayed or replaced to diagnose it.
+
+For validation `readback`, supply the original intent, key **and evidence file**;
+the saved review binds the journal even after publication changes the rehearsal
+record. Each operation has its own host marker and receipt. Observation cannot
+re-execute a batch or adopt another operation's result. After a successful batch,
+ordinary `verify` seals its receipt digest into the final upgraded snapshot's
+`business_validation_sha256`; it refuses a known failed latest validation.
+The final sanitized old-version tuple stays unchanged. Hand both managed tuples
+and the value-free validation receipt to the rollback consumer before ordinary
+retirement. This capability does not perform that consumer's business checks
+or rollback for it.
 
 Use `readback` with the original intent/action to inspect its completed effect.
 Retirement readback verifies stopped containers and immutable files without

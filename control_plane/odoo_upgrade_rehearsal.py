@@ -250,11 +250,26 @@ def rehearsal_inputs(
     principal: str,
 ) -> tuple[OdooUpgradeRehearsalRecord, dict[str, str], dict[str, str]]:
     previous = store.read_odoo_upgrade_rehearsal(request.rehearsal_id)
-    if previous is not None and request.action in {"simulate-final", "verify", "retire"}:
+    if previous is not None and request.action in {
+        "simulate-final",
+        "validate-business",
+        "verify",
+        "retire",
+    }:
         if (
             previous.product != product
             or previous.principal != principal
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if request.business_validation is not None and (
+            request.business_validation.source_commit != previous.target_artifact.source_commit
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
+        if (
+            request.action == "verify"
+            and previous.business_validation is not None
+            and not previous.business_validation.passed
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if (
@@ -357,6 +372,7 @@ def require_rehearsal_transition(record: OdooUpgradeRehearsalRecord, action: str
         "prepare": {"planned"},
         "execute": {"prepared"},
         "simulate-final": {"upgraded"},
+        "validate-business": {"switched"},
         "verify": {"switched"},
         "retire": {"verified"},
     }
@@ -626,6 +642,8 @@ class OdooRehearsalAdapter:
                 "mode": "apply",
                 "reviewed_plan_sha256": self.initial_prepare_binding(record)
                 if self.request.action == "prepare"
+                else self.request.reviewed_plan_sha256
+                if self.request.action == "validate-business"
                 else record.binding_sha256,
             }
         )
@@ -636,7 +654,7 @@ class OdooRehearsalAdapter:
             != request_fingerprint(
                 {
                     "product": record.product,
-                    **original.model_dump(mode="json"),
+                    **original.payload(),
                 }
             )
         ):
@@ -990,6 +1008,16 @@ class OdooRehearsalAdapter:
     def inputs(self) -> tuple[OdooUpgradeRehearsalRecord, dict[str, str], dict[str, str]]:
         return rehearsal_inputs(self.root, self.store, self.product, self.request, self.principal)
 
+    def reviewed_binding(self, record: OdooUpgradeRehearsalRecord) -> str:
+        if self.request.business_validation is None:
+            return record.binding_sha256
+        return canonical_json_sha256(
+            {
+                "record": record.binding_sha256,
+                "validation": self.request.business_validation.sha256,
+            }
+        )
+
     def run_script(
         self, record: OdooUpgradeRehearsalRecord, script: str, checkpoint: Callable[[], None]
     ) -> dict[str, str]:
@@ -1075,7 +1103,12 @@ class OdooRehearsalAdapter:
         operation_key: str = "",
         inspect_capture: bool = False,
     ) -> str:
-        if mode == "observe" or self.request.action in {"verify", "retire", "retire-incomplete"}:
+        if mode == "observe" or self.request.action in {
+            "validate-business",
+            "verify",
+            "retire",
+            "retire-incomplete",
+        }:
             source_values: dict[str, str] = {}
             shape: dict[str, str] = {}
             credentials: dict[str, str] = {}
@@ -1088,6 +1121,15 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
+        if self.request.business_validation is not None:
+            from control_plane._odoo_rehearsal_business_validation import business_validation_runner
+
+            plan = self.request.business_validation
+            spec["business_validation"] = plan.model_dump(mode="json")
+            spec["business_validation_sha256"] = plan.sha256
+            spec["business_validation_runner"] = business_validation_runner(
+                plan.model_dump(mode="json")
+            )
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         # Keep both Dokploy's remote shell materializer and Python's argv small.
@@ -1207,6 +1249,26 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if child is not None or result.get("retained_upgrade_logs") is not None:
             result["diagnostics_private"] = True
+        if self.request.business_validation is not None and result.get("completed") is True:
+            validation = result.get("business_validation")
+            plan = self.request.business_validation
+            if not isinstance(validation, dict) or (
+                validation["validation_sha256"] != plan.sha256
+                or validation["database"] != plan.database
+                or validation["source_commit"] != record.target_artifact.source_commit
+                or validation["attempt_sha256"]
+                != canonical_json_sha256({"operation_key": operation_key})
+                or [step["key"] for step in validation["steps"]]
+                != [step.key for step in plan.steps][: len(validation["steps"])]
+                or (
+                    validation["passed"]
+                    and (
+                        len(validation["steps"]) != len(plan.steps)
+                        or not all(step["passed"] for step in validation["steps"])
+                    )
+                )
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result
 
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:
@@ -1222,6 +1284,7 @@ class OdooRehearsalAdapter:
             "prepare": "prepared",
             "execute": "upgraded",
             "simulate-final": "switched",
+            "validate-business": "switched",
             "verify": "verified",
             "retire": "retired",
         }
@@ -1237,6 +1300,8 @@ class OdooRehearsalAdapter:
                 "copies": result["copies"],
                 "elapsed_seconds": result["elapsed_seconds"],
                 "updated_at": datetime.now(timezone.utc),
+                "business_validation": result.get("business_validation")
+                or record.business_validation,
             }
         )
         old_copies = {copy.database: copy for copy in record.copies}
@@ -1248,6 +1313,15 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if self.request.action == "verify" and record.business_validation is not None:
+            final = next(
+                (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
+            )
+            if (
+                final is None
+                or final.business_validation_sha256 != record.business_validation.sha256
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
         return self.public(updated)
 
@@ -1266,6 +1340,11 @@ class OdooRehearsalAdapter:
             **({"resources_preserved": True} if record.incomplete_retirement is None else {}),
             "public_route": False,
             "business_host_frozen": False,
+            **(
+                {"business_validation": record.business_validation.model_dump(mode="json")}
+                if record.business_validation
+                else {}
+            ),
         }
 
     def observe(
@@ -1379,7 +1458,7 @@ class OdooRehearsalAdapter:
             reviewed_binding = (
                 self.initial_prepare_binding(record)
                 if recovering_project or self._continue_prepare_host
-                else record.binding_sha256
+                else self.reviewed_binding(record)
             )
             if reviewed_binding != self.request.reviewed_plan_sha256:
                 raise ProviderMutationRejectedError(
