@@ -3479,6 +3479,7 @@ async def _get_dokploy_target_inspect(
     instance: str = "",
     target_type: str = "",
     target_id: str = "",
+    expected_image: str = "",
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
@@ -3490,6 +3491,7 @@ async def _get_dokploy_target_inspect(
         instance=instance,
         target_type=target_type,
         target_id=target_id,
+        expected_image=expected_image,
     )
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(app, f"/v1/dokploy-targets/inspect{suffix}", headers=request_headers)

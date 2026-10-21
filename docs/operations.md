@@ -2406,6 +2406,34 @@ stored evidence. The fingerprint supplies comparison evidence only; authorizatio
 exclusive lane ownership, visible target identity, live provider identity and the
 exact domain set are still checked. Neither read nor plan writes records.
 
+To diagnose an application, use that same GET with its exact `context` and
+`instance` and an immutable digest reference as `expected_image`, without
+`service` or `event`. It retains the existing lane-scoped `driver.read`
+authorization; explicit target reads still require `dokploy_target.inspect`.
+Without `expected_image` the read remains saved metadata only. Compose runtime
+reads still require both `service` and `expected_image`.
+
+The application `runtime_evidence` distinguishes saved provider input from
+actual server/service, attributed tasks, running container digests, deployment
+identity and process health. Service and container `environment_keys.names`
+contain only Docker Env-array names, never values or multiline value fields.
+Container names include image-baked ENV defaults, so presence alone does not
+prove Launchplane supplied that key or that the application consumed its value.
+Each names object has its own `complete` flag, separate from task/container
+diagnostic coverage. An incomplete set cannot prove
+that a key is absent. A stopped or restarting process may leave no attributable
+running-container evidence, even when the service still lists the desired input.
+
+The read rechecks provider placement and the tracked lane binding before
+returning. `diagnostic_complete`, task coverage, observation time and
+`details_truncated` disclose partial or bounded results; image agreement is
+unknown without nonempty complete immutable container evidence. `process_ready`
+and `image_matches_expected` are separate: image agreement covers the containers
+observed, while replica convergence is reflected in process readiness. Neither
+proves endpoint health,
+authenticated WSS, release acceptance, original-operation settlement or effects
+exclusion, and inspection never releases a fence or repairs a runtime.
+
 Fingerprint comparison uses the existing managed-secret key ring, with its own
 purpose. If that bootstrap configuration is unavailable, ordinary inspection
 still works and the plan reports `dokploy_target_comparison_evidence_unavailable`

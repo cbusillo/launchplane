@@ -13,7 +13,10 @@ from control_plane.dokploy.application_runtime import (
     application_runtime_drift_fingerprint,
     application_runtime_matches,
     fetch_application_runtime,
+    MAX_APPLICATION_ENVIRONMENT_KEYS,
 )
+from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
+from datetime import datetime, timezone
 from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
 
 
@@ -161,6 +164,60 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 token="fixture-token",
                 application_id="application-1",
             )
+
+    def test_actual_environment_names_are_bounded_and_values_never_escape(self) -> None:
+        spec = self.service["Spec"]
+        assert isinstance(spec, dict)
+        template = spec["TaskTemplate"]
+        assert isinstance(template, dict)
+        container_spec = template["ContainerSpec"]
+        assert isinstance(container_spec, dict)
+        container_spec["Env"] = [
+            "LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1",
+            "FEATURE_CONFIG=first\ninner=private-multiline-value\nAPP_TOKEN=private-token",
+            "APP_TOKEN=private-service-token",
+        ]
+        config = self.container["Config"]
+        assert isinstance(config, dict)
+        config["Env"] = [
+            "LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1",
+            "APP_TOKEN=private-container-token",
+        ]
+        observed = self.read()
+        self.assertEqual(observed.server_id, self.target["serverId"])
+        self.assertEqual(observed.tasks[0].task_id, self.task["ID"])
+        self.assertEqual(observed.running_containers[0].container_id, self.container["Id"])
+        self.assertEqual(
+            observed.service_environment_keys.names,
+            ("APP_TOKEN", "FEATURE_CONFIG", "LAUNCHPLANE_DEPLOYMENT_RECORD_ID"),
+        )
+        self.assertTrue(observed.service_environment_keys.complete)
+        self.assertNotIn("FEATURE_CONFIG", observed.running_containers[0].environment_keys.names)
+        summary = summarize_application_runtime(
+            observed, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+        )
+        self.assertTrue(summary["image_matches_expected"])
+        self.assertNotIn("private-", str(summary))
+        self.assertNotIn("inner", str(summary))
+        for extra in (
+            ["BAD-NAME=private-malformed"],
+            ["APP_TOKEN=private-one", "APP_TOKEN=private-two"],
+            [None],
+            [
+                f"KEY_{index}=private-overflow"
+                for index in range(MAX_APPLICATION_ENVIRONMENT_KEYS + 1)
+            ],
+        ):
+            with self.subTest(extra=extra):
+                config["Env"] = ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1", *extra]
+                observed = self.read()
+                self.assertTrue(
+                    observed.ready, "Diagnostic name validation must not change admission"
+                )
+                keys = observed.running_containers[0].environment_keys
+                self.assertFalse(keys.complete)
+                self.assertLessEqual(len(keys.names), MAX_APPLICATION_ENVIRONMENT_KEYS)
+                self.assertNotIn("private-", str(asdict(observed)))
 
     def test_exact_convergence_proves_actual_image_digest_and_exposes_no_values(self) -> None:
         observed = self.read()
@@ -386,6 +443,12 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 observation = self.read()
                 self.assertFalse(getattr(observation, "ready"))
                 self.assertEqual(getattr(observation, "pending_task_count"), 1)
+                diagnostic = summarize_application_runtime(
+                    observation, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+                )
+                self.assertIsNone(diagnostic["image_matches_expected"])
+                self.assertFalse(diagnostic["process_ready"])
+                self.assertEqual(diagnostic["containers"], [])
         status["State"] = "running"
         container_state = self.container["State"]
         assert isinstance(container_state, dict)
