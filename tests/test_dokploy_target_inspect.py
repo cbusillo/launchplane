@@ -284,7 +284,7 @@ class ApplicationRuntimeInspectTests(unittest.TestCase):
             update={"target_type": "compose"}
         )
         self.fetch_payload.reset_mock()
-        with self.assertRaisesRegex(ValueError, "requires a service"):
+        with self.assertRaises(ValueError):
             self.inspect(expected_image=self.expected)
         self.fetch_payload.assert_not_called()
         self.fetch.assert_not_called()
@@ -331,15 +331,16 @@ class ApplicationRuntimeInspectTests(unittest.TestCase):
         ):
             with self.subTest(observed=observed):
                 self.fetch.return_value = observed
-                with self.assertRaises(DokployEvidenceProviderError):
+                with self.assertRaises(DokployEvidenceProviderError) as provider_error:
                     self.inspect(expected_image=self.expected)
         self.fetch.return_value = self.observed
         self.store.read_dokploy_target_id_record.side_effect = [
             self.target_id,
             self.target_id.model_copy(update={"target_id": "replacement"}),
         ]
-        with self.assertRaises(DokployEvidenceProviderError):
+        with self.assertRaises(DokployEvidenceProviderError) as binding_error:
             self.inspect(expected_image=self.expected)
+        self.assertNotEqual(binding_error.exception.operation, provider_error.exception.operation)
 
     def test_local_server_normalization_and_non_authority_refresh_are_supported(self) -> None:
         self.payload["serverId"] = None

@@ -2,14 +2,11 @@
 
 from datetime import datetime
 
-from control_plane.contracts.deploy_reference import (
-    canonical_docker_image_repository,
-    docker_image_digest,
-)
 from control_plane.dokploy.application_runtime import (
     MAX_APPLICATION_DIAGNOSTIC_ITEMS,
     ApplicationEnvironmentKeys,
     ApplicationRuntimeObservation,
+    application_immutable_image_matches,
 )
 
 
@@ -34,12 +31,7 @@ def summarize_application_runtime(
     image_matches: bool | None = None
     if complete and container_count:
         image_matches = all(
-            any(
-                canonical_docker_image_repository(image)
-                == canonical_docker_image_repository(expected_image)
-                and docker_image_digest(image) == docker_image_digest(expected_image)
-                for image in images
-            )
+            any(application_immutable_image_matches(image, expected_image) for image in images)
             for images in observed.running_container_images
         )
     containers: list[dict[str, object]] = []

@@ -39,6 +39,7 @@ _RUNTIME_LOG_PROVIDER_ERROR_MARKERS = (
 type DokployEvidenceProviderOperation = Literal[
     "provider-config",
     "target-inspect",
+    "lane-binding",
     "container-list",
     "service-select",
     "container-config",

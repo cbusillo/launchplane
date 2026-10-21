@@ -157,7 +157,7 @@ def application_runtime_matches(
         and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
         and observed.service_deployment_record_id == deployment_record_id
         and all(
-            any(_immutable_image_matches(image, artifact_reference) for image in images)
+            any(application_immutable_image_matches(image, artifact_reference) for image in images)
             for images in observed.running_container_images
         )
         and all(
@@ -167,7 +167,7 @@ def application_runtime_matches(
     )
 
 
-def _immutable_image_matches(image: str, artifact_reference: str) -> bool:
+def application_immutable_image_matches(image: str, artifact_reference: str) -> bool:
     if image == artifact_reference:
         return True
     # The reader validates RepoDigests; identity comparison preserves the exact
@@ -181,7 +181,7 @@ def _immutable_image_matches(image: str, artifact_reference: str) -> bool:
 
 def _service_image_matches(image: str, artifact_reference: str, provider_reference: str) -> bool:
     if "@" in image:
-        return _immutable_image_matches(image, artifact_reference)
+        return application_immutable_image_matches(image, artifact_reference)
     return (
         "@" not in provider_reference
         and _repository(image) == _repository(provider_reference)

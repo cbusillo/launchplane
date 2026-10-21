@@ -321,18 +321,16 @@ def inspect_dokploy_target(
                 )
             except FileNotFoundError:
                 raise dokploy_runtime_evidence.DokployEvidenceProviderError(
-                    "target-inspect"
+                    "lane-binding"
                 ) from None
             if current_authority != application_authority:
-                raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect")
+                raise dokploy_runtime_evidence.DokployEvidenceProviderError("lane-binding")
         result["runtime_evidence"] = summarize_application_runtime(
             observed,
             expected_image=request.expected_image,
             observed_at=now().astimezone(timezone.utc),
         )
     if request.service:
-        if target_type != "compose":
-            raise ValueError("Dokploy runtime service evidence supports compose targets only.")
         app_name = str(provider_payload.get("appName") or "").strip()
         server_id = str(provider_payload.get("serverId") or "").strip()
         runtime_fetcher = (
@@ -527,7 +525,7 @@ def _application_read_authority(
             )
         )
     ):
-        raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect")
+        raise dokploy_runtime_evidence.DokployEvidenceProviderError("lane-binding")
     return (
         target.model_dump(exclude={"updated_at", "source_label"}),
         target_id.model_dump(exclude={"updated_at", "source_label"}),

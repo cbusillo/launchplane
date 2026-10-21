@@ -782,7 +782,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("private-provider", str(payload))
                     if expected_status == 200:
                         runtime = payload["inspect"]["runtime_evidence"]
-                        self.assertEqual(runtime["kind"], "application")
+                        self.assertEqual(runtime["application_id"], target_id.target_id)
                         self.assertIsNone(runtime["image_matches_expected"])
                         self.assertFalse(runtime["process_ready"])
                         fetch_runtime.assert_called_once()
