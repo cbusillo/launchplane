@@ -30,12 +30,10 @@ access to an invalid policy or silently starting with bootstrap authority.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine writes hold DB policy grants except for proven projection sync. The
-  Director's authenticated agents use the standing permission below; other agents
-  retain product-scoped policy rules.
-- Granting access is a stop boundary: an agent asks the Director before creating
-  credentials, granting access, or changing who can merge (see
-  [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
+- The Director's authenticated agents use the standing permission below.
+  Other machine identities retain their scoped DB policy rules.
+- Credentials, access and merge authority follow the
+  [stop boundaries](../DIRECTION.md#stop-boundaries). Do not create, edit,
   retarget, or dispatch a workflow, secret, or local helper to make a denied
   operation succeed. Fixing the refusing tool's rule through a reviewed source
   change, as [Denial Handling](#denial-handling) requires, is not such a
@@ -85,8 +83,12 @@ authorization membership rather than complete coverage.
 
 ## Standing Agent Read, Plan And Proven Projection Permission
 
-The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
-owns who may read and plan. The service authenticates the existing Director
+The [repository direction](../DIRECTION.md#stop-boundaries) and
+[overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+define the Director's standing permission and stop boundaries. Operation
+contracts establish eligibility and execution safety within that permission.
+
+The service authenticates the existing Director
 `local_operator` and `terminal_agent` bootstrap tokens and marks their resolved
 identities internally. A policy principal or diagnostic request cannot supply
 that marker. Diagnostics bind an exact subject, token label and transport to
@@ -106,27 +108,15 @@ secret-copy source checks explicitly disable read-role inheritance. Existing
 terminal transport restrictions remain; `local_operator` supplies the full
 planning surface, including mixed plan/apply routes.
 
-Health-monitoring record apply also inherits the authenticated Director-agent
-standing permission for the product's declared lanes, including testing and
-production. It stays classified as
-`write`, with an explicit standing declaration in the same action catalog. It
-changes Launchplane's monitoring records, not the live site, credentials, access
-or merge authority. Only this monitoring route admits the Director's terminal
-transport to its existing browser/bearer mutation path; other terminal mutation
-restrictions remain. Exact product/lane/check and private endpoint validation,
-reviewed plan digest, idempotency, concurrent-profile checks and readback still
-govern apply. Other machine identities retain their existing scoped policy.
-
-The existing testing-retry route also admits the authenticated Director agent
-through the existing `local_operator` bearer transport under the standing
-permission. Terminal-agent credentials retain their read-only transport boundary.
-This is a testing-only reconciler wakeup, not
-inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
-production/testing scope keeps its policy checks. Other callers still require
-that action on the exact testing lane. Mutation authentication and browser CSRF,
-reviewed digests, original-key replay, generation and custody fences, staff
-holds, active/unknown-operation refusal and the worker's safety checks remain
-in force. See [testing retry](testing-deploy-retry.md).
+The action catalog and [`service_auth.py`](../control_plane/service_auth.py)
+describe installed runtime admission, including explicit standing-write
+declarations. Native routes retain their principal, transport and safety checks;
+this document does not enable an undeclared write or bypass a route guard.
+[Denial Handling](#denial-handling) governs a refusal that conflicts with direction.
+Health-monitoring's browser/bearer mutation path admits the configured Director's
+terminal identity; other terminal mutation restrictions remain. Its
+[route contract](service-boundary.md#product-profile-endpoints) and the
+[testing-retry contract](testing-deploy-retry.md) own their execution safeguards.
 
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
@@ -153,15 +143,11 @@ separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
 
-Expected-configuration dry runs also preserve existing explicit grants: a
-`local_operator` granted `product_profile.expected_config.apply` may inspect the inert
-plan for a live product without changing its profile. The corresponding apply
-still refuses with `live_product_requires_operator`; browser CSRF and read-only
+Expected-configuration plans change no profile. Apply by a `local_operator` to a
+live product still refuses with `live_product_requires_operator`; browser CSRF and read-only
 identity restrictions remain in force.
 
-Product-config likewise lets the authenticated Director agent plan undeclared
-non-secret settings on a Live product, including testing, production and context
-scope. The plan saves only review evidence. An owned testing lane is non-live
+Product-config plans save only review evidence. An owned testing lane is non-live
 even when its product is Live: existing product-config write authority may record
 its plain settings and provider-key retirements, or adopt plain settings from
 that lane's provider environment, after a matching dry run. Adoption reads stay
@@ -212,21 +198,19 @@ refuse a Director read without a matching rule. Report that as a tool defect.
 
 ## Disposable-lane engineering
 
-The authenticated Director-agent marker also identifies ordinary disposable-lane
-work under the overall direction. `POST /v1/live-target-runtime/apply` retains
+`POST /v1/live-target-runtime/apply` retains
 the existing context-scoped policy check for existing callers, including
 production and Client scopes; an instance rule does not acquire new rights.
-The separate Director path validates an exact testing or uniquely owned preview
-lane. Director testing/preview applies need current safety even with a broad
+The disposable-lane path validates an exact testing or uniquely owned preview
+lane. Testing/preview applies need current safety even with a broad
 context grant; a grant cannot establish that a lane is unused or data is disposable.
 `deploy=false` may stage an independently reviewed separation without starting
 existing shared-storage containers. Staging eligibility never authorizes deploy.
-Preview-inclusive product retirement accepts that identity only for never-live
-products and testing; Client and other machine callers keep their existing rules.
+Preview-inclusive product retirement checks the Director-agent marker, never-live
+product status and testing-only ownership; Client and other machine callers keep
+their existing rules.
 
-These paths consume [recorded disposable-lane facts](disposable-lanes.md). They
-are generic source behavior, not a new policy grant, administrator identity,
-credential, promotion right or Client-access expansion. Existing runtime key
+These paths consume [recorded disposable-lane facts](disposable-lanes.md). Existing runtime key
 safety, transport isolation, reviewed retirement, provider fences and backup
 protection still apply. Paths requiring positive recorded facts return
 `disposable_lane_safety_unknown` when those facts are missing. Existing Odoo
@@ -239,9 +223,8 @@ compose, leaving retained target/storage and historical effects untouched.
 
 ### First testing target creation
 
-The authenticated Director agent may stage a first testing target without a
-policy grant through the existing Dokploy target setup dry-run/apply endpoint.
-This path creates only a new project, a new environment and an empty raw compose
+The Dokploy target setup dry-run/apply endpoint stages a first testing target:
+only a new project, a new environment and an empty raw compose
 for an active product's exclusively owned context. It accepts no existing
 project, environment or target IDs, replacement reference, repository source,
 domain route or published port. The testing lane and all three target authority
@@ -281,30 +264,25 @@ authority. Durable original-key execution retains partial effects and blocks
 duplicate creates; readback is observational. See the
 [storage request and recovery contract](dokploy-service-deployments.md#testing-application-state-volume).
 
-Other agent identities retain their scoped policy rules. No grant or credential
-is installed, and general setup, production, backup and promotion authority do
-not change.
-
 ### Testing-copy connection isolation
 
 The Odoo post-deploy endpoint classifies validated `connection_isolation`
-requests separately from general maintenance. Its instance-scoped plan and
-read actions inherit the Director's standing observation permission; a scoped
-`agent.read` rule alone does not execute its provider schedule. Isolation apply remains
-a write. Only the authenticated Director identity can use the source-owned
-testing repair without a policy grant, after operation-specific qualification.
+requests separately from general maintenance. Isolation apply remains a write;
+reading or planning never executes its provider schedule. The testing repair
+checks the authenticated Director-agent marker and current operation-specific
+qualification.
 The fixed repair preserves application records without asserting that a copy is
 unused or reproducible. Production, staff holds, recorded protected use or
 only-copy data, target aliases, shared resources and unverified actual testing
-resources refuse. No new policy record or credential is installed. General post-deploy
-authority does not authorize isolation apply. See the
+resources refuse. General post-deploy maintenance cannot substitute for this
+qualified repair. See the
 [repair procedure](operations.md#repair-copied-carrier-and-customer-sms-connections)
 for reviewed plan binding, stable idempotency, independent readback and current
 evidence-producer limitations.
 
 ### Reviewed never-live classification and preview execution
 
-The existing Director-agent identity can record a reviewed `unknown` to
+The bounded agent classification path records a reviewed `unknown` to
 `prelaunch` classification through the production-use route for an active
 product whose recorded stable lanes are testing only. A live classification,
 production lane, historical context, production deployment or promotion history
@@ -333,22 +311,19 @@ the before/after bootstrap-exemption effect in the reviewed plan, and the
 Client-settings panel displays it before Apply. Ordinary bounded agent
 classification keeps its existing response shape and supplies no exemption.
 
-Odoo preview apply uses the same source-owned Director identity boundary as
-[testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
+Odoo preview apply remains a write,
 including preview destruction. It requires the caller's exact service-issued
 plan and an existing uniquely owned preview. Stable lanes cannot be substituted
 for a preview. The frozen plan must name the discovered compose and cannot alias
 a recorded stable target. Completed same-key replay and read-only outcome
 reconciliation remain available after qualification expires or lifecycle changes.
-Scoped callers retain their explicit policy rules and inherit no Director authority.
 Source-read permission for an import credential remains separate from execution.
 
-Existing **Odoo preview refresh** follows overall direction's disposable-preview
-rule rather than requiring positive `unused` or `reproducible` observations that
-no automatic preview collector produces. This does not publish either fact.
+Existing **Odoo preview refresh** qualifies resources directly, without requiring
+or publishing positive `unused` or `reproducible` observations.
 Scheduled closed-preview cleanup uses the existing disposable observation API:
-the authenticated Director agent records its current facts for the exact owned
-preview, with evidence and binding checks. These observations qualify cleanup
+current facts for the exact owned preview require evidence and binding checks.
+These observations qualify cleanup
 only; they cannot admit runtime sync or another preview mutation. Unknown facts hold cleanup. Testing
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
@@ -368,14 +343,14 @@ Docker-reported backing directories, and complete container mount inventory (inc
 stopped containers). Foreign consumers, writable parent mounts, unknown backing,
 host networking or published ports refuse. Read-only administrative parent mounts
 are allowed; exact/child consumers are protected. Existing data is inspected,
-never emptied or deleted. The qualified Director refresh generates a compose with no host ports or host
+never emptied or deleted. The Director refresh generates a compose with no host ports or host
 SSH mounts. Existing scoped/source-reconciler SSH behavior is unchanged. Managed integration-key filtering and exact managed-source authority
 remain in force; no template source allowance is inherited.
 
 The schedule receipt binds the target/project/volumes, is consumed immediately,
 and is invalidated by a changed provider target readback. It is not a reusable
-positive usage/custody assertion. A new apply repeats collection automatically;
-no manual DB qualification or grant is required. Missing/failed/stale/conflicting
+positive usage/custody assertion. A new apply repeats collection automatically.
+Missing/failed/stale/conflicting
 inspection refuses before new application effects. The same operation/key observes
 an uncertain effect without redispatch; preserve it and use normal reconciliation.
 A refused or expired issued plan requires fresh plan/apply inputs.
@@ -471,8 +446,8 @@ definition of administrator. It does not widen anything else:
 - a rule that merely carries the `admin` role (for example the product-evidence
   read set, which lists one read action) stays exactly as narrow as it is
   written;
-- `read_only` people, Clients, and every machine identity (workflows,
-  agents, tokens) are still limited to their enumerated grants;
+- `read_only` people, Clients, and other machine identities retain their
+  scoped authority; the Director-agent standing permission is described above;
 - the schema-version and instance-scope checks still apply to the administrator;
 - approval and worker reauthorization of privileged operations still require the
   exact managed rule and never consult this shortcut.
