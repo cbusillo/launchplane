@@ -23,6 +23,7 @@ from threading import Event, Lock, Thread
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
 from pydantic import BaseModel
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -179,6 +180,21 @@ class ProviderEffectTimestampObserver(Protocol):
         """Observe a provider effect using its authoritative checkpoint time."""
 
 
+class _OriginIntentArguments(TypedDict, total=False):
+    provider_target_origin: ProviderTargetOrigin
+    original_intent: dict[str, object]
+
+
+class _SupersessionOriginIntentArguments(_OriginIntentArguments, total=False):
+    expected_original_intent: dict[str, object] | None
+
+
+@runtime_checkable
+class ProviderTargetOriginAdapter(Protocol):
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        """Return the captured recipient used by target_key, never a retry lookup."""
+
+
 class DurableProviderOperationStore(Protocol):
     def read_original_mutation_intent(
         self, reservation: LaunchplaneIdempotencyRecord
@@ -195,6 +211,7 @@ class DurableProviderOperationStore(Protocol):
         lease_seconds: int = ...,
         reconciliation_key: str = ...,
         provider_target_key: str = ...,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, object] | None = ...,
     ) -> MutationReservationResult: ...
 
@@ -253,6 +270,7 @@ class DurableProviderOperationStore(Protocol):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, object] | None = None,
         expected_original_intent: dict[str, object] | None = None,
     ) -> MutationReconciliationSupersessionResult: ...
@@ -461,12 +479,23 @@ def run_durable_provider_operation(
     provider_target_key = adapter.target_key().strip()
     if not provider_target_key:
         raise ValueError("Durable provider operations require a provider target key.")
+    origin = (
+        adapter.provider_target_origin()
+        if isinstance(adapter, ProviderTargetOriginAdapter)
+        else None
+    )
     reconciliation_key = adapter.reconciliation_key().strip()
     if not reconciliation_key:
         raise ValueError("Durable provider operations require a reconciliation key.")
     normalized_response_trace_id = response_trace_id.strip()
     if not normalized_response_trace_id:
         raise ValueError("Durable provider operations require a response trace id.")
+
+    origin_arguments: _OriginIntentArguments = {}
+    if origin is not None:
+        origin_arguments["provider_target_origin"] = origin
+    if original_intent:
+        origin_arguments["original_intent"] = original_intent
 
     def reserve() -> MutationReservationResult:
         return store.reserve_mutation(
@@ -478,7 +507,7 @@ def run_durable_provider_operation(
             lease_seconds=lease_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
-            **({"original_intent": original_intent} if original_intent else {}),
+            **origin_arguments,
         )
 
     reservation_result = reserve()
@@ -505,6 +534,12 @@ def run_durable_provider_operation(
         and target_supersession is not None
         and target_supersession.quiescence_check(reservation)
     ):
+        supersession_arguments: _SupersessionOriginIntentArguments = {}
+        if origin is not None:
+            supersession_arguments["provider_target_origin"] = origin
+        if original_intent:
+            supersession_arguments["original_intent"] = original_intent
+            supersession_arguments["expected_original_intent"] = superseded_intent
         supersession = store.supersede_expired_reconciled_mutation_and_reserve(
             reservation=reservation,
             response_status_code=target_supersession.response_status_code,
@@ -519,11 +554,7 @@ def run_durable_provider_operation(
             minimum_expired_seconds=target_supersession.minimum_expired_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
-            **(
-                {"original_intent": original_intent, "expected_original_intent": superseded_intent}
-                if original_intent
-                else {}
-            ),
+            **supersession_arguments,
         )
         if supersession.status == "acquired" and supersession.record is not None:
             decision = "acquired"

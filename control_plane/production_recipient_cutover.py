@@ -1,5 +1,7 @@
 """Accepted-release worker integration for independent private production recipients."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -710,6 +712,16 @@ class RecipientCutoverAdapter:
     validate_source: Callable[[], None]
     rollback_observed: bool = False
     rollback_resume_pending: bool = False
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.record.product,
+            context=self.record.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.record.retained_target_id.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(

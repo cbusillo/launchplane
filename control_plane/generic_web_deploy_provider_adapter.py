@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from dataclasses import dataclass
 from contextlib import nullcontext
 from dataclasses import replace
@@ -412,6 +414,17 @@ class GenericWebDeployProviderMutationAdapter:
             if self._retain_event_request
             else None,
             qualification_authority_digest=self._reconciliation_qualification_digest or "",
+        )
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        resolved = self._resolve_deploy_target()
+        return ProviderTargetOrigin(
+            product=self._profile.product,
+            context=resolved.ship_request.context,
+            instance=resolved.ship_request.instance,
+            provider_id=resolved.ship_request.provider_id,
+            target_type=resolved.resolved_target.target_type,
+            target_id=resolved.resolved_target.target_id,
         )
 
     def target_key(self) -> str:

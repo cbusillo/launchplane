@@ -42134,6 +42134,188 @@
         "title": "ProviderDeliveryProtectionExpectationV1",
         "type": "object"
       },
+      "ProviderHoldAttentionItem": {
+        "additionalProperties": false,
+        "properties": {
+          "attribution": {
+            "enum": [
+              "retained",
+              "legacy",
+              "unavailable",
+              "corrupt"
+            ],
+            "title": "Attribution",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "effect_started_at": {
+            "title": "Effect Started At",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "title": "Lease Expires At",
+            "type": "string"
+          },
+          "operation_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Reference"
+          },
+          "original_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderHoldScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phase": {
+            "enum": [
+              "not_recorded",
+              "effect_recorded"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "reconcile_required"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_reference",
+          "original_scope",
+          "attribution",
+          "state",
+          "phase",
+          "created_at",
+          "updated_at",
+          "lease_expires_at",
+          "effect_started_at"
+        ],
+        "title": "ProviderHoldAttentionItem",
+        "type": "object"
+      },
+      "ProviderHoldAttentionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "enum": [
+              "single_page",
+              "partial"
+            ],
+            "title": "Completeness",
+            "type": "string"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHoldAttentionItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "stale_after": {
+            "title": "Stale After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more",
+          "completeness",
+          "observed_at",
+          "stale_after"
+        ],
+        "title": "ProviderHoldAttentionPage",
+        "type": "object"
+      },
+      "ProviderHoldAttentionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/ProviderHoldAttentionPage"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "attention"
+        ],
+        "title": "ProviderHoldAttentionResponse",
+        "type": "object"
+      },
+      "ProviderHoldScope": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance"
+        ],
+        "title": "ProviderHoldScope",
+        "type": "object"
+      },
       "ProviderPullRequestExpectationV1": {
         "additionalProperties": false,
         "properties": {
@@ -79203,6 +79385,125 @@
         "summary": "Cancel Rollback Operation"
       }
     },
+    "/v1/operations/provider-hold-attention": {
+      "get": {
+        "operationId": "read_provider_hold_attention",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderHoldAttentionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a bounded page of retained service operation attention"
+      }
+    },
     "/v1/owner-secret-inputs": {
       "get": {
         "operationId": "read_owner_secret_inputs",
@@ -102810,6 +103111,7 @@
     "/v1/governance/projection": "read_governance_projection",
     "/v1/odoo-prod-promotions/operations/{operation_id}": "read_odoo_prod_promotion_operation",
     "/v1/odoo-prod-rollbacks/operations/{operation_id}": "read_odoo_prod_rollback_operation",
+    "/v1/operations/provider-hold-attention": "read_provider_hold_attention",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/previews/{preview_id}/history": "read_preview_history",

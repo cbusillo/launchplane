@@ -487,6 +487,47 @@ completion has the same evidence requirement as restart adoption; completed
 means the provider outcome is durable and replayable, not that the external
 deployment passed.
 
+Fresh reservations for shared physical-parent keys in the
+`generic-web-provider-target:*` namespace also require an original provider
+recipient captured from the same recipient used to compute the existing key.
+Suffixed child-effect keys keep their separate operation-fence semantics. The typed identity contains product, context, instance,
+provider, target type and target ID. Product is captured explicitly because the
+physical key does not include it. Storage verifies the existing key and retains
+that identity with a random operation nonce as the `provider_target_origin`
+sibling in the existing original-mutation-intent receipt, in the acquisition or
+supersession transaction. The family's `original_intent` dictionary and equality
+stay unchanged, including an empty dictionary for origin-only receipts.
+
+Retries, adoption and recovery never replace that capsule or infer it from
+current lane records. A safe release followed by fresh acquisition receives a
+new nonce even when the deterministic reservation ID and database timestamp are
+unchanged. Existing rows without custody remain readable and recoverable through
+their existing guards; they are never backfilled. Internal origin reads require
+the completed receipt, matching request fingerprint and reservation ID, a valid
+capsule and the same physical key. Missing or mismatched evidence is unavailable.
+The capsule is attention identity only: it grants no authorization, exclusion,
+effect-completion, retry, supersession or lane-separation proof.
+
+The common internal held-parent projection retains every operation and groups
+proved origins by captured product/context/instance. Legacy encoded origins
+must include product and rehash to the admitted physical key; they have no
+strong incarnation reference. Missing or corrupt custody remains unavailable.
+The current provider record is separate match metadata and cannot establish
+historical product ownership. Suffixed child effects and other namespaces stay
+outside this projection.
+
+Provider incidents store only opaque reservation-ID/nonce references inside
+`route_authority.target_keys`. Older material without these keys keeps its
+existing parser and canonical hash. Operation-set changes are material;
+ordering, summaries and heartbeats alone are not. Internal primary-key batch
+reads validate the same bound capsule and agreement between indexed row columns
+and the typed payload before accepting a completed reference. Contradictory
+parent projection is unavailable, as with malformed parent records; a corrupt
+receipt remains explicit unavailable custody without changing family-intent reads.
+Absence or a different nonce is never settlement. The projection and source
+witness contain private reservation/physical/configuration data; they are not
+public response models and their hashes must not be exposed.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through

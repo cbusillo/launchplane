@@ -1393,23 +1393,8 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             ),
             patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
         ):
-            old_operation = self.store.read_odoo_stable_target_replacement_operation_record(
-                old_operation_id
-            )
-            self.store.write_odoo_stable_target_replacement_operation_record(
-                old_operation.model_copy(
-                    update={
-                        "status": "reconciliation_required",
-                        "finished_at": "",
-                        "error_code": "provider_outcome_unknown",
-                    }
-                )
-            )
-            self.request()
-            unresolved = self.reconcile()
-            self.assertEqual(unresolved["queued_operation_id"], old_operation_id)
-            self.assertEqual(unresolved["queued_operation_status"], "reconciliation_required")
-            self.store.write_odoo_stable_target_replacement_operation_record(old_operation)
+            # Uncertain originals are covered by test_uncertain_testing_deploy_is_not_bypassed.
+            # This generation starts after the immutable old terminal history.
             for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
                 self.request()
                 queued = cast(str, self.reconcile()["queued_operation_id"])
@@ -5506,11 +5491,26 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                     resolved, product="site"
                 ),
                 provider_target_key=adapter.target_key(),
+                provider_target_origin=adapter.provider_target_origin(),
             ).record
             held = self.store.mark_mutation_reconcile_required(
                 reservation=reserved, reconciliation_key=reserved.reconciliation_key
             ).record
             assert held is not None
+        from control_plane.storage.postgres import (
+            LaunchplaneIdempotencyRow,
+            ORIGINAL_MUTATION_INTENT_ROUTE,
+        )
+        from sqlalchemy import delete
+
+        with self.store._session_factory.begin() as session:
+            session.execute(
+                delete(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == reserved.record_id,
+                )
+            )
+
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch.object(
@@ -7833,10 +7833,38 @@ class ProductReconcileCompletionTests(ProductReconcileTestCase):
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
 
     def test_independent_testing_operation_does_not_wake_event_reconciliation(self) -> None:
-        operation = self.queued_operation().model_copy(
-            update={"idempotency_scope": "independent-testing-operation"}
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
         )
-        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+
+        admit = self.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane
+
+        def independent(
+            record: OdooStableTargetReplacementOperationRecord,
+        ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+            scope = "independent-testing-operation"
+            return admit(
+                record.model_copy(
+                    update={
+                        "idempotency_scope": scope,
+                        "operation_id": build_odoo_stable_target_replacement_operation_id(
+                            product=record.product,
+                            context=record.context,
+                            instance=record.instance,
+                            created_at=record.created_at,
+                            idempotency_key=record.idempotency_key,
+                            idempotency_scope=scope,
+                        ),
+                    }
+                )
+            )
+
+        with patch.object(
+            self.store,
+            "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
+            side_effect=independent,
+        ):
+            operation = self.queued_operation()
         self.assertTrue(self.complete(operation, "pass"))
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
 
