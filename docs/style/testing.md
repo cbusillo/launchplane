@@ -71,21 +71,12 @@ current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
 does not replace that evidence. The trial does not change CI workflows or
 required checks.
 
-The comment/docstring gate compares a pull request with its event base and a
-protected-default push with its event's previous commit, covering every commit
-in the push. Train candidates compare their entire contribution with the first
-shared commit in the candidate and protected-default first-parent histories.
-That range survives candidate reconstruction and a rerun after merge landing;
-the last member's parent and an ordinary merge-base can omit earlier members.
-An all-no-op batch can publish an already protected first-parent commit. That
-proves an empty contribution, so the scanner still runs against that same
-commit, including after the protected branch advances. It is not a fallback
-for missing history and does not bypass repository-pin or other CI gates.
-The transitional product config-authority workflow uses the same train
-comparison, including proved empty contributions, and still runs its audit.
-Scheduled runs compare the previous first-parent commit. Missing, shallow or
-unsupported comparison history fails the gate instead of reporting an empty
-diff. Comments outside the selected change remain out of scope.
+Each gate checks the change's entire contribution; missing or unprovable
+history fails. An already protected candidate proves an empty contribution,
+but its scanner/audit and independent required gates still run. The
+[CI comment step](../../.github/workflows/ci.yml) and
+[transitional config-authority workflow](../../.github/workflows/reusable-product-repo-config-authority.yml)
+own event-range selection and validation.
 
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes keep their safety classification. Credential handling falls under safety
