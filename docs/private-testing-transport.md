@@ -221,13 +221,25 @@ also applies to application lanes without managed inputs. The provider job and
 runtime wait share the original deployment timeout. Unknown or updating runtime
 remains fenced; missing or unreadable task/container evidence is also unknown at
 the original deadline. Missing Swarm update status is not negative settlement
-proof: a newly accepted spec clears it before the asynchronous updater starts.
+proof: a newly accepted spec clears it before asynchronous reconciliation, and
+it can remain absent when that reconciliation finds no dirty slots to update.
 Neither job failure, elapsed timeout nor an observed task makes that missing
 status terminal. The full native service read can separately prove first creation
 when both PreviousSpec and UpdateStatus are absent; an accepted update atomically
 adds PreviousSpec. That value-free fact defaults to unproved for other observers
 and preserves first-deployment failure handling. Fully matching healthy runtime
 may still qualify without update status.
+An unresolved original cannot be bypassed with a fresh deployment key or a
+provider redeploy. The supported independent application
+[preparation and activation](testing-activation.md) path preserves its fence and
+resources, then binds the testing hold lift to the qualified replacement.
+That path still requires independent resources for carried writable external
+capabilities; an existing testing credential alone does not prove separation.
+Where those prerequisites are absent, retain the original fence and record the
+missing prerequisite rather than claim settlement from the provider job or
+timeout. With no unresolved original, a deliberate normal testing deploy remains
+available through the native generic-web deploy service, subject to its existing
+authority, hold and reservation checks.
 A complete observation of explicitly completed nonconvergence may fail
 qualification at that deadline. A correlated terminal rollback or failed
 qualification never receives delivery credit. Recovery adds the same

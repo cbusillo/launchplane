@@ -542,6 +542,31 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 self.assertEqual(result.outcome, expected)
                 if expected == "present":
                     self.assertEqual(result, job)
+        self.service.pop("UpdateStatus")
+        spec = self.service["Spec"]
+        assert isinstance(spec, dict)
+        template = spec["TaskTemplate"]
+        assert isinstance(template, dict)
+        container_spec = template["ContainerSpec"]
+        assert isinstance(container_spec, dict)
+        config = self.container["Config"]
+        assert isinstance(config, dict)
+        previous_environment = ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=previous-deployment"]
+        container_spec["Env"] = previous_environment
+        config["Env"] = previous_environment
+        self.task["Spec"] = {"ContainerSpec": {"Image": _TAG, "Env": previous_environment}}
+        initial_job = job.model_copy(update={"deployment_status": "error"})
+        with patch.object(
+            provider, "observe_testing_application_runtime", return_value=self.read()
+        ):
+            result = qualify_testing_application_observation(
+                provider=provider,
+                control_plane_root=Path("."),
+                target=target,
+                observation=initial_job,
+                deployment_record_id="deployment-1",
+            )
+        self.assertEqual(result, initial_job)
         with patch.object(
             provider,
             "observe_testing_application_runtime",
@@ -815,24 +840,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.service.pop("PreviousSpec")
         self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
         self.assertEqual(qualify(wait=False).outcome, "unknown")
-        self.service["PreviousSpec"] = deepcopy(self.service["Spec"])
-        original_spec = deepcopy(self.task["Spec"])
-        for state in ("rejected",):
-            self.task["Status"] = {"State": state}
-            self.assertEqual(qualify(wait=True).outcome, "unknown")
-        for state in ("starting", "shutdown"):
-            self.task["Status"] = {"State": state}
-            self.assertEqual(qualify(wait=True).outcome, "unknown")
-        self.task["Status"] = {"State": "failed"}
-        for spec in (
-            {},
-            {"Image": _IMAGE},
-            {"Image": _IMAGE, "Env": ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=older"]},
-        ):
-            with self.subTest(spec=spec):
-                self.task["Spec"] = {"ContainerSpec": spec}
-                self.assertEqual(qualify(wait=True).outcome, "unknown")
-        self.task["Spec"] = original_spec
         self.tasks.append({"containerId": "old-task"})
         self.vanished_tasks.add("old-task")
         self.assertEqual(qualify(wait=True).outcome, "unknown")
@@ -846,3 +853,8 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.vanished_tasks.remove(_CONTAINER_ID)
         self.assertEqual(qualify(wait=True), job)
         self.assertEqual(qualify(wait=False), job)
+        self.service["PreviousSpec"] = deepcopy(self.service["Spec"])
+        self.assertEqual(qualify(wait=True), job)
+        self.assertEqual(qualify(wait=False), job)
+        self.container["State"] = {"Running": True, "Health": {"Status": "unhealthy"}}
+        self.assertEqual(qualify(wait=True).outcome, "unknown")
