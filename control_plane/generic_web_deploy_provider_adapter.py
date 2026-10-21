@@ -751,16 +751,22 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_read_error_class="target_resolution_failed",
             )
         saved = evidence.execution_record
-        # Missing required receipts returned unknown above; None means the
-        # existing image-only legacy path required no product execution.
+        saved_receipt = execution_receipt(saved) if saved is not None else None
+        # Product execution and image settlement are independent proof. Legacy
+        # statuses alone do not retain the original runtime qualification.
         final_failed_result = (
             self._application_testing(resolved_target)
-            and (evidence.execution is None or evidence.execution.outcome == "terminal")
+            and evidence.execution is not None
+            and evidence.execution.outcome == "terminal"
             and saved is not None
+            and saved_receipt is not None
+            and bool(saved_receipt.settled_image_deployment_id)
             and _saved_testing_result_is_final(saved)
             and not deployment_record_passed(saved)
             and observation.outcome == "present"
-            and saved.deploy.deployment_id == observation.deployment_id
+            and saved_receipt.settled_image_deployment_id
+            == saved.deploy.deployment_id
+            == observation.deployment_id
             and observation.deployment_status not in {"canceled", "cancelled", "killed"}
         )
         if not final_failed_result:

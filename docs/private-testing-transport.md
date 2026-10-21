@@ -226,13 +226,26 @@ qualification never receives delivery credit. Recovery adds the same
 current-runtime check while retaining exact-original execution receipts,
 reviewed settlement and publication CAS. A healthy image cannot prove that
 earlier product work has stopped. An already final failed original result may
-finish that reservation as failed once
-its required execution is terminal, or existing image-only legacy rules prove
-no product execution was required. It needs no current runtime success proof.
+finish that reservation as failed when its original execution receipt proves
+terminal product work and retains the same provider deployment ID that the
+original runtime qualifier proved settled, either successfully or as a known
+failure. The proof, saved image result and observed provider job must agree.
+It needs no later runtime success proof. Legacy records without retained image
+settlement proof still require current runtime qualification, including records
+whose image status says pass but whose product result failed.
 This preserves the failed record and inventory; it grants no delivery credit.
 Missing required or nonterminal execution proof and cancelled jobs remain
 fenced. Recovery does not infer the original runtime deadline from an expired
 reservation lease.
+
+The optional image settlement reference lives in the existing producer-owned
+execution receipt and cannot be removed or changed after recording. Empty
+references are omitted from old receipt serialization. Older service versions
+reject receipts containing the new reference rather than guessing its meaning;
+deploy the receipt producer and recovery reader together. Follow the existing
+[service recovery guidance](operations.md#launchplane-service-deploy-posture)
+with a compatible rollback reader or a fixed forward build. Keep the retained
+proof when reverting unrelated code.
 
 Ordinary sweeps check current application runtime before returning
 `already_deployed`. Positively stable service drift permits one normal

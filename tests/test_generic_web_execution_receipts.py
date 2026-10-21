@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from contextlib import closing, ExitStack
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 import os
 import io
@@ -13,6 +14,7 @@ import click
 from urllib.error import HTTPError, URLError
 
 from control_plane.dokploy import api
+from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_source_qualification import (
@@ -47,6 +49,7 @@ from control_plane.workflows.generic_web_application_lifecycle import schedule_p
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
+    GenericWebProviderDeploymentFailed,
 )
 from tests.test_generic_web_application_lifecycle import _extensions, _LifecycleDeployProvider
 from tests.test_generic_web_deploy import (
@@ -1002,7 +1005,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
             inventory,
         )
 
-    def test_legacy_failed_image_completes_failed_without_new_inventory(self) -> None:
+    def test_legacy_failed_image_requires_current_proof_before_failed_completion(self) -> None:
         record_id = self.prepare("deploy_trigger", None, qualified=True)
         record = self.store.read_deployment_record(record_id)
         self.store.write_deployment_record(
@@ -1017,9 +1020,20 @@ class ExecutionRecoveryTests(unittest.TestCase):
             self.provider,
             "observe_testing_application_runtime",
             side_effect=RuntimeError("Current runtime became unreadable."),
-        ) as runtime:
-            status, result = self.complete_original("deploy_trigger")
-        runtime.assert_not_called()
+        ):
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            ):
+                status, held = _invoke_recovery(
+                    self.app,
+                    original_deploy=self.request,
+                    idempotency_key="deploy_trigger",
+                    reason="Require current proof for legacy failure.",
+                )
+        self.assertEqual((status, held["proposed_action"]), (200, "hold_unknown"))
+        self.assertEqual(self.store.read_deployment_record(record_id).deploy.status, "fail")
+        status, result = self.complete_original("deploy_trigger")
         self.assertEqual(status, 202)
         self.assertEqual(result["reservation_state"], "completed")
         completed = self.store.read_idempotency_record(
@@ -1113,6 +1127,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
             self.store, record_id, ExecutionReceipt(), expected_record=record
         )
         with self.store.provider_evidence_guard(lambda: owner):
+            recorder.record_settled_image(record.deploy.deployment_id)
             index = recorder.begin(
                 "product_executor", "verify", self.target.resolved_target.target_id, {}
             )
@@ -1142,10 +1157,47 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 self.store, "advance_generic_web_execution_receipt", side_effect=correct_then_merge
             ):
                 recorder.update(index, acknowledgement="completed", terminal="executor_completed")
+            saved = self.store.read_deployment_record(record_id)
+            for replacement in ("", "another-image"):
+                changed_receipt = recorder.receipt.model_copy(
+                    update={"settled_image_deployment_id": replacement}
+                )
+                changed = saved.model_copy(
+                    update={
+                        "post_deploy_update": saved.post_deploy_update.model_copy(
+                            update={
+                                "evidence": {
+                                    **saved.post_deploy_update.evidence,
+                                    EXECUTION_EVIDENCE_KEY: changed_receipt.model_dump_json(),
+                                }
+                            }
+                        )
+                    }
+                )
+                with self.subTest(replacement=replacement):
+                    with self.assertRaises(ValueError):
+                        recorder.record_settled_image(replacement)
+                    with self.assertRaises(ValueError):
+                        self.store.advance_generic_web_execution_receipt(
+                            record_id=record_id, receipt_json=changed_receipt.model_dump_json()
+                        )
+                    with self.assertRaises(ValueError):
+                        self.store.publish_generic_web_testing_result(
+                            expected_deployment=saved,
+                            expected_inventory=None,
+                            deployment=changed,
+                            inventory=None,
+                        )
         saved = self.store.read_deployment_record(record_id)
         self.assertEqual(saved.post_deploy_update.status, "fail")
         self.assertEqual(saved.post_deploy_update.detail, "Preserve supported correction")
         self.assertIsNotNone(saved.integration_key_readback)
+        self.assertEqual(
+            ExecutionReceipt.model_validate_json(
+                saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+            ).settled_image_deployment_id,
+            record.deploy.deployment_id,
+        )
         self.assertEqual(
             ExecutionReceipt.model_validate_json(
                 saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
@@ -1210,6 +1262,89 @@ class ExecutionRecoveryTests(unittest.TestCase):
         return self.store.read_deployment_record(
             self.normal_adapter()._deployment_record_id(operation)
         )
+
+    def test_unproved_original_image_deadlines_keep_recovery_fenced(self) -> None:
+        for cause in ("incomplete", "updating", "failed_job"):
+            with self.subTest(cause=cause):
+                self.assert_unproved_original_image_remains_fenced(cause)
+
+    def assert_unproved_original_image_remains_fenced(self, cause: str) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        self.provider.observation = self.provider.observation.model_copy(
+            update={"deployment_status": "success"}
+        )
+        adapter = self.normal_adapter()
+        provider = cast(_FakeGenericWebDeployProvider, adapter._deploy_provider)
+        if cause == "failed_job":
+            provider.deploy_error = GenericWebProviderDeploymentFailed(
+                provider.observation.model_copy(update={"deployment_status": "error"})
+            )
+            self.provider.observation = provider.observation.model_copy(
+                update={"deployment_status": "error"}
+            )
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            assert provider.application_runtime is not None
+            return replace(
+                provider.application_runtime,
+                rollout_state="completed" if cause == "incomplete" else "updating",
+                task_evidence_complete=cause != "incomplete",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+            )
+
+        with (
+            patch.object(provider, "observe_testing_application_runtime", side_effect=runtime),
+            patch("control_plane.workflows.generic_web_deploy.monotonic", return_value=0),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic", return_value=1e30
+            ),
+        ):
+            outcome = self.run_normal(adapter, cause)
+        self.assertEqual(outcome.status, "reconcile_required")
+        saved = self.normal_record(outcome)
+        self.assertEqual(saved.deploy.status, "fail")
+        held = self.store.list_held_provider_target_reservations()
+        self.assertTrue(held)
+        with (
+            patch.object(
+                self.provider,
+                "observe_testing_application_runtime",
+                side_effect=RuntimeError("Current runtime became unreadable."),
+            ),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            ),
+        ):
+            status, recovery = _invoke_recovery(
+                self.app,
+                original_deploy=self.request,
+                idempotency_key=cause,
+                reason="Keep the original unknown image fenced.",
+            )
+        self.assertEqual((status, recovery["proposed_action"]), (200, "hold_unknown"))
+        self.assertEqual(self.store.list_held_provider_target_reservations(), held)
+        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(
+                context_name=saved.context, instance_name="testing"
+            )
+        self.assertEqual(len(provider.runtime_identities), 1)
+        status, completed = self.complete_original(cause)
+        self.assertEqual((status, completed["reservation_state"]), (202, "completed"))
+        replay = self.run_normal(adapter, cause)
+        self.assertEqual(replay.status, "replayed")
+        assert replay.record is not None
+        self.assertEqual(replay.record.response_status_code, 502)
+        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(
+                context_name=saved.context, instance_name="testing"
+            )
 
     def test_answered_executor_result_lost_before_publication_settles_without_replay(self) -> None:
         self.profile = _profile()
@@ -1280,6 +1415,216 @@ class ExecutionRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(qualified.deployment_record_id, self.normal_record(successor).record_id)
 
+    def test_proved_image_failures_survive_lost_completion_and_unreadable_runtime(self) -> None:
+        for cause in ("pull", "rollback"):
+            with self.subTest(cause=cause):
+                self.assert_proved_image_failure_survives_lost_completion(cause)
+
+    def assert_proved_image_failure_survives_lost_completion(self, cause: str) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        self.provider.observation = self.provider.observation.model_copy(
+            update={"deployment_status": "success"}
+        )
+        adapter = self.normal_adapter()
+        provider = cast(_FakeGenericWebDeployProvider, adapter._deploy_provider)
+        if cause == "pull":
+            self.provider.observation = provider.observation.model_copy(
+                update={"deployment_status": "error"}
+            )
+            provider.deploy_error = GenericWebProviderDeploymentFailed(self.provider.observation)
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            assert provider.application_runtime is not None
+            if cause == "pull":
+                return replace(
+                    provider.application_runtime,
+                    service_image="fixture.invalid/previous:old",
+                    service_deployment_record_id="previous-deployment",
+                )
+            return replace(
+                provider.application_runtime,
+                rollout_state="rollback_completed",
+                rollout_started_at=provider.observation.started_at,
+                service_image="fixture.invalid/previous:old",
+                service_deployment_record_id="previous-deployment",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+            )
+
+        publish = self.store.publish_generic_web_testing_result
+
+        def lose_completion(**kwargs: Any) -> None:
+            publish(**kwargs)
+            if kwargs["deployment"].deploy.status == "fail":
+                raise ValueError("Final failed publication committed before worker stopped.")
+
+        with (
+            patch.object(provider, "observe_testing_application_runtime", side_effect=runtime),
+            patch.object(
+                self.store, "publish_generic_web_testing_result", side_effect=lose_completion
+            ),
+        ):
+            outcome = self.run_normal(adapter, cause)
+        self.assertEqual(outcome.status, "reconcile_required")
+        saved = self.normal_record(outcome)
+        self.assertEqual(saved.deploy.status, "fail")
+        receipt = ExecutionReceipt.model_validate_json(
+            saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+        )
+        self.assertEqual(receipt.settled_image_deployment_id, saved.deploy.deployment_id)
+        with patch.object(
+            self.provider,
+            "observe_testing_application_runtime",
+            side_effect=RuntimeError("Current runtime became unreadable."),
+        ):
+            status, result = self.complete_original(cause)
+        self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(
+                context_name=saved.context, instance_name="testing"
+            )
+        replay = self.run_normal(adapter, cause)
+        self.assertEqual(replay.status, "replayed")
+        assert replay.record is not None
+        self.assertEqual(replay.record.response_status_code, 502)
+        self.assertEqual(replay.record.response_payload["result"]["deploy_status"], "fail")
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assertEqual(len(provider.runtime_identities), 1)
+
+    def test_image_proof_save_interruption_retains_pending_original_without_product_effects(
+        self,
+    ) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        executions: list[str] = []
+
+        def executor(*_args: object) -> PostDeployUpdateEvidence:
+            executions.append("product")
+            return PostDeployUpdateEvidence(attempted=True, status="pass")
+
+        for committed in (False, True):
+            with self.subTest(committed=committed):
+                advance = self.store.advance_generic_web_execution_receipt
+
+                def interrupt_proof_save(**kwargs: Any) -> None:
+                    receipt = ExecutionReceipt.model_validate_json(kwargs["receipt_json"])
+                    if receipt.settled_image_deployment_id:
+                        if committed:
+                            advance(**kwargs)
+                        raise ValueError("Image proof persistence was interrupted.")
+                    advance(**kwargs)
+
+                key = f"image-proof-interrupted-{committed}"
+                adapter = self.normal_adapter()
+                provider = cast(_FakeGenericWebDeployProvider, adapter._deploy_provider)
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                        return_value=executor,
+                    ),
+                    patch.object(
+                        self.store,
+                        "advance_generic_web_execution_receipt",
+                        side_effect=interrupt_proof_save,
+                    ),
+                ):
+                    outcome = self.run_normal(adapter, key)
+                self.assertEqual(outcome.status, "reconcile_required")
+                saved = self.normal_record(outcome)
+                receipt = ExecutionReceipt.model_validate_json(
+                    saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                )
+                self.assertEqual(
+                    receipt.settled_image_deployment_id,
+                    provider.observation.deployment_id if committed else "",
+                )
+                self.assertEqual(saved.deploy.status, "pending")
+                held = self.store.list_held_provider_target_reservations()
+                self.assertTrue(held)
+                with (
+                    patch.object(
+                        self.provider,
+                        "observe_testing_application_runtime",
+                        side_effect=RuntimeError("Current runtime became unreadable."),
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                        return_value=self.provider,
+                    ),
+                ):
+                    status, recovery = _invoke_recovery(
+                        self.app,
+                        original_deploy=self.request,
+                        idempotency_key=key,
+                        reason="Image proof cannot replace the missing final result.",
+                    )
+                self.assertEqual((status, recovery["proposed_action"]), (200, "hold_unknown"))
+                self.assertEqual(self.store.list_held_provider_target_reservations(), held)
+                self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+                with self.assertRaises(FileNotFoundError):
+                    self.store.read_environment_inventory(
+                        context_name=saved.context, instance_name="testing"
+                    )
+                self.assertEqual(executions, [])
+                self.assertEqual(len(provider.runtime_identities), 1)
+                status, completed = self.complete_original(key, action="settle_testing_failure")
+                self.assertEqual((status, completed["reservation_state"]), (202, "completed"))
+
+    def test_settled_image_cannot_release_unknown_product_execution(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        executions: list[str] = []
+
+        def executor(*_args: object) -> PostDeployUpdateEvidence:
+            executions.append("original")
+            raise ProviderMutationUnknownError("Original product effect is unresolved.")
+
+        with patch(
+            "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+            return_value=executor,
+        ):
+            outcome = self.run_normal(self.normal_adapter(), "unknown-product")
+        self.assertEqual(outcome.status, "reconcile_required")
+        saved = self.normal_record(outcome)
+        receipt = ExecutionReceipt.model_validate_json(
+            saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+        )
+        self.assertEqual(receipt.settled_image_deployment_id, saved.deploy.deployment_id)
+        inventory = self.store.read_environment_inventory(
+            context_name=saved.context, instance_name="testing"
+        )
+        held = self.store.list_held_provider_target_reservations()
+        with (
+            patch.object(
+                self.provider,
+                "observe_testing_application_runtime",
+                side_effect=RuntimeError("Current runtime became unreadable."),
+            ),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            ),
+        ):
+            status, recovery = _invoke_recovery(
+                self.app,
+                original_deploy=self.request,
+                idempotency_key="unknown-product",
+                reason="The image proof cannot settle unknown product work.",
+            )
+        self.assertEqual((status, recovery["proposed_action"]), (200, "hold_unknown"))
+        self.assertEqual(self.store.list_held_provider_target_reservations(), held)
+        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=saved.context, instance_name="testing"
+            ),
+            inventory,
+        )
+        self.assertEqual(executions, ["original"])
+
     def test_durable_normal_result_recovery_preserves_corrected_inventory(self) -> None:
         self.profile = _profile()
         self.store.write_product_profile_record(self.profile)
@@ -1313,6 +1658,10 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     outcome = self.run_normal(self.normal_adapter(), key)
                 self.assertEqual(outcome.status, "reconcile_required")
                 saved = self.normal_record(outcome)
+                receipt = ExecutionReceipt.model_validate_json(
+                    saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                )
+                self.assertEqual(receipt.settled_image_deployment_id, saved.deploy.deployment_id)
                 inventory = self.store.read_environment_inventory(
                     context_name=saved.context, instance_name="testing"
                 ).model_copy(update={"bootstrap_record_id": f"supported-correction-{verdict}"})
@@ -1321,7 +1670,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     self.provider,
                     "observe_testing_application_runtime",
                     side_effect=RuntimeError("Current runtime became unreadable."),
-                ) as runtime:
+                ):
                     if verdict == "fail":
                         original_observation = self.provider.observation
                         for changes in (
@@ -1345,9 +1694,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                                 (status, held["proposed_action"]), (200, "hold_unknown")
                             )
                         self.provider.observation = original_observation
-                        runtime.reset_mock()
                         status, result = self.complete_original(key)
-                        runtime.assert_not_called()
                     else:
                         with patch(
                             "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
@@ -1360,7 +1707,6 @@ class ExecutionRecoveryTests(unittest.TestCase):
                                 reason="Require current runtime for a saved pass.",
                             )
                         self.assertEqual((status, held["proposed_action"]), (200, "hold_unknown"))
-                        runtime.assert_called()
                 if verdict == "pass":
                     status, result = self.complete_original(key)
                 self.assertEqual((status, result["reservation_state"]), (202, "completed"))
@@ -1569,6 +1915,24 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     }
                 )
                 self.store.write_deployment_record(failed)
+                with (
+                    patch.object(
+                        self.provider,
+                        "observe_testing_application_runtime",
+                        side_effect=RuntimeError("Legacy runtime proof is unavailable."),
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                        return_value=self.provider,
+                    ),
+                ):
+                    status, recovery = _invoke_recovery(
+                        self.app,
+                        original_deploy=self.request,
+                        idempotency_key=key,
+                        reason="Legacy passing image status is insufficient proof.",
+                    )
+                self.assertEqual((status, recovery["proposed_action"]), (200, "hold_unknown"))
                 status, result = self.complete_original(key)
                 self.assertEqual((status, result["reservation_state"]), (202, "completed"))
                 self.assertEqual(self.store.read_deployment_record(record_id), failed)
@@ -2133,6 +2497,11 @@ class ExecutionRecoveryTests(unittest.TestCase):
         )
         for evidence in (
             {EXECUTION_EVIDENCE_KEY: appended.model_dump_json()},
+            {
+                EXECUTION_EVIDENCE_KEY: ExecutionReceipt(
+                    settled_image_deployment_id=record.deploy.deployment_id
+                ).model_dump_json()
+            },
             snapshot.model_copy(update={"originals": {"job": {"enabled": False}}}).evidence(),
         ):
             changed = record.model_copy(

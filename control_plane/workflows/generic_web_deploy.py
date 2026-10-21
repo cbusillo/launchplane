@@ -1091,6 +1091,12 @@ def _execute_generic_web_deploy_unserialized(
             if not generic_web_provider_deployment_succeeded(qualified.deployment_status):
                 runtime_failure_proved = True
                 raise GenericWebProviderDeploymentFailed(qualified)
+            if (
+                execution_recorder is not None
+                and provider_deployment_observation is not None
+                and qualified.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            ):
+                execution_recorder.record_settled_image(qualified.deployment_id)
         deploy_completed = True
         previous_inventory = None
         if post_deploy_executor is not None:
@@ -1224,6 +1230,16 @@ def _execute_generic_web_deploy_unserialized(
                     provider_failure_observed = failed.outcome == "present" and not (
                         generic_web_provider_deployment_succeeded(failed.deployment_status)
                     )
+        if (
+            execution_recorder is not None
+            and runtime_deadline is not None
+            and provider_failure_observed
+            and not deploy_completed
+            and provider_deployment_observation is not None
+            and provider_deployment_observation.deployment_id
+            != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+        ):
+            execution_recorder.record_settled_image(provider_deployment_observation.deployment_id)
         if application_lifecycle is not None:
             try:
                 require_cleanup_authority()
