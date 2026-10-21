@@ -391,7 +391,7 @@ def validate_fresh_testing_intent(
 ) -> None:
     """Refuse predictable execution failures before any production capture."""
     import re
-    from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
+    from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_ACCEPTED_VALUES
 
     names = [name.strip() for name in modules.split(",") if name.strip()]
     if not names or any(
@@ -409,10 +409,10 @@ def validate_fresh_testing_intent(
             ("google_analytics.", "plausible.", "google_tag_manager.")
         ):
             raise ValueError("Fresh testing cannot apply integration connection settings.")
-        if key in CONNECTION_ISOLATION_PARAMETERS and item["value"] != {
-            "source": "literal",
-            "value": CONNECTION_ISOLATION_PARAMETERS[key],
-        }:
+        if key in CONNECTION_ISOLATION_ACCEPTED_VALUES and item["value"] not in [
+            {"source": "literal", "value": value}
+            for value in CONNECTION_ISOLATION_ACCEPTED_VALUES[key]
+        ]:
             raise ValueError("Fresh testing cannot replace its connection fences.")
     for item in payload.get("addon_settings", []):
         if (

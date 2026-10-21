@@ -144,7 +144,10 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             "_database_mutation_timestamp",
             return_value=self.now(-600 if expired else 0),
         ):
-            record = self.store.reserve_mutation(
+            from tests.support.provider_target_history import reserve_historical_mutation
+
+            record = reserve_historical_mutation(
+                self.store,
                 scope=reconcile_reservation_scope(self.profile.product),
                 route_path=GENERIC_WEB_DEPLOY_ROUTE,
                 idempotency_key=f"{RECONCILE_SOURCE}:{self.profile.product}:{self.context}:testing:old",
@@ -210,7 +213,17 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         self.assertEqual(completed.response_payload["recovery"], audit)
         self.assertEqual(completed.request_fingerprint, record.request_fingerprint)
         self.assertIsNone(self.recover(record))
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
         new = self.store.reserve_mutation(
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.target.ship_request.context,
+                instance=self.target.ship_request.instance,
+                provider_id=self.target.ship_request.provider_id,
+                target_type=self.target.resolved_target.target_type,
+                target_id=self.target.resolved_target.target_id,
+            ),
             scope=record.scope,
             route_path=record.route_path,
             idempotency_key="new-build",

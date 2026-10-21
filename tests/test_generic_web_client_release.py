@@ -2304,6 +2304,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             idempotency_key=f"{accepted.record_id}:promote-1",
         )
         assert promotion is not None
+        origin = self.store.read_provider_target_origin(promotion)
+        assert origin is not None
         competing = self.store.reserve_mutation(
             scope="manual-deploy",
             route_path="/v1/admin/generic-web/deploy",
@@ -2312,6 +2314,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             lease_owner="admin-worker",
             reconciliation_key=promotion.reconciliation_key,
             provider_target_key=promotion.provider_target_key,
+            provider_target_origin=origin.origin,
         )
         self.assertEqual(competing.status, "acquired")
         effects = list(self.provider.deployed_artifacts)

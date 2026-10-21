@@ -112,6 +112,17 @@ class PublishedRecoveryTests(unittest.TestCase):
             first = self.run_recovery()
             self.assertEqual(first.status, "completed")
             self.assertEqual(self.run_recovery().response_payload, first.response_payload)
+        capsule = self.store.read_provider_target_origin(first.record)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (self.record.product, self.record.context, "prod", self.record.target_id),
+        )
         self.assertEqual(len(self.calls), 1)
         self.assertFalse(first.response_payload["result"]["captured_database_empty"])
         saved = custody(self.store, self.record.product, self.record.context)

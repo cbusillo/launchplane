@@ -358,6 +358,28 @@ class TaskRouteTests(unittest.TestCase):
         provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
         status, receipt = self.invoke(provision, "provision")
         self.assertEqual((status, receipt["result"]["status"]), (200, "pass"))
+        reservation = self.store.read_idempotency_record(
+            scope=walkthrough_activity_scope(provision.product),
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="provision",
+        )
+        assert reservation is not None
+        capsule = self.store.read_provider_target_origin(reservation)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                provision.product,
+                provision.context,
+                "testing",
+                self.plan.connection.evidence.target_id,
+            ),
+        )
         password = self.account.call_args.kwargs["payload"]["password"]
         self.assertTrue(password)
         self.assertNotIn(password, json.dumps(receipt))
@@ -428,22 +450,59 @@ class TaskRouteTests(unittest.TestCase):
         )
 
     def test_live_original_lease_cannot_be_settled_or_inspected_as_an_ended_dispatch(self) -> None:
+        from control_plane.odoo_walkthrough import WalkthroughAdapter
+
         provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
         identity = LocalOperatorIdentity(subject="test-agent", token_label="test-token")
         actor = walkthrough_actor(identity)
-        self.store.reserve_mutation(
+        adapter = WalkthroughAdapter(
+            store=self.store,
+            root=self.root,
+            request=provision,
+            actor=actor,
+            plan=self.plan,
+            trace="live",
+        )
+        acquired = self.store.reserve_mutation(
             scope=walkthrough_activity_scope(task_request().product),
             route_path=WALKTHROUGH_ROUTE,
             idempotency_key="live",
             request_fingerprint=walkthrough_fingerprint(actor, provision),
             lease_owner="other-live-worker",
             reconciliation_key=self.plan.digest,
-            provider_target_key="active-fixture-target",
+            provider_target_key=adapter.target_key(),
+            provider_target_origin=adapter.provider_target_origin(),
         )
         self.planner.side_effect = ValueError("current lane is held")
         status, response = self.invoke(provision, "live")
         self.assertEqual(status, 409)
         self.assertEqual(response["detail"]["code"], WALKTHROUGH_RECONCILIATION_REQUIRED)
+        self.finished.assert_not_called()
+        self.account.assert_not_called()
+
+        assert acquired.record is not None
+        reservation = acquired.record
+        custody = self.store.read_provider_target_origin(reservation)
+        reserve = self.store.reserve_mutation
+
+        def reserve_after_clean_release(**kwargs: Any) -> Any:
+            self.assertEqual(
+                self.store.release_reserved_mutation(reservation=reservation).status, "released"
+            )
+            return reserve(**kwargs)
+
+        with patch.object(self.store, "reserve_mutation", side_effect=reserve_after_clean_release):
+            status, response = self.invoke(provision, "live")
+        self.assertEqual(status, 409)
+        self.assertEqual(response["detail"]["code"], WALKTHROUGH_RECONCILIATION_REQUIRED)
+        self.assertEqual(self.store.read_provider_target_origin(reservation), custody)
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+        )
         self.finished.assert_not_called()
         self.account.assert_not_called()
 

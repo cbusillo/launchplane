@@ -1602,18 +1602,120 @@ Prelaunch failures therefore stay visible as readiness evidence without being
 reported as public outages. Moving to `public` deterministically activates
 incident eligibility on the next monitor cycle.
 
-The monitor also watches every generic-web lane's deploy fence, with no lane
-configuration. A lane whose provider target is held by an unresolved deploy
-gets a Launchplane-owned `provider` check named `launchplane-deploy-fence`:
-it fails with `deploy_fence_held`, at warning severity, once a `running`
-reservation's lease has expired or a `reconcile_required` reservation has
-stood for 15 minutes. The incident names the held deploy's idempotency key,
-start time, and last provider-effect phase, notifies through the lane's
-notification policies, and resolves on the first cycle after recovery clears
-the fence. The monitor never clears a fence itself. Lanes with no fence and no
-open fence incident get no probe. A later deploy refused by that fence gets
-409 `mutation_reconciliation_required` naming when the held request started,
-instead of `mutation_in_progress`.
+The monitor also watches all shared generic-web provider-parent holds captured
+for a product lane, without lane configuration and independently of today's
+provider target or driver. Its Launchplane-owned `provider` check is named
+`launchplane-deploy-fence`. It counts every held operation and fails with
+`deploy_fence_held`, at warning severity, once any `running` reservation's lease
+has expired or a `reconcile_required` reservation has stood for 15 minutes. A
+live replacement never hides a stuck old hold. The incident reports safe
+reservation IDs, times and phases; caller scopes, request keys, fingerprints
+and physical-key hashes stay private.
+
+New incident material retains opaque reservation-ID/operation-nonce references
+in the existing route authority. A matching completed row establishes only
+that this incarnation no longer holds a key, even if its terminal result was a
+failure. A missing row, mismatched nonce or invalid receipt remains unverified.
+Nonce-less participants also retain typed attention markers: one records current
+held membership, and one records unverified history. Neither marker establishes
+an incarnation or proves settlement. Adding or removing a held legacy row changes
+incident material, while its unverified component remains, including in mixed
+nonce-backed/legacy warnings. This missing-incarnation limit applies even when a
+warning is newly opened for an old operation. Recovery never backfills a nonce.
+Historical reference-less warnings cannot acquire strong incarnation proof
+from present-day absence, and generic monitoring retirement does not resolve
+them. This conservative limit also covers indistinguishable historical Odoo
+replacement warnings. New service-testing replacement participants retain a
+separate typed reference to their captured operation ID, lane and creation time.
+The exact canonical typed row and indexed projection must still agree. Missing,
+corrupt or changed identity remains unavailable. Pending/running operations do
+not open a new stuck warning; a previously captured participant stays unresolved
+until its terminal record is proved. Genuine cancellation, supersession or
+terminal failure settles only that typed hold, never deployment verification.
+The shared typed writer preserves original request identity across updates and
+imports and refuses every terminal status change/reinitialization. Initial,
+identical and valid same-terminal metadata imports remain supported; source
+revalidation still fences changed terminal evidence during observation. Completion
+by the execution lease holder rejects changed original identity.
+Preview reservation probes keep their own existing path. The monitor never clears a provider fence.
+
+Original custody comes from the immutable receipt, or a legacy encoded snapshot
+whose product is present and physical key recomputes exactly. Current target
+matches remain separate metadata. Unattributed rows remain in service attention rather than being assigned to
+every product sharing a context. The bounded service read and Product Ops
+attention panel below expose them without inventing original ownership. If product A's old physical key
+becomes product B's current lane, A keeps its original attention and B is only
+current-match metadata. There is no separate inherited product-B warning.
+Deleted/inactive A rows remain service attention. Exact qualified testing separation
+still uses its existing activation/execution-exclusion proof; origin alone
+cannot detach an opaque hold.
+
+`GET /v1/operations/provider-hold-attention` requires existing `operations.read`
+on product/context `launchplane`, checked before any held-record read. A lane
+reader cannot observe unknown service rows or counts. Responses, including
+errors, are `no-store`. Unsupported storage or contradictory held-row payload
+and indexed columns makes the evidence unavailable, never an empty all-clear.
+The route performs a storage keyset read ordered by unique reservation ID with
+`limit + 1` rows (default 50, maximum 100), followed by one bounded receipt batch.
+It uses the same parent membership and strict origin projection as monitoring;
+unrelated namespaces and suffixed child effects do not consume a page.
+
+The closed response contains only nonce-backed opaque operation references when
+proved, original product/context/instance when proved, explicit retained/legacy/
+unavailable/corrupt attribution, held state, coarse recorded-effect phase, and
+times. Free-form phase text, physical provider identities, caller scopes, request
+keys/fingerprints, private intent and internal source hashes are omitted. The
+coarse phase says only whether a checkpoint was recorded; it cannot establish
+provider effects or their absence. Legacy custody without a nonce has no strong
+operation reference. Deleted/inactive original scopes remain visible without
+consulting today's product inventory. Current-target associations do not supply
+ownership and are not included in this public page.
+
+`has_more` and `next_cursor` support bounded continuation. `completeness` is
+`single_page` only on an untruncated first read, otherwise `partial`, including
+an empty last page. Pages are independent observations of changing records, not
+a snapshot assembled across requests or proof of safe recovery. Refresh starts
+at the first page. The fresh-read deadline bounds attention claims; neither an
+empty page nor completion of one operation settles another operation or grants
+replay, retry, release, or clear authority.
+
+Provider observations are accepted only after a short same-session source
+recheck under the existing membership advisory lock. Fresh insertion, unbound
+reclaim and supersession join that lock before row locks and lease timestamps.
+For typed membership the monitor first tries the existing Odoo lane admission
+lock without waiting; contention leaves the provider observation unaccepted.
+It then locks reservation/reference rows and only the expected lane's typed
+candidates plus exact referenced IDs before checking separation and incident
+authority. Typed row changes and new admission are therefore fenced through
+acceptance; there is no provider I/O under these locks. Lease renewal alone does not invalidate the semantic source
+witness. The same stuck/grace predicate classifies the original observation and
+the locked current rows at database acceptance time; a classification change,
+including elapsed grace without a row write, rejects the observation. All other
+source identity, membership, incarnation and authority checks remain exact.
+Application separation reads its captured activation history and real original
+parent completion in that same transaction, only for scopes demanded by a
+testing hold. Unused or unrelated application history is not validated by a
+lane projection. Unreadable requested proof retains the hold and contributes an
+unavailable outcome to its source witness. Both readable inputs contribute to the source
+witness and scheduler change detection; progress alone never proves separation.
+Bulk discovery may load completed history for several incidents. Each lane's
+source includes only active membership and its own requested history, so another
+lane's unresolved incident cannot change its locked source comparison. Requested
+but mismatched incarnation or lane proof stays unavailable and cannot settle a hold.
+A nonblocking shared product-authority lock avoids waiting
+behind a publisher that holds authority and needs a reservation. A changed or
+busy source leaves the observation unaccepted/skipped, with no persisted pass,
+recovery event or notification outbox. Normal scheduler change detection or
+cadence retries it. No provider or notification call runs under these locks.
+Lanes with no hold and no open warning receive no provider probe. Malformed
+reservation or provider-authority evidence makes the provider source explicitly
+unavailable: its observation remains unaccepted/skipped and cannot clear an
+incident. Each failed discovery writes one fixed, value-free warning to service
+logs. This diagnostic warning does not create a persisted incident, notification
+or UI alert. HTTP, TLS and private checks and scheduler authority detection continue;
+no invalid held row is treated as absent or assigned invented custody. The
+strict service attention read still returns unavailable for contradictory held
+records rather than an empty page.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6
@@ -3091,8 +3193,10 @@ carriers, clears their known stored credential columns (including USPS REST),
 and disables their production mode. Fixed-price/rule-based delivery remains
 available. `database.is_neutralized` makes Odoo disable freshly created IAP
 accounts; invalid-scheme SMS/IAP endpoints also reject synchronous sends before
-opening a network connection. Existing Shopify development-store settings are
-preserved. Neither a carrier nor an IAP allowance exempts these checks.
+opening a network connection. Readback accepts the neutralization flag as written
+(`true`) or as the shared settings add-on stores it at web startup (`True`); any
+other value, a missing flag, or a changed endpoint refuses. Existing Shopify
+development-store settings are preserved. Neither a carrier nor an IAP allowance exempts these checks.
 
 The independent integration readback now checks that state on every
 non-production deploy/bootstrap/restore. Ordinary maintenance reapplies isolation

@@ -1342,6 +1342,36 @@ class FreshTestingIntentTests(unittest.TestCase):
             readback_spec=spec,
         )
 
+    def test_connection_fences_accept_only_safe_neutralization_literals(self) -> None:
+        from control_plane.odoo_testing_restore import validate_fresh_testing_intent
+        from control_plane.odoo_connection_isolation import (
+            CONNECTION_ISOLATION_PARAMETERS,
+            NEUTRALIZED_FLAG,
+        )
+
+        spec = base64.b64encode(json.dumps({"families": []}).encode()).decode()
+
+        def fence_payload(value: object) -> str:
+            item = {"key": NEUTRALIZED_FLAG, "value": value}
+            return base64.b64encode(json.dumps({"config_parameters": [item]}).encode()).decode()
+
+        for stored in (CONNECTION_ISOLATION_PARAMETERS[NEUTRALIZED_FLAG], str(True)):
+            validate_fresh_testing_intent(
+                modules="website",
+                encoded_payload=fence_payload({"source": "literal", "value": stored}),
+                readback_spec=spec,
+            )
+        for unsafe in (
+            {"source": "literal", "value": str(False)},
+            {"source": "literal", "value": ""},
+            {"source": "secret_binding", "value": str(True)},
+            {"source": "literal", "value": str(True), "environment_variable": "OVERRIDE"},
+        ):
+            with self.subTest(value=unsafe), self.assertRaises(ValueError):
+                validate_fresh_testing_intent(
+                    modules="website", encoded_payload=fence_payload(unsafe), readback_spec=spec
+                )
+
     def test_stale_lock_requires_terminal_schedule_and_dead_owner_and_stays_in_copy(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory).resolve()

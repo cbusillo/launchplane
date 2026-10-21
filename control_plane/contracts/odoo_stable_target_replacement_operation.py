@@ -301,6 +301,23 @@ def odoo_stable_target_replacement_operation_is_terminal(
     return record.status in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES
 
 
+def odoo_replacement_original_identity(
+    record: OdooStableTargetReplacementOperationRecord,
+) -> tuple[object, ...]:
+    """Original request identity, shared by import and owner-CAS updates."""
+    return (
+        record.operation_id,
+        record.product,
+        record.context,
+        record.instance,
+        record.created_at,
+        record.idempotency_scope,
+        record.idempotency_key,
+        record.request_fingerprint,
+        record.request.model_dump(mode="json"),
+    )
+
+
 def _normalize_required(value: str, message: str) -> str:
     normalized = value.strip()
     if not normalized:

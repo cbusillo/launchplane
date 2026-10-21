@@ -1,5 +1,28 @@
 from __future__ import annotations
 
+from control_plane.provider_hold_attention import (
+    PROVIDER_HOLD_PAGE_LIMIT,
+    ProviderHoldAttentionPage,
+    parse_provider_hold_cursor,
+    provider_hold_page,
+)
+
+from control_plane.provider_target_holds import (
+    ProviderHoldAuthorityBusy,
+    ProviderHoldLaneSnapshot,
+    ProviderTargetHold,
+    ProviderOperationReference,
+    TestingReplacementReference,
+    bound_provider_target_origin,
+    project_provider_target_hold,
+    provider_hold_source_sha256,
+    provider_hold_classification,
+)
+from control_plane.contracts.provider_target_origin import (
+    ProviderTargetOrigin,
+    RetainedProviderTargetOrigin,
+    requires_provider_target_origin,
+)
 from urllib.parse import urlsplit
 
 from control_plane.route_binding_reconcile import (
@@ -361,6 +384,9 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    build_odoo_stable_target_replacement_operation_id,
+    odoo_replacement_original_identity,
+    odoo_stable_target_replacement_operation_is_terminal,
 )
 from control_plane.odoo_stable_lane import (
     ODOO_STABLE_LANE_BLOCKING_STATUSES,
@@ -761,6 +787,7 @@ TrustedMaintenancePolicyCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 PublicIngressTransitionWriteStatus = Literal[
+    "provider_source_changed",
     "written",
     "authority_changed",
     "incident_changed",
@@ -5731,25 +5758,28 @@ class PostgresRecordStore(HumanSessionStore):
                 snapshots.setdefault((context, instance), []).append(
                     ("secret-version", secret_id, version_id, status)
                 )
-        from control_plane.workflows.generic_web_deploy_provider import (
-            decode_generic_web_provider_reconciliation_target,
+        lane_keys = tuple(
+            (profile.product, lane.context, lane.instance)
+            for profile in profiles
+            for lane in profile.lanes
         )
-
-        for reservation in self.list_held_provider_target_reservations():
-            try:
-                target = decode_generic_web_provider_reconciliation_target(
-                    reservation.reconciliation_key
-                )
-            except ValueError:
-                continue
-            snapshots.setdefault((target.context, target.instance), []).append(
-                ("deploy-fence", reservation.record_id, reservation.state)
+        try:
+            provider_snapshots = self.read_provider_hold_snapshots(
+                lane_keys=lane_keys, references_by_lane={}
             )
+            fence_snapshots = {
+                lane: [("provider-holds", snapshot.source_sha256)]
+                for lane, snapshot in provider_snapshots.items()
+            }
+        except ValueError:
+            # Malformed evidence must wake monitoring without inventing custody.
+            fence_snapshots = {lane: [("provider-holds", "unavailable")] for lane in lane_keys}
         revisions = {}
         for profile in profiles:
             for lane in profile.lanes:
                 material = [
                     profile.model_dump(mode="json"),
+                    *fence_snapshots.get((profile.product, lane.context, lane.instance), []),
                     *snapshots.get(("", ""), []),
                     *snapshots.get((lane.context, ""), []),
                     *snapshots.get((lane.context, lane.instance), []),
@@ -8425,6 +8455,32 @@ class PostgresRecordStore(HumanSessionStore):
     def _original_mutation_intent(
         self, session: Any, reservation: LaunchplaneIdempotencyRecord, *, for_update: bool = False
     ) -> dict[str, Any]:
+        receipt = self._original_mutation_receipt(session, reservation, for_update=for_update)
+        intent = receipt.response_payload.get("original_intent") if receipt else None
+        return intent if isinstance(intent, dict) else {}
+
+    def _read_provider_hold_record(
+        self, row: LaunchplaneIdempotencyRow
+    ) -> LaunchplaneIdempotencyRecord:
+        """Reject contradictory indexed source before interpreting held/terminal evidence."""
+        record = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        canonical = record.model_dump(mode="json")
+        if any(value != canonical.get(name) for name, value in row.payload.items()) or any(
+            canonical.get(column.name) != getattr(row, column.name)
+            for column in LaunchplaneIdempotencyRow.__table__.columns
+            if column.name != "payload"
+        ):
+            raise ValueError("Provider operation source projection is unavailable.")
+        return record
+
+    def _original_mutation_receipt(
+        self,
+        session: Any,
+        reservation: LaunchplaneIdempotencyRecord,
+        *,
+        for_update: bool = False,
+        require_projection: bool = False,
+    ) -> LaunchplaneIdempotencyRecord | None:
         statement = self._idempotency_statement(
             scope=reservation.scope,
             route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
@@ -8434,26 +8490,459 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update()
         row = session.scalar(statement)
         if row is None:
-            return {}
-        receipt = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+            return None
+        receipt = (
+            self._read_provider_hold_record(row)
+            if require_projection
+            else self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        )
         if (
             receipt.state != "completed"
             or receipt.request_fingerprint != reservation.request_fingerprint
             or receipt.response_payload.get("reservation_id") != reservation.record_id
         ):
-            return {}
-        intent = receipt.response_payload.get("original_intent")
-        if not isinstance(intent, dict):
-            return {}
-        return intent
+            return None
+        return receipt
+
+    def read_provider_target_origin(
+        self, reservation: LaunchplaneIdempotencyRecord
+    ) -> RetainedProviderTargetOrigin | None:
+        """Internal bound custody read; missing or invalid evidence stays unavailable."""
+        with self._session_factory() as session:
+            try:
+                receipt = self._original_mutation_receipt(
+                    session, reservation, require_projection=True
+                )
+            except ValueError:
+                return None
+            return bound_provider_target_origin(reservation, receipt)
+
+    def read_provider_hold_snapshot(
+        self,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+        references: tuple[str, ...] = (),
+    ) -> ProviderHoldLaneSnapshot:
+        with self._session_factory() as session:
+            holds, authority = self._provider_target_holds(session, references=references)
+            return self._provider_hold_lane_snapshot(
+                holds,
+                authority,
+                product=product,
+                context=context,
+                instance=instance,
+                references=references,
+            )
+
+    def read_provider_hold_snapshots(
+        self,
+        *,
+        lane_keys: tuple[tuple[str, str, str], ...],
+        references_by_lane: dict[tuple[str, str, str], tuple[str, ...]],
+    ) -> dict[tuple[str, str, str], ProviderHoldLaneSnapshot]:
+        references = tuple(
+            sorted({value for values in references_by_lane.values() for value in values})
+        )
+        with self._session_factory() as session:
+            holds, authority = self._provider_target_holds(session, references=references)
+            return {
+                lane: self._provider_hold_lane_snapshot(
+                    holds,
+                    authority,
+                    product=lane[0],
+                    context=lane[1],
+                    instance=lane[2],
+                    references=references_by_lane.get(lane, ()),
+                )
+                for lane in lane_keys
+            }
+
+    def list_provider_target_holds(self) -> tuple[ProviderTargetHold, ...]:
+        """Bulk internal projection. Unattributed rows remain in this service-level result."""
+        with self._session_factory() as session:
+            holds, _authority = self._provider_target_holds(session)
+            return tuple(hold for hold in holds if hold.reservation.state != "completed")
+
+    def _project_provider_hold_reservations(
+        self,
+        session: Any,
+        reservations: tuple[LaunchplaneIdempotencyRecord, ...],
+        *,
+        for_update: bool = False,
+    ) -> tuple[ProviderTargetHold, ...]:
+        receipt_ids = tuple(
+            build_launchplane_mutation_reservation_id(
+                scope=row.scope,
+                route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                idempotency_key=row.record_id,
+            )
+            for row in reservations
+        )
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(LaunchplaneIdempotencyRow.record_id.in_(receipt_ids))
+            .order_by(LaunchplaneIdempotencyRow.record_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        receipts: dict[str, LaunchplaneIdempotencyRecord | None] = {}
+        for row in session.scalars(statement):
+            try:
+                receipts[row.record_id] = self._read_provider_hold_record(row)
+            except ValueError:
+                receipts[row.record_id] = None
+        return tuple(
+            project_provider_target_hold(
+                reservation,
+                receipts.get(receipt_id),
+                receipt_corrupt=receipt_id in receipts and receipts[receipt_id] is None,
+            )
+            for reservation in reservations
+            for receipt_id in (
+                build_launchplane_mutation_reservation_id(
+                    scope=reservation.scope,
+                    route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                    idempotency_key=reservation.record_id,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _provider_hold_membership() -> Any:
+        return (
+            LaunchplaneIdempotencyRow.provider_target_key.startswith("generic-web-provider-target:")
+            & ~LaunchplaneIdempotencyRow.provider_target_key.regexp_match(
+                r"^generic-web-provider-target:[0-9a-f]{64}:.+$"
+            )
+            & LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
+        )
+
+    def read_provider_hold_attention_page(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ProviderHoldAttentionPage:
+        """One bounded indexed keyset read, followed by a bounded batch origin read."""
+        if not 1 <= limit <= PROVIDER_HOLD_PAGE_LIMIT:
+            raise ValueError("Invalid provider attention page limit.")
+        after_id = parse_provider_hold_cursor(cursor)
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneIdempotencyRow)
+                .where(
+                    self._provider_hold_membership(), LaunchplaneIdempotencyRow.record_id > after_id
+                )
+                .order_by(LaunchplaneIdempotencyRow.record_id)
+                .limit(limit + 1)
+            )
+            # Validate indexed columns against payload before projecting. A corrupt held
+            # source makes this page unavailable rather than silently disappearing.
+            reservations = tuple(
+                self._read_provider_hold_record(row) for row in session.scalars(statement)
+            )
+            holds = self._project_provider_hold_reservations(session, reservations)
+            return provider_hold_page(holds, limit=limit, cursor=cursor)
+
+    def _provider_hold_replacements(
+        self,
+        session: Any,
+        *,
+        references: tuple[str, ...],
+        for_update: bool,
+        lane_key: tuple[str, str, str] | None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]:
+        from control_plane.testing_replacement_recovery import service_testing_operation
+
+        reference_ids = tuple(
+            reference.operation_id
+            for value in references
+            if (reference := TestingReplacementReference.parse(value)) is not None
+        )
+        membership = and_(
+            LaunchplaneOdooStableTargetReplacementOperationRow.status.in_(
+                ("pending", "running", "reconciliation_required")
+            )
+        )
+        if lane_key is not None:
+            membership = membership & (
+                (LaunchplaneOdooStableTargetReplacementOperationRow.product == lane_key[0])
+                & (LaunchplaneOdooStableTargetReplacementOperationRow.context == lane_key[1])
+                & (LaunchplaneOdooStableTargetReplacementOperationRow.instance == lane_key[2])
+            )
+        statement = (
+            select(LaunchplaneOdooStableTargetReplacementOperationRow)
+            .where(
+                membership
+                | LaunchplaneOdooStableTargetReplacementOperationRow.operation_id.in_(reference_ids)
+            )
+            .order_by(LaunchplaneOdooStableTargetReplacementOperationRow.operation_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        records = []
+        for row in session.scalars(statement):
+            record = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+            if not service_testing_operation(record):
+                continue
+            parse_launchplane_mutation_timestamp(record.created_at, field_name="created_at")
+            if odoo_stable_target_replacement_operation_is_terminal(record):
+                parse_launchplane_mutation_timestamp(record.finished_at, field_name="finished_at")
+            if record.status == "cancelled" and (
+                record.cancellation is None
+                or record.cancellation.reconciliation_attestation is None
+            ):
+                raise ValueError("Typed provider cancellation proof is unavailable.")
+            canonical = self._payload_dict(record)
+            if (
+                any(value != canonical.get(name) for name, value in row.payload.items())
+                or any(
+                    canonical.get(column.name) != getattr(row, column.name)
+                    for column in LaunchplaneOdooStableTargetReplacementOperationRow.__table__.columns
+                    if column.name != "payload"
+                )
+                or record.operation_id
+                != build_odoo_stable_target_replacement_operation_id(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    created_at=record.created_at,
+                    idempotency_scope=record.idempotency_scope,
+                    idempotency_key=record.idempotency_key,
+                )
+            ):
+                raise ValueError("Typed provider operation source is unavailable.")
+            records.append(record)
+        return tuple(records)
+
+    def _provider_target_holds(
+        self,
+        session: Any,
+        *,
+        references: tuple[str, ...] = (),
+        for_update: bool = False,
+        lane_key: tuple[str, str, str] | None = None,
+    ) -> tuple[tuple[ProviderTargetHold, ...], "_ProviderHoldAuthorityView"]:
+        reference_ids = tuple(
+            reference.record_id
+            for value in references
+            if (reference := ProviderOperationReference.parse(value)) is not None
+        )
+        # One indexed membership read and one primary-key batch receipt read, including
+        # completed referenced rows. Never scan private family intent to discover origin.
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                self._provider_hold_membership()
+                | LaunchplaneIdempotencyRow.record_id.in_(reference_ids)
+            )
+            .order_by(LaunchplaneIdempotencyRow.record_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        reservations = tuple(
+            record
+            for row in session.scalars(statement)
+            if requires_provider_target_origin(
+                (record := self._read_provider_hold_record(row)).provider_target_key
+            )
+        )
+        projected = self._project_provider_hold_reservations(
+            session, reservations, for_update=for_update
+        )
+        replacements = self._provider_hold_replacements(
+            session, references=references, for_update=for_update, lane_key=lane_key
+        )
+        # Reservation -> typed rows -> nonblocking authority -> incident.
+        if for_update and not self.database_url.startswith("sqlite"):
+            if not session.scalar(
+                text("select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
+                {"lock_name": "launchplane:product-authority-bundle"},
+            ):
+                raise ProviderHoldAuthorityBusy("Product authority is being published.")
+        authority = _ProviderHoldAuthorityView(self, session, replacements=replacements)
+        from control_plane.testing_activation import retained_fence_is_separated
+        from control_plane.workflows.generic_web_deploy_provider import (
+            generic_web_provider_target_key,
+        )
+
+        current_lanes: dict[str, list[tuple[str, str, str]]] = {}
+        for profile in authority.list_product_profile_records():
+            for lane in profile.lanes:
+                try:
+                    target = authority.read_provider_target_record(
+                        context_name=lane.context, instance_name=lane.instance
+                    )
+                except FileNotFoundError:
+                    continue
+                key = generic_web_provider_target_key(
+                    provider_id=target.provider_id,
+                    context=lane.context,
+                    instance=lane.instance,
+                    target_type=target.provider_target_type,
+                    target_id=target.target_id,
+                )
+                current_lanes.setdefault(key, []).append(
+                    (profile.product, lane.context, lane.instance)
+                )
+        holds = []
+        for hold in projected:
+            reservation = hold.reservation
+            lanes = tuple(sorted(current_lanes.get(reservation.provider_target_key, ())))
+            holds.append(
+                replace(
+                    hold,
+                    separated=retained_fence_is_separated(authority, reservation),
+                    current_target_matches=hold.lane is not None and hold.lane in lanes,
+                    current_lanes=lanes,
+                )
+            )
+        return tuple(holds), authority
+
+    @staticmethod
+    def _provider_hold_lane_snapshot(
+        holds: tuple[ProviderTargetHold, ...],
+        authority: "_ProviderHoldAuthorityView",
+        *,
+        product: str,
+        context: str,
+        instance: str,
+        references: tuple[str, ...] = (),
+    ) -> ProviderHoldLaneSnapshot:
+        # A bulk read unions every incident's references. Terminal rows loaded only
+        # for another lane must not enter this lane's locked source comparison.
+        reference_ids = {
+            reference.record_id
+            for value in references
+            if (reference := ProviderOperationReference.parse(value)) is not None
+        }
+        replacement_ids = {
+            replacement_reference.operation_id
+            for value in references
+            if (replacement_reference := TestingReplacementReference.parse(value)) is not None
+        }
+        holds = tuple(
+            hold
+            for hold in holds
+            if hold.reservation.state in ("running", "reconcile_required")
+            or hold.reservation.record_id in reference_ids
+        )
+        lane = (product, context, instance)
+        by_reference = {hold.reference: hold for hold in holds if hold.reference}
+        replacement_source = tuple(
+            record
+            for record in authority.replacement_operations
+            if (
+                not odoo_stable_target_replacement_operation_is_terminal(record)
+                or record.operation_id in replacement_ids
+            )
+            and (
+                (record.product, record.context, record.instance) == lane
+                or record.operation_id in replacement_ids
+            )
+        )
+        replacements = tuple(
+            record
+            for record in replacement_source
+            if (record.product, record.context, record.instance) == lane
+        )
+        by_replacement_reference = {
+            TestingReplacementReference.from_record(record).encode(): record
+            for record in replacements
+        }
+        unavailable = tuple(
+            sorted(
+                value
+                for value in references
+                if (value not in by_reference or by_reference[value].lane != lane)
+                and value not in by_replacement_reference
+            )
+        )
+        selected = tuple(
+            hold
+            for hold in holds
+            if (
+                hold.lane == lane
+                and hold.reservation.state in ("running", "reconcile_required")
+                and not hold.separated
+            )
+        )
+        # Heartbeat timestamps are classified separately at observation and locked
+        # acceptance times. Preserve every other source/separation input exactly.
+        material = [
+            [
+                (
+                    hold.reservation.model_dump(
+                        mode="json", exclude={"updated_at", "lease_expires_at"}
+                    ),
+                    hold.origin.model_dump(mode="json") if hold.origin else None,
+                    hold.attribution,
+                    str(hold.operation_nonce),
+                    hold.separated,
+                    hold.current_lanes,
+                )
+                for hold in holds
+                if hold.lane == lane
+                or lane in hold.current_lanes
+                or hold.reservation.record_id in reference_ids
+            ],
+            references,
+            unavailable,
+            authority.material_for_lane(
+                product,
+                context,
+                instance,
+                reservations=tuple(
+                    hold.reservation
+                    for hold in holds
+                    if hold.lane == lane
+                    or lane in hold.current_lanes
+                    or hold.reservation.record_id in reference_ids
+                ),
+            ),
+            [
+                record.model_dump(
+                    mode="json", exclude={"updated_at", "heartbeat_at", "lease_expires_at"}
+                )
+                for record in replacement_source
+            ],
+        ]
+        return ProviderHoldLaneSnapshot(
+            product,
+            context,
+            instance,
+            selected,
+            tuple(sorted(references)),
+            unavailable,
+            provider_hold_source_sha256(material),
+            replacements,
+        )
 
     def _retain_original_mutation_intent(
         self,
         session: Any,
         reservation: LaunchplaneIdempotencyRecord,
         original_intent: dict[str, Any] | None,
+        provider_target_origin: ProviderTargetOrigin | None = None,
     ) -> None:
-        if not original_intent:
+        capsule = None
+        if requires_provider_target_origin(reservation.provider_target_key):
+            if (
+                provider_target_origin is None
+                or provider_target_origin.target_key() != reservation.provider_target_key
+            ):
+                raise ValueError(
+                    "Fresh shared provider reservations require their original recipient."
+                )
+            capsule = RetainedProviderTargetOrigin(
+                origin=ProviderTargetOrigin.model_validate(provider_target_origin.model_dump()),
+                operation_nonce=uuid4(),
+            )
+        elif provider_target_origin is not None:
+            raise ValueError("Original recipient requires the shared provider target key.")
+        if not original_intent and capsule is None:
             return
         route = ORIGINAL_MUTATION_INTENT_ROUTE
         receipt = LaunchplaneIdempotencyRecord(
@@ -8471,7 +8960,8 @@ class PostgresRecordStore(HumanSessionStore):
             recorded_at=reservation.created_at,
             response_payload={
                 "reservation_id": reservation.record_id,
-                "original_intent": original_intent,
+                "original_intent": original_intent or {},
+                **({"provider_target_origin": capsule.model_dump(mode="json")} if capsule else {}),
             },
         )
         # Called only in the transaction that acquires a fresh reservation. A
@@ -8748,6 +9238,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_seconds: int = 300,
         reconciliation_key: str = "",
         provider_target_key: str = "",
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         return self._reserve_mutation(
@@ -8760,6 +9251,7 @@ class PostgresRecordStore(HumanSessionStore):
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
             original_intent=original_intent,
+            provider_target_origin=provider_target_origin,
             retry_missing_collision=True,
         )
 
@@ -8825,6 +9317,7 @@ class PostgresRecordStore(HumanSessionStore):
         reconciliation_key: str,
         provider_target_key: str,
         retry_missing_collision: bool,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         normalized_scope = scope.strip()
@@ -8841,6 +9334,12 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                if requires_provider_target_origin(
+                    normalized_provider_target_key
+                ) and not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
                 if normalized_provider_target_key.startswith("testing-private-ingress:"):
                     # Private edge admission and native application publication
                     # share the same authority transaction fence.
@@ -8870,7 +9369,10 @@ class PostgresRecordStore(HumanSessionStore):
                     provider_target_key=normalized_provider_target_key,
                 )
                 session.add(self._idempotency_row(reservation))
-                self._retain_original_mutation_intent(session, reservation, original_intent)
+                session.flush()
+                self._retain_original_mutation_intent(
+                    session, reservation, original_intent, provider_target_origin
+                )
                 session.commit()
             return MutationReservationResult(status="acquired", record=reservation)
         except IntegrityError as error:
@@ -8878,6 +9380,12 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if requires_provider_target_origin(
+                normalized_provider_target_key
+            ) and not self.database_url.startswith("sqlite"):
+                from control_plane.service_deploy_drain import lock
+
+                lock(self, session)
             observed = self._observe_mutation_during_drain(
                 session,
                 scope=normalized_scope,
@@ -8917,6 +9425,7 @@ class PostgresRecordStore(HumanSessionStore):
                         reconciliation_key=reconciliation_key,
                         provider_target_key=provider_target_key,
                         original_intent=original_intent,
+                        provider_target_origin=provider_target_origin,
                         retry_missing_collision=False,
                     )
                 raise insert_error
@@ -9002,6 +9511,20 @@ class PostgresRecordStore(HumanSessionStore):
                 response_payload={},
             )
             self._sync_idempotency_row(row, reclaimed_record)
+            session.flush()
+            if (
+                requires_provider_target_origin(normalized_provider_target_key)
+                or provider_target_origin is not None
+            ):
+                # This was an unbound row, so assigning a shared physical key is
+                # a fresh admission. Preserve its existing family equality; a
+                # caller's different supplied intent must still conflict.
+                self._retain_original_mutation_intent(
+                    session,
+                    reclaimed_record,
+                    self._original_mutation_intent(session, current_record),
+                    provider_target_origin,
+                )
             session.commit()
             return MutationReservationResult(status="acquired", record=reclaimed_record)
 
@@ -9639,6 +10162,7 @@ class PostgresRecordStore(HumanSessionStore):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
         expected_original_intent: dict[str, Any] | None = None,
     ) -> MutationReconciliationSupersessionResult:
@@ -9665,6 +10189,12 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 from control_plane.service_deploy_drain import admit_reservation
 
+                if requires_provider_target_origin(
+                    normalized_provider_target_key
+                ) and not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
                 admit_reservation(self, session, scope, route_path)
                 row = session.scalar(
                     self._idempotency_statement(
@@ -9753,7 +10283,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))
-                self._retain_original_mutation_intent(session, replacement, original_intent)
+                session.flush()
+                self._retain_original_mutation_intent(
+                    session, replacement, original_intent, provider_target_origin
+                )
                 session.commit()
                 return MutationReconciliationSupersessionResult(
                     status="acquired",
@@ -9936,19 +10469,23 @@ class PostgresRecordStore(HumanSessionStore):
         product: str,
         context: str,
         instance: str,
-    ) -> None:
+        wait: bool = True,
+    ) -> bool:
         dialect_name = session.get_bind().dialect.name
         if dialect_name == "postgresql":
             lane_key = "".join(f"{len(value)}:{value}" for value in (product, context, instance))
-            session.execute(
+            function = "pg_advisory_xact_lock" if wait else "pg_try_advisory_xact_lock"
+            acquired = session.scalar(
                 text(
-                    "SELECT pg_advisory_xact_lock("
-                    "hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
+                    f"SELECT {function}(hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
                 ),
                 {"lane_key": lane_key},
             )
-        elif dialect_name == "sqlite":
+            return True if wait else bool(acquired)
+        elif dialect_name == "sqlite" and wait:
             session.execute(text("BEGIN IMMEDIATE"))
+
+        return True
 
     @staticmethod
     def _active_odoo_stable_lane_operation_owner(
@@ -10409,31 +10946,53 @@ class PostgresRecordStore(HumanSessionStore):
     def write_odoo_stable_target_replacement_operation_record(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> None:
-        self._write_row(
-            LaunchplaneOdooStableTargetReplacementOperationRow(
-                operation_id=record.operation_id,
-                product=record.product,
-                context=record.context,
-                instance=record.instance,
-                idempotency_key=record.idempotency_key,
-                idempotency_scope=record.idempotency_scope,
-                status=record.status,
-                phase=record.phase,
-                created_at=record.created_at,
-                updated_at=record.updated_at,
-                lease_owner=record.lease_owner,
-                lease_expires_at=record.lease_expires_at,
-                heartbeat_at=record.heartbeat_at,
-                attempt=record.attempt,
-                payload=self._payload_dict(record),
-            )
+        row = LaunchplaneOdooStableTargetReplacementOperationRow(
+            operation_id=record.operation_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            idempotency_key=record.idempotency_key,
+            idempotency_scope=record.idempotency_scope,
+            status=record.status,
+            phase=record.phase,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            lease_owner=record.lease_owner,
+            lease_expires_at=record.lease_expires_at,
+            heartbeat_at=record.heartbeat_at,
+            attempt=record.attempt,
+            payload=self._payload_dict(record),
         )
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=record.product, context=record.context, instance=record.instance
+            )
+            current = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                record.operation_id,
+                with_for_update=True,
+            )
+            if current is None:
+                session.add(row)
+            else:
+                self._sync_odoo_stable_target_replacement_operation_row(current, record)
+            session.commit()
 
     def _sync_odoo_stable_target_replacement_operation_row(
         self,
         row: LaunchplaneOdooStableTargetReplacementOperationRow,
         record: OdooStableTargetReplacementOperationRecord,
     ) -> None:
+        current = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+        if odoo_replacement_original_identity(current) != odoo_replacement_original_identity(
+            record
+        ):
+            raise ValueError("Original Odoo replacement request identity cannot change.")
+        if (
+            odoo_stable_target_replacement_operation_is_terminal(current)
+            and current.status != record.status
+        ):
+            raise ValueError("Terminal Odoo replacement status cannot change or be reused.")
         row.product = record.product
         row.context = record.context
         row.instance = record.instance
@@ -12801,83 +13360,115 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             session.commit()
 
+    def _testing_application_activation_evidence(
+        self,
+        session: Any,
+        *,
+        product: str | None = None,
+        context: str | None = None,
+        scope: str | None = None,
+        preparation_key: str | None = None,
+    ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
+        """Read bound activation progress and real parents in the caller's transaction."""
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
+            "testing_activation"
+        ]
+        statement = select(LaunchplaneIdempotencyRow).where(
+            LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+            payload["product"].as_string().is_not(None),
+            payload["context"].as_string().is_not(None),
+        )
+        for field, value in (("product", product), ("context", context)):
+            if value is not None:
+                statement = statement.where(payload[field].as_string() == value)
+        if scope is not None:
+            statement = statement.where(LaunchplaneIdempotencyRow.scope == scope)
+        if preparation_key is not None:
+            statement = statement.where(
+                payload["request"]["preparation_key"].as_string() == preparation_key
+            )
+        originals = tuple(
+            LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            for row in session.scalars(statement.order_by(LaunchplaneIdempotencyRow.record_id))
+        )
+        parent_ids = []
+        for original in originals:
+            try:
+                parent_id = original.response_payload["reservation_id"]
+                captured = original.response_payload["original_intent"]["testing_activation"]
+                preparation = captured["request"]["preparation_key"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError("Application activation original binding is unavailable.") from exc
+            if (
+                not isinstance(parent_id, str)
+                or not parent_id
+                or not isinstance(preparation, str)
+                or not preparation
+            ):
+                raise ValueError("Application activation original binding is unavailable.")
+            parent_ids.append(parent_id)
+        parents = {
+            row.record_id: row
+            for row in session.scalars(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.record_id.in_(parent_ids)
+                )
+            )
+        }
+        result = []
+        for original in originals:
+            try:
+                captured = original.response_payload["original_intent"]["testing_activation"]
+                product_name = captured["product"]
+                parent = parents.get(original.response_payload["reservation_id"])
+            except (KeyError, TypeError) as exc:
+                raise ValueError("Application activation original binding is unavailable.") from exc
+            parent_record = (
+                LaunchplaneIdempotencyRecord.model_validate(parent.payload)
+                if parent is not None
+                else None
+            )
+            if (
+                parent is None
+                or parent_record is None
+                or parent.scope != original.scope
+                or parent.route_path != f"/v1/products/{product_name}/testing-activation"
+                or parent_record.request_fingerprint != original.request_fingerprint
+            ):
+                continue
+            result.append((original, parent_record))
+        return tuple(result)
+
     def list_testing_application_activations(
         self, product: str, context: str
     ) -> tuple[dict[str, Any], ...]:
         """Progress belongs to a real retained parent, never a synthetic activation receipt."""
-        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
-            "testing_activation"
-        ]
         with self._session_factory() as session:
-            originals = session.scalars(
-                select(LaunchplaneIdempotencyRow).where(
-                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
-                    payload["product"].as_string() == product,
-                    payload["context"].as_string() == context,
+            return tuple(
+                original.response_payload.get(
+                    "testing_activation",
+                    original.response_payload["original_intent"]["testing_activation"],
                 )
-            ).all()
-            result = []
-            for row in originals:
-                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-                parent = session.scalar(
-                    select(LaunchplaneIdempotencyRow).where(
-                        LaunchplaneIdempotencyRow.record_id
-                        == original.response_payload["reservation_id"],
-                        LaunchplaneIdempotencyRow.scope == original.scope,
-                        LaunchplaneIdempotencyRow.route_path
-                        == f"/v1/products/{product}/testing-activation",
-                    )
+                for original, _parent in self._testing_application_activation_evidence(
+                    session, product=product, context=context
                 )
-                if (
-                    parent is None
-                    or parent.payload["request_fingerprint"] != original.request_fingerprint
-                ):
-                    continue
-                result.append(
-                    original.response_payload.get(
-                        "testing_activation",
-                        original.response_payload["original_intent"]["testing_activation"],
-                    )
-                )
-            return tuple(result)
+            )
 
     def read_testing_application_activation_operation(
         self, product: str, context: str, scope: str, preparation_key: str
     ) -> LaunchplaneIdempotencyRecord | None:
         """Resolve the real original parent; progress is never completion evidence."""
-        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
-            "testing_activation"
-        ]
         with self._session_factory() as session:
-            originals = session.scalars(
-                select(LaunchplaneIdempotencyRow).where(
-                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
-                    LaunchplaneIdempotencyRow.scope == scope,
-                    payload["product"].as_string() == product,
-                    payload["context"].as_string() == context,
-                    payload["request"]["preparation_key"].as_string() == preparation_key,
-                )
-            ).all()
-            parents = []
-            for row in originals:
-                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-                parent = session.scalar(
-                    select(LaunchplaneIdempotencyRow).where(
-                        LaunchplaneIdempotencyRow.record_id
-                        == original.response_payload["reservation_id"],
-                        LaunchplaneIdempotencyRow.scope == scope,
-                        LaunchplaneIdempotencyRow.route_path
-                        == f"/v1/products/{product}/testing-activation",
-                    )
-                )
-                if (
-                    parent is not None
-                    and parent.payload["request_fingerprint"] == original.request_fingerprint
-                ):
-                    parents.append(LaunchplaneIdempotencyRecord.model_validate(parent.payload))
-            if len(parents) > 1:
+            evidence = self._testing_application_activation_evidence(
+                session,
+                product=product,
+                context=context,
+                scope=scope,
+                preparation_key=preparation_key,
+            )
+            if len(evidence) > 1:
                 raise ValueError("Activation has more than one original parent operation.")
-            return parents[0] if parents else None
+            return evidence[0][1] if evidence else None
 
     def list_pending_odoo_testing_drill_alerts(
         self, product: str, context: str
@@ -14637,7 +15228,9 @@ class PostgresRecordStore(HumanSessionStore):
             )
             completed_at = _utc_now_timestamp()
             if (
-                current_record.status != "running"
+                odoo_replacement_original_identity(current_record)
+                != odoo_replacement_original_identity(record)
+                or current_record.status != "running"
                 or current_record.lease_owner != lease_owner.strip()
                 or not current_record.lease_expires_at
                 or current_record.lease_expires_at <= completed_at
@@ -29994,10 +30587,51 @@ class PostgresRecordStore(HumanSessionStore):
         expected_private_endpoint_key: str = "",
         expected_private_endpoint_sha256: str = "",
         expected_route_binding_sha256: str = "",
+        expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     ) -> PublicIngressTransitionWriteResult:
         check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if expected_provider_hold_snapshot is not None:
+                if not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
+                if not self._lock_odoo_stable_lane(
+                    session,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    wait=False,
+                ):
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
+                try:
+                    holds, authority = self._provider_target_holds(
+                        session,
+                        references=expected_provider_hold_snapshot.references,
+                        for_update=True,
+                        lane_key=(observation.product, observation.context, observation.instance),
+                    )
+                except (ProviderHoldAuthorityBusy, ValueError):
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
+                current_source = self._provider_hold_lane_snapshot(
+                    holds,
+                    authority,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    references=expected_provider_hold_snapshot.references,
+                )
+                if (
+                    current_source.source_sha256 != expected_provider_hold_snapshot.source_sha256
+                    or provider_hold_classification(
+                        expected_provider_hold_snapshot, checked_at=observation.observed_at
+                    )
+                    != provider_hold_classification(
+                        current_source, checked_at=self._database_mutation_timestamp(session)
+                    )
+                ):
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
             authority_changed = False
             if expected_profile_sha256:
                 profile_statement = (
@@ -30057,6 +30691,8 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 authority_changed = route_binding_sha256 != expected_route_binding_sha256
             if authority_changed:
+                if expected_provider_hold_snapshot is not None:
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
                 observation_row = LaunchplanePublicIngressObservationRow(
                     record_id=observation.record_id,
                     product=observation.product,
@@ -30125,6 +30761,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             if incident_changed:
+                if expected_provider_hold_snapshot is not None:
+                    # A retry can discover new held source. Do not leave an
+                    # unaccepted pass behind before that independent recheck.
+                    return PublicIngressTransitionWriteResult(status="incident_changed")
                 unlinked_observation = observation.model_copy(
                     update={"incident_id": "", "incident_event_id": ""}
                 )
@@ -33015,3 +33655,239 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1
         return counts
+
+
+class _ProviderHoldAuthorityView(PostgresRecordStore):
+    """Bulk same-session inputs for the existing retained-fence separation predicate.
+
+    This read-only view deliberately uses the predicate's existing store interface;
+    it cannot perform a provider call, acquire authority or write a record.
+    """
+
+    def __init__(
+        self,
+        store: PostgresRecordStore,
+        session: Any,
+        *,
+        replacements: tuple[OdooStableTargetReplacementOperationRecord, ...] = (),
+    ) -> None:
+        self.replacement_operations = replacements
+        self._profiles = tuple(
+            store._read_product_profile_payload(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneProductProfileRow).order_by(LaunchplaneProductProfileRow.product)
+            )
+        )
+        self._providers = tuple(
+            ProviderTargetRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneProviderTargetRow).order_by(
+                    LaunchplaneProviderTargetRow.context, LaunchplaneProviderTargetRow.instance
+                )
+            )
+        )
+        self._target_ids = tuple(
+            DokployTargetIdRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneDokployTargetIdRow).order_by(
+                    LaunchplaneDokployTargetIdRow.context, LaunchplaneDokployTargetIdRow.instance
+                )
+            )
+        )
+        self._targets = tuple(
+            DokployTargetRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneDokployTargetRow).order_by(
+                    LaunchplaneDokployTargetRow.context, LaunchplaneDokployTargetRow.instance
+                )
+            )
+        )
+        self._activations = {
+            (row.product, row.context): row.payload
+            for row in session.scalars(
+                select(LaunchplaneTestingActivationRow).order_by(
+                    LaunchplaneTestingActivationRow.product, LaunchplaneTestingActivationRow.context
+                )
+            )
+        }
+
+        self._application_store = store
+        self._application_session = session
+        self._application_evidence: dict[
+            tuple[str, str],
+            tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...] | None,
+        ] = {}
+
+    def __getattr__(self, name: str) -> NoReturn:
+        if name == "_session_factory":
+            raise ValueError("Provider hold authority requires a captured same-session read.")
+        raise AttributeError(name)
+
+    def _application_evidence_for_lane(
+        self, product: str, context: str
+    ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
+        key = (product, context)
+        if key not in self._application_evidence:
+            self._application_evidence[key] = None
+            self._application_evidence[key] = (
+                self._application_store._testing_application_activation_evidence(
+                    self._application_session, product=product, context=context
+                )
+            )
+        evidence = self._application_evidence[key]
+        if evidence is None:
+            raise ValueError("Application activation evidence is unavailable.")
+        return evidence
+
+    def material_for_lane(
+        self,
+        product: str,
+        context: str,
+        instance: str,
+        *,
+        reservations: tuple[LaunchplaneIdempotencyRecord, ...],
+    ) -> object:
+        # Only evidence demanded by the separation predicate belongs in its witness.
+        # This projection must never read more history outside that fail-closed boundary.
+        application_material: list[object] = []
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+
+        scopes = set()
+        for reservation in reservations:
+            try:
+                captured = decode_generic_web_provider_reconciliation_target(
+                    reservation.reconciliation_key
+                )
+            except ValueError:
+                continue
+            if captured.instance == "testing" and captured.product:
+                scopes.add((captured.product, captured.context))
+        for key in sorted(scopes):
+            if key not in self._application_evidence:
+                continue
+            evidence = self._application_evidence[key]
+            application_material.append(
+                (
+                    key,
+                    {"available": False}
+                    if evidence is None
+                    else [
+                        [
+                            record.model_dump(
+                                mode="json", exclude={"updated_at", "lease_expires_at"}
+                            )
+                            for record in pair
+                        ]
+                        for pair in evidence
+                    ],
+                )
+            )
+        target_ids = {
+            row.target_id
+            for row in self._providers
+            if (row.context, row.instance) == (context, instance)
+        } | {
+            row.target_id
+            for row in self._target_ids
+            if (row.context, row.instance) == (context, instance)
+        }
+        return [
+            [row.model_dump(mode="json") for row in self._profiles if row.product == product],
+            [
+                row.model_dump(mode="json")
+                for row in self._providers
+                if (row.context, row.instance) == (context, instance) or row.target_id in target_ids
+            ],
+            [
+                row.model_dump(mode="json")
+                for row in self._target_ids
+                if (row.context, row.instance) == (context, instance) or row.target_id in target_ids
+            ],
+            [
+                row.model_dump(mode="json")
+                for row in self._targets
+                if (row.context, row.instance) == (context, instance)
+            ],
+            [(key, self._activations.get(key)) for key in sorted(scopes)],
+            application_material,
+        ]
+
+    def close(self) -> None:
+        pass
+
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return tuple(row for row in self._profiles if not driver_id or row.driver_id == driver_id)
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        for row in self._profiles:
+            if row.product == product:
+                return row
+        raise FileNotFoundError("Original product is unavailable.")
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord:
+        for row in self._providers:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Provider target is unavailable.")
+
+    def list_provider_target_records(
+        self, *, provider_id: str = ""
+    ) -> tuple[ProviderTargetRecord, ...]:
+        return tuple(
+            row for row in self._providers if not provider_id or row.provider_id == provider_id
+        )
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        for row in self._targets:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Target settings are unavailable.")
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord:
+        for row in self._target_ids:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Target identity is unavailable.")
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self._target_ids
+
+    def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
+        return self._activations.get((product, context))
+
+    def list_testing_application_activations(
+        self, product: str, context: str
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            original.response_payload.get(
+                "testing_activation",
+                original.response_payload["original_intent"]["testing_activation"],
+            )
+            for original, _parent in self._application_evidence_for_lane(product, context)
+        )
+
+    def read_testing_application_activation_operation(
+        self, product: str, context: str, scope: str, preparation_key: str
+    ) -> LaunchplaneIdempotencyRecord | None:
+        parents = tuple(
+            parent
+            for original, parent in self._application_evidence_for_lane(product, context)
+            if original.scope == scope
+            and original.response_payload["original_intent"]["testing_activation"]["request"][
+                "preparation_key"
+            ]
+            == preparation_key
+        )
+        if len(parents) > 1:
+            raise ValueError("Activation has more than one original parent operation.")
+        return parents[0] if parents else None

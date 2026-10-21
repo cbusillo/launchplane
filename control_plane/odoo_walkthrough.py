@@ -1,5 +1,7 @@
 """Testing-only account custody. All external effects remain inside the service."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -454,6 +456,16 @@ class WalkthroughAdapter:
         )
         self.transient_screenshots: tuple[str, ...] = ()
         self.dispatch_deadline = int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.request.product,
+            context=self.request.context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.plan.connection.evidence.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
