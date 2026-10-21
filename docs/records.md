@@ -601,8 +601,9 @@ an ORM column/table or remains only in the evidence payload.
   evidence rather than remain a second live authorization source.
 - Human session: the DB-backed payload includes the GitHub identity snapshot,
   creation/expiry timestamps, CSRF generation and provider-verification time.
-  Admin/read-only sessions also hold session/person-bound encrypted OAuth
-  credentials and their provider expiry metadata; Client sessions do not.
+  When retained, admin/read-only OAuth credentials include provider expiry
+  metadata inside the authenticated ciphertext, bound to the session and GitHub
+  identity; Client sessions hold none.
   The [human auth/session contract](service-boundary.md#service-route-checklist)
   owns verification and renewal; [credential retirement](service-boundary.md#human-oauth-credential-retirement)
   distinguishes local removal from provider validity and historical backups.

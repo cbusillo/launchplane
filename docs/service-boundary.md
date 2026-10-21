@@ -783,41 +783,31 @@ clears an ended cookie while a live session still requires valid CSRF proof.
 
 ### Human OAuth credential retirement
 
-Local session removal and provider revocation are different operations. A valid
-logout removes its current database session and encrypted credential. Expiry
-collection and failed identity verification also remove local custody. These
-paths make no provider revocation request and do not depend on a successful
-provider deletion. Client sessions retain no OAuth credential and keep their
-existing confinement. The current-row update guards prevent renewal from
-recreating a deleted session; they are not a historical-backup revocation ledger.
+A valid logout removes its current database session and encrypted credential.
+Failed identity verification also removes local custody. Neither path makes a
+GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+update guards prevent renewal from recreating a deleted session; they do not
+prevent restoration from an older database backup.
 
-GitHub documents [multiple tokens for one user/application/scope combination](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#creating-multiple-tokens-for-oauth-apps).
-That is not a documented guarantee that every browser sign-in owns a unique
-credential. Its [individual-token deletion and whole-grant deletion](https://docs.github.com/en/rest/apps/oauth-applications)
-have different scopes: grant deletion removes all of that user's tokens for the
-application. The individual-token contract does not establish browser-session
-exclusivity or complete refresh-pair retirement. Counting current session rows
-cannot establish those properties either: Client credentials are not retained
-and another callback may be in flight. Automatic provider retirement is not
-implemented; local logout must not be described as GitHub token invalidation.
-GitHub's token-count limits can also evict an older credential, making another
-browser require sign-in after its next revalidation. That existing provider
-behavior does not establish isolation for a Launchplane revocation request.
+Expired rows are deleted by normal session reads and by opportunistic sign-in
+or provider-refresh sweeps, which skip locked rows. An inactive service performs
+no sweep. Reaching the claims ceiling alone does not collect an inactive
+browser's credential, and ciphertext can remain beyond stored session expiry
+until a later read or sweep.
 
 Database backups may retain earlier encrypted credentials and the identifiers
 needed to decrypt them. Someone holding that backup and its original session
 root can recover the historical credential; local deletion does not erase the
-backup or prove the credential has expired at GitHub. Rotating the current root
-invalidates current service cookies and custody, not the GitHub token or a copy
-recoverable with the old root. Restoring an older database with the same root
-can also restore unexpired local session rows. Keep the root separate from
-database exports and preserve the existing backup access and retention controls.
+backup or establish that the credential has expired at GitHub. Rotating the
+current root invalidates current service cookies and custody, but does not
+invalidate GitHub credentials or prevent decryption with the old root. Restoring
+an older database with the same root can also restore unexpired session rows.
+Keep the root separate from database exports and preserve existing backup access
+and retention controls.
 
-The service supports GitHub's expiring access/refresh pairs when supplied, but
-does not require them or request another scope. Provider expiry and rotation
-are not evidence of immediate retirement on logout. Any change to app settings,
-requested scopes or revocation that could affect another session needs its
-own established authority and isolation proof.
+Provider revocation is not implemented. Neither per-browser credential isolation
+nor complete refresh-pair retirement has been established. Supported provider
+expiry and rotation do not establish immediate retirement on logout.
 
 ### Browser Mutation Boundary
 
