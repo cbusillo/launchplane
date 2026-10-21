@@ -91,6 +91,10 @@ class HistoryStore(Protocol):
     ) -> tuple[PublicIngressObservationRecord, ...]: ...
 
 
+class HistoryQueryError(ValueError):
+    """The lane/window/cursor request is invalid, rather than stored evidence."""
+
+
 def _identity(value: RuntimeIdentity | None) -> HistoryIdentity | None:
     if value is None:
         return None
@@ -136,9 +140,9 @@ def project_observation(record: PublicIngressObservationRecord) -> HistoryObserv
 
 def _window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
     if since.tzinfo is None or until.tzinfo is None or not since < until:
-        raise ValueError("Use an increasing window with timezone-aware timestamps.")
+        raise HistoryQueryError("Use an increasing window with timezone-aware timestamps.")
     if until - since > timedelta(days=8):
-        raise ValueError("Read at most eight days of lane history per window.")
+        raise HistoryQueryError("Read at most eight days of lane history per window.")
     return since.astimezone(timezone.utc), until.astimezone(timezone.utc)
 
 
@@ -155,7 +159,7 @@ def read_lane_health_history(
 ) -> LaneHealthHistory:
     since, until = _window(since, until)
     if not 1 <= limit <= 500:
-        raise ValueError("Read between one and 500 observations per page.")
+        raise HistoryQueryError("Read between one and 500 observations per page.")
     binding = [product, context, instance, since.isoformat(), until.isoformat()]
     before = None
     if cursor is not None:
@@ -170,7 +174,9 @@ def read_lane_health_history(
                 raise ValueError
             before = (data[5], data[6])
         except (ValueError, TypeError, UnicodeError) as error:
-            raise ValueError("History cursor does not match this lane and window.") from error
+            raise HistoryQueryError(
+                "History cursor does not match this lane and window."
+            ) from error
     # Include bounded lookback so a pass just before the window can cover its beginning.
     lookback = max(health_monitor_freshness_seconds(instance), PUBLIC_TLS_STALE_AFTER_SECONDS)
     records = store.list_public_ingress_history_records(
@@ -219,6 +225,16 @@ class HealthHistoryAccounting(BaseModel):
     until: AwareDatetime
     denominator_seconds: float
     checks: tuple[CheckHistoryAccounting, ...]
+    required_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
+    identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
+    missing_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
+    lane_health_pass_seconds: float
+    lane_health_fail_seconds: float
+    lane_health_unknown_seconds: float
+    lane_identity_verified_seconds: float
+    lane_health_and_identity_seconds: float
+    lane_health_pass_percent: float
+    lane_health_and_identity_percent: float
 
 
 class LaneHealthHistoryAccounting(HealthHistoryAccounting):
@@ -233,10 +249,23 @@ def summarize_observations(
     since: datetime,
     until: datetime,
     instance: str,
+    required_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
+    identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
 ) -> HealthHistoryAccounting:
     """A lower bound on verified time for each stream, not a physical uptime claim."""
     since, until = _window(since, until)
     denominator = (until - since).total_seconds()
+    if (
+        not required_checks
+        or len(set(required_checks)) != len(required_checks)
+        or any(not name.strip() for _, name in required_checks)
+        or not identity_checks
+        or len(set(identity_checks)) != len(identity_checks)
+        or not set(identity_checks) <= set(required_checks)
+    ):
+        raise ValueError(
+            "Supply distinct required checks and their nonempty identity-check subset."
+        )
     streams: dict[tuple[PublicIngressCheckKind, str], list[HistoryObservation]] = defaultdict(list)
     seen = set()
     for record in records:
@@ -251,7 +280,13 @@ def summarize_observations(
         if item.observed_at < until:
             streams[(item.check_kind, item.check_name)].append(item)
     results = []
-    for (kind, name), observations in sorted(streams.items()):
+    # End events precede start events at the same instant; a new observation
+    # replaces expiry without manufacturing a gap or overwriting the new state.
+    events: dict[datetime, list[tuple[int, tuple[PublicIngressCheckKind, str], str, bool]]] = (
+        defaultdict(list)
+    )
+    for kind, name in sorted(set(streams) | set(required_checks)):
+        observations = streams.get((kind, name), [])
         observations.sort(key=lambda item: (item.observed_at, item.record_id))
         passing = failing = verified = both = 0.0
         freshness = (
@@ -290,6 +325,17 @@ def summarize_observations(
                 verified += seconds
                 if passed:
                     both += seconds
+            start = max(since, time)
+            if seconds and (kind, name) in required_checks:
+                state = (
+                    "pass"
+                    if passed
+                    else "fail"
+                    if any(item.status == "fail" for item in items)
+                    else "unknown"
+                )
+                events[start].append((1, (kind, name), state, identity_matches))
+                events[end].append((0, (kind, name), "unknown", False))
         results.append(
             CheckHistoryAccounting(
                 check_name=name,
@@ -304,12 +350,48 @@ def summarize_observations(
                 health_and_identity_percent=100 * both / denominator,
             )
         )
+    states = {key: ("unknown", False) for key in required_checks}
+    lane_pass = lane_fail = lane_identity = lane_both = 0.0
+    previous = since
+    for time in sorted({*events, until}):
+        seconds = (time - previous).total_seconds()
+        passed = all(state[0] == "pass" for state in states.values())
+        if passed:
+            lane_pass += seconds
+        elif any(state[0] == "fail" for state in states.values()):
+            lane_fail += seconds
+        identity = all(states[key][1] for key in identity_checks)
+        if identity:
+            lane_identity += seconds
+            if passed:
+                lane_both += seconds
+        for _, key, state, identity in sorted(events.get(time, [])):
+            states[key] = (state, identity)
+        previous = time
     return HealthHistoryAccounting(
-        since=since, until=until, denominator_seconds=denominator, checks=tuple(results)
+        since=since,
+        until=until,
+        denominator_seconds=denominator,
+        checks=tuple(results),
+        required_checks=required_checks,
+        identity_checks=identity_checks,
+        missing_checks=tuple(key for key in required_checks if key not in streams),
+        lane_health_pass_seconds=lane_pass,
+        lane_health_fail_seconds=lane_fail,
+        lane_health_unknown_seconds=denominator - lane_pass - lane_fail,
+        lane_identity_verified_seconds=lane_identity,
+        lane_health_and_identity_seconds=lane_both,
+        lane_health_pass_percent=100 * lane_pass / denominator,
+        lane_health_and_identity_percent=100 * lane_both / denominator,
     )
 
 
-def summarize_history_pages(pages: Iterable[LaneHealthHistory]) -> LaneHealthHistoryAccounting:
+def summarize_history_pages(
+    pages: Iterable[LaneHealthHistory],
+    *,
+    required_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
+    identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
+) -> LaneHealthHistoryAccounting:
     """Refuse truncated, mixed or skipped pages before computing percentages."""
     first = None
     expected_cursor = None
@@ -332,7 +414,12 @@ def summarize_history_pages(pages: Iterable[LaneHealthHistory]) -> LaneHealthHis
     if first is None or expected_cursor is not None:
         raise ValueError("Complete history pages are required; fetch the next cursor.")
     accounting = summarize_observations(
-        observations, since=first.since, until=first.until, instance=first.instance
+        observations,
+        since=first.since,
+        until=first.until,
+        instance=first.instance,
+        required_checks=required_checks,
+        identity_checks=identity_checks,
     )
     return LaneHealthHistoryAccounting(
         **accounting.model_dump(),

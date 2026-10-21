@@ -10,6 +10,7 @@ from fastapi import Depends, Path, Query
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from control_plane.lane_health_history import (
+    HistoryQueryError,
     HistoryStore,
     LaneHealthHistoryResponse,
     read_lane_health_history,
@@ -1306,7 +1307,7 @@ def register_product_environment_read_routes(
         )
         try:
             if until > datetime.now(timezone.utc):
-                raise ValueError("History cannot include future observations.")
+                raise HistoryQueryError("History cannot include future observations.")
             history = read_lane_health_history(
                 cast(HistoryStore, record_store),
                 product=scope.product,
@@ -1317,7 +1318,7 @@ def register_product_environment_read_routes(
                 limit=limit,
                 cursor=cursor,
             )
-        except ValueError as error:
+        except HistoryQueryError as error:
             raise common.http_error(
                 status_code=400,
                 trace_id=trace_id,

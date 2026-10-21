@@ -29824,6 +29824,12 @@ class PostgresRecordStore(HumanSessionStore):
             row.product == product,
             row.context == context_name,
             row.instance == instance_name,
+            # Use the existing lane/time index to bound the scan independently
+            # of total retained history. ISO offsets are strictly within 24h;
+            # the widened text bounds admit every representation before the
+            # exact instant comparison below.
+            row.observed_at >= (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+            row.observed_at < (until + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
             observed >= bound(since),
             observed < bound(until),
         ]

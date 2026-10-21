@@ -4589,34 +4589,6 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def list_public_ingress_history_records(
-        self,
-        *,
-        product: str,
-        context_name: str,
-        instance_name: str,
-        since: datetime,
-        until: datetime,
-        before: tuple[str, str] | None,
-        limit: int,
-    ) -> tuple[PublicIngressObservationRecord, ...]:
-        def instant(value: str) -> datetime:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-        position = (instant(before[0]), before[1]) if before else None
-        records = [
-            record
-            for record in self.list_public_ingress_observation_records(
-                product=product, context_name=context_name, instance_name=instance_name
-            )
-            if since <= instant(record.observed_at) < until
-            and (position is None or (instant(record.observed_at), record.record_id) < position)
-        ]
-        records.sort(
-            key=lambda record: (instant(record.observed_at), record.record_id), reverse=True
-        )
-        return tuple(records[:limit])
-
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
 

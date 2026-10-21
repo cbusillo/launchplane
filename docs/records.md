@@ -1303,12 +1303,13 @@ The read includes up to two hours of lookback for evidence covering the start
 of the requested window. Save every response in cursor order and run:
 
 ```bash
-uv run launchplane ingress health-history-summary --page first.json --page second.json
+uv run launchplane ingress health-history-summary --page first.json --page second.json \
+  --check public_http:health --identity-check public_http:health
 ```
 
 The offline command rejects incomplete, mixed or skipped page chains. Its real
-denominator is the requested elapsed seconds **for each check stream on this
-lane**, never scheduler completions or a pooled fleet sample. Each observation
+denominator is the requested elapsed seconds for this lane and each of its
+check streams, never scheduler completions or a pooled fleet sample. Each observation
 covers time forward until the next observation or the existing freshness
 deadline, whichever comes first. Failure, missing/expired evidence and verified
 identity time are reported separately. Reconciliation is administrative evidence
@@ -1320,8 +1321,16 @@ not a healthy lane.
 `health_pass_percent` and `health_and_identity_percent` are conservative
 percentages of retained verified time. They do not establish physical outage
 durations. Provider delivery/source-warning streams stay separate from actual
-HTTP health streams. Check each required stream rather than averaging their
-percentages. These observations do not reconstruct past profile declarations,
+HTTP health streams. Supply the complete reviewed required check set with
+repeated `--check KIND:NAME`
+and the checks that must verify runtime identity with `--identity-check KIND:NAME`.
+The latter must be a nonempty subset of the former. The report prints both sets
+and any absent checks. Lane totals intersect these streams in time, so disjoint
+failures cannot hide behind individually passing percentages. A required check
+with no records contributes unknown time, not a pass. TLS or dependency checks
+can belong to the health set without being runtime-identity witnesses. The
+`lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
+those intersections. These observations do not reconstruct past profile declarations,
 check applicability, incident-open intervals or the historical Live roster.
 Those qualifications and the no-open-warning closing condition remain separate;
 this read cannot certify the Q419 milestone, reset a clock or retroactively

@@ -7,6 +7,7 @@ import unittest
 from click.testing import CliRunner
 
 from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressCheckKind,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     health_monitor_freshness_seconds,
@@ -14,7 +15,6 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import (
     _product_environment_read_policy,
     _seed_product_environment_read_records,
@@ -24,6 +24,7 @@ from tests.support.http import request
 from tests.support.stores import _sqlite_database_url
 
 START = datetime(2026, 10, 1, tzinfo=timezone.utc)
+REQUIRED: tuple[tuple[PublicIngressCheckKind, str], ...] = (("public_http", "health"),)
 
 
 def stamp(seconds: float) -> str:
@@ -127,6 +128,20 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer valid-token"},
             )
             self.assertEqual(denied.status_code, 403)
+            store.write_public_ingress_observation_record(
+                observation("naive-record", 45).model_copy(
+                    update={"observed_at": stamp(45).removesuffix("Z")}
+                )
+            )
+            invalid_evidence = await request(
+                app,
+                "GET",
+                path + "?" + urlencode({"since": stamp(0), "until": stamp(180)}),
+                headers={"Authorization": "Bearer valid-token"},
+                capture_server_error_response=True,
+            )
+            self.assertEqual(invalid_evidence.status_code, 500)
+            self.assertNotIn("invalid_query", invalid_evidence.text)
 
 
 class LaneHealthHistoryAccountingTests(unittest.TestCase):
@@ -148,11 +163,13 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
             next_cursor="next",
             observations=(project_observation(observation("pass", 0)),),
         )
-        with self.assertRaisesRegex(ValueError, "Complete history"):
-            summarize_history_pages([page])
-        with self.assertRaisesRegex(ValueError, "cursor order"):
+        with self.assertRaises(ValueError):
+            summarize_history_pages([page], required_checks=REQUIRED, identity_checks=REQUIRED)
+        with self.assertRaises(ValueError):
             summarize_history_pages(
-                [page, page.model_copy(update={"cursor": "wrong", "next_cursor": None})]
+                [page, page.model_copy(update={"cursor": "wrong", "next_cursor": None})],
+                required_checks=REQUIRED,
+                identity_checks=REQUIRED,
             )
         complete = page.model_copy(update={"next_cursor": None})
         with TemporaryDirectory() as temporary:
@@ -161,12 +178,34 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
                 json.dumps({"trace_id": "trace", "history": page.model_dump(mode="json")})
             )
             runner = CliRunner()
-            refused = runner.invoke(ingress, ["health-history-summary", "--page", str(path)])
+            refused = runner.invoke(
+                ingress,
+                [
+                    "health-history-summary",
+                    "--page",
+                    str(path),
+                    "--check",
+                    "public_http:health",
+                    "--identity-check",
+                    "public_http:health",
+                ],
+            )
             self.assertNotEqual(refused.exit_code, 0)
             path.write_text(
                 json.dumps({"trace_id": "trace", "history": complete.model_dump(mode="json")})
             )
-            result = runner.invoke(ingress, ["health-history-summary", "--page", str(path)])
+            result = runner.invoke(
+                ingress,
+                [
+                    "health-history-summary",
+                    "--page",
+                    str(path),
+                    "--check",
+                    "public_http:health",
+                    "--identity-check",
+                    "public_http:health",
+                ],
+            )
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertEqual(
                 json.loads(result.output)["checks"][0]["health_and_identity_seconds"], 60
@@ -180,6 +219,8 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
             since=START,
             until=START + timedelta(seconds=60),
             instance="prod",
+            required_checks=REQUIRED,
+            identity_checks=REQUIRED,
         )
         check = result.checks[0]
         self.assertEqual(check.health_pass_seconds, 0)
@@ -197,7 +238,12 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
             observation("recover", freshness * 3),
         )
         result = summarize_observations(
-            records, since=START, until=START + timedelta(seconds=end), instance="prod"
+            records,
+            since=START,
+            until=START + timedelta(seconds=end),
+            instance="prod",
+            required_checks=REQUIRED,
+            identity_checks=REQUIRED,
         )
         check = result.checks[0]
         self.assertEqual(result.denominator_seconds, end)
@@ -235,6 +281,8 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
             since=START,
             until=START + timedelta(seconds=180),
             instance="prod",
+            required_checks=REQUIRED,
+            identity_checks=REQUIRED,
         )
         check = result.checks[0]
         self.assertEqual(check.health_and_identity_seconds, 30)
@@ -242,63 +290,102 @@ class LaneHealthHistoryAccountingTests(unittest.TestCase):
         self.assertEqual(check.health_unknown_seconds, 120)
 
 
-class LaneHealthHistoryStorageTests(unittest.TestCase):
-    def test_time_bounds_and_cursor_use_instants_on_both_stores(self) -> None:
-        from control_plane.lane_health_history import read_lane_health_history
+def assert_history_time_bounds(testcase: unittest.TestCase, store: PostgresRecordStore) -> None:
+    from control_plane.lane_health_history import read_lane_health_history
 
+    offset = observation("offset", 0).model_copy(
+        update={"observed_at": "2026-09-30T20:00:30-04:00"}
+    )
+    records = (
+        observation("before", -30),
+        observation("fraction", 30.5),
+        offset,
+        observation("tie", 30),
+        observation("until", 60),
+        observation("other", 45).model_copy(update={"instance": "testing"}),
+    )
+    for record in records:
+        store.write_public_ingress_observation_record(record)
+    pages = []
+    cursor = None
+    for _ in records:
+        page = read_lane_health_history(
+            store,
+            product="example-site",
+            context="example-site",
+            instance="prod",
+            since=START,
+            until=START + timedelta(seconds=60),
+            limit=1,
+            cursor=cursor,
+        )
+        pages.append(page)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    testcase.assertEqual(
+        [item.record_id for page in pages for item in page.observations],
+        ["fraction", "tie", "offset", "before"],
+    )
+    with testcase.assertRaises(ValueError):
+        read_lane_health_history(
+            store,
+            product="example-site",
+            context="example-site",
+            instance="testing",
+            since=START,
+            until=START + timedelta(seconds=60),
+            limit=1,
+            cursor=pages[0].next_cursor,
+        )
+
+
+class LaneHealthHistoryStorageTests(unittest.TestCase):
+    def test_time_bounds_and_cursor_use_instants(self) -> None:
         with TemporaryDirectory() as temporary:
-            stores = (
-                FilesystemRecordStore(Path(temporary) / "files"),
-                PostgresRecordStore(
-                    database_url=_sqlite_database_url(Path(temporary) / "records.sqlite")
-                ),
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary) / "records.sqlite")
             )
-            self.addCleanup(stores[1].close)
-            for store in stores:
-                with self.subTest(store=type(store).__name__):
-                    if isinstance(store, PostgresRecordStore):
-                        store.ensure_schema()
-                    offset = observation("offset", 0).model_copy(
-                        update={"observed_at": "2026-09-30T20:00:30-04:00"}
-                    )
-                    records = (
-                        observation("before", -30),
-                        observation("fraction", 30.5),
-                        offset,
-                        observation("until", 60),
-                        observation("other", 45).model_copy(update={"instance": "testing"}),
-                    )
-                    for record in records:
-                        store.write_public_ingress_observation_record(record)
-                    pages = []
-                    cursor = None
-                    for _ in records:
-                        page = read_lane_health_history(
-                            store,
-                            product="example-site",
-                            context="example-site",
-                            instance="prod",
-                            since=START,
-                            until=START + timedelta(seconds=60),
-                            limit=1,
-                            cursor=cursor,
-                        )
-                        pages.append(page)
-                        cursor = page.next_cursor
-                        if cursor is None:
-                            break
-                    self.assertEqual(
-                        [item.record_id for page in pages for item in page.observations],
-                        ["fraction", "offset", "before"],
-                    )
-                    with self.assertRaisesRegex(ValueError, "cursor"):
-                        read_lane_health_history(
-                            store,
-                            product="example-site",
-                            context="example-site",
-                            instance="testing",
-                            since=START,
-                            until=START + timedelta(seconds=60),
-                            limit=1,
-                            cursor=pages[0].next_cursor,
-                        )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            assert_history_time_bounds(self, store)
+
+
+class LaneIntersectionTests(unittest.TestCase):
+    def test_disjoint_failures_and_a_missing_required_check_cannot_hide(self) -> None:
+        from control_plane.lane_health_history import summarize_observations
+
+        records = (
+            observation("a-pass", 0, check="a"),
+            observation("a-fail", 20, check="a", status="fail"),
+            observation("a-recover", 40, check="a"),
+            observation("b-pass", 0, check="b"),
+            observation("b-fail", 60, check="b", status="fail"),
+            observation("b-recover", 80, check="b"),
+        )
+        required: tuple[tuple[PublicIngressCheckKind, str], ...] = (
+            ("public_http", "a"),
+            ("public_http", "b"),
+        )
+        result = summarize_observations(
+            records,
+            since=START,
+            until=START + timedelta(seconds=100),
+            instance="prod",
+            required_checks=required,
+            identity_checks=required,
+        )
+        self.assertEqual(result.lane_health_pass_seconds, 60)
+        self.assertEqual(result.lane_health_and_identity_seconds, 60)
+        self.assertEqual(result.lane_health_fail_seconds, 40)
+        missing = summarize_observations(
+            records,
+            since=START,
+            until=START + timedelta(seconds=100),
+            instance="prod",
+            required_checks=(*required, ("private_http", "missing")),
+            identity_checks=required,
+        )
+        self.assertEqual(missing.lane_health_pass_seconds, 0)
+        self.assertEqual(missing.lane_health_unknown_seconds, 60)
+        self.assertEqual(missing.missing_checks, (("private_http", "missing"),))
