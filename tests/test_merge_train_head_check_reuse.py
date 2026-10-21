@@ -49,6 +49,7 @@ class _ReuseTransport:
         self.change_unbound_fields = False
         self.base_history: list[dict[str, object]] = []
         self.unavailable_path = ""
+        self.repository_full_name = "example/merge-train-repo"
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.requests.append(MergeTrainGitHubRequest(method=method, path=path, body=body))
@@ -126,7 +127,7 @@ class _ReuseTransport:
                 "base": {
                     "sha": self.base_sha,
                     "ref": "main",
-                    "repo": {"full_name": "example/merge-train-repo"},
+                    "repo": {"full_name": self.repository_full_name},
                 },
             }
         if suffix.startswith("/compare/"):
@@ -184,6 +185,11 @@ class HeadCheckReuseTests(unittest.TestCase):
         self.assertEqual(restored, built)
         assert restored.structural_provenance is not None
         self.assertTrue(restored.structural_provenance.complete)
+
+    def test_provider_repository_casing_does_not_prevent_reuse(self) -> None:
+        # GitHub reports the repository's own casing; the candidate stores it lowercased.
+        self.transport.repository_full_name = self.candidate.repository.upper()
+        self.assertIsNotNone(self.build().head_check_reuse)
 
     def test_different_tree_publishes_full_candidate_ci(self) -> None:
         self.transport.candidate_tree = "tree-with-base-change"
