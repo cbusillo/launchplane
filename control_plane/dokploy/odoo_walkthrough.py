@@ -1,6 +1,8 @@
 """Fixed testing-account program over the existing private, non-echo transport."""
 
-from control_plane.dokploy.native_copy_stream import _read_remote
+from enum import StrEnum
+
+from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.contracts.odoo_walkthrough import (
@@ -14,6 +16,35 @@ from control_plane.contracts.odoo_walkthrough import (
 
 WALKTHROUGH_JOURNAL_DIRECTORY = "/tmp/launchplane-walkthrough"
 WALKTHROUGH_LOGIN_PATTERN = "^" + WALKTHROUGH_LOGIN_PREFIX + "([a-f0-9]{32})$"
+
+
+class TestingRead(StrEnum):
+    """Closed, value-free outcome of the fixed native testing read.
+
+    Every value except UNAVAILABLE is a predicate the read actually observed.
+    A failed, partial or unrecognized read is UNAVAILABLE, never a refusal.
+    """
+
+    CLEAR = "clear"
+    RUNNER_UNSELECTED = "runner_unselected"
+    RUNNER_CHANGED = "runner_changed"
+    COPY_CHANGED = "copy_changed"
+    ISOLATION_REFUSED = "isolation_refused"
+    TASK_ACCOUNT_CHANGED = "task_account_changed"
+    PROTECTED_SIGNIN = "protected_signin"
+    DISPATCH_UNSETTLED = "dispatch_unsettled"
+    UNAVAILABLE = "unavailable"
+
+
+# Outcomes the in-container database probe may report; the host adds the rest.
+_PROBE_READS = (
+    TestingRead.CLEAR,
+    TestingRead.COPY_CHANGED,
+    TestingRead.ISOLATION_REFUSED,
+    TestingRead.TASK_ACCOUNT_CHANGED,
+    TestingRead.PROTECTED_SIGNIN,
+    TestingRead.DISPATCH_UNSETTLED,
+)
 
 # Only a matching native task marker on this exact copy can exempt a sign-in.
 # A reserved-looking login without that witness remains protected staff usage.
@@ -64,100 +95,119 @@ def testing_account_command(
 def testing_account_dispatch_finished(
     *, host: str, token: str, server_id: str, dispatch_id: str, original_intent: dict[str, object]
 ) -> bool:
-    frames: list[dict[str, object]] = []
-    _read_remote(
-        host=host,
-        token=token,
-        server_id=server_id,
-        program=ACCOUNT_JOURNAL_READ_PROGRAM,
-        payload={
-            **original_intent,
-            "dispatch_id": dispatch_id,
-            "mode": "quiescence",
-            "probe": ACCOUNT_DATABASE_PROBE,
-        },
-        receive=frames.append,
-        timeout_seconds=30,
+    return (
+        _testing_read(
+            host=host,
+            token=token,
+            server_id=server_id,
+            payload={**original_intent, "dispatch_id": dispatch_id, "mode": "quiescence"},
+        )
+        is TestingRead.CLEAR
     )
-    return len(frames) == 1 and frames[0].get("clear") is True
 
 
 def testing_task_unused(
-    *, host: str, token: str, server_id: str, intent: dict[str, object], require_task: bool = True
-) -> bool:
-    return _testing_read_clear(
-        host=host,
-        token=token,
-        server_id=server_id,
-        intent=intent,
-        mode="usage" if require_task else "lane_usage",
-    )
-
-
-def testing_connection_isolated(
     *, host: str, token: str, server_id: str, intent: dict[str, object]
 ) -> bool:
-    return _testing_read_clear(
-        host=host, token=token, server_id=server_id, intent=intent, mode="isolation"
+    return (
+        read_testing_task_usage(host=host, token=token, server_id=server_id, intent=intent)
+        is TestingRead.CLEAR
     )
 
 
-def _testing_read_clear(
-    *, host: str, token: str, server_id: str, intent: dict[str, object], mode: str
-) -> bool:
-    frames: list[dict[str, object]] = []
-    _read_remote(
+def read_testing_task_usage(
+    *, host: str, token: str, server_id: str, intent: dict[str, object], require_task: bool = True
+) -> TestingRead:
+    return _testing_read(
         host=host,
         token=token,
         server_id=server_id,
-        program=ACCOUNT_JOURNAL_READ_PROGRAM,
-        payload={
-            **intent,
-            "mode": mode,
-            "probe": ACCOUNT_DATABASE_PROBE,
-        },
-        receive=frames.append,
-        timeout_seconds=30,
+        payload={**intent, "mode": "usage" if require_task else "lane_usage"},
     )
-    return len(frames) == 1 and frames[0].get("clear") is True
+
+
+def read_testing_connection_isolation(
+    *, host: str, token: str, server_id: str, intent: dict[str, object]
+) -> TestingRead:
+    return _testing_read(
+        host=host, token=token, server_id=server_id, payload={**intent, "mode": "isolation"}
+    )
+
+
+def _testing_read(
+    *, host: str, token: str, server_id: str, payload: dict[str, object]
+) -> TestingRead:
+    frames: list[dict[str, object]] = []
+    try:
+        _read_remote(
+            host=host,
+            token=token,
+            server_id=server_id,
+            program=ACCOUNT_JOURNAL_READ_PROGRAM,
+            payload={**payload, "probe": ACCOUNT_DATABASE_PROBE},
+            receive=frames.append,
+            timeout_seconds=30,
+        )
+    except NativeSourceUnavailable:
+        return TestingRead.UNAVAILABLE
+    if len(frames) != 1 or frames[0].get("type") != "complete":
+        return TestingRead.UNAVAILABLE
+    reason = frames[0].get("reason")
+    if not isinstance(reason, str) or reason not in set(TestingRead):
+        return TestingRead.UNAVAILABLE
+    read = TestingRead(reason)
+    if frames[0].get("clear") is not (read is TestingRead.CLEAR):
+        return TestingRead.UNAVAILABLE
+    return read
 
 
 ACCOUNT_DATABASE_PROBE = (
     connection_isolation_library()
     + r"""
 import json,os,sys,psycopg2
+# Only an observed negative predicate is a refusal. Every other error exits
+# without a receipt, which the host reports as unavailable evidence.
+class Refused(Exception): pass
 spec=json.loads(sys.stdin.read())
 connection=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),
     dbname=os.environ['ODOO_DB_NAME'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=5)
 try:
     connection.set_session(readonly=True,autocommit=False)
-    with connection.cursor() as cursor:
-        cursor.execute("SET LOCAL statement_timeout='5s'")
-        cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
-        row=cursor.fetchone()
-        if not row or row[0]!=spec['copy_binding']: raise RuntimeError('Testing copy changed')
-        if spec['mode'] in ('usage','lane_usage','isolation') and connection_isolation(cursor, apply=False):
-            raise RuntimeError('Testing connection isolation did not pass')
-        if spec['mode']=='quiescence':
-            cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
-            clear=cursor.fetchone()[0] is True
-        elif spec['mode']=='isolation':
-            clear=True
-        elif spec['mode'] in ('usage','lane_usage'):
-            if spec['mode']=='usage':
-                cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
-                row=cursor.fetchone()
-                marker=json.loads(row[0]) if row else {}
-                uid=marker.get('account_id')
-                if marker.get('binding')!=spec['binding'] or marker.get('state')!=__TASK_ACTIVE_STATE__ or type(uid)is not int or uid<=2:
-                    raise RuntimeError('Task account changed')
-                cursor.execute('SELECT login,active FROM res_users WHERE id=%s',(uid,))
-                if cursor.fetchone()!=(__TASK_LOGIN_PREFIX__+spec['task_id'],True): raise RuntimeError('Task account changed')
-            cursor.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,spec['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,spec['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
-            clear=cursor.fetchone()[0] is False
-        else: raise RuntimeError('Unsupported read')
+    reason='clear'
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout='5s'")
+            cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
+            row=cursor.fetchone()
+            if not row or row[0]!=spec['copy_binding']: raise Refused('copy_changed')
+            if spec['mode'] in ('usage','lane_usage','isolation') and connection_isolation(cursor, apply=False):
+                raise Refused('isolation_refused')
+            if spec['mode']=='quiescence':
+                cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
+                free=cursor.fetchone()[0]
+                if free is False: raise Refused('dispatch_unsettled')
+                if free is not True: raise RuntimeError('Unreadable dispatch lock')
+            elif spec['mode']=='isolation':
+                pass
+            elif spec['mode'] in ('usage','lane_usage'):
+                if spec['mode']=='usage':
+                    cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
+                    row=cursor.fetchone()
+                    marker=json.loads(row[0]) if row else {}
+                    uid=marker.get('account_id')
+                    if marker.get('binding')!=spec['binding'] or marker.get('state')!=__TASK_ACTIVE_STATE__ or type(uid)is not int or uid<=2:
+                        raise Refused('task_account_changed')
+                    cursor.execute('SELECT login,active FROM res_users WHERE id=%s',(uid,))
+                    if cursor.fetchone()!=(__TASK_LOGIN_PREFIX__+spec['task_id'],True): raise Refused('task_account_changed')
+                cursor.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,spec['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,spec['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
+                used=cursor.fetchone()[0]
+                if used is True: raise Refused('protected_signin')
+                if used is not False: raise RuntimeError('Unreadable sign-in history')
+            else: raise RuntimeError('Unsupported read')
+    except Refused as refusal:
+        reason=refusal.args[0]
     connection.rollback()
-    print(json.dumps({'clear':clear}))
+    print(json.dumps({'reason':reason}))
 finally:
     connection.close()
 """.replace("__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER)
@@ -175,7 +225,9 @@ ACCOUNT_JOURNAL_READ_PROGRAM = r"""
 import base64,json,re,sys,os,stat,time,subprocess
 from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
-clear=False
+# The receipt carries only a fixed reason; exception text never leaves this host.
+class Refused(Exception): pass
+reason='unavailable'
 try:
     if spec.get('mode')=='quiescence':
         if not re.fullmatch('[a-f0-9]{64}',spec['dispatch_id']): raise RuntimeError('Invalid dispatch')
@@ -186,10 +238,12 @@ try:
             if directory.is_symlink() or mode.st_uid!=os.getuid() or stat.S_IMODE(mode.st_mode)&0o077 or path.is_symlink():
                 raise ValueError('Untrusted journal')
             value=json.loads(path.read_text())
-            clear=value.get('finished') is True and value.get('needs_quiescence') is not True
+            if value.get('finished') is True and value.get('needs_quiescence') is not True: reason='clear'
         except (OSError,ValueError):
             pass
-    if not clear and (spec.get('mode') in ('usage','lane_usage','isolation') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline'])):
+    if reason=='clear':
+        pass
+    elif spec.get('mode') in ('usage','lane_usage','isolation') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline']):
         def docker(*args,data=None):
             result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=15)
             if result.returncode: raise RuntimeError('Testing read unavailable')
@@ -197,19 +251,27 @@ try:
         if spec['identity']['instance']!='testing': raise RuntimeError('Not testing')
         ids=docker('ps','--filter','label=com.docker.compose.project='+spec['project'],
             '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
-        if len(ids)!=1: raise RuntimeError('Ambiguous testing runner')
+        if len(ids)!=1: raise Refused('runner_unselected')
         runner=json.loads(docker('inspect',ids[0]))[0]
         environment=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
         observed=json.loads(environment.get(spec['identity_key'],'{}')); expected=spec['identity']
         observed.pop('deployed_at',None); expected.pop('deployed_at',None)
         if observed!=expected or runner['Config']['Image']!=spec['image'] or environment.get('PLATFORM_INSTANCE')!='testing' or environment.get('ODOO_DB_HOST')!='database' or environment.get('ODOO_DB_NAME')!=spec['database']:
-            raise RuntimeError('Testing receiver changed')
+            raise Refused('runner_changed')
         response=json.loads(docker('exec','-i',ids[0],'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
-        clear=response.get('clear') is True
+        if not isinstance(response,dict) or set(response)!={'reason'} or response['reason'] not in __PROBE_READS__:
+            raise RuntimeError('Invalid probe receipt')
+        reason=response['reason']
+    elif spec.get('mode')=='quiescence':
+        reason='dispatch_unsettled'
+except Refused as refusal:
+    reason=refusal.args[0]
 except Exception:
-    clear=False
-print(sys.argv[2]+json.dumps({'type':'complete','clear':clear}),flush=True)
-""".replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY))
+    reason='unavailable'
+print(sys.argv[2]+json.dumps({'type':'complete','clear':reason=='clear','reason':reason}),flush=True)
+""".replace("__JOURNAL_DIRECTORY__", repr(WALKTHROUGH_JOURNAL_DIRECTORY)).replace(
+    "__PROBE_READS__", repr(tuple(read.value for read in _PROBE_READS))
+)
 
 
 # There are no user-selected executable names, paths, SQL, shell or Python.
