@@ -2565,7 +2565,7 @@ else:
         for field, limit in ATTACHMENT_METADATA_LIMITS.items():
             mismatch[field] = "\U0001f680" * limit
 
-        def capture_file(arguments: list[str], path: Path, bound: int) -> None:
+        def capture_file(arguments: list[str], path: Path, bound: int, **_kwargs: Any) -> None:
             if path.suffix == ".dump":
                 path.write_bytes(b"private database contents")
             else:
@@ -2575,6 +2575,11 @@ else:
                     archive.addfile(member, io.BytesIO(b"private contents"))
 
         self.host["bounded_capture"] = capture_file
+        table = (
+            "COPY public.ir_attachment (store_fname, checksum, file_size) FROM stdin;\n"
+            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size']}\n\\.\n"
+        ).encode()
+        self.host["captured_attachment_table_chunks"] = lambda *_: (chunk for chunk in [table])
         probe = Mock(return_value={"reason": mismatch["reason"], "mismatch": mismatch})
         self.host["attachment_validation_payload"] = probe
         (root / "execute.started").touch(mode=0o600)
@@ -2785,6 +2790,66 @@ else:
         self.assertEqual(
             sum(bool(call.kwargs.get("name")) for call in connection.cursor.call_args_list), 1
         )
+
+    def test_capture_selects_only_valid_distinct_dump_references(self) -> None:
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 20480,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        (root / "database.dump").write_bytes(b"retained dump")
+        checksum = hashlib.sha1(b"attachment").hexdigest()
+        name = checksum[:2] + "/" + checksum
+        header = b"COPY public.ir_attachment (name, store_fname, checksum, file_size) FROM stdin;\n"
+        row = f"private\\tname\t{name}\t{checksum}\t10\n".encode()
+        table = header + b"x" * (2 * 1024**2) + b"\t\\N\t\\N\t0\n" + row * 2 + b"\\.\n"
+
+        def decode(*_args: Any) -> Any:
+            return (table[i : i + 31] for i in range(0, len(table), 31))
+
+        self.host["captured_attachment_table_chunks"] = decode
+        select = self.host["write_captured_attachment_names"]
+        selected = select(spec, root, containers)
+        self.assertEqual(selected.read_bytes(), name.encode() + b"\0")
+        self.assertEqual(selected.stat().st_mode & 0o777, 0o600)
+        selected.unlink()
+        for invalid in (
+            row.replace(name.encode(), b"../private"),
+            row.replace(name.encode(), b"/private"),
+            row.replace(checksum.encode(), b"z" * 40),
+            row.replace(b"\t10\n", b"\t-1\n"),
+            row + row.replace(b"\t10\n", b"\t11\n"),
+            row.replace(name.encode(), b"x" * 100),
+            row + b"\\.\n" + header,
+        ):
+            with self.subTest(reference=invalid[:100]):
+                table = header + invalid + b"\\.\n"
+                with self.assertRaises(ValueError):
+                    select(spec, root, containers)
+                self.assertFalse(selected.exists())
+        table = header + row
+        with self.assertRaises(ValueError):
+            select(spec, root, containers)
+        self.assertFalse(selected.exists())
+        table = header + b"\\N\t\\N\t\\N\t0\n\\.\n"
+        self.assertEqual(select(spec, root, containers).read_bytes(), b"")
+
+    def test_capture_reads_large_file_stdin_while_draining_stdout(self) -> None:
+        import sys
+
+        source = self.fixture.root / "large-input"
+        output = self.fixture.root / "captured-output"
+        content = bytes(range(256)) * 8192
+        source.write_bytes(content)
+        program = "import shutil,sys;shutil.copyfileobj(sys.stdin.buffer,sys.stdout.buffer)"
+        with source.open("rb") as stream:
+            self.host["bounded_capture"](
+                [sys.executable, "-c", program], output, len(content), stdin=stream
+            )
+        self.assertEqual(output.read_bytes(), content)
 
     def test_captured_table_decoder_bounds_output_and_closes_its_process(self) -> None:
         import subprocess

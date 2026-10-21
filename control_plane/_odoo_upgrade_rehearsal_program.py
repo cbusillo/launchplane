@@ -91,8 +91,8 @@ def digest(path):
     return value.hexdigest()
 
 
-def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def bounded_capture(arguments,path,bound,*,stdin=None):
+    process=subprocess.Popen(arguments,stdin=stdin,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     errors=b''
     try:
         size=0
@@ -443,8 +443,10 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    remote=shlex.join(['tar','-cf','-','-C',filestore,'.'])
-    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'])
+    names=write_captured_attachment_names(spec,raw,containers)
+    remote=shlex.join(['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-'])
+    with names.open('rb') as listed:
+        bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:

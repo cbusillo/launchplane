@@ -2940,6 +2940,10 @@ each next `action` through its own dry-run/review/apply with a distinct stable
 key and new evidence file:
 
 1. `execute` captures the external source through fixed read-only SSH commands.
+   The filestore archive reads only the files referenced by the captured database
+   dump, without walking live directories or copying unreferenced files and the
+   GC checklist. A referenced file removed by source GC before it is read still
+   fails the capture; every nonzero source status remains a refusal.
    Database and filestore streams are bounded. Source-copy lineage is hashed,
    referenced attachments are checked against the restored database, and raw
    failure material stays outside all container mounts. The SQL-only
