@@ -13323,7 +13323,12 @@ class PostgresRecordStore(HumanSessionStore):
             LaunchplaneIdempotencyRecord.model_validate(row.payload)
             for row in session.scalars(statement.order_by(LaunchplaneIdempotencyRow.record_id))
         )
-        parent_ids = tuple(row.response_payload["reservation_id"] for row in originals)
+        try:
+            parent_ids = tuple(row.response_payload["reservation_id"] for row in originals)
+        except KeyError as exc:
+            raise ValueError(
+                "Application activation original parent binding is unavailable."
+            ) from exc
         parents = {
             row.record_id: row
             for row in session.scalars(
@@ -13334,16 +13339,26 @@ class PostgresRecordStore(HumanSessionStore):
         }
         result = []
         for original in originals:
-            captured = original.response_payload["original_intent"]["testing_activation"]
-            parent = parents.get(original.response_payload["reservation_id"])
+            try:
+                captured = original.response_payload["original_intent"]["testing_activation"]
+                product_name = captured["product"]
+                parent = parents.get(original.response_payload["reservation_id"])
+            except (KeyError, TypeError) as exc:
+                raise ValueError("Application activation original binding is unavailable.") from exc
+            parent_record = (
+                LaunchplaneIdempotencyRecord.model_validate(parent.payload)
+                if parent is not None
+                else None
+            )
             if (
                 parent is None
+                or parent_record is None
                 or parent.scope != original.scope
-                or parent.route_path != f"/v1/products/{captured['product']}/testing-activation"
-                or parent.payload["request_fingerprint"] != original.request_fingerprint
+                or parent.route_path != f"/v1/products/{product_name}/testing-activation"
+                or parent_record.request_fingerprint != original.request_fingerprint
             ):
                 continue
-            result.append((original, LaunchplaneIdempotencyRecord.model_validate(parent.payload)))
+            result.append((original, parent_record))
         return tuple(result)
 
     def list_testing_application_activations(
@@ -33557,7 +33572,12 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
             )
         }
 
-        self._application_evidence = store._testing_application_activation_evidence(session)
+        self._application_store = store
+        self._application_session = session
+        self._application_evidence: dict[
+            tuple[str, str],
+            tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...] | None,
+        ] = {}
 
     def __getattr__(self, name: str) -> NoReturn:
         if name == "_session_factory":
@@ -33567,17 +33587,37 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
     def _application_evidence_for_lane(
         self, product: str, context: str
     ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
-        return tuple(
-            (original, parent)
-            for original, parent in self._application_evidence
-            if (
-                original.response_payload["original_intent"]["testing_activation"]["product"],
-                original.response_payload["original_intent"]["testing_activation"]["context"],
+        key = (product, context)
+        if key not in self._application_evidence:
+            self._application_evidence[key] = None
+            self._application_evidence[key] = (
+                self._application_store._testing_application_activation_evidence(
+                    self._application_session, product=product, context=context
+                )
             )
-            == (product, context)
-        )
+        evidence = self._application_evidence[key]
+        if evidence is None:
+            raise ValueError("Application activation evidence is unavailable.")
+        return evidence
 
     def material_for_lane(self, product: str, context: str, instance: str) -> object:
+        # Only evidence demanded by the separation predicate belongs in its witness.
+        # This projection must never read more history outside that fail-closed boundary.
+        application_material: object = []
+        key = (product, context)
+        if instance == "testing" and key in self._application_evidence:
+            evidence = self._application_evidence[key]
+            application_material = (
+                {"available": False}
+                if evidence is None
+                else [
+                    [
+                        record.model_dump(mode="json", exclude={"updated_at", "lease_expires_at"})
+                        for record in pair
+                    ]
+                    for pair in evidence
+                ]
+            )
         target_ids = {
             row.target_id
             for row in self._providers
@@ -33604,14 +33644,8 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
                 for row in self._targets
                 if (row.context, row.instance) == (context, instance)
             ],
-            self._activations.get((product, context)),
-            [
-                [
-                    record.model_dump(mode="json", exclude={"updated_at", "lease_expires_at"})
-                    for record in evidence
-                ]
-                for evidence in self._application_evidence_for_lane(product, context)
-            ],
+            self._activations.get(key) if instance == "testing" else None,
+            application_material,
         ]
 
     def close(self) -> None:

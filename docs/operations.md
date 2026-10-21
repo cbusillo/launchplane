@@ -1724,7 +1724,10 @@ the locked current rows at database acceptance time; a classification change,
 including elapsed grace without a row write, rejects the observation. All other
 source identity, membership, incarnation and authority checks remain exact.
 Application separation reads its captured activation history and real original
-parent completion in that same transaction. Both contribute to the source
+parent completion in that same transaction, only for scopes demanded by a
+testing hold. Unused or unrelated application history is not validated by a
+lane projection. Unreadable requested proof retains the hold and contributes an
+unavailable outcome to its source witness. Both readable inputs contribute to the source
 witness and scheduler change detection; progress alone never proves separation.
 A nonblocking shared product-authority lock avoids waiting
 behind a publisher that holds authority and needs a reservation. A changed or

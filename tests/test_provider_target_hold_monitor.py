@@ -692,6 +692,110 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
             after[(other.product, "example-site", "prod")],
         )
 
+    def test_unused_application_history_cannot_block_prod_observation(self) -> None:
+        held = self.reserve("ordinary-prod")
+        target = discover_public_ingress_monitor_targets(self.store)[0]
+        for with_hold in (True, False):
+            if not with_hold:
+                self.complete(held)
+            snapshot = self.store.read_provider_hold_snapshot(
+                product=self.profile.product, context=self.origin.context, instance="prod"
+            )
+            target = replace(target, provider_hold_snapshot=snapshot)
+            revisions = self.store.health_monitor_authority_revisions()
+            observation = check_public_ingress_target(
+                target=target,
+                checked_at="2026-10-01T01:00:00Z",
+                timeout_seconds=1,
+                http_get=Mock(),
+                tls_get=Mock(),
+            )
+            for corruption in ("original", "parent"):
+                with self.subTest(with_hold=with_hold, corruption=corruption):
+                    original = held.model_copy(
+                        update={
+                            "record_id": "unrelated-application-original",
+                            "route_path": ORIGINAL_MUTATION_INTENT_ROUTE,
+                            "provider_target_key": "",
+                            "state": "completed",
+                            "response_status_code": 200,
+                            "recorded_at": held.updated_at,
+                            "response_payload": {
+                                "original_intent": {
+                                    "testing_activation": {
+                                        "product": self.profile.product,
+                                        "context": self.origin.context,
+                                    }
+                                },
+                                **(
+                                    {"reservation_id": "unrelated-parent"}
+                                    if corruption == "parent"
+                                    else {}
+                                ),
+                            },
+                        }
+                    )
+                    parent = held.model_copy(
+                        update={
+                            "record_id": "unrelated-parent",
+                            "route_path": f"/v1/products/{self.profile.product}/testing-activation",
+                            "provider_target_key": "",
+                        }
+                    )
+                    with self.store._session_factory.begin() as session:
+                        for record in (original, parent):
+                            row = LaunchplaneIdempotencyRow(
+                                record_id=record.record_id,
+                                scope=record.scope,
+                                route_path=record.route_path,
+                                idempotency_key=record.idempotency_key,
+                            )
+                            self.store._sync_idempotency_row(row, record)
+                            if record is parent:
+                                row.payload = {
+                                    key: value
+                                    for key, value in row.payload.items()
+                                    if key != "request_fingerprint"
+                                }
+                            session.add(row)
+                    try:
+                        self.assertEqual(
+                            self.store.read_provider_hold_snapshot(
+                                product=self.profile.product,
+                                context=self.origin.context,
+                                instance="prod",
+                            ),
+                            snapshot,
+                        )
+                        self.assertEqual(self.store.health_monitor_authority_revisions(), revisions)
+                        self.assertEqual(
+                            {
+                                hold.reservation.record_id
+                                for hold in self.store.list_provider_target_holds()
+                            },
+                            {held.record_id} if with_hold else set(),
+                        )
+                        with patch.object(
+                            self.store,
+                            "_database_mutation_timestamp",
+                            return_value=observation.observed_at,
+                        ):
+                            publication = self.store.write_public_ingress_transition_with_outbox(
+                                observation=observation,
+                                incidents=(),
+                                expected_provider_hold_snapshot=snapshot,
+                            )
+                        self.assertEqual(publication.status, "written")
+                    finally:
+                        with self.store._session_factory.begin() as session:
+                            session.execute(
+                                delete(LaunchplaneIdempotencyRow).where(
+                                    LaunchplaneIdempotencyRow.record_id.in_(
+                                        (original.record_id, parent.record_id)
+                                    )
+                                )
+                            )
+
     def test_repoint_type_change_and_delete_do_not_erase_origin(self) -> None:
         self.reserve("old")
         for target_type in ("compose", "application"):

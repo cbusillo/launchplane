@@ -16,6 +16,8 @@ import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
+from sqlalchemy import select
+
 from control_plane import secrets
 from control_plane.dokploy import api
 from control_plane.dokploy.api import dokploy_request as schedule_transport
@@ -4361,7 +4363,10 @@ class ApplicationFlowTests(unittest.TestCase):
 
         from dataclasses import replace
         from unittest.mock import Mock
-        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from control_plane.storage.postgres import (
+            ORIGINAL_MUTATION_INTENT_ROUTE,
+            LaunchplaneIdempotencyRow,
+        )
         from control_plane.workflows.public_ingress_monitor import (
             _deploy_fence_monitor_target,
             check_public_ingress_target,
@@ -4385,8 +4390,109 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(observation.status, "pass")
         revisions = self.store.health_monitor_authority_revisions()
-        previous_observations = self.store.list_public_ingress_observation_records()
         assert first_operation is not None
+        with self.store._session_factory() as session:
+            original_row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == first_operation.record_id,
+                )
+            )
+            assert original_row is not None
+            original_id = original_row.record_id
+            original_payload = deepcopy(original_row.payload)
+            foreign_payload = deepcopy(original_payload)
+            foreign_payload["response_payload"]["original_intent"]["testing_activation"][
+                "product"
+            ] = "unrelated-product"
+            foreign_payload["response_payload"].pop("reservation_id")
+            foreign_payload["record_id"] = "unrelated-application-original"
+            foreign_payload["idempotency_key"] = "unrelated-application"
+            foreign = LaunchplaneIdempotencyRow(
+                record_id=foreign_payload["record_id"],
+                scope=original_row.scope,
+                route_path=original_row.route_path,
+                idempotency_key=foreign_payload["idempotency_key"],
+            )
+            self.store._sync_idempotency_row(
+                foreign, type(first_operation).model_validate(foreign_payload)
+            )
+            session.add(foreign)
+            session.commit()
+        self.assertEqual(
+            self.store.read_provider_hold_snapshot(
+                product=self.product, context=self.context, instance="testing"
+            ),
+            snapshot,
+        )
+        for corruption in ("original-parent-link", "parent-fingerprint"):
+            with self.subTest(corruption=corruption):
+                with self.store._session_factory.begin() as session:
+                    row = session.get(
+                        LaunchplaneIdempotencyRow,
+                        original_id
+                        if corruption == "original-parent-link"
+                        else first_operation.record_id,
+                    )
+                    assert row is not None
+                    saved_payload = deepcopy(row.payload)
+                    corrupt_payload = deepcopy(saved_payload)
+                    if corruption == "original-parent-link":
+                        corrupt_payload["response_payload"].pop("reservation_id")
+                    else:
+                        corrupt_payload.pop("request_fingerprint")
+                    row.payload = corrupt_payload
+                try:
+                    unavailable = self.store.read_provider_hold_snapshot(
+                        product=self.product, context=self.context, instance="testing"
+                    )
+                    self.assertIn(
+                        self.original.record_id,
+                        {hold.reservation.record_id for hold in unavailable.holds},
+                    )
+                    self.assertNotEqual(unavailable.source_sha256, snapshot.source_sha256)
+                finally:
+                    with self.store._session_factory.begin() as session:
+                        row = session.get(LaunchplaneIdempotencyRow, saved_payload["record_id"])
+                        assert row is not None
+                        row.payload = saved_payload
+                self.assertEqual(
+                    self.store.read_provider_hold_snapshot(
+                        product=self.product, context=self.context, instance="testing"
+                    ),
+                    snapshot,
+                )
+        from tests.test_public_ingress_monitor import _minutes_after
+
+        with self.store._session_factory.begin() as session:
+            for record_id in (original_id, first_operation.record_id):
+                row = session.get(LaunchplaneIdempotencyRow, record_id)
+                assert row is not None
+                value = type(first_operation).model_validate(row.payload)
+                self.store._sync_idempotency_row(
+                    row,
+                    value.model_copy(update={"updated_at": _minutes_after(value.updated_at, 1)}),
+                )
+        self.assertEqual(
+            self.store.read_provider_hold_snapshot(
+                product=self.product, context=self.context, instance="testing"
+            ),
+            snapshot,
+        )
+        self.assertEqual(self.store.health_monitor_authority_revisions(), revisions)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=observation.observed_at
+        ):
+            self.assertEqual(
+                self.store.write_public_ingress_transition_with_outbox(
+                    observation=observation, incidents=(), expected_provider_hold_snapshot=snapshot
+                ).status,
+                "written",
+            )
+        previous_observations = self.store.list_public_ingress_observation_records()
+        prod_snapshot = self.store.read_provider_hold_snapshot(
+            product=self.product, context=self.context, instance="prod"
+        )
         with self.store._session_factory() as session:
             row = session.get(LaunchplaneIdempotencyRow, first_operation.record_id)
             assert row is not None
@@ -4410,6 +4516,12 @@ class ApplicationFlowTests(unittest.TestCase):
             self.original.record_id, {hold.reservation.record_id for hold in current.holds}
         )
         self.assertNotEqual(snapshot.source_sha256, current.source_sha256)
+        self.assertEqual(
+            self.store.read_provider_hold_snapshot(
+                product=self.product, context=self.context, instance="prod"
+            ),
+            prod_snapshot,
+        )
         lane_key = (self.product, self.context, "testing")
         self.assertNotEqual(
             revisions[lane_key], self.store.health_monitor_authority_revisions()[lane_key]

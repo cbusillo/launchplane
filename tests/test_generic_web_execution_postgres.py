@@ -384,6 +384,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 lease_owner="original",
                 reconciliation_key=adapter.reconciliation_key(),
                 provider_target_key=adapter.target_key(),
+                provider_target_origin=adapter.provider_target_origin(),
             )
             assert reserved.record is not None
             reservation = reserved.record
