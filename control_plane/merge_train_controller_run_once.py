@@ -5,6 +5,7 @@ from control_plane.merge_train_policy_binding import merge_train_policy_bindings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 import logging
 from time import sleep
 from typing import TYPE_CHECKING, Literal, Protocol, cast
@@ -135,6 +136,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 _QUEUE_RETRY_RETIREMENT_SOURCE = "service:controller:queue-retry-retirement:"
 DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
+CANDIDATE_CHECK_RETRY_WAIT_SECONDS = 10 * 60
 MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION = "merge_train_controller_run_once"
 MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS = (
     "admit_collapsed_root",
@@ -5785,6 +5787,19 @@ def _retry_closed_candidate_after_passing_checks(
     )
 
 
+def _candidate_check_retry_wait_expired(
+    *, candidate: MergeTrainBatchCandidate, recorded_at: str
+) -> bool:
+    return (
+        not candidate.check_rerun_requested_at
+        or (
+            datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+            - datetime.fromisoformat(candidate.check_rerun_requested_at.replace("Z", "+00:00"))
+        ).total_seconds()
+        >= CANDIDATE_CHECK_RETRY_WAIT_SECONDS
+    )
+
+
 def _recover_failed_merge_train_candidate(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
@@ -5811,6 +5826,26 @@ def _recover_failed_merge_train_candidate(
         or not failed.candidate_sha
     ):
         return None
+    retry_result: dict[str, object] = {
+        "repository": repository,
+        "base_branch": base_branch,
+        "mode": "dry-run",
+        "controller_action": "candidate_failed",
+        "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+        "candidate": failed.model_dump(mode="json"),
+    }
+    if failed.check_rerun_attempts and mutate:
+        try:
+            github_client.retry_candidate_checks(
+                candidate=failed,
+                resume=True,
+                before_write=lambda: lease.checkpoint(
+                    active_phase="restore_candidate_check_retry",
+                    active_record_id=active_candidate_record.record_id,
+                ),
+            )
+        except MergeTrainGitHubError:
+            return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
     try:
         failures = github_client.read_candidate_check_failures(candidate=failed)
     except MergeTrainGitHubError:
@@ -5818,6 +5853,14 @@ def _recover_failed_merge_train_candidate(
         return None
     if not failures.conclusive:
         # A re-run in progress or a failure no longer visible blames nobody yet.
+        if failed.check_rerun_attempts:
+            if _candidate_check_retry_wait_expired(candidate=failed, recorded_at=recorded_at):
+                return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
+            return {
+                **retry_result,
+                "controller_action": "observe_candidate",
+                "reason_code": "candidate_checks_retry_pending",
+            }
         lease.observe(reason_code="candidate_failure_evidence_unavailable")
         return None
     details: dict[str, object] = {
@@ -5827,6 +5870,79 @@ def _recover_failed_merge_train_candidate(
         ],
         "failed_tests": list(failures.failed_tests),
     }
+    retry_result["details"] = details
+    if any(check.conclusion == "action_required" for check in failures.checks):
+        return {**retry_result, "reason_code": "candidate_checks_admin_hold"}
+    retry_used = bool(
+        failed.check_retry_of or failed.infrastructure_retry_of or failed.batch_body_retry_of
+    ) or any(
+        record.candidate.check_rerun_attempts
+        and _merge_train_candidate_matches_dry_run_queue(
+            candidate=record.candidate, dry_run_result=dry_run_result, base_sha=snapshot.base_sha
+        )
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=snapshot.base_sha,
+        )
+    )
+    if not retry_used and not failures.infrastructure_only and failures.retry_runs:
+        retried = failed.model_copy(
+            update={
+                "check_rerun_attempts": dict(failures.retry_runs),
+                "check_rerun_requested_at": recorded_at,
+            }
+        )
+        publish: Callable[[Callable[[], object]], None] | None = None
+        if mutate:
+            try:
+                publish = github_client.prepare_candidate_check_retry(candidate=retried)
+            except MergeTrainGitHubError:
+                return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
+        retry_result.update(
+            controller_action="observe_candidate",
+            mode="observe_candidate" if mutate else "dry-run",
+            reason_code="candidate_checks_retry_requested",
+            candidate=retried.model_dump(mode="json"),
+        )
+        if publish is not None:
+            record_id = _persist_replacement_candidate(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                candidate=retried,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                lease=lease,
+            )
+            retry_result["merge_train_batch_candidate_record_id"] = record_id
+            publish(
+                lambda: lease.checkpoint(
+                    active_action="reflow_candidate",
+                    active_phase="retry_candidate_checks",
+                    active_record_id=record_id,
+                    active_pull_request_number=None,
+                    step_payload={"candidate_record_id": record_id},
+                ),
+            )
+        return retry_result
+    if failures.checks_disagree:
+        return {**retry_result, "reason_code": "candidate_checks_disagree"}
+    if failed.check_rerun_attempts:
+        try:
+            finished = github_client.candidate_check_retry_finished(candidate=failed)
+        except MergeTrainGitHubError:
+            return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
+        if not finished:
+            if _candidate_check_retry_wait_expired(candidate=failed, recorded_at=recorded_at):
+                return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
+            return {
+                **retry_result,
+                "controller_action": "observe_candidate",
+                "reason_code": "candidate_checks_retry_pending",
+            }
     if failures.infrastructure_only:
         if _infrastructure_retry_used(
             candidate_store=candidate_store,

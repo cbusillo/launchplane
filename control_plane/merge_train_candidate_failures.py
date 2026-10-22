@@ -53,6 +53,8 @@ class CandidateCheckFailures:
     # A check run is still queued or running, for example a re-run of a failed job.
     checks_pending: bool = False
     attribution_requirements: tuple[CheckRequirement, ...] = ()
+    retry_runs: tuple[tuple[int, int], ...] = ()
+    checks_disagree: bool = False
 
     @property
     def conclusive(self) -> bool:

@@ -195,6 +195,10 @@ class MergeTrainGitHubPolicyUnavailableError(MergeTrainGitHubError):
     pass
 
 
+class _CandidateCheckRetryProvenanceUnavailable(MergeTrainGitHubError):
+    pass
+
+
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub state no longer matches guarded merge evidence."""
 
@@ -1186,12 +1190,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             ),
             safe="",
         )
-        check_runs = _list_check_runs(
+        check_payload = _list_check_runs(
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_sha,
             required_checks=tuple((check.name, check.app_id) for check in requirements),
-        )["check_runs"]
+        )
+        check_runs = check_payload["check_runs"]
         statuses = _list_commit_statuses(
             transport=self.transport,
             repository_path=repository_path,
@@ -1270,7 +1275,221 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             attribution_requirements=tuple(
                 requirement for requirement, state in verdict.blocking if state == "fail"
             ),
+            retry_runs=self._candidate_check_retry_runs(
+                candidate=candidate,
+                checks=[check for check in normalized_runs if is_required(check, "check_run")],
+            ),
+            checks_disagree=not check_payload.get("actions_observation_error")
+            and any(
+                _check_run_status(failed) == "fail"
+                and is_required(failed, "check_run")
+                and _actions_check_identity(
+                    failed, repository_path=repository_path, head_sha=encoded_sha
+                )
+                is not None
+                and any(
+                    str(passed.get("name") or "").casefold()
+                    == str(failed.get("name") or "").casefold()
+                    and _check_payload_app_id(passed) == _check_payload_app_id(failed)
+                    and passed.get("status") == "completed"
+                    and passed.get("conclusion") == "success"
+                    and _actions_check_identity(
+                        passed, repository_path=repository_path, head_sha=encoded_sha
+                    )
+                    is not None
+                    for passed in normalized_runs
+                )
+                for failed in normalized_runs
+            ),
         )
+
+    def _candidate_check_retry_runs(
+        self, *, candidate: MergeTrainBatchCandidate, checks: list[dict[str, object]]
+    ) -> tuple[tuple[int, int], ...]:
+        repository_path = _repository_path(candidate.repository)
+        runs: dict[int, int] = {}
+        for check in checks:
+            if check.get("conclusion") not in {"failure", "timed_out"}:
+                continue
+            identity = _actions_check_identity(
+                check, repository_path=repository_path, head_sha=candidate.candidate_sha
+            )
+            if identity is None:
+                return ()
+            run_id, suite_id = identity
+            if run_id in runs:
+                continue
+            try:
+                run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+            except _CandidateCheckRetryProvenanceUnavailable:
+                return ()
+            except MergeTrainGitHubError as error:
+                if error.status_code in {403, 404} and not error.rate_limited:
+                    return ()
+                raise
+            if (
+                run.get("event") != "push"
+                or run.get("check_suite_id") != suite_id
+                or run.get("status") != "completed"
+                or run.get("conclusion") not in {"failure", "timed_out"}
+            ):
+                return ()
+            runs[run_id] = cast(int, run["run_attempt"])
+        return tuple(sorted(runs.items()))
+
+    def _candidate_check_retry_run(
+        self, *, candidate: MergeTrainBatchCandidate, run_id: int
+    ) -> dict[str, object]:
+        payload = self.transport.request(
+            method="GET",
+            path=f"/repos/{_repository_path(candidate.repository)}/actions/runs/{run_id}",
+        )
+        try:
+            return self._validate_candidate_check_retry_run(
+                candidate=candidate, run_id=run_id, payload=payload
+            )
+        except MergeTrainGitHubError as error:
+            raise _CandidateCheckRetryProvenanceUnavailable(str(error)) from error
+
+    @staticmethod
+    def _validate_candidate_check_retry_run(
+        *, candidate: MergeTrainBatchCandidate, run_id: int, payload: object
+    ) -> dict[str, object]:
+        run = _json_object(payload, "GitHub candidate check execution")
+        attempt = run.get("run_attempt")
+        if (
+            run.get("id") != run_id
+            or run.get("head_sha") != candidate.candidate_sha
+            or run.get("head_branch") != candidate.candidate_ref.removeprefix("refs/heads/")
+            or run.get("event") not in {"push", "pull_request"}
+            or _repository_full_name(run.get("repository"), "GitHub execution repository")
+            != candidate.repository.casefold()
+            or _repository_full_name(run.get("head_repository"), "GitHub execution head repository")
+            != candidate.repository.casefold()
+            or not isinstance(attempt, int)
+            or isinstance(attempt, bool)
+            or attempt < 1
+        ):
+            raise MergeTrainGitHubError(
+                "Candidate check retry execution provenance is unavailable."
+            )
+        return run
+
+    def prepare_candidate_check_retry(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        resume: bool = False,
+    ) -> Callable[[Callable[[], object]], None]:
+        expected_ref = build_merge_train_batch_candidate_ref(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            batch_id=candidate.batch_id,
+        )
+        if not candidate.check_rerun_attempts or candidate.candidate_ref != expected_ref:
+            raise MergeTrainGitHubError(
+                "Candidate check retry requires its recorded canonical ref."
+            )
+        if not resume:
+            for run_id, attempt in candidate.check_rerun_attempts.items():
+                run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+                if (
+                    run.get("event") != "push"
+                    or run.get("run_attempt") != attempt
+                    or run.get("status") != "completed"
+                    or run.get("conclusion") not in {"failure", "timed_out"}
+                ):
+                    raise MergeTrainGitHubError("Candidate check execution changed before retry.")
+        repository_path = _repository_path(candidate.repository)
+        try:
+            observed = _base_branch_sha(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=_branch_name_from_ref(candidate.candidate_ref),
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 404:
+                raise
+            observed = None
+        if observed is not None and observed != candidate.candidate_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Candidate ref moved before check retry.", status_code=409
+            )
+
+        def publish(before_write: Callable[[], object]) -> None:
+            if observed is not None and resume:
+                return
+            self._publish_candidate_check_retry(
+                candidate=candidate, before_write=before_write, delete_existing=observed is not None
+            )
+
+        return publish
+
+    def retry_candidate_checks(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        before_write: Callable[[], object],
+        resume: bool = False,
+    ) -> None:
+        self.prepare_candidate_check_retry(candidate=candidate, resume=resume)(before_write)
+
+    def _publish_candidate_check_retry(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        before_write: Callable[[], object],
+        delete_existing: bool,
+    ) -> None:
+        repository_path = _repository_path(candidate.repository)
+        if delete_existing:
+            before_write()
+            self._delete_reference_if_present(
+                repository_path=repository_path, reference=candidate.candidate_ref
+            )
+        before_write()
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/git/refs",
+                body={"ref": candidate.candidate_ref, "sha": candidate.candidate_sha},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+        _verify_candidate_publication(
+            transport=self.transport,
+            repository_path=repository_path,
+            candidate_ref=candidate.candidate_ref,
+            expected_sha=candidate.candidate_sha,
+        )
+
+    def candidate_check_retry_finished(self, *, candidate: MergeTrainBatchCandidate) -> bool:
+        from github_plan_status.workflow_runs import (
+            current_workflow_runs,
+            workflow_execution_identity,
+        )
+
+        runs = _read_actions_workflow_inventory(
+            transport=self.transport,
+            repository_path=_repository_path(candidate.repository),
+            head_sha=candidate.candidate_sha,
+        )
+        if runs is None:
+            return False
+        current = current_workflow_runs(runs, candidate.candidate_sha)["current"]
+        for run_id, attempt in candidate.check_rerun_attempts.items():
+            original = next((run for run in runs if run.get("id") == run_id), None)
+            if original is None or (identity := workflow_execution_identity(original)) is None:
+                return False
+            if not any(
+                workflow_execution_identity(run) == identity
+                and run.get("status") == "completed"
+                and (run.get("id") != run_id or cast(int, run["run_attempt"]) > attempt)
+                for run in current
+            ):
+                return False
+        return True
 
     def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
