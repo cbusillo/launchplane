@@ -899,11 +899,8 @@ def main():
         if action in {'prepare','rebuild-final'}:
             if action=='rebuild-final':
                 try:
-                    archived=record.get('abandoned_validations',[])
-                    if (record['state']!='rebuilding' or not archived
-                            or archived[-1]['host_disposal'].get('recovery_snapshots_preserved') is not True
-                            or archived[-1]['host_disposal']['recovery_snapshots']!=record['copies']):
-                        raise RuntimeError('A verified retained FINAL tuple is required')
+                    if not preserved_rehearsal_abandonment(record):
+                        raise RuntimeError('A current preserving abandonment is required')
                     validate_snapshots(spec,root,{},record['copies'],retired=True)
                 except Exception:
                     emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')

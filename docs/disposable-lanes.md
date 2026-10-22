@@ -2945,7 +2945,10 @@ original intent. For each step run `dry-run`, review the saved evidence, run
    FINAL tuple, and starts private web only after the existing isolation and
    health checks. It uses recorded artifact and upgrade settings; it neither
    recaptures the business host nor replays the initial upgrade. Both source
-   tuples and the abandonment archive remain unchanged.
+   tuples and the abandonment archive remain unchanged. Admission requires the
+   current preserving retirement receipt to match the latest abandonment.
+   Historical abandonment alone cannot authorize rebuilding after a later
+   disposal deleted those tuples.
 3. `validate-business`, using another new key and its own saved review. This
    validates the newly built working copy. Validation readback needs that
    attempt's saved evidence file.

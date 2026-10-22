@@ -1,6 +1,29 @@
 """Fixed host disposal for an idle incomplete or completed later-phase standalone rehearsal."""
 
-INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
+import inspect
+from typing import Any
+
+
+def preserved_rehearsal_abandonment(record: dict[str, Any]) -> bool:
+    archived = record.get("abandoned_validations", [])
+    progress = record.get("incomplete_retirement")
+    if not archived or not progress:
+        return False
+    disposal = progress.get("host_disposal")
+    return bool(
+        record.get("state") in {"retired", "rebuilding"}
+        and disposal
+        and disposal == archived[-1]["host_disposal"]
+        and disposal.get("disposed") is True
+        and disposal.get("recovery_snapshots_preserved") is True
+        and disposal.get("recovery_snapshots") == record.get("copies")
+    )
+
+
+INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = (
+    "from typing import Any\n"
+    + inspect.getsource(preserved_rehearsal_abandonment)
+    + r"""
 def incomplete_initial_snapshot(spec,root,*,allow_partial):
     names=database_names(spec)
     for role in ('upgrade','final_source','final_upgrade'):
@@ -287,3 +310,4 @@ def incomplete_retirement_locked(spec,root):
     emit_rehearsal_result(result)
     return result
 """
+)

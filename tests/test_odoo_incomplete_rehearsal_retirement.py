@@ -1053,6 +1053,80 @@ class LaterPhaseRetirementTests(unittest.TestCase):
         ):
             self.assertEqual(abandonment.readback()["original_outcome"], "unknown")
 
+    def test_rebuild_refuses_after_later_retirement_disposes_the_preserved_tuples(self) -> None:
+        from control_plane.odoo_upgrade_rehearsal import require_rehearsal_transition
+
+        self.test_rebuild_uses_new_resources_and_the_retained_final_tuple()
+        rebuilt = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert rebuilt is not None
+        operation = self.retirement("new-final-copy")
+        with (
+            patch.object(
+                type(operation),
+                "host",
+                side_effect=self.host(self.native(rebuilt.copies, "new-final-copy")),
+            ),
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            self.run_retirement(operation)
+        disposed = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert disposed is not None and disposed.incomplete_retirement is not None
+        assert disposed.incomplete_retirement.host_disposal is not None
+        self.assertFalse(disposed.incomplete_retirement.host_disposal.recovery_snapshots_preserved)
+        self.assertEqual(disposed.abandoned_validations, rebuilt.abandoned_validations)
+        with self.assertRaises(RehearsalRefused):
+            require_rehearsal_transition(disposed, "rebuild-final")
+        with patch(
+            "control_plane.dokploy.sandbox_placement.created_placement",
+            side_effect=AssertionError("Disposed custody must fail before provider reads"),
+        ):
+            self.assertFalse(
+                self.fixture.adapter("rebuild-final").can_retry_empty_placement(disposed, "")
+            )
+        with patch(
+            "control_plane.dokploy.sandbox_placement.create_isolated_placement"
+        ) as allocation:
+            with self.assertRaises(RehearsalRefused):
+                self.fixture.run_operation(
+                    self.fixture.adapter("rebuild-final"), "disposed-custody"
+                )
+            allocation.assert_not_called()
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), disposed)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_rebuild_requires_the_latest_current_preserving_disposal(self) -> None:
+        from copy import deepcopy
+        from control_plane._odoo_incomplete_rehearsal_retirement import (
+            preserved_rehearsal_abandonment,
+        )
+
+        self.test_unknown_validation_retires_working_copy_and_archives_original()
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert retired is not None
+        for state in ("retired", "rebuilding"):
+            record = retired.model_dump(mode="json")
+            record["state"] = state
+            self.assertTrue(preserved_rehearsal_abandonment(record))
+            for case in ("missing", "disposed", "older"):
+                changed = deepcopy(record)
+                if case == "missing":
+                    changed["incomplete_retirement"] = None
+                elif case == "disposed":
+                    changed["incomplete_retirement"]["host_disposal"][
+                        "recovery_snapshots_preserved"
+                    ] = False
+                else:
+                    newer = deepcopy(changed["abandoned_validations"][-1])
+                    newer["host_disposal"]["binding_sha256"] = canonical_json_sha256(
+                        {"new": "disposal"}
+                    )
+                    changed["abandoned_validations"].append(newer)
+                self.assertFalse(preserved_rehearsal_abandonment(changed))
+
     def test_retired_abandonment_history_does_not_skip_current_ownership(self) -> None:
         from types import SimpleNamespace
         from control_plane.odoo_upgrade_rehearsal import require_unaliased_rehearsal
@@ -1811,12 +1885,15 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             abandoned_validations=[
                 {
                     "host_disposal": {
+                        "disposed": True,
                         "recovery_snapshots_preserved": True,
                         "recovery_snapshots": copies,
                     }
                 }
             ],
         )
+        disposal = self.spec["record"]["abandoned_validations"][-1]["host_disposal"]
+        self.spec["record"]["incomplete_retirement"] = {"host_disposal": disposal}
         host = self.fixture.host
         restore = Mock()
         upgrade = Mock()
@@ -1836,6 +1913,27 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"] = canonical_json_sha256(
             {"old": "attempt"}
         )
+        first_attempt = self.spec["attempt_sha256"]
+        for custody in (
+            None,
+            {"host_disposal": {**disposal, "recovery_snapshots_preserved": False}},
+            {
+                "host_disposal": {
+                    **disposal,
+                    "binding_sha256": canonical_json_sha256({"other": "disposal"}),
+                }
+            },
+        ):
+            self.spec["record"]["incomplete_retirement"] = custody
+            self.spec["attempt_sha256"] = canonical_json_sha256({"custody": custody})
+            self.assertEqual(
+                self.fixture.run_host(self.spec)["refusal_code"],
+                "rehearsal_rebuild_precheck_refused",
+            )
+            host["compose"].assert_not_called()
+            restore.assert_not_called()
+        self.spec["record"]["incomplete_retirement"] = {"host_disposal": disposal}
+        self.spec["attempt_sha256"] = first_attempt
         refused = self.fixture.run_host(self.spec)
         self.assertEqual(refused["refusal_code"], "rehearsal_rebuild_capacity_insufficient")
         restore.assert_not_called()

@@ -14,6 +14,7 @@ from typing import cast
 import click
 
 from control_plane import secrets
+from control_plane._odoo_incomplete_rehearsal_retirement import preserved_rehearsal_abandonment
 from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_check_script,
     business_entrypoint_schedule,
@@ -384,10 +385,8 @@ def require_rehearsal_transition(record: OdooUpgradeRehearsalRecord, action: str
         "retire": {"verified"},
         "rebuild-final": {"retired", "rebuilding"},
     }
-    if action == "rebuild-final" and (
-        not record.abandoned_validations
-        or not record.abandoned_validations[-1].host_disposal.recovery_snapshots_preserved
-        or tuple(record.copies) != record.abandoned_validations[-1].host_disposal.recovery_snapshots
+    if action == "rebuild-final" and not preserved_rehearsal_abandonment(
+        record.model_dump(mode="json")
     ):
         raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
     if record.state not in allowed.get(action, set()):
@@ -407,9 +406,7 @@ def require_unaliased_rehearsal(
         raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
     if record.compose_id and not (
         record.state == "retired"
-        and record.abandoned_validations
-        and record.incomplete_retirement is not None
-        and record.copies == record.abandoned_validations[-1].host_disposal.recovery_snapshots
+        and preserved_rehearsal_abandonment(record.model_dump(mode="json"))
     ):
         owned = store.read_provider_target_record(
             context_name=record.rehearsal_id, instance_name="rehearsal"
@@ -642,8 +639,7 @@ class OdooRehearsalAdapter:
             and not record.copies
             and not record.elapsed_seconds
             or self.request.action == "rebuild-final"
-            and record.state in {"retired", "rebuilding"}
-            and bool(record.abandoned_validations)
+            and preserved_rehearsal_abandonment(record.model_dump(mode="json"))
             and (
                 record.state == "retired"
                 or not any((record.project_id, record.environment_id, record.compose_id))
