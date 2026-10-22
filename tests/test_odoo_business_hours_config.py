@@ -1052,6 +1052,9 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
                             "odoo_business_hours": {
                                 "operation": "inspect",
                                 "private_endpoint_key": "calendar-prod",
+                                **(
+                                    {"company_id": 7} if contradiction == "membership_bound" else {}
+                                ),
                             },
                         }
                     )

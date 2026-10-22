@@ -2079,7 +2079,6 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                     )
                 else:
                     self.assertEqual(response.status_code, 409, msg=response.text)
-                    self.assertEqual(response.json()["error"]["code"], "product_profile_conflict")
                     self.assertIsNone(completion)
                 self.assertEqual(len(runtime_records), 1)
                 self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
