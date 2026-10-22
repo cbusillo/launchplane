@@ -42,6 +42,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
+    PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
     build_outbox_delivery_id,
@@ -342,6 +343,7 @@ class PublicIngressNotificationDrivers(Protocol):
 
 
 INCIDENT_RESOLVED_SUPERSESSION_ACTION = "superseded_incident_resolved"
+INCIDENT_BACKLOG_SUPERSESSION_ACTION = "superseded_incident_backlog"
 
 
 class PublicIngressMonitorResult(BaseModel):
@@ -3712,40 +3714,21 @@ def deliver_public_ingress_notification_outbox_delivery(
                 incident.status == "resolved"
                 or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
             ):
-                if record.provider_operation_key:
-                    return record.model_copy(
-                        update={
-                            "state": "failed",
-                            "error_code": "delivery_outcome_unknown",
-                            "lease_owner": "",
-                            "lease_expires_at": "",
-                        }
-                    )
                 if retired_refusal:
                     reason = "retired_production_refusal"
                 elif incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
                     reason = "retired_source_lag"
                 else:
                     reason = INCIDENT_RESOLVED_SUPERSESSION_ACTION
-                attempt = PublicIngressNotificationAttemptRecord.model_validate(
-                    {
-                        **attempt_payload,
-                        "delivery_status": "skipped",
-                        "action": reason,
-                    }
+                return _superseded_incident_outbox_delivery(
+                    record=record,
+                    reason=reason,
                 )
-                return record.model_copy(
-                    update={
-                        "state": "delivered",
-                        "action": reason
-                        if reason == INCIDENT_RESOLVED_SUPERSESSION_ACTION
-                        else f"skipped_{reason}",
-                        "error_code": "",
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
-                    }
-                )
+        summary_delivery_id = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY)
+        if summary_delivery_id and summary_delivery_id != record.delivery_id:
+            return _superseded_incident_outbox_delivery(
+                record=record, reason=INCIDENT_BACKLOG_SUPERSESSION_ACTION
+            )
         if destination_payload.get("kind") in {"email", "discord"}:
             return _deliver_direct_notification_outbox(
                 record=record,
@@ -3871,6 +3854,37 @@ def deliver_public_ingress_notification_outbox_delivery(
         )
 
 
+def _superseded_incident_outbox_delivery(
+    *, record: OutboxDeliveryRecord, reason: str
+) -> OutboxDeliveryRecord:
+    if record.provider_operation_key:
+        return record.model_copy(
+            update={
+                "state": "failed",
+                "error_code": "delivery_outcome_unknown",
+                "lease_owner": "",
+                "lease_expires_at": "",
+            }
+        )
+    attempt = PublicIngressNotificationAttemptRecord.model_validate(
+        {
+            **_dict_payload(record.payload.get("attempt")),
+            "delivery_status": "skipped",
+            "action": reason,
+        }
+    )
+    return record.model_copy(
+        update={
+            "state": "delivered",
+            "action": reason if reason.startswith("superseded_") else f"skipped_{reason}",
+            "error_code": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "payload": {**record.payload, "attempt_result": attempt.model_dump(mode="json")},
+        }
+    )
+
+
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
     def read_public_ingress_incident_record(
         self, incident_id: str
@@ -3904,9 +3918,21 @@ def _deliver_direct_notification_outbox(
     if record_store is None:
         raise ValueError("direct notification outbox requires record store")
     incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+    summary = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY) == record.delivery_id
     observation = record_store.read_public_ingress_observation_record(
-        str(attempt_payload["observation_id"])
+        incident.latest_observation_id if summary else str(attempt_payload["observation_id"])
     )
+    event = _public_ingress_event_value(attempt_payload.get("event"))
+    body = _required_payload_text(payload, "body")
+    if summary:
+        body = "Current incident summary\n\n" + public_ingress_incident_notification_body(
+            event=event, incident=incident, observation=observation
+        )
+        attempt_payload = {
+            **attempt_payload,
+            "observation_id": observation.record_id,
+            "attempted_at": record.updated_at,
+        }
     destination = next(
         (
             destination
@@ -3934,10 +3960,10 @@ def _deliver_direct_notification_outbox(
     mark_provider_started(operation_key, destination.kind)
     delivery = drivers.send(
         destination=destination,
-        event=_public_ingress_event_value(attempt_payload.get("event")),
+        event=event,
         incident=incident,
         observation=observation,
-        notification_body=_required_payload_text(payload, "body"),
+        notification_body=body,
     )
     attempt = PublicIngressNotificationAttemptRecord.model_validate(
         {
