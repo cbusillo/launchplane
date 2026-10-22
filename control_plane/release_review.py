@@ -111,7 +111,7 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
     "candidate_identity_missing": "Testing has no qualified deployed version.",
-    "candidate_operation_unresolved": "Testing has an unresolved provider operation. Wait for it to finish or reconcile its original operation before starting a fresh release step.",
+    "candidate_operation_unresolved": "Testing has an unresolved operation. Fresh release work waits until it finishes.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
 }

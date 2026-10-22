@@ -756,6 +756,34 @@ def read_client_release_step_views(
     return tuple(views)
 
 
+_TESTING_RELEASE_CHANGED_MESSAGE = "Testing has moved to a different version. Qualify this accepted artifact and revision again, or accept the new candidate for its own release."
+
+
+def _release_needs_testing(
+    profile: LaunchplaneProductProfileRecord, views: tuple[ClientReleaseStepView, ...]
+) -> bool:
+    next_step = next(view for view in views if view.status != "pass")
+    return not (
+        profile.driver_id == "generic-web"
+        and (
+            next_step.kind == "rollback"
+            or next_step.kind == "promote"
+            and next_step.status in {"pending", "running"}
+        )
+    )
+
+
+def _testing_release_evidence_blocked_reason(error: ValueError | FileNotFoundError) -> str:
+    if (
+        isinstance(error, ReleaseEvidenceUnavailable)
+        and error.code == "candidate_operation_unresolved"
+    ):
+        return str(error)
+    if isinstance(error, ReleaseEvidenceUnavailable) and error.code == "candidate_identity_missing":
+        return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
+    return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
@@ -772,15 +800,6 @@ def _release_run_blocked_reason(
                 "Releases are on hold. This release cannot advance until an admin lifts the hold."
             )
         return "This decision no longer covers the product's release. The current Client and release decision must be reviewed before it can advance."
-    next_step = next(view for view in views if view.status != "pass")
-    needs_testing = not (
-        profile.driver_id == "generic-web"
-        and (
-            next_step.kind == "rollback"
-            or next_step.kind == "promote"
-            and next_step.status in {"pending", "running"}
-        )
-    )
     try:
         production = release_version(store=store, profile=profile, instance="prod")
         # A rejected hotfix rolls back even if testing has moved on.
@@ -790,20 +809,19 @@ def _release_run_blocked_reason(
         return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
     try:
         candidate = (
-            release_version(store=store, profile=profile, instance="testing")
-            if needs_testing
+            (
+                recorded_generic_web_testing_version(store=store, profile=profile)
+                if profile.driver_id == "generic-web"
+                else release_version(store=store, profile=profile, instance="testing")
+            )
+            if _release_needs_testing(profile, views)
             else None
         )
-    except ReleaseEvidenceUnavailable as error:
-        if error.code == "candidate_operation_unresolved":
-            return str(error)
-        if error.code == "candidate_identity_missing":
-            return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
-        return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
-    except (FileNotFoundError, ValueError):
-        return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
+    except (FileNotFoundError, ValueError) as error:
+        return _testing_release_evidence_blocked_reason(error)
     if candidate is not None and candidate != decision.checklist.candidate:
-        return "Testing has moved to a different version. Qualify this accepted artifact and revision again, or accept the new candidate for its own release."
+        return _TESTING_RELEASE_CHANGED_MESSAGE
+    next_step = next(view for view in views if view.status != "pass")
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -820,6 +838,37 @@ def _release_run_blocked_reason(
 
 
 def read_client_release_run(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    control_plane_root: Path | None = None,
+) -> ClientReleaseRunView | None:
+    run = _read_client_release_continuation(
+        store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
+    )
+    if (
+        run is None
+        or run.blocked_reason
+        or run.state not in {"waiting", "running"}
+        or profile.driver_id != "generic-web"
+        or not _release_needs_testing(profile, run.steps)
+    ):
+        return run
+    try:
+        candidate = release_version(
+            store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+        )
+    except (FileNotFoundError, ValueError) as error:
+        return run.model_copy(
+            update={"blocked_reason": _testing_release_evidence_blocked_reason(error)}
+        )
+    if candidate != decision.checklist.candidate:
+        return run.model_copy(update={"blocked_reason": _TESTING_RELEASE_CHANGED_MESSAGE})
+    return run
+
+
+def _read_client_release_continuation(
     *,
     store: object,
     profile: LaunchplaneProductProfileRecord,
@@ -1351,6 +1400,8 @@ def _require_qualified_generic_web_release_source(
 ) -> None:
     try:
         candidate = release_version(store=store, profile=profile, instance="testing")
+    except ReleaseEvidenceUnavailable as error:
+        raise GenericWebPromotionSourceRefused(str(error)) from error
     except (FileNotFoundError, ValueError) as error:
         raise GenericWebPromotionSourceRefused(
             "Testing is no longer qualified for release."

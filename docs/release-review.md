@@ -418,9 +418,8 @@ fail closed. Every successful production promotion writes production's
 environment record from the deployment it made, so the next review starts from
 the version actually running. When the checklist cannot be compiled, the
 response carries one fixed `unavailable_reason` code, shown on the review page
-with the trace ID and logged with it: `testing_lane_missing`,
-`source_control_access_unavailable`, `production_identity_missing`,
-`candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
+with the trace ID and logged with it. The `ReleaseEvidenceReason` contract in
+[release_review.py](../control_plane/contracts/release_review.py) defines those codes.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
@@ -979,8 +978,11 @@ capture. Its worker still rechecks the current decision, Client, release hold,
 production boundary and complete saved testing pair at every stage; failed or
 changed saved qualification still refuses. Fresh backup queueing and promotion
 admission use the stronger current-recipient and unresolved-operation checks.
-An unresolved testing operation reports `candidate_operation_unresolved`, with
-guidance to finish or reconcile that original operation before fresh release work.
+An unresolved testing operation reports `candidate_operation_unresolved`, while
+fresh release work waits for it to finish. A waiting accepted release retains its
+merge-train hold while its saved pair and continuation checks still qualify.
+Permanent decision, lane, inverse and drill blockers retain their previous effects
+on that hold; the public release view still explains fresh admission waits.
 
 Each step runs under a `client_release_acceptance` grant that names the
 decision. Before a fresh backup or promotion is queued, the worker checks all of the following:

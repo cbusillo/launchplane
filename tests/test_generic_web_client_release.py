@@ -2341,11 +2341,10 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                             host=host, expected_status="pass" if admission_only_change else "fail"
                         )
                     operation = fixture.store.list_verireel_prod_backup_gate_operation_records()[0]
-                    self.assertTrue(
-                        any(row[:2] == [host.guest_command, "snapshot"] for row in host.commands)
-                    )
+                    self.assertTrue(operation.progress_evidence.get("snapshot_finished_at"))
                     self.assertEqual(
-                        any(row[0] == "vzdump" for row in host.commands), admission_only_change
+                        bool(operation.progress_evidence.get("independent_backup_finished_at")),
+                        admission_only_change,
                     )
                     self.assertEqual(fixture.advance(), ())
                     self.assertEqual(fixture.provider.deployed_artifacts, [])
@@ -2395,6 +2394,101 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                         self.assertEqual(
                             operation.error_code, "operation_authorization_client_release_refused"
                         )
+                finally:
+                    fixture.doCleanups()
+
+    def test_testing_admission_wait_preserves_train_hold_and_permanent_blockers(self) -> None:
+        from control_plane.merge_train_release_hold import merge_train_release_hold
+
+        for blocker in (
+            "hold",
+            "binding",
+            "drill",
+            "withdrawal",
+            "release_hold",
+            "changed_pair",
+            "failed_pair",
+        ):
+            with self.subTest(blocker=blocker):
+                fixture = GenericWebClientReleaseTests()
+                fixture.setUp()
+                try:
+                    if blocker == "drill":
+                        fixture.switch("promote_with_rollback_drill")
+                    decision = fixture.accept()
+                    self.assertTrue(fixture.advance())
+                    fixture.capture()
+                    self.assertIsNotNone(
+                        merge_train_release_hold(fixture.store, fixture.profile.repository)
+                    )
+                    inventory = fixture.store.read_environment_inventory(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    if blocker == "drill":
+                        for record in fixture.store.list_deployment_records(
+                            context_name=fixture.context, instance_name="prod"
+                        ):
+                            fixture.store.write_deployment_record(
+                                record.model_copy(
+                                    update={
+                                        "deploy": record.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
+                            )
+                    elif blocker == "withdrawal":
+                        fixture.accept("changes_requested", suffix="-withdrawal")
+                    elif blocker == "release_hold":
+                        fixture.switch("held")
+                    elif blocker == "changed_pair":
+                        assert inventory.runtime_identity is not None
+                        fixture.write_qualified_testing_inventory(
+                            inventory.model_copy(
+                                update={
+                                    "runtime_identity": inventory.runtime_identity.model_copy(
+                                        update={
+                                            "artifact_id": fixture.profile.image.repository
+                                            + "@sha256:"
+                                            + "d" * 64,
+                                            "source_git_ref": "d" * 40,
+                                        }
+                                    )
+                                }
+                            )
+                        )
+                    elif blocker == "failed_pair":
+                        record = fixture.store.read_deployment_record(
+                            inventory.deployment_record_id
+                        )
+                        fixture.store.write_deployment_record(
+                            record.model_copy(
+                                update={
+                                    "deploy": record.deploy.model_copy(update={"status": "fail"})
+                                }
+                            )
+                        )
+                    if blocker == "binding":
+                        binding = fixture.store.read_provider_target_record(
+                            context_name=fixture.context, instance_name="testing"
+                        )
+                        fixture.store.write_provider_target_record(
+                            binding.model_copy(update={"target_id": "replacement-testing"})
+                        )
+                    else:
+                        fixture.hold_testing_source()
+                    held = merge_train_release_hold(fixture.store, fixture.profile.repository)
+                    self.assertEqual(held is not None, blocker in {"hold", "binding"})
+                    run = read_client_release_run(
+                        store=fixture.store,
+                        profile=fixture.store.read_product_profile_record(fixture.profile.product),
+                        decision=decision,
+                    )
+                    assert run is not None
+                    self.assertTrue(run.blocked_reason)
+                    self.assertEqual(run.state, "waiting")
+                    self.assertEqual(fixture.advance(), ())
+                    self.assertEqual(fixture.provider.deployed_artifacts, [])
                 finally:
                     fixture.doCleanups()
 
