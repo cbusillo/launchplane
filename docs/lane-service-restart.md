@@ -2,7 +2,7 @@
 title: Restart One Lane Service
 ---
 
-The Odoo service restart action resets one existing Compose service on the lane's
+The service restart action resets one existing Odoo or generic-web Compose service on the lane's
 current artifact. It calls Dokploy's [container restart API](https://docs.dokploy.com/docs/api/docker),
 never pull, build, deploy, config, env, database repair, or volume replacement.
 The [direction stop boundaries](../DIRECTION.md#stop-boundaries) still govern
@@ -17,12 +17,15 @@ scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) 
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
 
-The active Odoo product lane must have agreeing provider/Compose records and a
+The active Odoo or generic-web product lane must have agreeing provider/Compose records and a
 settled current deployment with a runtime identity and immutable artifact
 manifest. Production also requires recorded acceptance of that exact artifact
-and source commit. Other drivers and application targets are refused: the
-supported Compose path uses the Odoo lane reservation already respected by
-release enqueues, workers and synchronous releases.
+and source commit. Other drivers and application targets are refused. Odoo uses
+the lane reservation respected by release enqueues, workers and synchronous
+releases. Generic-web holds its existing product serializer exclusively through
+the final inspection, restart and verification, excluding deploy, promotion,
+rollback and retirement operations. Both drivers use the existing endpoint;
+the historical `odoo` route segment does not restrict it to Odoo products.
 
 Container selection requires inspected project and service labels and exactly
 one non-one-off container. Name matches alone never authorize a restart. The
@@ -30,6 +33,14 @@ container must report the recorded deployment identity and immutable artifact
 image, a valid timezone-aware start time and a container health check. Missing or ambiguous identity refuses
 without a restart. `web` additionally verifies the lane's HTTP runtime identity
 after restart and requires that endpoint before the restart; other named services verify their own container health and identity.
+
+These checks also apply to generic-web dependency services. A database container
+without the recorded application runtime identity, immutable artifact image or
+container health check is refused. Merely sharing the Compose project does not
+qualify it. This action does not install missing evidence, change a health check,
+or start an unqualified dependency as a workaround. Qualify every service in an
+ordered recovery independently; a successful database restart must precede any
+dependent application restart.
 
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
