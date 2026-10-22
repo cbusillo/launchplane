@@ -15,24 +15,17 @@ class BrowserSmokeContainerTests(unittest.TestCase):
                 "node": "exit 0\n",
                 "readlink": "echo 'net:[fixture-host]'\n",
                 "corepack": """
-[ "$COREPACK_ENABLE_NETWORK" = 0 ] || exit 91
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output|-o) shift; printf '%s' "$1" > "$ARCHIVE_RECEIPT"; break ;;
+  esac
+  shift
+done
 [ "$PACK_EXIT" = 0 ] || exit "$PACK_EXIT"
-printf fixture-pnpm > "$3"
 """,
                 "docker": """
 case "$1" in
   create) if [ "$CREATE_EXIT" != 0 ]; then exit "$CREATE_EXIT"; fi
-          for argument in "$@"; do
-            case "$argument" in
-              type=bind,source=*,target=/opt/browser-pnpm,readonly)
-                source=${argument#type=bind,source=}
-                source=${source%,target=/opt/browser-pnpm,readonly}
-                [ "$(cat "$source/corepack.tgz")" = fixture-pnpm ] || exit 92
-                hydrated=1 ;;
-              COREPACK_ENABLE_NETWORK=0) offline=1 ;;
-            esac
-          done
-          [ "$hydrated:$offline" = 1:1 ] || exit 93
           echo fixture-container ;;
   start) exit "$ATTACH_EXIT" ;;
   inspect) echo "$SMOKE_EXIT" ;;
@@ -55,13 +48,15 @@ esac
                     "CREATE_EXIT": str(create_exit),
                     "ATTACH_EXIT": str(attach_exit),
                     "CLEANUP_RECEIPT": str(receipt),
+                    "ARCHIVE_RECEIPT": str(root / "archive"),
                     "PACK_EXIT": str(pack_exit),
                     "RUNNER_TEMP": directory,
                 },
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(list(root.glob("browser-pnpm.*")), [])
+            archive = Path((root / "archive").read_text())
+            self.assertFalse(archive.parent.exists())
             return result.returncode, receipt.read_text().strip() if receipt.exists() else ""
 
     def test_failed_suite_fails_the_job_and_removes_its_container(self) -> None:

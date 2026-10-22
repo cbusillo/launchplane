@@ -22,7 +22,7 @@ trap 'exit 130' INT TERM
 package_manager_directory="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/browser-pnpm.XXXXXX")"
 (
   cd "$repo_root/frontend"
-  COREPACK_ENABLE_NETWORK=0 corepack pack --output "$package_manager_directory/corepack.tgz"
+  corepack pack --output "$package_manager_directory/corepack.tgz"
 )
 
 # Use this job's actual identity so the next non-container job can clean its
