@@ -10,6 +10,7 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
@@ -2023,6 +2024,9 @@ def reconcile_preview_target(
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )
         outcome = _preview_failure(plan, code)
+    if cleanup and plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
+        return ReconcileOutcome(plan)
     if (
         plan["action"] == "destroy"
         and outcome.error
@@ -2042,7 +2046,6 @@ def _preview_cleanup_guard(
     store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     number: int,
-    target_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
@@ -2071,7 +2074,6 @@ def _preview_cleanup_guard(
             ),
             context=profile.preview.context,
             instance=instance,
-            target_id=target_id,
         )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
@@ -2278,7 +2280,7 @@ def _run_preview_operation(
         return _hold_preview_destroy(plan, previous_plan, failed_attempts)
     database_url = getattr(record_store, "database_url", None)
 
-    def pre_mutation_guard(operation_plan: OdooPreviewApplyInputsResult) -> None:
+    def pre_mutation_guard() -> None:
         # Holding the reservation, just before the provider apply: a PR that closed,
         # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
@@ -2289,9 +2291,7 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(
-                record_store, profile, pull_request_number, operation_plan.dry_run_plan.compose_ref
-            )
+            _preview_cleanup_guard(record_store, profile, pull_request_number)
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -2354,7 +2354,7 @@ def _run_preview_operation(
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
-            pre_mutation_guard=lambda: pre_mutation_guard(operation_plan),
+            pre_mutation_guard=pre_mutation_guard,
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,
@@ -2375,6 +2375,10 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
+        if str(driver_result.get("error_message") or "").startswith(
+            f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
+        ):
+            plan["preview_result_error_code"] = PREVIEW_CLEANUP_SAFETY_UNKNOWN
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"

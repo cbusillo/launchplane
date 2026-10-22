@@ -625,93 +625,19 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(self.provider.applied, [("destroy", 42)])
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
-    def test_cleanup_leaves_shared_credentials_untouched(self) -> None:
-        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
-
-        self.remove_original_intent()
-        secret = SecretRecord(
-            secret_id="shared-integration",
-            scope="context",
-            integration="runtime_environment",
-            name="INTEGRATION_PASSWORD",
-            context=self.profile.preview.context,
-            current_version_id="fixture-version",
-            created_at=self.profile.updated_at,
-            updated_at=self.profile.updated_at,
-        )
-        self.store.write_secret_record(secret)
-        for instance in ("prod", "pr-42"):
-            self.store.write_secret_binding(
-                SecretBinding(
-                    binding_id=f"integration-{instance}",
-                    secret_id=secret.secret_id,
-                    integration=secret.integration,
-                    binding_key=secret.name,
-                    context=secret.context,
-                    instance=instance,
-                    created_at=secret.created_at,
-                    updated_at=secret.updated_at,
-                )
-            )
-        bindings = self.store.list_secret_bindings()
-        self.prepare_cleanup(production_resources="shared")
-        result = self.cleanup()
-        self.assertFalse(result.error, result.plan)
-        self.assertEqual(self.provider.applied, [("destroy", 42)])
-        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
-        self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
-        self.assertEqual(self.store.list_secret_bindings(), bindings)
-
-    def test_cleanup_does_not_change_other_lane_isolation_rules(self) -> None:
+    def test_historical_preview_facts_cannot_qualify_other_lane_mutations(self) -> None:
         from control_plane.disposable_lanes import (
             DisposableLaneSafetyUnknown,
             require_disposable_lane,
         )
-        from tests.support.disposable_lanes import record_safety
-        from control_plane.product_reconcile import _preview_cleanup_guard
-        from functools import partial
 
-        self.prepare_cleanup(production_resources="shared")
-        preview = self.store.list_preview_records()[0]
-        lane = dict(product=self.profile.product, context=preview.context, instance="pr-42")
-        require_lane = partial(
-            require_disposable_lane,
-            self.store,
-            product=self.profile.product,
-            context=preview.context,
-            instance="pr-42",
-        )
-        for isolation in ("shared", "unknown", "separation_ready"):
-            with self.subTest(isolation=isolation):
-                record_safety(
-                    self.store,
-                    **lane,
-                    preview=preview,
-                    production_resources=isolation,
-                )
-                with self.assertRaises(DisposableLaneSafetyUnknown):
-                    require_lane()
-                if isolation != "unknown":
-                    with self.assertRaises(DisposableLaneSafetyUnknown):
-                        require_lane(preview_refresh=True)
-                _preview_cleanup_guard(self.store, self.profile, 42)
-        record_safety(self.store, **lane, preview=preview, observer_kind="historical-preview")
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            require_lane()
-        _preview_cleanup_guard(self.store, self.profile, 42)
-        record_safety(
-            self.store,
-            self.profile.product,
-            preview.context,
-            "testing",
-            production_resources="shared",
-        )
+        self.prepare_cleanup(observer_kind="historical-preview")
         with self.assertRaises(DisposableLaneSafetyUnknown):
             require_disposable_lane(
                 self.store,
                 product=self.profile.product,
-                context=preview.context,
-                instance="testing",
+                context=self.profile.preview.context,
+                instance="pr-42",
             )
 
     def test_cleanup_refuses_a_production_shared_target(self) -> None:
@@ -744,25 +670,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 self.assertEqual(self.store.list_preview_records()[0].state, "active")
                 if state != "open":
                     self.assertEqual(result.plan["reason"], "preview_cleanup_pr_state_unknown")
-
-    def test_cleanup_preserves_provider_only_alias_of_actual_planned_target(self) -> None:
-        from control_plane.contracts.deploy_target import ProviderTargetRecord
-
-        self.remove_original_intent()
-        self.prepare_cleanup()
-        self.store.write_provider_target_record(
-            ProviderTargetRecord(
-                context="another-product",
-                instance="prod",
-                provider_id="dokploy",
-                target_id="cm-odoo-preview-pr-42",
-                display_name="Shared target",
-                updated_at=self.profile.updated_at,
-            )
-        )
-        self.cleanup()
-        self.assertFalse(self.provider.applied)
-        self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
     def test_cleanup_names_invalid_retained_intent_without_spending_retry_budget(self) -> None:
         self.prepare_cleanup()

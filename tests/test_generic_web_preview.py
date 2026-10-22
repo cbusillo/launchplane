@@ -1964,11 +1964,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 return_value={"applicationId": "app-1"},
             ),
             patch(
-                "control_plane.workflows.generic_web_preview.destroy_dokploy_preview_resource"
-            ) as destroy,
-            self.assertRaisesRegex(ValueError, "aliases"),
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+            ) as provider,
         ):
-            execute_generic_web_preview_destroy(
+            result = execute_generic_web_preview_destroy(
                 control_plane_root=Path("."),
                 record_store=store,
                 request=GenericWebPreviewDestroyRequest(
@@ -1977,7 +1976,8 @@ class GenericWebPreviewTests(unittest.TestCase):
                     destroy_reason="closed PR",
                 ),
             )
-        destroy.assert_not_called()
+        self.assertEqual(result.destroy_status, "fail")
+        provider.assert_not_called()
 
     def test_execute_generic_web_preview_destroy_deletes_domains_and_application(self) -> None:
         store = _GenericWebPreviewStore(_profile())

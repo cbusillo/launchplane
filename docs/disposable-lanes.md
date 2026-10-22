@@ -445,7 +445,7 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. Preview `record` assertions refuse.
+authenticated actor and current time itself. Preview `record` assertions are refused.
 For testing, caller-supplied usage, custody and isolation values are stored as
 unknown. Observations retain their actor as provenance;
 historical observer names confer no permission. Preview refresh and retirement

@@ -553,7 +553,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                 "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
             },
         )
-        self.assertEqual(recorded.status_code, 202, recorded.text)
+        self.assertEqual(recorded.status_code, 409, recorded.text)
         payload = await self.director_plan()
         applied = await request(
             self.app,
