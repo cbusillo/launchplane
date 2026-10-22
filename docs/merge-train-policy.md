@@ -1253,7 +1253,7 @@ unrelated optional workflows cannot change its classification:
   before contextual Client readiness, batch caps or area grouping. Each trial
   defers every other policy-eligible root, including unready Client and engineering
   heads, then applies current Ready, Client and readiness checks to its sole root.
-  Failed-probe reflow validates its existing holds against the same policy queue.
+  Holds use the same policy queue for current membership and active isolation.
   Ineligible and manually held heads stay excluded. Full stack topology remains
   available for discovery or the exact recorded collapse proof.
   Base-conflict and dependency holds retain their current head/base lifetimes;
@@ -1392,10 +1392,12 @@ pull request and head is recorded as `held_out` with reason `entry_conflict` and
 merge onto the base). The controller result reports the probe as
 `conflict_probe`, and PR feedback tells each held-out pull request which pull
 requests it conflicts with. Each hold also records `probe_base_sha` and the
-ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
-the base, held head, and accepted preceding PR/head sequence are unchanged. A
-changed base or preceding membership/head permits a fresh observation without
-requiring a speculative PR refresh. Legacy holds without probe lineage are
+ordered `conflicts_with_head_shas`. A base-only conflict lasts while its base,
+held head and policy eligibility are unchanged. A pairwise conflict also needs
+the same accepted preceding PR/head sequence from the contextual queue; excluded
+heads never become probe predecessors. A changed base or preceding membership/head
+permits a fresh observation without requiring a speculative PR refresh. Legacy
+holds without probe lineage are
 re-observed once; their missing history is not reconstructed. On the first
 mutating pass, this may supersede and rebuild an in-flight candidate and close
 its service batch PR, so its CI runs once more. Trailing queue

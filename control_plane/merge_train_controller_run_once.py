@@ -5009,11 +5009,6 @@ def try_reflow_failed_merge_train_candidate(
         held_out=active_candidate_record.candidate.held_out,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
         isolating_entries=active_candidate_record.candidate.entries,
-        queue=build_merge_train_queue_entries(
-            policy=policy,
-            snapshot=snapshot,
-            batch_landing=active_candidate_record.ordinary_job_binding is None,
-        ),
     )
     queue_snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
@@ -6012,7 +6007,6 @@ def _explore_nonpassing_base_candidates(
             snapshot=snapshot,
             held_out=(*failed.held_out, *held_out),
             batch_landing=True,
-            queue=queue,
         )
         if hold.reason != "entry_conflict" or not hold.conflicts_with
     )
@@ -7124,26 +7118,20 @@ def _surviving_held_out_entries(
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
     batch_landing: bool = False,
     isolating_entries: tuple[MergeTrainBatchEntry, ...] = (),
-    queue: tuple[MergeTrainQueueEntry, ...] | None = None,
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
-    """Return the holds that still apply to the current queue.
-
-    A conflict hold lasts while its base, head and accepted preceding heads are
-    unchanged. A failure-isolation hold also needs its base and head, and lasts
-    only while every member of the candidate retesting without it
-    (``isolating_entries``) is still queued at the same head; planning without
-    that candidate releases it. A dependency-not-ready hold lasts while its base
-    and head are unchanged, whether or not the head has settled yet, so a head
-    that settles mid-candidate waits for the next base instead of replacing the
-    candidate.
-    """
     if not held_out:
         return ()
-    if queue is None:
-        queue = build_merge_train_dry_run_result(
+    queue = build_merge_train_queue_entries(
+        policy=policy, snapshot=snapshot, batch_landing=batch_landing
+    )
+    eligible_heads = {(entry.number, entry.head_sha) for entry in queue if entry.eligible}
+    contextual_heads = {
+        (entry.number, entry.head_sha)
+        for entry in build_merge_train_dry_run_result(
             policy=policy, snapshot=snapshot, batch_landing=batch_landing
         ).queue
-    eligible_heads = {(entry.number, entry.head_sha) for entry in queue if entry.eligible}
+        if entry.eligible
+    }
     isolation_active = bool(isolating_entries) and all(
         (entry.pull_request_number, entry.head_sha) in eligible_heads for entry in isolating_entries
     )
@@ -7170,12 +7158,13 @@ def _surviving_held_out_entries(
                 isolation_active
                 if hold.reason == "failure_isolation"
                 else hold.reason == "dependency_not_ready"
+                or not hold.conflicts_with
                 or tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
                 == tuple(preceding)
             )
         ):
             surviving.append(hold)
-        else:
+        elif (entry.number, entry.head_sha) in contextual_heads:
             preceding.append((entry.number, entry.head_sha))
     return tuple(surviving)
 

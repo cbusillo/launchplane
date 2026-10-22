@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train import build_merge_train_queue_entries
 from control_plane.merge_train_controller_run_once import (
     _expose_persisted_conflict_holds,
     _surviving_held_out_entries,
@@ -47,9 +46,17 @@ class HoldLineageTests(unittest.TestCase):
         pending = first.model_copy(
             update={"owner_review_required": True, "required_checks_status": "pending"}
         )
+        earlier = pending.model_copy(
+            update={
+                "number": 99,
+                "head_sha": "earlier-client",
+                "created_at": "2026-04-01T00:00:00Z",
+            }
+        )
         snapshot = snapshot.model_copy(
             update={
                 "pull_requests": (
+                    earlier,
                     pending,
                     second.model_copy(update={"owner_review_required": True}),
                 )
@@ -65,7 +72,7 @@ class HoldLineageTests(unittest.TestCase):
             _surviving_held_out_entries(
                 policy=policy, snapshot=snapshot, held_out=(hold,), batch_landing=True
             ),
-            (),
+            (hold,),
         )
         for change in (
             {},
@@ -74,13 +81,15 @@ class HoldLineageTests(unittest.TestCase):
             {"labels": ()},
             {"actor_role": "unknown"},
             {"labels": (*pending.labels, policy.policies[0].blocked_label)},
+            {"state": "closed"},
         ):
             with self.subTest(change=change):
                 current = snapshot.model_copy(
                     update={
                         "pull_requests": (
+                            earlier,
                             pending.model_copy(update=change),
-                            snapshot.pull_requests[1],
+                            snapshot.pull_requests[-1],
                         )
                     }
                 )
@@ -90,9 +99,6 @@ class HoldLineageTests(unittest.TestCase):
                         snapshot=current,
                         held_out=(hold,),
                         batch_landing=True,
-                        queue=build_merge_train_queue_entries(
-                            policy=policy, snapshot=current, batch_landing=True
-                        ),
                     ),
                     () if change else (hold,),
                 )
@@ -103,9 +109,6 @@ class HoldLineageTests(unittest.TestCase):
                 snapshot=changed_base,
                 held_out=(hold,),
                 batch_landing=True,
-                queue=build_merge_train_queue_entries(
-                    policy=policy, snapshot=changed_base, batch_landing=True
-                ),
             ),
             (),
         )
@@ -115,9 +118,6 @@ class HoldLineageTests(unittest.TestCase):
                 snapshot=snapshot,
                 held_out=(hold, hold.model_copy(update={"reason": "failure_isolation"})),
                 batch_landing=True,
-                queue=build_merge_train_queue_entries(
-                    policy=policy, snapshot=snapshot, batch_landing=True
-                ),
             ),
             (),
         )

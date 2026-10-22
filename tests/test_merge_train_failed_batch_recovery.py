@@ -11,6 +11,10 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
+from control_plane.contracts.merge_train_effect import (
+    CandidateHeadMergeOutcome,
+    MergeTrainSemanticEffectExecutor,
+)
 from control_plane.github_required_checks import CheckRequirement
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -36,6 +40,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
     MergeTrainBaseCheckObservation,
+    MergeTrainGitHubCandidateEntryConflictError,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -45,6 +50,7 @@ from tests.merge_train_policy_fixtures import (
 )
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_batch_pull_request import _BatchProvider
+from tests.test_http_app_merge_train import _PairConflictProbeExecutor
 from tests.test_merge_train_github import (
     _protected_branch_with_checks,
     _required_check_run,
@@ -484,31 +490,160 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         self.assertNotIn(manual.number, events)
                         self.reflow_client.add_pull_request_label.assert_not_called()
 
-    def test_base_exploration_preserves_a_contextually_hidden_base_conflict(self) -> None:
+    def test_reflow_preserves_pairwise_conflict_context_behind_a_hidden_client(self) -> None:
+        for base_status, mutate, hidden, cap in (
+            ("pass", True, False, None),
+            ("pass", True, True, None),
+            ("fail", True, True, None),
+            ("pass", False, True, None),
+            ("pass", True, True, 2),
+        ):
+            with self.subTest(base=base_status, mutate=mutate, hidden=hidden, cap=cap):
+                self._prepare()
+                template = self.snapshot.pull_requests[0]
+                self.snapshot = self.snapshot.model_copy(
+                    update={
+                        "pull_requests": tuple(
+                            template.model_copy(
+                                update={
+                                    "number": number,
+                                    "head_sha": f"head-{number}",
+                                    "head_ref": f"branch-{number}",
+                                    "created_at": f"2026-05-08T0{number}:00:00Z",
+                                    "owner_review_required": number in (1, 2),
+                                    "required_checks_status": "pending"
+                                    if number == 2 and hidden
+                                    else "pass",
+                                }
+                            )
+                            for number in range(1, 5)
+                        )
+                    }
+                )
+                planning = build_merge_train_dry_run_result(
+                    policy=self.policy, snapshot=self.snapshot, batch_landing=True
+                )
+                by_number = {entry.number: entry for entry in planning.queue}
+                executor = _PairConflictProbeExecutor(conflicting_pair=(3, 4))
+                probe_client = GitHubMergeTrainClient(
+                    transport=self.provider,
+                    effect_executor=cast(MergeTrainSemanticEffectExecutor, executor),
+                )
+                holds = probe_client.probe_batch_entry_conflicts(
+                    repository=self.snapshot.repository,
+                    base_branch=self.snapshot.base_branch,
+                    base_sha=self.snapshot.base_sha,
+                    queue=tuple(by_number[number] for number in planning.queue_order),
+                    probe_ref="fixture-probe",
+                )
+                candidate_snapshot = self.snapshot.model_copy(
+                    update={"pull_requests": self.snapshot.pull_requests[:-1]}
+                )
+                self.candidate = build_merge_train_batch_candidate(
+                    dry_run_result=build_merge_train_dry_run_result(
+                        policy=self.policy, snapshot=candidate_snapshot, batch_landing=True
+                    ),
+                    base_sha=self.snapshot.base_sha,
+                    policy_sha256="policy-digest",
+                    created_at=self.candidate.created_at,
+                    held_out=holds,
+                ).model_copy(
+                    update={
+                        "candidate_sha": "failed-sha",
+                        "status": "failed",
+                        "required_checks_status": "fail",
+                    }
+                )
+                self.provider = _RerunProvider(self.candidate)
+                self.client = GitHubMergeTrainClient(transport=self.provider)
+                self.provider.created = True
+                self.provider.closed = True
+                self.provider.body = batch_pull_request_body(
+                    client=self.client, candidate=self.candidate
+                )
+                self.policy = self.policy.model_copy(
+                    update={
+                        "policies": (
+                            self.policy.policies[0].model_copy(update={"max_batch_size": cap}),
+                        )
+                    }
+                )
+                with TemporaryDirectory() as directory:
+                    result = self._reflow(
+                        FilesystemRecordStore(state_dir=Path(directory)),
+                        self.candidate,
+                        conflicts=holds,
+                        base_status=base_status,
+                        mutate=mutate,
+                    )
+                self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
+                self.reflow_client.add_pull_request_label.assert_not_called()
+                replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1])
+                if base_status == "pass":
+                    self.assertIn(holds[0], replacement.held_out)
+                else:
+                    self.assertEqual(
+                        {(hold.pull_request_number, hold.reason) for hold in replacement.held_out},
+                        {
+                            (pull.number, "failure_isolation")
+                            for pull in self.snapshot.pull_requests
+                            if pull.number != replacement.entries[0].pull_request_number
+                        },
+                    )
+
+    def test_base_exploration_preserves_a_base_conflict_behind_a_hidden_client(self) -> None:
         first, repair = self.snapshot.pull_requests
         hidden = first.model_copy(
             update={
-                "number": 3,
-                "head_sha": "base-conflicting-client",
-                "head_ref": "feature/base-conflicting-client",
-                "created_at": "2026-05-01T00:00:00Z",
+                "number": 4,
+                "head_sha": "unready-client",
+                "head_ref": "feature/unready-client",
+                "created_at": "2026-04-01T00:00:00Z",
                 "owner_review_required": True,
                 "required_checks_status": "pending",
+            }
+        )
+        conflicting = first.model_copy(
+            update={
+                "number": 3,
+                "head_sha": "base-conflicting-head",
+                "head_ref": "feature/base-conflicting-head",
+                "created_at": "2026-05-01T00:00:00Z",
             }
         )
         self.snapshot = self.snapshot.model_copy(
             update={
                 "pull_requests": (
                     hidden,
+                    conflicting,
                     first.model_copy(update={"owner_review_required": True}),
                     repair,
                 )
             }
         )
-        hold = MergeTrainBatchHeldOutEntry(
-            pull_request_number=hidden.number,
-            head_sha=hidden.head_sha,
-            probe_base_sha=self.snapshot.base_sha,
+        planning = build_merge_train_dry_run_result(
+            policy=self.policy, snapshot=self.snapshot, batch_landing=True
+        )
+        probe_queue = tuple(
+            entry for entry in planning.queue if entry.number in planning.queue_order
+        )
+        executor = Mock(spec=MergeTrainSemanticEffectExecutor)
+        executor.merge_candidate_head.side_effect = [
+            MergeTrainGitHubCandidateEntryConflictError(
+                pull_request_number=entry.number, head_sha=entry.head_sha
+            )
+            if entry.number == conflicting.number
+            else CandidateHeadMergeOutcome(result_sha=f"probe-{entry.number}")
+            for entry in probe_queue
+        ]
+        probe_client = GitHubMergeTrainClient(transport=self.provider, effect_executor=executor)
+        (hold,) = probe_client.probe_batch_entry_conflicts(
+            repository=self.snapshot.repository,
+            base_branch=self.snapshot.base_branch,
+            base_sha=self.snapshot.base_sha,
+            queue=probe_queue,
+            probe_ref="fixture-base-probe",
         )
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -521,7 +656,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 row["pull_request_number"]: row["event"]
                 for row in build_feedback_payloads(response={"result": result})
             }
-            self.assertEqual(events[hidden.number], "blocked")
+            self.assertEqual(events[conflicting.number], "blocked")
+            self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
             self.reflow_client.add_pull_request_label.assert_not_called()
             restarted = FilesystemRecordStore(state_dir=Path(directory))
             later = self._reflow(
@@ -540,6 +676,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 [entry.pull_request_number for entry in replacement.entries], [repair.number]
             )
             self.assertIn(hold, replacement.held_out)
+            self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
             self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_base_exploration_routes_or_defers_stacks_without_starving_later_repair(self) -> None:
