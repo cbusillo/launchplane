@@ -111,10 +111,10 @@ def main() -> int:
             return 0
         assert draft is not None
         if args.mode == "apply" or (
-            draft.action == "validate-business" and args.mode == "readback"
+            draft.action in {"validate-business", "rebuild-final"} and args.mode == "readback"
         ):
             if evidence is None:
-                raise ValueError("Business readback requires its original saved review.")
+                raise ValueError("This readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
             if saved["intent"] != intent or saved["plan"]["applied"] is not False:
                 raise ValueError("Review belongs to another intent.")
@@ -180,7 +180,7 @@ def main() -> int:
             and result.get("action", draft.action) != draft.action
         ):
             raise ValueError("The receipt describes a different rehearsal action.")
-        if draft.action == "retire-incomplete" and args.mode != "dry-run":
+        if draft.action in {"retire-incomplete", "abandon-validation"} and args.mode != "dry-run":
             IncompleteRehearsalRetirementReceipt.model_validate(result)
         unobserved_readback = (
             args.mode == "readback"

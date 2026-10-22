@@ -155,7 +155,7 @@ def register_odoo_upgrade_rehearsal_routes(
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
-            if body.action == "retire-incomplete":
+            if body.action in {"retire-incomplete", "abandon-validation"}:
                 from control_plane.odoo_incomplete_rehearsal_retirement import (
                     IncompleteRehearsalRetirement,
                 )

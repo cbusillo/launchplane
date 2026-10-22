@@ -28,6 +28,9 @@ from control_plane.contracts.provider_target_origin import (
     requires_provider_target_origin,
 )
 from urllib.parse import urlsplit
+from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
+    PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
+)
 
 from control_plane.route_binding_reconcile import (
     RouteBindingReviewSources,
@@ -6573,6 +6576,13 @@ class PostgresRecordStore(HumanSessionStore):
                 # cached before another authority writer could acquire it.
                 session.expire_all()
                 if self.database_dialect_name == "postgresql":
+                    if not session.scalar(
+                        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                        {"key": PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY},
+                    ):
+                        raise PublicHostAuthorityBusy(
+                            "Public-host schema transition is busy; retry from a fresh plan."
+                        )
                     # Keep only target/name fences over I/O. A checkpoint commits
                     # these locks, so acquire them anew before further effects.
                     fenced_target = expected_target.model_copy(
@@ -12336,14 +12346,25 @@ class PostgresRecordStore(HumanSessionStore):
         later phase keeps its original journal unchanged as custody evidence.
         """
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
-        from control_plane.odoo_incomplete_rehearsal_retirement import later_phase_copies
+        from control_plane.odoo_incomplete_rehearsal_retirement import (
+            later_phase_copies,
+            require_abandonable_validation,
+        )
         from control_plane.odoo_upgrade_rehearsal import require_unaliased_rehearsal
         from control_plane.provider_operations import provider_operation_response_payload
 
-        later = bool(expected.copies)
+        abandoning = result.get("action") == "abandon-validation"
+        later = bool(expected.copies) and not abandoning
         if later:
             admitted = (
                 later_phase_copies(expected, expected.state) and original.state == "completed"
+            )
+        elif abandoning:
+            admitted = (
+                expected.state == "switched"
+                and later_phase_copies(expected, "switched")
+                and original.state in {"running", "reconcile_required"}
+                and original.provider_effect_phase == "validate-business"
             )
         else:
             admitted = (
@@ -12356,14 +12377,37 @@ class PostgresRecordStore(HumanSessionStore):
             not admitted
             or replacement.state != "retired"
             or replacement.model_copy(
-                update={"state": expected.state, "updated_at": expected.updated_at}
+                update={
+                    "state": expected.state,
+                    "updated_at": expected.updated_at,
+                    "abandoned_validations": expected.abandoned_validations,
+                }
             )
             != expected
             or original.scope != expected.principal
             or original.provider_target_key != expected.rehearsal_id
             or original.route_path != ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=expected.product)
+            or (
+                not abandoning
+                and replacement.abandoned_validations != expected.abandoned_validations
+            )
             or result.get("disposed") is not True
-            or result.get("action") != "retire-incomplete"
+            or result.get("action") not in {"retire-incomplete", "abandon-validation"}
+            or (
+                abandoning
+                and (
+                    len(replacement.abandoned_validations)
+                    != len(expected.abandoned_validations) + 1
+                    or replacement.abandoned_validations[:-1] != expected.abandoned_validations
+                    or replacement.abandoned_validations[-1].original != original
+                    or expected.incomplete_retirement is None
+                    or replacement.abandoned_validations[-1].host_disposal
+                    != expected.incomplete_retirement.host_disposal
+                    or not replacement.abandoned_validations[
+                        -1
+                    ].host_disposal.recovery_snapshots_preserved
+                )
+            )
         ):
             raise ValueError(
                 "Incomplete retirement requires the exact held execute and disposal proof."
@@ -12393,10 +12437,11 @@ class PostgresRecordStore(HumanSessionStore):
                     "Original rehearsal custody changed before retirement publication."
                 )
             require_unaliased_rehearsal(self, expected)
-            if later and session.scalar(
+            if (later or abandoning) and session.scalar(
                 select(LaunchplaneIdempotencyRow.record_id)
                 .where(
                     LaunchplaneIdempotencyRow.provider_target_key == expected.rehearsal_id,
+                    LaunchplaneIdempotencyRow.record_id != original.record_id,
                     LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
                 )
                 .limit(1)
@@ -12404,6 +12449,8 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise ValueError("Another rehearsal operation is unsettled.")
             now = self._database_mutation_timestamp(session)
+            if abandoning:
+                require_abandonable_validation(expected, original, now)
             if original.state == "running" and parse_launchplane_mutation_timestamp(
                 original.lease_expires_at, field_name="lease_expires_at"
             ) > parse_launchplane_mutation_timestamp(now, field_name="observed_at"):

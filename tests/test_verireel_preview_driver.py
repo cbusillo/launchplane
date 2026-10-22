@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import click
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.secret_record import SecretBinding
@@ -240,6 +241,20 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             destroy_resource.assert_called_once()
             self.assertEqual(result.destroy_status, "pass")
             self.assertEqual(result.error_message, "")
+
+            with patch(
+                "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
+                return_value=PreviewResourceDestroyResult(
+                    status="fail",
+                    cleanup_errors=(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: shared target",),
+                ),
+            ):
+                drop.reset_mock()
+                refused = execute_verireel_preview_destroy(
+                    control_plane_root=Path(temporary_directory_name), request=request
+                )
+                self.assertEqual(refused.destroy_status, "fail")
+                drop.assert_not_called()
 
             for application in (None, {"applicationId": "app-preview"}):
                 with (

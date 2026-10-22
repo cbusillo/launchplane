@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import unittest
 from unittest.mock import patch
 
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane import secrets
 from control_plane import testing_candidate_application as application
 from control_plane.dokploy import api, source as provider_source, post_deploy
@@ -459,6 +460,60 @@ class CandidateApplicationTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.prepare_application()
         self.restore_deployments[0]["status"] = "error"
+        restoring = self.store.read_testing_candidate(self.allocation.namespace)
+        assert restoring is not None
+        for predicate in (
+            ReadbackPredicate.ATTACHMENTS,
+            ReadbackPredicate.INTEGRATIONS,
+            ReadbackPredicate.ISOLATION,
+        ):
+            for kind in ("refused", "unavailable"):
+                with self.subTest(predicate=predicate, kind=kind):
+                    self.restore_deployments[0]["logs"] = [
+                        f"readback_failed_predicate={predicate}",
+                        f"readback_failure_kind={kind}",
+                        "private attachment detail",
+                    ]
+                    evidence = application.candidate_restore_terminal(
+                        host="fixture",
+                        token="fixture",
+                        record=restoring,
+                        require_success=False,
+                    )
+                    self.assertIn(f":{predicate}_{kind}:", evidence)
+                    self.assertTrue(evidence.endswith(":" + self.restore_deployments[0]["status"]))
+                    self.assertNotIn("private", evidence)
+        for invalid_predicate, invalid_kind in (
+            ("private-value", "refused"),
+            (ReadbackPredicate.ATTACHMENTS, "private-value"),
+        ):
+            self.restore_deployments[0]["logs"] = [
+                f"readback_failed_predicate={invalid_predicate}",
+                f"readback_failure_kind={invalid_kind}",
+            ]
+            generic = application.candidate_restore_terminal(
+                host="fixture", token="fixture", record=restoring, require_success=False
+            )
+            self.assertNotIn("private", generic)
+            self.assertNotIn("refused", generic)
+        self.restore_deployments[0]["logs"] = []
+        with patch.object(
+            api,
+            "fetch_dokploy_deployment_logs",
+            side_effect=post_deploy.OdooPostDeployReadbackFailure(
+                "private unavailable", evidence={}
+            ),
+        ):
+            self.assertEqual(
+                application.candidate_restore_terminal(
+                    host="fixture", token="fixture", record=restoring, require_success=False
+                ),
+                generic,
+            )
+        self.restore_deployments[0]["logs"] = [
+            f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+            "readback_failure_kind=refused",
+        ]
         with self.assertRaises(ValueError):
             self.prepare_application()
         abandoned = application.abandon_candidate_application(
@@ -470,6 +525,9 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         assert abandoned.application is not None
         self.assertEqual(abandoned.application.phase, "abandoned")
+        self.assertIn(
+            f":{ReadbackPredicate.ATTACHMENTS}_refused:", abandoned.application.abandonment_evidence
+        )
         self.assertEqual(abandoned.compose_id, self.allocation.compose_id)
         self.assertEqual(
             abandoned.resources_binding_sha256, self.allocation.resources_binding_sha256

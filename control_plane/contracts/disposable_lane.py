@@ -26,7 +26,7 @@ class DisposableLaneSafety(BaseModel):
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)
     observed_by: str = Field(min_length=1)
-    observer_kind: Literal["director_agent", "director_agent_preview_cleanup"]
+    observer_kind: str
     binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     usage: Literal["unknown", "unused", "in_use"] = "unknown"
     data: Literal["unknown", "reproducible", "only_copy"] = "unknown"

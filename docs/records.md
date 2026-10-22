@@ -1245,6 +1245,14 @@ product repo authority. It enforces the same fail-closed historical-context
 transition rule as service and manifest writes, so it cannot reactivate a
 retired context.
 
+On creation, omitted driver, lane and preview options use the command's defaults.
+On update, omitted options preserve the stored values; explicitly supplied
+options replace them, including `--preview-disabled` and `--lanes-json '[]'`.
+Preview changes preserve omitted preview fields and validate the combined
+configuration. Fields outside the command's supported options also remain
+unchanged. Each successful write refreshes the timestamp and source unless
+explicit overrides are supplied, and refuses a concurrent profile change.
+
 ### Product Repository Identity
 
 Launchplane's repository inventory is the authority for a product's immutable

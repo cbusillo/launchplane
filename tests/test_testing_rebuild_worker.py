@@ -2668,6 +2668,75 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
 
+    def test_failed_restore_diagnostic_survives_original_worker_recovery(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        candidate = self.fixture.candidate
+        assert candidate.application is not None
+        restoring = candidate.model_copy(
+            update={
+                "application": candidate.application.model_copy(
+                    update={"phase": "restoring", "prepared": None}
+                )
+            }
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = restoring.model_dump(mode="json", exclude_none=True)
+        history = self.fixture.fixture.restore_deployments
+        history[0].update(
+            status="error",
+            logs=[],
+        )
+        original_prepare = service.NativeTestingRebuildExecution.prepare
+        plans: list[Any] = []
+        effects = list(self.fixture.fixture.effects)
+
+        def prepare(executor: Any, plan: Any) -> Any:
+            plans.append(plan)
+            return original_prepare(executor, plan)
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", prepare),
+            patch.object(
+                api,
+                "fetch_dokploy_deployment_logs",
+                side_effect=[
+                    post_deploy.OdooPostDeployReadbackFailure("private unavailable", evidence={}),
+                    [
+                        f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+                        "readback_failure_kind=refused",
+                        "private attachment detail",
+                    ],
+                ],
+            ),
+            patch.object(api, "dokploy_request", side_effect=self.fixture.fixture.configure),
+            patch.object(
+                api, "list_deployments_for_target", return_value=self.fixture.fixture.deployments
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.error_code, "candidate_preparation_failed")
+        checkpoint = RecordTestingRebuildStore(self.store).load(plans[0])
+        diagnostic = f"{ReadbackPredicate.ATTACHMENTS}_refused"
+        self.assertIn(diagnostic, checkpoint.preparation_failure_evidence)
+        retained = self.store.read_testing_candidate(candidate.namespace)
+        assert retained is not None and retained.application is not None
+        self.assertEqual(retained.application.phase, "abandoned")
+        self.assertIn(diagnostic, retained.application.abandonment_evidence)
+        self.assertEqual(
+            checkpoint.preparation_failure_evidence, retained.application.abandonment_evidence
+        )
+        self.assertNotIn("private", checkpoint.preparation_failure_evidence)
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.fixture.fixture.effects, effects)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
     def test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving(self) -> None:
         from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
         from control_plane.dokploy.native_copy_stream import (

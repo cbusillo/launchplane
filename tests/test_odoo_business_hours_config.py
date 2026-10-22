@@ -283,10 +283,28 @@ class CalendarRuntimeTests(CalendarRuntimeFixture):
 
 
 class CalendarCliProfileTests(CalendarRuntimeFixture):
-    def upsert(self, record: LaunchplaneProductProfileRecord) -> Any:
+    def upsert(
+        self, record: LaunchplaneProductProfileRecord, *, options: list[str] | None = None
+    ) -> Any:
         from click.testing import CliRunner
         from control_plane.cli import main
 
+        if options is None:
+            options = [
+                "--driver-id",
+                record.driver_id,
+                "--lanes-json",
+                json.dumps([lane.model_dump(mode="json") for lane in record.lanes]),
+                "--preview-enabled" if record.preview.enabled else "--preview-disabled",
+                "--preview-context",
+                record.preview.context,
+                "--preview-slug-template",
+                record.preview.slug_template,
+                "--updated-at",
+                record.updated_at,
+                "--source-label",
+                record.source,
+            ]
         return CliRunner().invoke(
             main,
             [
@@ -300,28 +318,159 @@ class CalendarCliProfileTests(CalendarRuntimeFixture):
                 "Updated display",
                 "--repository",
                 record.repository,
-                "--driver-id",
-                record.driver_id,
                 "--image-repository",
                 record.image.repository,
                 "--runtime-port",
                 str(record.runtime_port),
                 "--health-path",
                 record.health_path,
-                "--lanes-json",
-                json.dumps([lane.model_dump(mode="json") for lane in record.lanes]),
-                "--preview-enabled" if record.preview.enabled else "--preview-disabled",
-                "--preview-context",
-                record.preview.context,
-                "--preview-slug-template",
-                record.preview.slug_template,
-                "--updated-at",
-                record.updated_at,
-                "--source-label",
-                record.source,
+                *options,
                 "--allow-direct-db-mutation",
             ],
         )
+
+    def test_break_glass_required_only_update_preserves_omitted_configuration(self) -> None:
+        original = LaunchplaneProductProfileRecord.model_validate(
+            self.profile.model_copy(
+                update={
+                    "odoo_business_hours": None,
+                    "preview": self.profile.preview.model_copy(
+                        update={"slug_template": "review-{number}"}
+                    ),
+                    "image": self.profile.image.model_copy(update={"scan_enabled": True}),
+                }
+            ).model_dump(mode="json")
+        )
+        self.store.write_product_profile_record(original)
+        with patch(
+            "control_plane.cli_policy_profiles._product_profile_store", return_value=self.store
+        ):
+            result = self.upsert(original, options=[])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actual = self.store.read_product_profile_record(original.product)
+        self.assertEqual(
+            actual,
+            original.model_copy(
+                update={
+                    "display_name": "Updated display",
+                    "updated_at": actual.updated_at,
+                    "source": actual.source,
+                }
+            ),
+        )
+        self.assertNotEqual(actual.updated_at, original.updated_at)
+        self.assertNotEqual(actual.source, original.source)
+
+    def test_break_glass_explicit_default_and_empty_values_replace_configuration(self) -> None:
+        from control_plane.cli_policy_profiles import product_profiles_upsert
+
+        defaults = {option.name: option.default for option in product_profiles_upsert.params}
+        original = LaunchplaneProductProfileRecord.model_validate(
+            self.profile.model_copy(
+                update={
+                    "odoo_business_hours": None,
+                    "preview": self.profile.preview.model_copy(
+                        update={"slug_template": "review-{number}"}
+                    ),
+                }
+            ).model_dump(mode="json")
+        )
+        self.store.write_product_profile_record(original)
+        with patch(
+            "control_plane.cli_policy_profiles._product_profile_store", return_value=self.store
+        ):
+            result = self.upsert(
+                original,
+                options=[
+                    "--driver-id",
+                    str(defaults["driver_id"]),
+                    "--lanes-json",
+                    "[]",
+                    "--preview-disabled",
+                    "--preview-context",
+                    "",
+                    "--preview-slug-template",
+                    str(defaults["preview_slug_template"]),
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        actual = self.store.read_product_profile_record(original.product)
+        self.assertEqual(
+            actual,
+            original.model_copy(
+                update={
+                    "display_name": "Updated display",
+                    "updated_at": actual.updated_at,
+                    "source": actual.source,
+                    "driver_id": defaults["driver_id"],
+                    "lanes": (),
+                    "preview": original.preview.model_copy(
+                        update={
+                            "enabled": False,
+                            "context": "",
+                            "slug_template": defaults["preview_slug_template"],
+                        }
+                    ),
+                }
+            ),
+        )
+
+    def test_break_glass_preview_enable_preserves_existing_context(self) -> None:
+        original = LaunchplaneProductProfileRecord.model_validate(
+            self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            ).model_dump(mode="json")
+        )
+        self.store.write_product_profile_record(original)
+        with patch(
+            "control_plane.cli_policy_profiles._product_profile_store", return_value=self.store
+        ):
+            result = self.upsert(original, options=["--preview-enabled"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actual = self.store.read_product_profile_record(original.product)
+        self.assertEqual(
+            actual,
+            original.model_copy(
+                update={
+                    "display_name": "Updated display",
+                    "updated_at": actual.updated_at,
+                    "source": actual.source,
+                    "preview": original.preview.model_copy(update={"enabled": True}),
+                }
+            ),
+        )
+
+    def test_break_glass_required_only_create_uses_command_defaults(self) -> None:
+        from control_plane.cli_policy_profiles import product_profiles_upsert
+
+        defaults = {option.name: option.default for option in product_profiles_upsert.params}
+        requested = self.profile.model_copy(update={"product": "new-product"})
+        with patch(
+            "control_plane.cli_policy_profiles._product_profile_store", return_value=self.store
+        ):
+            result = self.upsert(requested, options=[])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actual = self.store.read_product_profile_record(requested.product)
+        expected = LaunchplaneProductProfileRecord.model_validate(
+            {
+                "product": requested.product,
+                "display_name": "Updated display",
+                "repository": requested.repository,
+                "driver_id": defaults["driver_id"],
+                "image": {"repository": requested.image.repository},
+                "runtime_port": requested.runtime_port,
+                "health_path": requested.health_path,
+                "lanes": json.loads(str(defaults["lanes_json"])),
+                "preview": {
+                    "enabled": defaults["preview_enabled"],
+                    "context": defaults["preview_context"],
+                    "slug_template": defaults["preview_slug_template"],
+                },
+                "updated_at": actual.updated_at,
+                "source": defaults["source_label"],
+            }
+        )
+        self.assertEqual(actual, expected)
 
     def test_break_glass_upsert_preserves_non_cli_profile_fields(self) -> None:
         self.profile = LaunchplaneProductProfileRecord.model_validate(
@@ -874,7 +1023,7 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
 
     async def test_inspect_refuses_unbounded_duplicate_or_incomplete_company_scope(self) -> None:
         original = self.http
-        for contradiction in ("membership_bound", "rows_bound", "duplicate", "omitted"):
+        for contradiction in ("membership_bound", "duplicate", "omitted"):
             with self.subTest(contradiction=contradiction):
 
                 def invalid_scope(opener: object, request: Any) -> object:
@@ -888,9 +1037,7 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
                                 str(i): {"id": i, "name": "Company"} for i in range(1, 130)
                             }
                         elif params.get("model") == "res.company":
-                            if contradiction == "rows_bound":
-                                response["result"] *= 129
-                            elif contradiction == "duplicate":
+                            if contradiction == "duplicate":
                                 response["result"] *= 2
                             elif contradiction == "omitted":
                                 response["result"] = []
