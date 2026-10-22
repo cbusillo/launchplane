@@ -3364,12 +3364,18 @@ alone is not proof that an existing testing copy has been repaired.
     `test_store` on a production lane, a lane with no tracked target record, and
     missing or invalid bindings.
     On non-production lanes, the protected keys also include the product's
-    production-lane `shop_url_key` from stored Shopify addon settings or
-    `shopify.shop_url_key` config-parameter overrides. Apply reads this authority
+    production-lane store identities from stored Shopify addon settings or
+    `shopify.shop_url_key`, `shopify.shop_url` and `shopify.store_url`
+    config-parameter overrides. Apply reads this authority
     again before writing, so a production-store change since dry-run cannot
     authorize the same store on testing. These are record comparisons, not
     proof of the store a running credential reaches; the read-only runtime
     identity comparison remains necessary before Shopify writes.
+    The common post-deploy renderer also checks these production identities
+    when it has record-store authority, including for existing stored intent
+    delivered by post-deploy, bootstrap and target replacement. Offline renders
+    without a record store still require explicitly supplied protected keys;
+    they cannot verify production identity.
   - The record changes only intent. Run Odoo post-deploy for the lane afterwards
     so the database receives the settings, then verify them in the lane database.
 - On a non-production lane, post-deploy always sends an explicit Shopify

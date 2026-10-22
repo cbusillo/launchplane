@@ -23,8 +23,12 @@ from typing import Literal
 
 from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.odoo_instance_overrides import shopify_store_handle
-from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS, shopify_store_handle
+from control_plane.runtime_key_safety import (
+    is_integration_runtime_key,
+    runtime_key_integrations,
+    runtime_key_safety_environment_class,
+)
 from control_plane.odoo_connection_isolation import connection_isolation_library
 
 IntegrationReadbackWorkflowMode = Literal["maintenance", "bootstrap", "restore"]
@@ -82,9 +86,7 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
     IntegrationFamily(
         integration="shopify",
         config_parameters=(
-            "shopify.shop_url_key",
-            "shopify.shop_url",
-            "shopify.store_url",
+            *(f"shopify.{setting}" for setting in SHOPIFY_STORE_SETTINGS),
             "shopify.api_token",
             "shopify.webhook_key",
         ),
@@ -142,28 +144,53 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
 )
 
 
-def integration_credential_warnings(summary: LaunchplaneLaneSummary | None) -> tuple[str, ...]:
-    if summary is None or runtime_key_safety_environment_class(summary.instance) == "prod":
+def integration_credential_warnings(
+    summary: LaunchplaneLaneSummary | None, *, record_store: object | None = None
+) -> tuple[str, ...]:
+    if (
+        summary is None
+        or not summary.secret_bindings
+        or runtime_key_safety_environment_class(summary.instance) == "prod"
+    ):
         return ()
     allowed = (
         {item.integration for item in summary.dokploy_target.policies.integration_allowances}
         if summary.dokploy_target is not None
         else set()
     )
-    integrations = {
-        family.integration
-        for binding in summary.secret_bindings
-        if binding.status == "configured"
-        and binding.context in {"", summary.context}
-        and binding.instance in {"", summary.instance}
-        for family in INTEGRATION_FAMILIES
-        if binding.integration == family.integration
-        or f"_{family.integration.upper()}_"
-        in f"_{re.sub(r'[_.]+', '_', binding.binding_key.upper())}_"
-    }
+    list_policies = getattr(record_store, "list_runtime_key_safety_policy_records", None)
+    policies = list_policies(status="active", limit=1) if callable(list_policies) else ()
+    extra_markers = policies[0].integration_key_markers if policies else ()
+    integrations: set[str] = set()
+    unknown_integration = False
+    for binding in summary.secret_bindings:
+        if (
+            binding.status != "configured"
+            or binding.context not in {"", summary.context}
+            or binding.instance not in {"", summary.instance}
+        ):
+            continue
+        if binding.integration != "runtime_environment":
+            integrations.add(binding.integration)
+            continue
+        families = runtime_key_integrations(binding.binding_key)
+        integrations.update(families)
+        unknown_integration |= (
+            not families
+            and is_integration_runtime_key(binding.binding_key, extra_markers=extra_markers)
+            and not any(
+                marker.lower() in allowed
+                and is_integration_runtime_key(binding.binding_key, extra_markers=(marker,))
+                for marker in extra_markers
+            )
+        )
     return tuple(
         f"Stored {integration} credentials have no integration allowance for this non-production lane."
         for integration in sorted(integrations - allowed)
+    ) + (
+        ("Stored integration credentials cannot be matched to a lane allowance.",)
+        if unknown_integration
+        else ()
     )
 
 

@@ -1975,12 +1975,7 @@ def _run_compose_post_deploy_update(
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
         override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
+            PostgresRecordStore(database_url=database_url) if database_url else None
         )
         try:
             post_deploy_environment = (

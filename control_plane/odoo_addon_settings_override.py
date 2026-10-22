@@ -40,6 +40,7 @@ from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
     odoo_instance_is_production,
+    production_shopify_store_keys,
     shopify_store_key_is_protected,
 )
 
@@ -297,41 +298,22 @@ def _protected_store_keys(
             "Odoo addon settings require the lane's tracked target record so its protected "
             "Shopify store keys can be checked.",
         ) from error
-    protected = list(target.policies.shopify.protected_store_keys)
-    if odoo_instance_is_production(instance):
-        return tuple(protected)
-    profile = record_store.read_product_profile_record(product)
-    for lane in profile.lanes:
-        if not odoo_instance_is_production(lane.instance):
-            continue
-        record = _read_existing_record(
-            record_store=record_store, context=lane.context, instance=lane.instance
-        )
-        if record is None:
-            continue
-        values = [
-            setting.value
-            for setting in record.addon_settings
-            if setting.addon == SHOPIFY_ADDON_NAME and setting.setting == "shop_url_key"
-        ]
-        values.extend(
-            parameter.value
-            for parameter in record.config_parameters
-            if parameter.key == "shopify.shop_url_key"
-        )
-        protected.extend(
-            value.value
-            for value in values
-            if value.source == "literal" and isinstance(value.value, str) and value.value.strip()
-        )
-    return tuple(protected)
+    return (
+        *target.policies.shopify.protected_store_keys,
+        *production_shopify_store_keys(
+            record_store,
+            context=context,
+            instance=instance,
+            profile=record_store.read_product_profile_record(product),
+        ),
+    )
 
 
 def _validate_store_key(*, shop_url_key: str, protected_store_keys: tuple[str, ...]) -> None:
     if shopify_store_key_is_protected(shop_url_key, protected_store_keys):
         raise OdooAddonSettingsRefusal(
             "protected_store_key",
-            "Shopify shop_url_key is in this lane's protected store keys.",
+            "Shopify shop_url_key matches a protected or production store.",
         )
     for indicator in DEFAULT_SHOPIFY_PRODUCTION_INDICATORS:
         if indicator in shop_url_key:

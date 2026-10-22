@@ -10,6 +10,7 @@ import unittest
 import os
 
 from control_plane.action_effects import ACTION_DECLARATIONS
+from control_plane.integration_readback import integration_credential_warnings
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
@@ -715,12 +716,15 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 summary = next(
                     item for item in overview.environments if item.environment == lane.instance
                 )
-                detail_warnings = tuple(
-                    item for item in detail.warnings if "shopify" in item.lower()
+                expected = integration_credential_warnings(
+                    store.read_lane_summary(context_name=lane.context, instance_name=lane.instance),
+                    record_store=store,
                 )
+                detail_warnings = tuple(item for item in detail.warnings if item in expected)
+                self.assertEqual(detail_warnings, expected)
                 self.assertEqual(
                     detail_warnings,
-                    tuple(item for item in summary.warnings if "shopify" in item.lower()),
+                    tuple(item for item in summary.warnings if item in expected),
                 )
                 return detail_warnings
 

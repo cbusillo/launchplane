@@ -775,7 +775,7 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
-            *integration_credential_warnings(lane_summary),
+            *integration_credential_warnings(lane_summary, record_store=record_store),
             *(
                 topology_warning.detail
                 for topology_warning in topology.warnings
@@ -2213,7 +2213,7 @@ def _build_environment_summary(
         ),
         provenance=provenance,
         warnings=(
-            *integration_credential_warnings(lane_summary),
+            *integration_credential_warnings(lane_summary, record_store=record_store),
             *(warning.detail for warning in topology.warnings if warning.severity != "info"),
         ),
         available_actions=_action_availability(

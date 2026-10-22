@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployAddonSetting
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployConfigParameter
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
@@ -29,6 +30,7 @@ LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDE
 LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
 SHOPIFY_ADDON_NAME = "shopify"
+SHOPIFY_STORE_SETTINGS = ("shop_url_key", "shop_url", "store_url")
 SHOPIFY_ACTION_SETTING = "action"
 SHOPIFY_ACTION_APPLY = "apply"
 SHOPIFY_ACTION_CLEAR = "clear"
@@ -98,6 +100,63 @@ def shopify_store_key_is_protected(
         shopify_store_handle(raw_key) for raw_key in protected_shopify_store_keys if raw_key.strip()
     }
     return shopify_store_handle(shop_url_key) in protected_handles
+
+
+def shopify_record_store_keys(record: OdooInstanceOverrideRecord) -> tuple[str, ...]:
+    values = [
+        setting.value
+        for setting in record.addon_settings
+        if setting.addon == SHOPIFY_ADDON_NAME and setting.setting in SHOPIFY_STORE_SETTINGS
+    ]
+    values.extend(
+        parameter.value
+        for parameter in record.config_parameters
+        if parameter.key in {f"shopify.{setting}" for setting in SHOPIFY_STORE_SETTINGS}
+    )
+    return tuple(
+        value.value
+        for value in values
+        if value.source == "literal" and isinstance(value.value, str) and value.value.strip()
+    )
+
+
+def production_shopify_store_keys(
+    record_store: object | None,
+    *,
+    context: str,
+    instance: str,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> tuple[str, ...]:
+    if record_store is None or odoo_instance_is_production(instance):
+        return ()
+    read_override = getattr(record_store, "read_odoo_instance_override_record", None)
+    list_profiles = getattr(record_store, "list_product_profile_records", None)
+    if not callable(read_override):
+        return ()
+    if profile is not None:
+        profiles: tuple[LaunchplaneProductProfileRecord, ...] = (profile,)
+    elif callable(list_profiles):
+        profiles = cast(tuple[LaunchplaneProductProfileRecord, ...], list_profiles())
+    else:
+        return ()
+    protected: list[str] = []
+    for candidate in profiles:
+        if not any(
+            lane.context == context and lane.instance == instance for lane in candidate.lanes
+        ):
+            continue
+        for lane in candidate.lanes:
+            if not odoo_instance_is_production(lane.instance):
+                continue
+            try:
+                record = cast(
+                    OdooInstanceOverrideRecord,
+                    read_override(context_name=lane.context, instance_name=lane.instance),
+                )
+            except FileNotFoundError:
+                continue
+            protected.extend(shopify_record_store_keys(record))
+    return tuple(protected)
 
 
 def odoo_instance_is_production(instance_name: str) -> bool:
@@ -240,6 +299,18 @@ def render_post_deploy_payload(
     selected_website_settings: OdooWebsiteSettings | None = None,
     preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> OdooPostDeployPayload:
+    store_keys = shopify_record_store_keys(record)
+    if store_keys:
+        protected_shopify_store_keys = (
+            *protected_shopify_store_keys,
+            *production_shopify_store_keys(
+                record_store, context=record.context, instance=record.instance
+            ),
+        )
+        if any(
+            shopify_store_key_is_protected(key, protected_shopify_store_keys) for key in store_keys
+        ):
+            raise click.ClickException("Shopify settings match a protected or production store.")
     try:
         if preview_import_source is not None:
             preview_import_source.require_override_agreement(record)

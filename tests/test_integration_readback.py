@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
+    DokployTargetRecord,
+)
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
 )
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.secret_record import SecretBinding
@@ -38,6 +44,79 @@ def _integrations(policy_families: tuple[object, ...]) -> set[str]:
 
 
 class IntegrationReadbackPolicyTests(unittest.TestCase):
+    def test_mail_payment_and_web_push_credentials_warn_without_allowances(self) -> None:
+        for key, integration in (
+            ("SMTP_PASSWORD", "outgoing_mail"),
+            ("SENDGRID_API_KEY", "outgoing_mail"),
+            ("STRIPE_SECRET_KEY", "payment"),
+            ("VAPID_PRIVATE_KEY", "web_push"),
+            ("ODOO_OVERRIDE_SECRET__CONFIG_PARAMETER__MAIL_WEB_PUSH_VAPID_PRIVATE_KEY", "web_push"),
+            ("INCOMING_MAIL_PASSWORD", "incoming_mail"),
+        ):
+            with self.subTest(key=key):
+                binding = SecretBinding(
+                    binding_id="binding",
+                    secret_id="secret",
+                    integration="runtime_environment",
+                    binding_key=key,
+                    context="example",
+                    instance="testing",
+                    created_at="2026-10-21T00:00:00Z",
+                    updated_at="2026-10-21T00:00:00Z",
+                )
+                summary = LaunchplaneLaneSummary(
+                    context="example", instance="testing", secret_bindings=(binding,)
+                )
+                self.assertTrue(integration_credential_warnings(summary))
+                target = DokployTargetRecord(
+                    context="example",
+                    instance="testing",
+                    policies=_policies(integration),
+                    updated_at=binding.updated_at,
+                )
+                self.assertFalse(
+                    integration_credential_warnings(
+                        summary.model_copy(update={"dokploy_target": target})
+                    )
+                )
+
+    def test_custom_policy_marker_warns_when_integration_cannot_be_matched(self) -> None:
+        binding = SecretBinding(
+            binding_id="binding",
+            secret_id="secret",
+            integration="runtime_environment",
+            binding_key="ACCOUNTING_API_TOKEN",
+            context="example",
+            instance="testing",
+            created_at="2026-10-21T00:00:00Z",
+            updated_at="2026-10-21T00:00:00Z",
+        )
+        policy = RuntimeKeySafetyPolicyRecord(
+            record_id="policy",
+            source="test",
+            updated_at=binding.updated_at,
+            rules=(
+                RuntimeSecretSafetyRule(binding_key=binding.binding_key, secret_class="testing"),
+            ),
+            integration_key_markers=("ACCOUNTING",),
+        )
+        store = SimpleNamespace(list_runtime_key_safety_policy_records=lambda **_: (policy,))
+        summary = LaunchplaneLaneSummary(
+            context="example", instance="testing", secret_bindings=(binding,)
+        )
+        self.assertTrue(integration_credential_warnings(summary, record_store=store))
+        target = DokployTargetRecord(
+            context="example",
+            instance="testing",
+            policies=_policies("accounting"),
+            updated_at=binding.updated_at,
+        )
+        self.assertFalse(
+            integration_credential_warnings(
+                summary.model_copy(update={"dokploy_target": target}), record_store=store
+            )
+        )
+
     def test_credential_warnings_use_configured_in_scope_integrations_only(self) -> None:
         binding = SecretBinding(
             binding_id="binding",

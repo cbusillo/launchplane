@@ -28,6 +28,9 @@ for a known integration are stored without that integration's allowance on a
 non-production lane. The warning uses binding metadata and target policy only;
 it does not prove runtime delivery or connectivity, and shows no credential
 values. Disabled bindings and production lanes do not produce this warning.
+Runtime key families share the credential-safety marker catalog, so mail and
+payment provider names count too. An active policy's custom marker produces an
+explicit warning when its credential cannot be matched to a named allowance.
 
 ## Primary User And Job
 

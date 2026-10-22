@@ -33,6 +33,7 @@ from control_plane.odoo_addon_settings_override import (
 from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
+    build_post_deploy_environment,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -161,7 +162,12 @@ def _request(**kwargs: object) -> OdooAddonSettingsApplyRequest:
 
 class OdooAddonSettingsPlanTests(unittest.TestCase):
     def test_apply_refuses_store_that_became_production_after_review(self) -> None:
-        for field in ("addon_settings", "config_parameters"):
+        for field in (
+            "addon_settings",
+            "config_parameters",
+            "shopify.shop_url",
+            "shopify.store_url",
+        ):
             with self.subTest(field=field), TemporaryDirectory() as directory:
                 store = FilesystemRecordStore(state_dir=Path(directory))
                 _seed_lane(store, protected_keys=())
@@ -185,11 +191,17 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
                 setting = (
                     OdooAddonSettingOverride(addon="shopify", setting="shop_url_key", value=value)
                     if field == "addon_settings"
-                    else OdooConfigParameterOverride(key="shopify.shop_url_key", value=value)
+                    else OdooConfigParameterOverride(
+                        key=field if field.startswith("shopify.") else "shopify.shop_url_key",
+                        value=value,
+                    )
                 )
+                field = "config_parameters" if field.startswith("shopify.") else field
                 production = production.model_copy(update={field: (setting,)})
                 store.write_odoo_instance_override_record(production)
-                plan, _, _ = build_odoo_addon_settings_plan(record_store=store, request=_request())
+                plan, _, replacement = build_odoo_addon_settings_plan(
+                    record_store=store, request=_request()
+                )
                 setting = setting.model_copy(
                     update={
                         "value": OdooOverrideValue(
@@ -200,6 +212,8 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
                 store.write_odoo_instance_override_record(
                     production.model_copy(update={field: (setting,)})
                 )
+                with self.assertRaises(ClickException):
+                    build_post_deploy_environment(replacement, record_store=store)
                 with self.assertRaises(OdooAddonSettingsRefusal) as raised:
                     apply_odoo_addon_settings_plan(
                         record_store=store,

@@ -31,25 +31,19 @@ SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY
 # outgoing mail, printing, web push and business-system connectors.
 # A binding whose key carries one never takes its classification from a non-production
 # lane. The active policy record can add product-specific markers.
-DEFAULT_INTEGRATION_KEY_MARKERS = (
-    "SHOPIFY",
-    "STRIPE",
-    "PAYPAL",
-    "SQUARE",
-    "BRAINTREE",
-    "AUTHORIZE_NET",
-    "PAYMENT",
-    "SMTP",
-    "MAIL",
-    "SENDGRID",
-    "MAILGUN",
-    "POSTMARK",
-    "RESEND",
-    "PRINTNODE",
-    "REPAIRSHOPR",
-    "FISHBOWL",
-    "CM_DATA",
-    "VAPID",
+INTEGRATION_KEY_MARKERS = {
+    "shopify": ("SHOPIFY",),
+    "payment": ("STRIPE", "PAYPAL", "SQUARE", "BRAINTREE", "AUTHORIZE_NET", "PAYMENT"),
+    "outgoing_mail": ("SMTP", "MAIL", "SENDGRID", "MAILGUN", "POSTMARK", "RESEND"),
+    "incoming_mail": (),
+    "printnode": ("PRINTNODE",),
+    "repairshopr": ("REPAIRSHOPR",),
+    "fishbowl": ("FISHBOWL",),
+    "cm_data": ("CM_DATA",),
+    "web_push": ("VAPID",),
+}
+DEFAULT_INTEGRATION_KEY_MARKERS = tuple(
+    marker for markers in INTEGRATION_KEY_MARKERS.values() for marker in markers
 )
 
 
@@ -80,19 +74,34 @@ def is_credential_runtime_value(key_name: str, value: str) -> bool:
     )
 
 
-def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+def _runtime_key_has_marker(key_name: str, marker: str) -> bool:
     key_parts = _key_parts(key_name)
-    for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers):
-        marker_parts = _key_parts(marker)
-        if not marker_parts:
-            continue
-        width = len(marker_parts)
+    marker_parts = _key_parts(marker)
+    width = len(marker_parts)
+    return bool(width) and any(
+        key_parts[index : index + width] == marker_parts
+        for index in range(len(key_parts) - width + 1)
+    )
+
+
+def runtime_key_integrations(key_name: str) -> tuple[str, ...]:
+    integrations = tuple(
+        integration
+        for integration, markers in INTEGRATION_KEY_MARKERS.items()
         if any(
-            key_parts[index : index + width] == marker_parts
-            for index in range(len(key_parts) - width + 1)
-        ):
-            return True
-    return False
+            _runtime_key_has_marker(key_name, marker)
+            for marker in (*markers, integration)
+            if marker != "MAIL"
+        )
+    )
+    return integrations or (("outgoing_mail",) if _runtime_key_has_marker(key_name, "MAIL") else ())
+
+
+def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+    return any(
+        _runtime_key_has_marker(key_name, marker)
+        for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers)
+    )
 
 
 def _key_parts(key_name: str) -> tuple[str, ...]:
