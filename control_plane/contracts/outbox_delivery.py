@@ -22,6 +22,7 @@ OutboxDeliveryState = Literal[
     "failed",
     "reconcile_required",
 ]
+PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY = "backlog_summary_delivery_id"
 
 
 class OutboxDeliveryRecord(BaseModel):

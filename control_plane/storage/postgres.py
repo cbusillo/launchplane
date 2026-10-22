@@ -8298,6 +8298,84 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def _prepare_public_ingress_notification_backlog(self, session: Session, now: str) -> None:
+        from control_plane.contracts.outbox_delivery import (
+            PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
+        )
+
+        scope = "system:incident-notification-backlog"
+        route = "outbox:incident-backlog"
+        key = "current-incident-summary"
+        receipt_id = build_launchplane_mutation_reservation_id(
+            scope=scope, route_path=route, idempotency_key=key
+        )
+        if session.get(LaunchplaneIdempotencyRow, receipt_id) is not None:
+            return
+        statement = (
+            select(LaunchplaneOutboxDeliveryRow)
+            .where(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.provider_operation_key == "",
+                or_(
+                    LaunchplaneOutboxDeliveryRow.state == "pending",
+                    and_(
+                        LaunchplaneOutboxDeliveryRow.state == "running",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at < now,
+                    ),
+                ),
+            )
+            .order_by(
+                LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        groups: dict[
+            tuple[str, str, str, str],
+            list[tuple[LaunchplaneOutboxDeliveryRow, OutboxDeliveryRecord]],
+        ] = {}
+        for row in session.scalars(statement):
+            record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            attempt = record.payload.get("attempt")
+            destination = record.payload.get("destination")
+            if not isinstance(attempt, dict) or not isinstance(destination, dict):
+                continue
+            if destination.get("kind") not in {"email", "discord"}:
+                continue
+            group_key = (
+                record.aggregate_id,
+                str(attempt.get("policy_id", "")),
+                str(destination.get("kind", "")),
+                str(destination.get("destination_id", "")),
+            )
+            groups.setdefault(group_key, []).append((row, record))
+        for group in groups.values():
+            summary_delivery_id = group[-1][1].delivery_id
+            for row, record in group:
+                self._sync_outbox_delivery_row(
+                    row,
+                    record.model_copy(
+                        update={
+                            "payload": {
+                                **record.payload,
+                                PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY: summary_delivery_id,
+                            }
+                        }
+                    ),
+                )
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=receipt_id,
+            scope=scope,
+            route_path=route,
+            idempotency_key=key,
+            request_fingerprint=receipt_id,
+            response_status_code=200,
+            response_trace_id=receipt_id,
+            recorded_at=now,
+        )
+        session.add(self._idempotency_row(receipt))
+
     def claim_next_outbox_delivery_record(
         self,
         *,
@@ -8310,9 +8388,12 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Outbox delivery claim requires lease_owner.")
         observed_at = now.strip()
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
             if not observed_at:
                 observed_at = self._database_mutation_timestamp(session)
+            self._prepare_public_ingress_notification_backlog(session, observed_at)
             lease_expires_at = self._mutation_lease_expiry(
                 observed_at=observed_at,
                 lease_seconds=lease_seconds,
@@ -8338,10 +8419,18 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 .limit(1)
             )
+            if not admission_allowed(session, observed_at):
+                statement = statement.where(
+                    or_(
+                        LaunchplaneOutboxDeliveryRow.kind != "github_workflow_dispatch",
+                        LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
+                    )
+                )
             if not self.database_url.startswith("sqlite"):
                 statement = statement.with_for_update(skip_locked=True)
             row = session.scalar(statement)
             if row is None:
+                session.commit()
                 return OutboxDeliveryClaimResult(status="empty")
             record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
             if record.state == "running" and record.provider_operation_key:
@@ -8428,8 +8517,12 @@ class PostgresRecordStore(HumanSessionStore):
         if not normalized_lease_owner:
             raise ValueError("Outbox delivery update requires lease_owner.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            observed_at = self._database_mutation_timestamp(session)
+            if require_terminal:
+                self._begin_serialized_write(session)
+            else:
+                from control_plane.service_deploy_drain import lock
+
+                lock(self, session)
             statement = (
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(LaunchplaneOutboxDeliveryRow.delivery_id == record.delivery_id)
@@ -8440,6 +8533,7 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.scalar(statement)
             if row is None:
                 return OutboxDeliveryCompletionResult(status="missing")
+            observed_at = self._database_mutation_timestamp(session)
             current_record = self._read_payload(
                 model_type=OutboxDeliveryRecord,
                 payload=row.payload,

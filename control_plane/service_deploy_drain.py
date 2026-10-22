@@ -209,6 +209,7 @@ def admit_reservation(store: Any, session: Any, scope: str, route_path: str = ""
 def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[str, object], ...]:
     from control_plane.storage.postgres import (
         LaunchplaneIdempotencyRow,
+        LaunchplaneOutboxDeliveryRow,
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
         LaunchplaneOdooStableTargetReplacementOperationRow,
@@ -239,6 +240,29 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 }
             )
     observed_at = parse_launchplane_mutation_timestamp(now, field_name="observed_at")
+    for row in session.scalars(
+        select(LaunchplaneOutboxDeliveryRow).where(
+            LaunchplaneOutboxDeliveryRow.kind == "github_workflow_dispatch",
+            LaunchplaneOutboxDeliveryRow.state == "running",
+        )
+    ):
+        observations.append(
+            {
+                "operation_id": row.delivery_id,
+                "kind": row.kind,
+                "state": row.state,
+                "lease_owner": row.lease_owner,
+                "lease_expires_at": row.lease_expires_at,
+                "blocks_drain": bool(row.provider_operation_key)
+                or (
+                    bool(row.lease_expires_at)
+                    and parse_launchplane_mutation_timestamp(
+                        row.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    > observed_at
+                ),
+            }
+        )
     from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
     from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
     from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
