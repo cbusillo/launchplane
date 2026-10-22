@@ -479,7 +479,7 @@ def _apply_testing_abandonment(
                 status_code=409,
                 trace_id=trace_id,
                 code="execution_lock_busy",
-                message="The original testing worker still holds execution.",
+                message="Testing execution is busy.",
             )
         try:
             check()

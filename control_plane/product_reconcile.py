@@ -953,6 +953,7 @@ def _deploy_generic_web_testing(
 
         base_idempotency_key = idempotency_key
         idempotency_key, existing = current_attempt(base_idempotency_key)
+        plan["deploy_idempotency_key"] = idempotency_key
         artifact_scanned = existing is None
         if artifact_scanned and not _scan_deploy_artifact(profile, plan, desired):
             return ReconcileOutcome(plan)

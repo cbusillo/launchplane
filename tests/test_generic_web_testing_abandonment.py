@@ -295,20 +295,27 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                 }
             }
         )
-        with patch.object(self.store, "read_abandoned_testing_original", return_value=altered):
-            status, result = _invoke_app(
-                self.fixture.app,
-                method="POST",
-                path="/v1/admin/generic-web/deploy-recovery/dry-run",
-                authorization=f"Bearer {_OPERATOR_TOKEN}",
-                payload={
-                    "product": self.fixture.profile.product,
-                    "instance": "testing",
-                    "recovery_reference": coordinates.reference,
-                    "reason": "Read the original disposition.",
-                },
-            )
-        self.assertEqual(status, 409, result)
+        for changed in (
+            altered,
+            saved.model_copy(update={"provider_target_key": "changed-target"}),
+        ):
+            with self.subTest(record=changed.record_id):
+                with patch.object(
+                    self.store, "read_abandoned_testing_original", return_value=changed
+                ):
+                    status, result = _invoke_app(
+                        self.fixture.app,
+                        method="POST",
+                        path="/v1/admin/generic-web/deploy-recovery/dry-run",
+                        authorization=f"Bearer {_OPERATOR_TOKEN}",
+                        payload={
+                            "product": self.fixture.profile.product,
+                            "instance": "testing",
+                            "recovery_reference": coordinates.reference,
+                            "reason": "Read the original disposition.",
+                        },
+                    )
+                self.assertEqual(status, 409, result)
 
     def test_provider_reads_do_not_hold_global_authority_lock(self) -> None:
         plan = self.inspect()
@@ -516,7 +523,12 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
     def test_abandonment_after_initial_read_starts_successor_in_the_same_pass(self) -> None:
         self.qualify_successor(abandon_during_reconcile=True)
 
-    def qualify_successor(self, *, abandon_during_reconcile: bool) -> None:
+    def test_refused_successor_scan_reports_its_own_key_without_deploying(self) -> None:
+        self.qualify_successor(abandon_during_reconcile=False, refuse_successor=True)
+
+    def qualify_successor(
+        self, *, abandon_during_reconcile: bool, refuse_successor: bool = False
+    ) -> None:
         scenario = reconciliation.ProductReconcileGenericWebTestingTests()
         scenario.setUp()
         self.addCleanup(scenario.doCleanups)
@@ -629,14 +641,31 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
 
                 if not abandon_during_reconcile:
                     abandon()
+                if refuse_successor:
+                    from control_plane.artifact_scan import ArtifactScanResult
+
+                    scenario.artifact_scanner.side_effect = lambda image: ArtifactScanResult(
+                        image_reference=image,
+                        status="fail",
+                        reason="vulnerability",
+                        scanned_at="2026-10-22T20:00:00Z",
+                    )
                 scenario.request()
+                prior_scans = scenario.artifact_scanner.call_count
                 with patch.object(
                     scenario.store,
                     "testing_replacement_execution_lock",
                     abandon_before_lock if abandon_during_reconcile else lock,
                 ):
                     successor = scenario.reconcile()
+                self.assertEqual(scenario.artifact_scanner.call_count, prior_scans + 1)
         self.assertNotEqual(successor["deploy_idempotency_key"], original.idempotency_key)
+        if refuse_successor:
+            self.assertEqual(successor["reason"], "artifact_scan_refused")
+            self.assertTrue(successor["held"])
+            self.assertEqual(calls, [before.record_id])
+            self.assertEqual(scenario.input_schedule, disabled)
+            return
         self.assertEqual(successor["post_deploy_status"], "pass")
         self.assertEqual(len(triggered), len(calls))
         self.assertEqual(len(set(calls)), len(calls))
