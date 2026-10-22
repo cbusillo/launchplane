@@ -101,6 +101,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "GET",
+        "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         "/v1/products/{product}/environments/{environment}/health-history",
         "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
         ("service_api",),
