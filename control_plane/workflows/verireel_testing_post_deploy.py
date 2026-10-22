@@ -74,7 +74,16 @@ def _unknown_testing_effect(
     *,
     request: BrowserRequest | None = None,
     response: BrowserResponse | None = None,
+    phase: str = "unknown",
 ) -> ProviderMutationUnknownError:
+    if phase not in {
+        "post_deploy_fixture_signup",
+        "post_deploy_fixture_qr",
+        "post_deploy_grant-sponsored",
+        "post_deploy_promote-owner",
+        "post_deploy_delete-user",
+    }:
+        phase = "unknown"
     method, path, resource_type, status = "unknown", "unknown", "unknown", None
     try:
         if response is not None:
@@ -93,9 +102,10 @@ def _unknown_testing_effect(
     except Exception:
         method, path, resource_type, status = "unknown", "unknown", "unknown", None
     _LOGGER.warning(
-        "Testing effect unknown site=%s reason=%s method=%s path=%s status=%s resource_type=%s",
+        "Testing effect unknown site=%s reason=%s phase=%s method=%s path=%s status=%s resource_type=%s",
         site,
         reason,
+        phase,
         method,
         path,
         status,
@@ -149,7 +159,9 @@ def checkpoint_testing_effect(guard: GenericWebPostDeployGuard, phase: str) -> N
     try:
         guard.checkpoint_effect(phase)
     except Exception as error:
-        raise _unknown_testing_effect("checkpoint_testing_effect", "effect_fence_lost") from error
+        raise _unknown_testing_effect(
+            "checkpoint_testing_effect", "effect_fence_lost", phase=phase
+        ) from error
 
 
 def recorded_verireel_testing_qualification(
@@ -288,18 +300,24 @@ def _maintenance(
     if application_id != context.target_id:
         raise click.ClickException("Testing maintenance target changed during deployment.")
     checkpoint_testing_effect(guard, f"post_deploy_{action}")
-    result = execute_verireel_app_maintenance(
-        control_plane_root=root,
-        request=VeriReelAppMaintenanceRequest.model_validate(
-            {
-                "action": action,
-                "intent": intent,
-                "email": email,
-            }
-        ),
-        testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
-        execution_guard=guard,
-    )
+    try:
+        result = execute_verireel_app_maintenance(
+            control_plane_root=root,
+            request=VeriReelAppMaintenanceRequest.model_validate(
+                {
+                    "action": action,
+                    "intent": intent,
+                    "email": email,
+                }
+            ),
+            testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
+            execution_guard=guard,
+        )
+    except ProviderMutationUnknownError:
+        _unknown_testing_effect(
+            "maintenance", "maintenance_unobserved", phase=f"post_deploy_{action}"
+        )
+        raise
     if result.maintenance_status != "pass":
         raise click.ClickException(f"Testing {action} did not complete successfully.")
 
@@ -578,7 +596,6 @@ def verify_verireel_testing_product(
                             assert_verireel_testing_identity(base_url, context)
                         evidence["admin_verification_status"] = "pass"
                     except ProviderMutationUnknownError as error:
-                        _unknown_testing_effect("verify_product", "propagated_unknown")
                         effect_unknown = error
                         raise
                     except Exception as error:
@@ -609,7 +626,6 @@ def verify_verireel_testing_product(
                                     email=email,
                                 )
                             except ProviderMutationUnknownError as error:
-                                _unknown_testing_effect("cleanup", "propagated_unknown")
                                 effect_unknown = error
                                 raise
                             evidence["cleanup_status"] = "pass"
@@ -623,10 +639,6 @@ def verify_verireel_testing_product(
 
     except Exception:
         if effect_unknown is not None:
-            _LOGGER.warning(
-                "VeriReel testing qualification remains unknown deployment=%s",
-                context.deployment_record_id,
-            )
             raise effect_unknown
         raise
 
@@ -696,9 +708,16 @@ def execute_verireel_testing_post_deploy(
         )
         raise
     except Exception as error:
-        _LOGGER.warning(
-            "VeriReel testing qualification failed in %s (%s)", phase, type(error).__name__
-        )
+        if not all(guard.exchanges.values()):
+            _LOGGER.warning(
+                "VeriReel testing qualification remains unknown phase=%s deployment=%s",
+                phase,
+                context.deployment_record_id,
+            )
+        else:
+            _LOGGER.warning(
+                "VeriReel testing qualification failed in %s (%s)", phase, type(error).__name__
+            )
         status = "fail"
         evidence["failure_kind"] = (
             "product_check"

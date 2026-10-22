@@ -382,13 +382,77 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_lost_lease_is_an_unknown_effect_instead_of_a_cached_failure(self) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
-        with self.assertRaises(ProviderMutationUnknownError):
+        phase = "post_deploy_fixture_signup"
+        with (
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
             checkpoint_testing_effect(
                 GenericWebPostDeployGuard(
                     provider_effect_checkpoint=Mock(side_effect=RuntimeError("lease lost")),
                 ),
-                "post_deploy_fixture_signup",
+                phase,
             )
+        self.assertIn(phase, "\n".join(logs.output))
+
+    def test_unfinished_cleanup_exchange_logs_its_deployment_without_settling_it(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        guard = GenericWebPostDeployGuard()
+
+        def unfinished(*_args: object) -> None:
+            guard.begin_exchange("late-refresh")
+            raise TimeoutError("private-transport-detail")
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.wait_for_verireel_testing_identity"
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_base_url"
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.verify_verireel_testing_product",
+                unfinished,
+            ),
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+        ):
+            result = execute_verireel_testing_post_deploy(
+                Path("."), self.store, self.context, guard
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertIn(self.context.deployment_record_id, "\n".join(logs.output))
+        self.assertNotIn("private-transport-detail", "\n".join(logs.output))
+        with self.assertRaises(ProviderMutationUnknownError):
+            guard.require_completed_exchanges()
+
+    def test_unknown_maintenance_logs_its_action_without_exception_values(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.workflows.verireel_testing_post_deploy import _maintenance
+
+        action = "grant-sponsored"
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_application",
+                return_value=("testing", self.context.target_id),
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_app_maintenance",
+                side_effect=ProviderMutationUnknownError("private-maintenance-detail"),
+            ),
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
+            _maintenance(
+                Path("."),
+                self.context,
+                GenericWebPostDeployGuard(),
+                action=action,
+                intent="stable-testing-remote-e2e-grant-sponsored",
+                email=fixture_email(self.context.deployment_record_id),
+            )
+        self.assertIn(action, "\n".join(logs.output))
+        self.assertNotIn("private-maintenance-detail", "\n".join(logs.output))
 
     def test_fixture_identity_is_available_even_if_cleanup_cannot_continue(self) -> None:
         browser = MagicMock()
