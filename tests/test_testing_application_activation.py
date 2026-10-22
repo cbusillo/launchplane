@@ -404,6 +404,25 @@ class ApplicationCredentialTests(unittest.TestCase):
                 generation_bundle(self.store, self.record)
         generate.assert_not_called()
 
+    def test_declared_external_provider_cannot_be_reinterpreted_as_local_generation(self) -> None:
+        profile = self.store.read_product_profile_record(self.record.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD",
+                context=self.record.context,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        with patch(
+            "control_plane.testing_application_credentials.random_secrets.token_bytes",
+            return_value=b"fixture-generated-material",
+        ) as generate:
+            with self.assertRaises(ValueError):
+                generation_bundle(self.store, self.record)
+        generate.assert_not_called()
+
 
 class ApplicationRuntimeImageTests(unittest.TestCase):
     @unittest.skipUnless(

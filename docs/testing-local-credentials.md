@@ -111,3 +111,59 @@ its own provider-issued test key, or record a reviewed sharing decision. This au
 covers Launchplane's managed runtime store, not provider-only or unrecorded keys,
 nor a proof of current application authentication. Run it after compatible deploy,
 generate OPW testing first, then use the same path for other local overlaps.
+
+## External provider observations
+
+A managed requirement may declare `external_provider: "discord_bot"` on its
+explicit runtime context. This purpose is stored metadata, not inferred from a
+key name or credential value. It cannot also request local generation. To classify
+an existing exact requirement through the existing expected-config service API:
+
+```bash
+uv run python scripts/declare-external-resource.py dry-run \
+  --operator-helper <helper> --product <product> --context <context> \
+  --instance testing --binding-key <key> --provider discord_bot \
+  --reason '<reason>' --evidence-file <private-review-file>
+```
+
+Review the names-only declaration and repeat the same arguments with `apply`,
+`--reviewed-dry-run` and `--idempotency-key <stable-key>`. Classification explicitly
+retires local generation for that requirement and preserves its other metadata.
+It creates no account, credential, grant, provider resource or runtime change.
+The client checks the saved intent and requirement, then independently reads the
+classification back. An uncertain apply retains its original key and intent;
+`accepted_unverified` requires investigation of the readback.
+
+Add `--external-resources` to the existing `prepare-testing-credentials.py audit`
+command to request `include_external_resources=true` on either audit GET. Without
+that option, the existing response and outbound behavior stay unchanged. With the
+option, only purpose-declared, delivered bindings are used for external reads.
+All participating products and production/testing lanes must first be authorized.
+The service alone decrypts the captured managed version and sends it to Discord's
+fixed HTTPS API using bot authentication. Responses contain identifiers and bounded
+status codes, never tokens, raw provider bodies or value fingerprints.
+
+The read observes bot/application identity and guild memberships across every
+reported guild partition, following each partition through an empty terminal page.
+Discord's `session_start_limit.max_concurrency` supplies the guild partition count;
+this is distinct from the gateway's connection shard count. A changed partition
+count, repeated or malformed page, timeout, redirect, oversized body or collection
+budget leaves the relevant observation unavailable. Collection is bounded to 16
+partitions, 48 pages, 4,000 guilds, 256 KiB per response, 16 declared lane bindings
+and a shared 90-second network budget. HTTP calls each have at most 10 seconds.
+
+The service captures authorized profiles, delivered bindings and the managed
+record/version read set used by the local overlap audit before either audit. It
+rechecks those inputs before every provider request and after collection. A change
+discards all external entries with `inputs_changed`; no database lock spans network
+I/O. Missing declarations report `not_configured`, not a successful external audit.
+
+Every external result says `qualification: "not_evaluated"`. Different bot IDs or
+disjoint guild memberships do not prove resource isolation, current permissions,
+absence of direct-message/global writes, what credentials old local state holds,
+or exclusion of future old-generation effects. A guild enumeration is an interval
+observation, not an atomic provider snapshot. Deployment and continuation gates
+remain unchanged and require their own authoritative evidence.
+
+Provider contract: [Discord current-user guilds](https://docs.discord.com/developers/resources/user#get-current-user-guilds)
+and [current application](https://docs.discord.com/developers/resources/application#get-current-application).

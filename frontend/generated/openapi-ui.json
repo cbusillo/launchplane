@@ -35669,6 +35669,19 @@
             "title": "Context",
             "type": "string"
           },
+          "external_provider": {
+            "anyOf": [
+              {
+                "const": "discord_bot",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Provider",
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "default": "",
             "title": "Instance",

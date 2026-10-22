@@ -4,7 +4,11 @@ import unittest
 
 from httpx2 import Response
 
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductOwnerSecretInput,
+    ProductSecretConfigRequirement,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -111,6 +115,116 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
         with scoped_agent_transport():
             response = await self.post(self.payload, "scoped")
         self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_external_purpose_updates_existing_requirement_without_clearing_other_metadata(
+        self,
+    ) -> None:
+        requirement = ProductSecretConfigRequirement(
+            binding_key="API_TOKEN",
+            context=self.profile.product,
+            instance="testing",
+            owner_input=ProductOwnerSecretInput(label="Existing provider input"),
+        )
+        self.profile.expected_config.managed_secret_bindings = (requirement,)
+        self.store.write_product_profile_record(self.profile)
+        payload = {
+            "product": self.profile.product,
+            "reason": "Identify the external provider without changing the credential.",
+            "managed_secret_bindings": [
+                {
+                    "binding_key": requirement.binding_key,
+                    "context": requirement.context,
+                    "instance": requirement.instance,
+                    "external_provider": "discord_bot",
+                }
+            ],
+        }
+        planned = await self.post({**payload, "mode": "dry-run"})
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertTrue(planned.json()["result"]["changed"])
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        applied = await self.post({**payload, "mode": "apply"}, "external-purpose")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        stored = self.store.read_product_profile_record(self.profile.product)
+        expected = requirement.model_copy(update={"external_provider": "discord_bot"})
+        self.assertEqual(stored.expected_config.managed_secret_bindings, (expected,))
+        omitted = await self.post(
+            {
+                **payload,
+                "mode": "apply",
+                "managed_secret_bindings": [
+                    requirement.model_dump(
+                        mode="json", include={"binding_key", "integration", "context", "instance"}
+                    )
+                ],
+            },
+            "purpose-omitted",
+        )
+        self.assertEqual(omitted.status_code, 202, omitted.text)
+        self.assertFalse(omitted.json()["result"]["changed"])
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), stored)
+        self.assertEqual(self.store.list_runtime_environment_records(), (self.runtime,))
+        self.assertEqual(self.store.list_secret_bindings(integration="runtime_environment"), ())
+
+    async def test_external_declaration_requires_explicit_retirement_of_existing_local_generation(
+        self,
+    ) -> None:
+        requirement = ProductSecretConfigRequirement(
+            binding_key="API_TOKEN",
+            context=self.profile.product,
+            instance="testing",
+            testing_local_credential=True,
+        )
+        self.profile.expected_config.managed_secret_bindings = (requirement,)
+        self.store.write_product_profile_record(self.profile)
+        declaration = {
+            "binding_key": requirement.binding_key,
+            "context": requirement.context,
+            "instance": requirement.instance,
+            "external_provider": "discord_bot",
+        }
+        payload: dict[str, object] = {
+            "product": self.profile.product,
+            "mode": "apply",
+            "reason": "Correct the declared credential purpose.",
+            "managed_secret_bindings": [declaration],
+        }
+        refused = await self.post(payload, "local-conflict")
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        payload["managed_secret_bindings"] = [{**declaration, "testing_local_credential": False}]
+        applied = await self.post(payload, "retire-local-intent")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        requirement_after = self.store.read_product_profile_record(
+            self.profile.product
+        ).expected_config.managed_secret_bindings[0]
+        self.assertEqual(requirement_after.external_provider, "discord_bot")
+        self.assertFalse(requirement_after.testing_local_credential)
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_duplicate_external_purpose_updates_cannot_hide_an_intermediate_mutation(
+        self,
+    ) -> None:
+        declaration = {
+            "binding_key": "API_TOKEN",
+            "context": self.profile.product,
+            "instance": "testing",
+            "external_provider": "discord_bot",
+        }
+        response = await self.post(
+            {
+                "product": self.profile.product,
+                "mode": "apply",
+                "reason": "Ambiguous purpose update.",
+                "managed_secret_bindings": [
+                    declaration,
+                    {**declaration, "external_provider": None},
+                ],
+            },
+            "duplicate-purpose",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_removals_do_not_inherit_addition_authority(self) -> None:

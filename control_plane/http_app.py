@@ -2165,6 +2165,16 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
             _secret_config_requirement_key(removal)
             for removal in self.remove_managed_secret_bindings
         ]
+        secret_additions = [
+            _secret_config_requirement_key(requirement)
+            for requirement in self.managed_secret_bindings
+        ]
+        if any(
+            "external_provider" in requirement.model_fields_set
+            and secret_additions.count(_secret_config_requirement_key(requirement)) > 1
+            for requirement in self.managed_secret_bindings
+        ):
+            raise ValueError("External provider declarations must be unique.")
         if len(runtime_removals) != len(set(runtime_removals)) or len(secret_removals) != len(
             set(secret_removals)
         ):
@@ -2296,6 +2306,7 @@ def _merge_product_expected_config(
     added_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     unchanged_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     added_secret_requirements: list[ProductSecretConfigRequirement] = []
+    updated_secret_requirements: list[ProductSecretConfigRequirement] = []
     unchanged_secret_requirements: list[ProductSecretConfigRequirement] = []
 
     for runtime_requirement in request.runtime_environment_keys:
@@ -2310,6 +2321,29 @@ def _merge_product_expected_config(
     for secret_requirement in request.managed_secret_bindings:
         secret_key = _secret_config_requirement_key(secret_requirement)
         if secret_key in existing_secret_keys:
+            if "external_provider" in secret_requirement.model_fields_set:
+                index = next(
+                    index
+                    for index, existing in enumerate(secret_requirements)
+                    if _secret_config_requirement_key(existing) == secret_key
+                )
+                existing = secret_requirements[index]
+                changes: dict[str, object] = {
+                    "external_provider": secret_requirement.external_provider
+                }
+                if "testing_local_credential" in secret_requirement.model_fields_set:
+                    changes["testing_local_credential"] = (
+                        secret_requirement.testing_local_credential
+                    )
+                replacement = ProductSecretConfigRequirement.model_validate(
+                    {**existing.model_dump(mode="json"), **changes}
+                )
+                if replacement != existing:
+                    secret_requirements[index] = replacement
+                    updated_secret_requirements.append(replacement)
+                    continue
+                unchanged_secret_requirements.append(existing)
+                continue
             unchanged_secret_requirements.append(secret_requirement)
             continue
         existing_secret_keys.add(secret_key)
@@ -2319,6 +2353,7 @@ def _merge_product_expected_config(
     changed = bool(
         added_runtime_requirements
         or added_secret_requirements
+        or updated_secret_requirements
         or removed_runtime_requirements
         or removed_secret_requirements
     )
@@ -2355,6 +2390,14 @@ def _merge_product_expected_config(
         "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
         "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
     }
+    if any(
+        "external_provider" in requirement.model_fields_set
+        for requirement in request.managed_secret_bindings
+    ):
+        secret_result["updated"] = [
+            requirement.model_dump(mode="json") for requirement in updated_secret_requirements
+        ]
+        summary["managed_secret_binding_update_count"] = len(updated_secret_requirements)
     # Add-only responses keep their original shape for callers that validate it
     # strictly; removal dispositions appear only when the request asked for them.
     if request.requests_removal:
@@ -13923,12 +13966,20 @@ def create_launchplane_fastapi_app(
                 )
                 for binding in list_secret_bindings(integration=integration, limit=None)
             )
-        merged_profile, result = _merge_product_expected_config(
-            profile=profile,
-            request=expected_config_request,
-            updated_at=utc_now_timestamp(),
-            secret_bindings=secret_bindings,
-        )
+        try:
+            merged_profile, result = _merge_product_expected_config(
+                profile=profile,
+                request=expected_config_request,
+                updated_at=utc_now_timestamp(),
+                secret_bindings=secret_bindings,
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="The declaration conflicts with existing requirement metadata.",
+            ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},

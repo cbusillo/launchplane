@@ -5946,6 +5946,110 @@
         "title": "DetachedApplicationRetirementRequest",
         "type": "object"
       },
+      "DiscordBotResourceObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "default": "",
+            "title": "Application Id",
+            "type": "string"
+          },
+          "bot_id": {
+            "default": "",
+            "title": "Bot Id",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "guild_enumeration_complete": {
+            "default": false,
+            "title": "Guild Enumeration Complete",
+            "type": "boolean"
+          },
+          "guild_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Guild Ids",
+            "type": "array"
+          },
+          "guild_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Guild Status",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "identity_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Identity Status",
+            "type": "string"
+          },
+          "provider": {
+            "const": "discord_bot",
+            "default": "discord_bot",
+            "title": "Provider",
+            "type": "string"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at"
+        ],
+        "title": "DiscordBotResourceObservation",
+        "type": "object"
+      },
       "DiscussionTopicInput": {
         "additionalProperties": false,
         "properties": {
@@ -39919,6 +40023,19 @@
             "title": "Context",
             "type": "string"
           },
+          "external_provider": {
+            "anyOf": [
+              {
+                "const": "discord_bot",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Provider",
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "default": "",
             "title": "Instance",
@@ -52339,6 +52456,17 @@
       "TestingCredentialAuditResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52372,6 +52500,17 @@
       "TestingCredentialInventoryResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52457,6 +52596,102 @@
           }
         },
         "title": "TestingExclusionFacet",
+        "type": "object"
+      },
+      "TestingExternalResourceAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingExternalResourceEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "unavailable",
+              "not_configured"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "TestingExternalResourceAudit",
+        "type": "object"
+      },
+      "TestingExternalResourceEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "enum": [
+              "testing",
+              "prod"
+            ],
+            "title": "Instance",
+            "type": "string"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/DiscordBotResourceObservation"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "binding_key",
+          "version_id",
+          "observation"
+        ],
+        "title": "TestingExternalResourceEntry",
         "type": "object"
       },
       "TestingGenerationRetirementRequest": {
@@ -85197,6 +85432,19 @@
                         "title": "Context",
                         "type": "string"
                       },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
+                      },
                       "instance": {
                         "default": "",
                         "title": "Instance",
@@ -85722,6 +85970,19 @@
                         "default": "",
                         "title": "Context",
                         "type": "string"
+                      },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
                       },
                       "instance": {
                         "default": "",
@@ -95580,6 +95841,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -100906,6 +101177,16 @@
       "get": {
         "operationId": "audit_testing_credentials",
         "parameters": [
+          {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
+            }
+          },
           {
             "in": "header",
             "name": "Authorization",

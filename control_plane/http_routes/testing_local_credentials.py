@@ -13,11 +13,27 @@ from control_plane.testing_local_credentials import (
     TestingCredentialInventoryResponse,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.testing_external_resources import (
+    ExternalResourceInputSnapshot,
+    audit_external_resources,
+    capture_external_resource_inputs,
+)
 
 
 def register_testing_credential_routes(
     app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
 ) -> None:
+    def capture(
+        store: TestingCredentialStore,
+        profiles: tuple[LaunchplaneProductProfileRecord, ...],
+        *,
+        inventory: bool = False,
+    ) -> ExternalResourceInputSnapshot | None:
+        try:
+            return capture_external_resource_inputs(store, profiles, inventory=inventory)
+        except Exception:
+            return None
+
     def authorize(
         product: str,
         response: Response,
@@ -75,13 +91,26 @@ def register_testing_credential_routes(
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_external_resources: bool = False,
     ) -> TestingCredentialAuditResponse:
         profile = authorize(product, response, identity, record_store)
+        snapshot = (
+            capture(cast(TestingCredentialStore, record_store), (profile,))
+            if include_external_resources
+            else None
+        )
         return TestingCredentialAuditResponse(
             trace_id=dependencies.next_trace_id(),
             product=product,
             lanes=audit_testing_credentials(
                 cast(TestingCredentialStore, record_store), product, profile_snapshot=profile
+            ),
+            external_resources=(
+                audit_external_resources(
+                    cast(TestingCredentialStore, record_store), (profile,), captured=snapshot
+                )
+                if include_external_resources
+                else None
             ),
         )
 
@@ -101,11 +130,15 @@ def register_testing_credential_routes(
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_external_resources: bool = False,
     ) -> TestingCredentialInventoryResponse:
         store = cast(TestingCredentialStore, record_store)
         profiles = store.list_product_profile_records()
         for profile in profiles:
             authorize(profile.product, response, identity, record_store)
+        snapshot = (
+            capture(store, tuple(profiles), inventory=True) if include_external_resources else None
+        )
         lanes = [
             lane
             for profile in profiles
@@ -125,6 +158,11 @@ def register_testing_credential_routes(
             trace_id=dependencies.next_trace_id(),
             products=sorted(profile.product for profile in profiles),
             lanes=lanes,
+            external_resources=(
+                audit_external_resources(store, tuple(profiles), captured=snapshot, inventory=True)
+                if include_external_resources
+                else None
+            ),
         )
 
     app.add_api_route(

@@ -583,6 +583,11 @@ class ProductSecretConfigRequirement(BaseModel):
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
+    external_provider: Literal["discord_bot"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     testing_local_credential: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
@@ -603,8 +608,14 @@ class ProductSecretConfigRequirement(BaseModel):
         self.integration = self.integration.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
+        if self.external_provider is not None and (
+            self.integration != "runtime_environment" or not self.context
+        ):
+            raise ValueError("External provider declarations require one runtime context.")
         if self.testing_local_credential and (
-            self.integration != "runtime_environment" or self.owner_input is not None
+            self.integration != "runtime_environment"
+            or self.owner_input is not None
+            or self.external_provider is not None
         ):
             raise ValueError(
                 "Testing local credentials require runtime storage and no external input"

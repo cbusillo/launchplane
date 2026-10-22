@@ -12,7 +12,10 @@ import unittest
 from unittest.mock import patch
 
 from control_plane import secrets
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductSecretConfigRequirement,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config import apply_product_config_bundle
 from control_plane.service_auth import BearerIdentityConfig
@@ -101,15 +104,237 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def audit(self, *, inventory: bool = False) -> Any:
+    async def audit(self, *, inventory: bool = False, external: bool = False) -> Any:
         return await _asgi_request(
             self.app,
             "GET",
-            "/v1/testing-credentials"
-            if inventory
-            else "/v1/products/example-site/testing-credentials",
+            (
+                "/v1/testing-credentials"
+                if inventory
+                else "/v1/products/example-site/testing-credentials"
+            )
+            + ("?include_external_resources=true" if external else ""),
             headers={"Authorization": "Bearer test-operator-token"},
         )
+
+    def external_fixture(self) -> None:
+        requirements = self.profile.expected_config.managed_secret_bindings
+        self.profile.expected_config.managed_secret_bindings = requirements + (
+            ProductSecretConfigRequirement(
+                binding_key="BOT_ACCESS",
+                context=self.profile.product,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "testing",
+                "secrets": [{"binding_key": "BOT_ACCESS", "value": "synthetic-external-token"}],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+
+    def provider_response(self, url: str, **kwargs: Any) -> Any:
+        from control_plane.outbound_http import PublicHttpResponse
+
+        payload: Any = (
+            {"id": "123", "bot": True}
+            if url.endswith("/users/@me")
+            else {"id": "456"}
+            if url.endswith("/applications/@me")
+            else {"session_start_limit": {"max_concurrency": 1}}
+            if url.endswith("/gateway/bot")
+            else []
+        )
+        return PublicHttpResponse(200, url, 0, (), json.dumps(payload).encode())
+
+    async def test_external_reads_require_both_opt_in_and_explicit_stored_purpose(self) -> None:
+        with patch("control_plane.discord_external_resources.request_public_http") as request:
+            original = await self.audit()
+            self.assertNotIn("external_resources", original.json())
+            unconfigured = await self.audit(external=True)
+            self.assertEqual(unconfigured.json()["external_resources"]["status"], "not_configured")
+            request.assert_not_called()
+        self.external_fixture()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.provider_response,
+        ) as request:
+            ordinary = await self.audit()
+            request.assert_not_called()
+            report = await self.audit(external=True)
+        self.assertNotIn("external_resources", ordinary.json())
+        result = report.json()["external_resources"]
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["qualification"], "not_evaluated")
+        self.assertEqual(result["entries"][0]["observation"]["bot_id"], "123")
+        self.assertNotIn("synthetic-external-token", report.text)
+        self.assertTrue(request.called)
+
+    async def test_rotation_during_provider_read_clears_previously_observed_identity(self) -> None:
+        self.external_fixture()
+        calls = 0
+
+        def response(url: str, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if url.endswith("/applications/@me"):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.product,
+                        "instance": "testing",
+                        "secrets": [
+                            {"binding_key": "BOT_ACCESS", "value": "rotated-fixture-token"}
+                        ],
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            return self.provider_response(url, **kwargs)
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=response
+        ):
+            report = await self.audit(external=True)
+        self.assertEqual(calls, 2)
+        result = report.json()["external_resources"]
+        self.assertEqual(result["failure_code"], "inputs_changed")
+        self.assertEqual(result["entries"], [])
+
+    async def test_local_rotation_between_audits_cannot_pair_stale_pass_with_external_observation(
+        self,
+    ) -> None:
+        from control_plane.http_routes import testing_local_credentials as routes
+        from control_plane.testing_local_credentials import audit_testing_credentials
+
+        self.external_fixture()
+        self.assertEqual((await self.post(self.payload)).status_code, 202)
+        generated = await self.post({**self.payload, "mode": "apply"}, "before-seal")
+        self.assertEqual(generated.status_code, 202, generated.text)
+        original = audit_testing_credentials
+
+        def audit_then_rotate(*args: Any, **kwargs: Any) -> Any:
+            result = original(*args, **kwargs)
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": self.profile.product,
+                    "context": self.profile.product,
+                    "instance": "testing",
+                    "secrets": [
+                        {"binding_key": "DATABASE_PASSWORD", "value": "production-fixture"}
+                    ],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+            return result
+
+        with (
+            patch.object(routes, "audit_testing_credentials", side_effect=audit_then_rotate),
+            patch("control_plane.discord_external_resources.request_public_http") as request,
+        ):
+            report = await self.audit(external=True)
+        self.assertEqual(report.json()["external_resources"]["failure_code"], "inputs_changed")
+        self.assertEqual(report.json()["external_resources"]["entries"], [])
+        request.assert_not_called()
+
+    async def test_retired_production_binding_rotation_invalidates_combined_report(self) -> None:
+        self.external_fixture()
+        self.assertEqual((await self.post(self.payload)).status_code, 202)
+        generated = await self.post({**self.payload, "mode": "apply"}, "retired-source-seal")
+        self.assertEqual(generated.status_code, 202, generated.text)
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "prod",
+                "runtime_env": {
+                    "env": {"SITE_MODE": "production"},
+                    "retired_provider_keys": ["DATABASE_PASSWORD"],
+                },
+                "schema_version": 2,
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings(instance_name="testing")
+            if row.binding_key == "DATABASE_PASSWORD"
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        version = self.store.read_secret_version(record.current_version_id)
+        value = secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+
+        def response(url: str, **kwargs: Any) -> Any:
+            if "/guilds?" in url:
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.product,
+                        "instance": "prod",
+                        "secrets": [{"binding_key": "DATABASE_PASSWORD", "value": value}],
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            return self.provider_response(url, **kwargs)
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=response
+        ):
+            report = await self.audit(external=True)
+        self.assertEqual(report.json()["external_resources"]["failure_code"], "inputs_changed")
+        self.assertEqual(report.json()["external_resources"]["entries"], [])
+        current = await self.audit()
+        self.assertEqual(current.json()["lanes"][0]["status"], "overlap")
+
+    def test_odoo_builtin_does_not_override_positive_external_declaration(self) -> None:
+        from control_plane.testing_local_credentials import (
+            local_credential_keys,
+            validate_generation,
+        )
+        from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+
+        key = sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)[0]
+        profile = self.profile.model_copy(update={"driver_id": "odoo"}, deep=True)
+        self.store.write_product_profile_record(profile)
+        self.assertIn(key, local_credential_keys(profile, self.profile.product))
+        profile.expected_config.managed_secret_bindings += (
+            ProductSecretConfigRequirement(
+                binding_key=key,
+                context=self.profile.product,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        with patch("secrets.token_bytes") as generate:
+            with self.assertRaises(ValueError):
+                validate_generation(
+                    self.store,
+                    product=self.profile.product,
+                    context=self.profile.product,
+                    instance="testing",
+                    entries=({"binding_key": key, "name": key},),
+                )
+            generate.assert_not_called()
 
     async def test_audit_finds_cross_key_overlap_then_reports_generated_readback(self) -> None:
         apply_product_config_bundle(
@@ -451,6 +676,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
 
     @scoped_agent_test
     async def test_inventory_authorizes_every_product_before_decryption(self) -> None:
+        self.external_fixture()
         other = LaunchplaneProductProfileRecord.model_validate(
             _generic_site_profile_payload("another-site")
         )
@@ -468,16 +694,22 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 local_operator_token_label="local-owner-write",
             ),
         )
-        with patch.object(
-            secrets, "_decrypt_secret_value", side_effect=AssertionError("unauthorized audit read")
+        with (
+            patch.object(
+                secrets,
+                "_decrypt_secret_value",
+                side_effect=AssertionError("unauthorized audit read"),
+            ),
+            patch("control_plane.discord_external_resources.request_public_http") as provider,
         ):
             response = await _asgi_request(
                 app,
                 "GET",
-                "/v1/testing-credentials",
+                "/v1/testing-credentials?include_external_resources=true",
                 headers={"Authorization": "Bearer test-operator-token"},
             )
         self.assertEqual(response.status_code, 403, response.text)
+        provider.assert_not_called()
 
     def test_onboarding_import_preserves_existing_lane_credentials(self) -> None:
         from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
