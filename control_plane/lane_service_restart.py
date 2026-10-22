@@ -18,6 +18,7 @@ from control_plane.contracts.lane_service_restart import (
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
+from control_plane.disposable_lanes import require_disposable_lane
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -182,6 +183,7 @@ class ServiceRestartAdapter:
         token: str,
         health_url: str,
         trace_id: str,
+        require_disposable: bool = False,
     ) -> None:
         self.store = store
         self.root = root
@@ -192,6 +194,7 @@ class ServiceRestartAdapter:
         self.token = token
         self.health_url = health_url
         self.trace_id = trace_id
+        self.require_disposable = require_disposable
 
     def target_key(self) -> str:
         # Fence the immutable recipient of the POST. An old uncertain request
@@ -347,6 +350,13 @@ class ServiceRestartAdapter:
                 if fresh.digest() != self.request.reviewed_plan_sha256:
                     raise ServiceRestartRefused(
                         "Restart identity changed; inspect and review again."
+                    )
+                if self.require_disposable:
+                    require_disposable_lane(
+                        self.store,
+                        product=self.plan.product,
+                        context=self.plan.context,
+                        instance=self.plan.instance,
                     )
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationRejectedError(

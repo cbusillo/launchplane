@@ -38,6 +38,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -73,9 +74,13 @@ def register_service_restart_route(
         operator = isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
-        # Reuse the existing runtime-operation authority; no grant is added.
+        director_testing = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and payload.instance == "testing"
+        )
         if payload.mode != "dry-run":
-            allowed = native_routes.native_driver_route_authorization_allows(
+            allowed = director_testing or native_routes.native_driver_route_authorization_allows(
                 endpoint=restart_lane_service,
                 authorization_allows=dependencies.authorization_allows,
                 identity=identity,
@@ -238,6 +243,7 @@ def register_service_restart_route(
                 token=token,
                 health_url=health_url,
                 trace_id=trace,
+                require_disposable=director_testing,
             )
             try:
                 result = run_durable_provider_operation(

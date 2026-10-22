@@ -17,6 +17,18 @@ scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) 
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
 
+The service-authenticated Director `local_operator` can also restart an eligible
+testing service under standing direction without a write grant. Immediately
+before the restart checkpoint, under the release lane reservation, it must pass
+the existing [disposable-lane qualification](disposable-lanes.md): current bound
+reproducible and production-isolated evidence, protected-use checks, no staff-testing hold,
+and no target alias. This qualification applies even with an explicit grant.
+Inspect or collect current evidence through `/v1/disposable-lanes/observations`
+before a fresh apply; missing or expired resource/custody evidence refuses. Completed replay and
+original-request reconciliation remain observational when that eligibility
+changes. Production and other local operators keep their policy checks;
+terminal-agent credentials cannot restart a service.
+
 The active Odoo product lane must have agreeing provider/Compose records and a
 settled current deployment with a runtime identity and immutable artifact
 manifest. Production also requires recorded acceptance of that exact artifact
