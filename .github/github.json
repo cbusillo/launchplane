@@ -109,22 +109,22 @@
       "default": "uv run --extra dev mypy control_plane tests"
     },
     "build": {
-      "browser": "pnpm --dir frontend test:browser",
-      "frontend": "pnpm --dir frontend validate",
+      "browser": "(cd frontend && pnpm test:browser)",
+      "frontend": "(cd frontend && pnpm validate)",
       "container": "docker build -t launchplane-ci:test .",
       "testingBrowser": "bash scripts/qualify-testing-browser.sh launchplane-ci:test",
       "serviceCompose": "bash scripts/qualify-service-compose.sh launchplane-ci:test \"${LAUNCHPLANE_CI_POSTGRES_IMAGE:?set from the top-level env in .github/workflows/ci.yml}\""
     },
     "openapi": {
       "export": "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
-      "frontendGenerate": "pnpm --dir frontend generate:openapi",
-      "frontendTypes": "pnpm --dir frontend generate:openapi-types",
-      "frontendDrift": "pnpm --dir frontend check:openapi-drift"
+      "frontendGenerate": "(cd frontend && pnpm generate:openapi)",
+      "frontendTypes": "(cd frontend && pnpm generate:openapi-types)",
+      "frontendDrift": "(cd frontend && pnpm check:openapi-drift)"
     },
     "agentContract": {
       "artifact": "contracts/agent-operator-contract.json",
       "export": "uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json",
-      "drift": "pnpm --dir frontend check:openapi-drift"
+      "drift": "(cd frontend && pnpm check:openapi-drift)"
     },
     "ownerControlContract": {
       "artifact": "contracts/owner-control-contract.json",

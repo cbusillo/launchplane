@@ -243,7 +243,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
@@ -1104,11 +1107,19 @@ class FilesystemRecordStore:
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> Path:
-        return self._write_model(
-            "launchplane_runner_lane_registration_audits",
-            _runner_audit_record_id(record.audit_record_key),
-            record,
-        )
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        record_type = "launchplane_runner_lane_registration_audits"
+        record_id = _runner_audit_record_id(record.audit_record_key)
+        with self._product_authority_bundle_lock():
+            try:
+                existing = self._read_model_locked(
+                    RunnerLaneRegistrationAuditRecord, record_type, record_id
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                validate_runner_lane_registration_audit_identity(existing, record)
+            return self._write_model_locked(record_type, record_id, record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
