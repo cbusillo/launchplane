@@ -1,4 +1,5 @@
 from __future__ import annotations
+from control_plane.github_required_checks import CheckRequirement
 
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -43,6 +44,7 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from control_plane.merge_train_github import (
+    MergeTrainBaseCheckObservation,
     GitHubMergeTrainClient,
     MergeTrainGitHubTransport,
     LegacyMergeTrainEffectExecutor,
@@ -358,10 +360,13 @@ class _FakeMergeTrainGitHubClient:
 class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     labels_added: list[tuple[int, str]] = []
 
-    def read_base_check_status(
-        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
-    ) -> str:
-        return "pass"
+    def read_base_check_observation(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        attribution_requirements: tuple[CheckRequirement, ...],
+    ) -> MergeTrainBaseCheckObservation:
+        return MergeTrainBaseCheckObservation("pass")
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -372,6 +377,7 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:
         return CandidateCheckFailures(
+            attribution_requirements=(CheckRequirement("ci-gate"),),
             checks=(
                 CandidateCheckFailure(
                     name="test_shard (0)",
@@ -379,7 +385,7 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
                     url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
                     failed_tests=("tests.test_widget.WidgetTests.test_renders",),
                 ),
-            )
+            ),
         )
 
     def add_pull_request_label(
