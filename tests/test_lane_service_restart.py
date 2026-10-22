@@ -392,6 +392,68 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(self.invoke()[0], 409)
         self.assertEqual(self.provider.writes, [])
 
+    def test_completed_history_without_start_keeps_current_artifact_restartable(self) -> None:
+        original = self.store.read_deployment_record(self.expected.deployment_record_id)
+        self.store.write_deployment_record(
+            original.model_copy(
+                update={
+                    "record_id": "historical-activation-image",
+                    "deploy": original.deploy.model_copy(
+                        update={"started_at": "", "finished_at": "2026-10-09T23:59:00Z"}
+                    ),
+                }
+            )
+        )
+        self.review()
+        self.assertEqual(self.invoke(key="historical-activation")[1]["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_unplaceable_or_malformed_history_refuses_without_dispatch(self) -> None:
+        original = self.store.read_deployment_record(self.expected.deployment_record_id)
+        for started_at, finished_at in (
+            ("", ""),
+            ("2026-10-09T23:58:00", "2026-10-09T23:59:00Z"),
+            ("2026-10-09T23:58:00Z", "invalid"),
+        ):
+            with self.subTest(started_at=started_at, finished_at=finished_at):
+                self.store.write_deployment_record(
+                    original.model_copy(
+                        update={
+                            "record_id": "unplaceable-history",
+                            "deploy": original.deploy.model_copy(
+                                update={"started_at": started_at, "finished_at": finished_at}
+                            ),
+                        }
+                    )
+                )
+                self.assertEqual(self.invoke()[0], 409)
+                self.assertEqual(self.provider.writes, [])
+
+    def test_overlapping_attempt_and_missing_current_start_refuse(self) -> None:
+        current = self.store.read_deployment_record(self.expected.deployment_record_id)
+        self.store.write_deployment_record(
+            current.model_copy(
+                update={"deploy": current.deploy.model_copy(update={"started_at": ""})}
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.store.write_deployment_record(current)
+        self.store.write_deployment_record(
+            current.model_copy(
+                update={
+                    "record_id": "overlapping-deployment",
+                    "deploy": current.deploy.model_copy(
+                        update={
+                            "started_at": "2026-10-09T23:59:00Z",
+                            "finished_at": current.deploy.started_at,
+                        }
+                    ),
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
     def test_blocked_code_after_post_deploy_effect_refuses_restart(self) -> None:
         self.record_newer_attempt(code=deploy_blocked_code("backup_restore_proof_required"))
         attempt = self.store.read_deployment_record("newer-attempt")

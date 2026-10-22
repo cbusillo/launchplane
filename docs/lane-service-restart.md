@@ -40,6 +40,9 @@ of their position in history. Newer unfinished attempts, successes, unclassified
 failures and uncertain effects refuse recovery. The same selection is checked during
 apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
 and source commit. The same requirements apply to generic-web Compose lanes.
+Historical rows may omit a start or finish time: their latest available timestamp
+places them relative to the current deployment's required start time. Missing
+both timestamps or a malformed recorded timestamp refuses recovery.
 Other drivers and application targets are refused. Odoo uses
 the lane reservation respected by release enqueues, workers and synchronous
 releases. Generic-web holds its existing product serializer exclusively through

@@ -57,6 +57,13 @@ def _deployment_timestamp(value: str) -> datetime:
     return parsed
 
 
+def _latest_attempt_timestamp(started_at: str, finished_at: str) -> datetime:
+    timestamps = tuple(_deployment_timestamp(value) for value in (started_at, finished_at) if value)
+    if not timestamps:
+        raise ServiceRestartRefused("Deployment history has no timestamp to establish its order.")
+    return max(timestamps)
+
+
 def plan_service_restart(
     *,
     store: PostgresRecordStore,
@@ -114,13 +121,10 @@ def plan_service_restart(
     ):
         if attempt.record_id == deployment.record_id:
             continue
-        attempt_started_at = _deployment_timestamp(attempt.deploy.started_at)
-        attempt_finished_at = (
-            _deployment_timestamp(attempt.deploy.finished_at)
-            if attempt.deploy.finished_at
-            else attempt_started_at
-        )
-        if max(attempt_started_at, attempt_finished_at) < current_started_at:
+        if (
+            _latest_attempt_timestamp(attempt.deploy.started_at, attempt.deploy.finished_at)
+            < current_started_at
+        ):
             continue
         if not (
             attempt.deploy.status == "fail"
