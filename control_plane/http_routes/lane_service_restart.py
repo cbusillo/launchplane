@@ -26,6 +26,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.drivers import native_routes
 from control_plane.dokploy.api import redact_dokploy_log_line
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.lane_service_restart import (
     ServiceRestartAdapter,
     ServiceRestartRefused,
@@ -257,6 +258,12 @@ def register_service_restart_route(
                     adapter=adapter,
                     allow_mutation=not recovering and payload.mode == "apply",
                 )
+            except DisposableLaneSafetyUnknown:
+                refuse(
+                    "disposable_lane_safety_unknown",
+                    "Testing restart requires current disposable-lane evidence and resolved use, custody and isolation protections. Inspect /v1/disposable-lanes/observations.",
+                )
+                raise AssertionError
             except ServiceRestartRefused:
                 refuse(
                     "restart_refused",

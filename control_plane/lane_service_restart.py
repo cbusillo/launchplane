@@ -18,7 +18,7 @@ from control_plane.contracts.lane_service_restart import (
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
-from control_plane.disposable_lanes import require_disposable_lane
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -358,6 +358,8 @@ class ServiceRestartAdapter:
                         context=self.plan.context,
                         instance=self.plan.instance,
                     )
+            except DisposableLaneSafetyUnknown as error:
+                raise ProviderMutationRejectedError(error) from error
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationRejectedError(
                     ServiceRestartRefused(

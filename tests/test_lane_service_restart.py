@@ -390,12 +390,14 @@ class ServiceRestartTests(unittest.TestCase):
                 )
                 status, response = self.invoke(key=f"unsafe-restart-{index}")
                 self.assertEqual(status, 409, response)
-                self.assertEqual(response["error"]["code"], "restart_refused")
+                self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
                 self.assertEqual(self.provider.writes, [])
         self.store.clear_disposable_lane_safety(
             self.expected.product, self.expected.context, "testing"
         )
-        self.assertEqual(self.invoke(key="missing-safety")[0], 409)
+        status, response = self.invoke(key="missing-safety")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
 
     def test_director_grant_does_not_bypass_testing_hold_or_target_alias(self) -> None:
@@ -408,7 +410,9 @@ class ServiceRestartTests(unittest.TestCase):
         )
         self.store.write_dokploy_target_record(target)
         record_safety(self.store, self.expected.product, self.expected.context, "testing")
-        self.assertEqual(self.invoke(key="held-restart")[0], 409)
+        status, response = self.invoke(key="held-restart")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         target.policies.staff_testing_hold = None
         self.store.write_dokploy_target_record(target)
         record_safety(self.store, self.expected.product, self.expected.context, "testing")
@@ -416,7 +420,9 @@ class ServiceRestartTests(unittest.TestCase):
             context_name=self.expected.context, instance_name="testing"
         )
         self.store.write_dokploy_target_id_record(current.model_copy(update={"instance": "prod"}))
-        self.assertEqual(self.invoke(key="aliased-restart")[0], 409)
+        status, response = self.invoke(key="aliased-restart")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
 
     @scoped_agent_test
