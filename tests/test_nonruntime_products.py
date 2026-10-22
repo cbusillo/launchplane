@@ -1,5 +1,3 @@
-"""Repository/Client identity without runtime authority, through retained surfaces."""
-
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
 from itertools import chain, repeat
@@ -76,6 +74,8 @@ def inert_profile(product: str = "desktop-tool") -> LaunchplaneProductProfileRec
         product=product,
         display_name="Desktop tool",
         repository="example/desktop-tool",
+        owner=ProductOwnerProfile(github_login="director", github_id="1234"),
+        release_on_acceptance="director_standing",
         updated_at=NOW,
         source="test",
     )
@@ -88,11 +88,12 @@ def inert_manifest() -> dict[str, object]:
         "display_name": "Desktop tool",
         "repository": "Example/Desktop-Tool",
         "driver_id": "",
+        "owner": {"github_login": "director", "github_id": "1234"},
+        "release_on_acceptance": "director_standing",
     }
 
 
 def assert_registration_race(case: unittest.TestCase, store: PostgresRecordStore) -> None:
-    """Independent transactions compete for both a key and a normalized repository."""
     for same_product in (True, False):
         with case.subTest(same_product=same_product):
             suffix = "key" if same_product else "repository"
@@ -131,6 +132,78 @@ def assert_registration_race(case: unittest.TestCase, store: PostgresRecordStore
 
 
 class NonruntimeProductTests(unittest.TestCase):
+    def test_nonruntime_registration_requires_explicit_standing_client(self) -> None:
+        invalid_inputs: tuple[dict[str, object], ...] = (
+            {"owner": {}},
+            {"release_on_acceptance": "held"},
+            {
+                "owner": {"github_login": "other-client", "github_id": "5678"},
+                "release_on_acceptance": "held",
+            },
+        )
+        for changes in invalid_inputs:
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                ProductOnboardingManifest.model_validate({**inert_manifest(), **changes})
+        manifest = ProductOnboardingManifest.model_validate(
+            {
+                **inert_manifest(),
+                "owner": {"github_login": "director", "github_id": "1234"},
+                "release_on_acceptance": "director_standing",
+            }
+        )
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            result, _ = plan_product_onboarding_authority_bundle(
+                record_store=store, manifest=manifest
+            )
+        self.assertEqual(result.product_profile.owner, manifest.owner)
+        self.assertEqual(
+            result.product_profile.release_on_acceptance, manifest.release_on_acceptance
+        )
+
+    def test_active_nonruntime_client_and_acceptance_cannot_be_changed_to_held(self) -> None:
+        from control_plane.product_owner_setting import (
+            ProductOwnerApplyRequest,
+            ProductOwnerIdentity,
+            build_product_owner_setting_plan,
+        )
+        from control_plane.product_production_use_setting import (
+            ProductProductionUseApplyRequest,
+            build_product_production_use_plan,
+        )
+
+        profile = inert_profile()
+        for owner in (
+            ProductOwnerIdentity(),
+            ProductOwnerIdentity(github_login="other-client", github_id="5678"),
+        ):
+            with self.subTest(owner=owner), self.assertRaises(ValueError):
+                build_product_owner_setting_plan(
+                    profile=profile,
+                    request=ProductOwnerApplyRequest(
+                        github_login=owner.github_login,
+                        clear=not owner.github_id,
+                        reason="Change Client",
+                    ),
+                    resolved_owner=owner,
+                )
+        with self.assertRaises(ValueError):
+            build_product_production_use_plan(
+                profile=profile,
+                request=ProductProductionUseApplyRequest(
+                    production_use="unknown", release_on_acceptance="held", reason="Hold release"
+                ),
+            )
+        with self.assertRaises(ValidationError):
+            LaunchplaneProductProfileRecord.model_validate(
+                {**profile.model_dump(mode="json"), "release_on_acceptance": "held"}
+            )
+
     def test_explicit_classification_preserves_legacy_serialization(self) -> None:
         runtime = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
         self.assertNotIn("classification", runtime.model_dump(mode="json"))
@@ -391,6 +464,43 @@ class NonruntimeProductTests(unittest.TestCase):
 
 
 class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registration_cannot_record_standing_from_machine_identity(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(identity()),
+                authz_policy=_product_config_policy(
+                    action="product_onboarding.apply", product="launchplane", context="launchplane"
+                ),
+                record_store_factory=lambda: store,
+            )
+            headers = {"Authorization": "Bearer valid-token"}
+            payload: dict[str, object] = {
+                "product": "launchplane",
+                "mode": "dry_run",
+                "manifest": inert_manifest(),
+            }
+            dry = await _asgi_request(app, "POST", ROUTE, headers=headers, payload=payload)
+            self.assertEqual(dry.status_code, 202, dry.text)
+            refused = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers={**headers, "Idempotency-Key": "machine-registration"},
+                payload={
+                    **payload,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                },
+            )
+            self.assertEqual(refused.status_code, 403, refused.text)
+            self.assertEqual(store.list_product_profile_records(), ())
+
     async def test_inert_plan_uses_existing_plan_authority_without_apply(self) -> None:
         payload: dict[str, object] = {
             "product": "launchplane",
@@ -473,36 +583,43 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             ) as store,
         ):
             store.ensure_schema()
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = sessions.issue(_github_human_identity())
+            rule = _github_human_product_config_policy(
+                actions=(
+                    "product_onboarding.apply",
+                    "product_profile.read",
+                    "product_environment.read",
+                    "product_profile.write",
+                ),
+                product="launchplane",
+                context="launchplane",
+            ).model_dump(mode="json")["github_humans"][0]
+            machine_rule = _product_config_policy(
+                action="product_profile.write", product="launchplane", context="launchplane"
+            ).model_dump(mode="json")["github_actions"][0]
             app = create_launchplane_fastapi_app(
                 verifier=StubVerifier(identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate(
                     {
+                        "github_humans": [
+                            {**rule, "products": ["launchplane", "desktop-tool", "another"]}
+                        ],
                         "github_actions": [
-                            {
-                                **_product_config_policy(
-                                    action="product_onboarding.apply",
-                                    product="launchplane",
-                                    context="launchplane",
-                                ).model_dump(mode="json")["github_actions"][0],
-                                "products": ["launchplane", "desktop-tool", "another"],
-                                "actions": [
-                                    "product_onboarding.apply",
-                                    "product_profile.read",
-                                    "product_environment.read",
-                                    "product_profile.write",
-                                ],
-                            }
-                        ]
+                            {**machine_rule, "products": ["launchplane", "desktop-tool", "another"]}
+                        ],
                     }
                 ),
                 record_store_factory=lambda: store,
+                human_session_manager=sessions,
             )
-            headers = {"Authorization": "Bearer valid-token"}
             unreviewed = await _asgi_request(
                 app,
                 "POST",
                 "/v1/product-profiles",
-                headers=headers,
+                headers={"Authorization": "Bearer valid-token"},
                 payload=inert_profile().model_dump(mode="json"),
             )
             self.assertEqual(unreviewed.status_code, 409, unreviewed.text)
@@ -511,7 +628,13 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "dry_run",
                 "manifest": inert_manifest(),
             }
-            dry = await _asgi_request(app, "POST", ROUTE, headers=headers, payload=payload)
+            dry = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers=_browser_mutation_headers(sessions, session),
+                payload=payload,
+            )
             self.assertEqual(dry.status_code, 202, dry.text)
             self.assertEqual(store.list_product_profile_records(), ())
             apply = {
@@ -519,11 +642,24 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "apply",
                 "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
             }
-            missing_key = await _asgi_request(app, "POST", ROUTE, headers=headers, payload=apply)
+            missing_key = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers=_browser_mutation_headers(sessions, session),
+                payload=apply,
+            )
             self.assertEqual(missing_key.status_code, 400, missing_key.text)
             changed = {**apply, "manifest": {**inert_manifest(), "display_name": "Changed"}}
             refused = await _asgi_request(
-                app, "POST", ROUTE, headers={**headers, "Idempotency-Key": "stale"}, payload=changed
+                app,
+                "POST",
+                ROUTE,
+                headers={
+                    **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "stale",
+                },
+                payload=changed,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
             self.assertEqual(store.list_product_profile_records(), ())
@@ -531,7 +667,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ROUTE,
-                headers={**headers, "Idempotency-Key": "register"},
+                headers={
+                    **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "register",
+                },
                 payload=apply,
             )
             self.assertEqual(accepted.status_code, 202, accepted.text)
@@ -539,7 +678,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ROUTE,
-                headers={**headers, "Idempotency-Key": "register"},
+                headers={
+                    **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "register",
+                },
                 payload=apply,
             )
             self.assertEqual(replay.json()["original_trace_id"], accepted.json()["trace_id"])
@@ -566,7 +708,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                         app,
                         "POST",
                         ROUTE,
-                        headers={**headers, "Idempotency-Key": "register"},
+                        headers={
+                            **_browser_mutation_headers(sessions, session),
+                            "Idempotency-Key": "register",
+                        },
                         payload=apply,
                     )
                 self.assertEqual(raced_replay.status_code, 202, raced_replay.text)
@@ -579,7 +724,11 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(readback.is_managed_runtime)
             conflicting = {**product_profile_payload("another"), "repository": readback.repository}
             refused = await _asgi_request(
-                app, "POST", "/v1/product-profiles", headers=headers, payload=conflicting
+                app,
+                "POST",
+                "/v1/product-profiles",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=conflicting,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
             self.assertEqual(refused.json()["error"]["code"], ProductRepositoryOwnershipError.code)
@@ -597,7 +746,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ROUTE,
-                headers={**headers, "Idempotency-Key": "runtime-collision"},
+                headers={
+                    **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "runtime-collision",
+                },
                 payload=runtime_onboarding,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
@@ -606,62 +758,33 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.list_runtime_environment_records(), ())
             self.assertEqual(store.list_secret_bindings(), ())
             profile_read = await _asgi_request(
-                app, "GET", "/v1/product-profiles/desktop-tool", headers=headers
+                app,
+                "GET",
+                "/v1/product-profiles/desktop-tool",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(profile_read.status_code, 200, profile_read.text)
             self.assertEqual(
                 profile_read.json()["profile"]["classification"], readback.classification
             )
             mapping_read = await _asgi_request(
-                app, "GET", "/v1/repo-product-mapping", headers=headers
+                app,
+                "GET",
+                "/v1/repo-product-mapping",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(mapping_read.status_code, 200, mapping_read.text)
             self.assertEqual(
                 mapping_read.json()["mapping"]["repositories"][0]["product"], readback.product
             )
-            owner_route = f"/v1/product-profiles/{readback.product}/owner"
-            owner_payload: dict[str, object] = {
-                "github_login": "example-client",
-                "reason": "Record this product's Client.",
-            }
-            with (
-                patch(
-                    "control_plane.http_app.resolve_launchplane_github_token",
-                    return_value="managed-fixture-token",
-                ),
-                patch(
-                    "control_plane.http_app.github_api_request",
-                    return_value={"type": "User", "login": "example-client", "id": 1234},
-                ),
-            ):
-                owner_dry = await _asgi_request(
-                    app, "POST", owner_route, headers=headers, payload=owner_payload
-                )
-                self.assertEqual(owner_dry.status_code, 202, owner_dry.text)
-                self.assertFalse(store.read_product_profile_record(readback.product).owner.is_set)
-                owner_apply = await _asgi_request(
-                    app,
-                    "POST",
-                    owner_route,
-                    headers={**headers, "Idempotency-Key": "client"},
-                    payload={**owner_payload, "mode": "apply"},
-                )
-                self.assertEqual(owner_apply.status_code, 202, owner_apply.text)
-            self.assertEqual(
-                store.read_product_profile_record(readback.product).owner.github_login,
-                "example-client",
-            )
+            self.assertEqual(readback.owner, inert_profile().owner)
+            self.assertEqual(readback.release_on_acceptance, inert_profile().release_on_acceptance)
             with self.assertRaises(ValueError):
                 plan_product_onboarding_authority_bundle(
                     record_store=store,
                     manifest=ProductOnboardingManifest.model_validate(inert_manifest()),
                 )
-
-            # Reuse the existing full-profile service for an inert record's lifecycle.
             current = store.read_product_profile_record(readback.product)
-            # Standing setup; the separate signed-human test proves its service authority.
-            current = current.model_copy(update={"release_on_acceptance": "director_standing"})
-            store.write_product_profile_record(current)
             converted = {
                 **product_profile_payload(current.product),
                 "repository": current.repository,
@@ -669,7 +792,11 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 "release_on_acceptance": current.release_on_acceptance,
             }
             refused = await _asgi_request(
-                app, "POST", "/v1/product-profiles", headers=headers, payload=converted
+                app,
+                "POST",
+                "/v1/product-profiles",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=converted,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
             self.assertEqual(refused.json()["error"]["code"], ProductClassificationChangeError.code)
@@ -679,12 +806,15 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 "/v1/product-profiles",
-                headers={**headers, "Idempotency-Key": "retire-inert"},
+                headers={"Authorization": "Bearer valid-token", "Idempotency-Key": "retire-inert"},
                 payload=retired.model_dump(mode="json"),
             )
             self.assertEqual(retirement.status_code, 202, retirement.text)
             old_read = await _asgi_request(
-                app, "GET", f"/v1/product-profiles/{current.product}", headers=headers
+                app,
+                "GET",
+                f"/v1/product-profiles/{current.product}",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(old_read.status_code, 200, old_read.text)
             self.assertEqual(
@@ -692,7 +822,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 retired,
             )
             no_mapping = await _asgi_request(
-                app, "GET", "/v1/repo-product-mapping", headers=headers
+                app,
+                "GET",
+                "/v1/repo-product-mapping",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(no_mapping.status_code, 200, no_mapping.text)
             self.assertEqual(no_mapping.json()["mapping"]["repositories"], [])
@@ -700,24 +833,30 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ROUTE,
-                headers={**headers, "Idempotency-Key": "runtime-replacement"},
+                headers={
+                    **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "runtime-replacement",
+                },
                 payload=runtime_onboarding,
             )
             self.assertEqual(replacement.status_code, 202, replacement.text)
             new_read = await _asgi_request(
-                app, "GET", "/v1/product-profiles/another", headers=headers
+                app,
+                "GET",
+                "/v1/product-profiles/another",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(new_read.status_code, 200, new_read.text)
             new_profile = LaunchplaneProductProfileRecord.model_validate(new_read.json()["profile"])
             self.assertTrue(new_profile.is_managed_runtime)
             self.assertFalse(new_profile.owner.is_set)
-            self.assertEqual(
-                new_profile.release_on_acceptance, inert_profile().release_on_acceptance
-            )
             self.assertNotEqual(new_profile.release_on_acceptance, retired.release_on_acceptance)
             self.assertEqual(store.read_product_profile_record(current.product), retired)
             new_mapping = await _asgi_request(
-                app, "GET", "/v1/repo-product-mapping", headers=headers
+                app,
+                "GET",
+                "/v1/repo-product-mapping",
+                headers=_browser_mutation_headers(sessions, session),
             )
             self.assertEqual(new_mapping.status_code, 200, new_mapping.text)
             self.assertEqual(
@@ -842,7 +981,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                         "owner": ProductOwnerProfile(
                             github_login="changed-client", github_id="5678"
                         ),
-                        "release_on_acceptance": "held",
+                        "release_on_acceptance": "director_standing",
                     }
                 )
             )

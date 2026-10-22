@@ -936,8 +936,10 @@ the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
 
-A product that Launchplane does not deploy can have the same repository, Client,
-acceptance mode and lifecycle metadata. Its explicit `classification` is
+A product that Launchplane does not deploy can record its repository, the Director
+as its Client, standing acceptance and lifecycle metadata. Active non-runtime
+products with another Client or without standing acceptance are refused; they
+need a preview-independent Client review flow before registration is supported. Its explicit `classification` is
 `active_awareness`, `support_dependency` or `out_of_scope`, from the existing
 repository-mapping vocabulary. Omitted classification means `managed_runtime`
 and keeps existing serialized profiles unchanged. A non-runtime profile has no
@@ -952,7 +954,13 @@ using the existing `product_onboarding.plan` authorization for the dry run
 (existing apply-authorized callers may also plan), and `product_onboarding.apply`
 for apply. Send `product:
 "launchplane"`, `mode: "dry_run"` and a `manifest` containing the new product key,
-display name, one `owner/repository`, explicit classification and `driver_id: ""`.
+display name, one `owner/repository`, explicit classification, `driver_id: ""`,
+`owner` with the Director's `github_login` and numeric `github_id`, and
+`release_on_acceptance: "director_standing"`. The acceptance field is an explicit
+admin attestation that the recorded Client is the Director. Apply requires a
+signed-in admin with the existing onboarding authorization and the normal
+browser origin and CSRF checks; machine identities can plan but cannot record
+standing acceptance.
 Optional `repository_id` and `repository_owner_id` must be supplied together. Supply no
 runtime resources. The dry run writes nothing and returns `plan_sha256` and the
 planned profile. Apply the same manifest with `mode: "apply"`, that digest as
@@ -961,9 +969,9 @@ The commit rechecks product-key absence and repository ownership under the
 existing authority lock. It refuses an existing product or competing active
 repository owner, including a matching immutable repository id. A committed
 same-key replay returns the recorded result. Read the profile and repository
-mapping back, then use the existing Client and production-use setting routes to
-record the Client and acceptance mode. Standing acceptance still requires its
-recorded Client, reviewed current profile and signed-in admin apply.
+mapping back to verify the Client and standing acceptance from that registration.
+Existing runtime products keep their bounded Client and production-use settings;
+onboarding cannot set those fields for a runtime product.
 
 The ordinary full-profile write cannot create a non-runtime product. Neither
 onboarding nor another profile writer can change an existing profile's

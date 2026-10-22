@@ -7,6 +7,8 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     RepoProductClassification,
     ProductImageProfile,
+    ProductOwnerProfile,
+    ReleaseOnAcceptance,
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductOdooStableBootstrapPolicy,
@@ -161,6 +163,12 @@ class ProductOnboardingManifest(BaseModel):
     repository_owner_id: str = ""
     default_branch: str = "main"
     driver_id: str = "generic-web"
+    owner: ProductOwnerProfile = Field(
+        default_factory=ProductOwnerProfile, exclude_if=lambda value: not value.is_set
+    )
+    release_on_acceptance: ReleaseOnAcceptance = Field(
+        default="held", exclude_if=lambda value: value == "held"
+    )
     image_repository: str = ""
     runtime_port: int = Field(default=0, ge=0, le=65535)
     health_path: str = ""
@@ -199,8 +207,6 @@ class ProductOnboardingManifest(BaseModel):
     @model_validator(mode="after")
     def _validate_manifest(self) -> "ProductOnboardingManifest":
         if self.classification != "managed_runtime":
-            # Validate the same inert shape as the stored profile. The existing
-            # Client and acceptance settings are independent bounded operations.
             profile = LaunchplaneProductProfileRecord(
                 classification=self.classification,
                 product=self.product,
@@ -219,6 +225,8 @@ class ProductOnboardingManifest(BaseModel):
                 expected_config=self.product_expected_config_profile(),
                 updated_at=self.updated_at or "planned",
                 source=self.source_label,
+                owner=self.owner,
+                release_on_acceptance=self.release_on_acceptance,
             )
             if (
                 self.lanes
@@ -232,6 +240,10 @@ class ProductOnboardingManifest(BaseModel):
             self.repository_owner_id = profile.repository_owner_id
             self.default_branch = profile.default_branch
             return self
+        if self.owner.is_set or self.release_on_acceptance != "held":
+            raise ValueError(
+                "Runtime onboarding records Client and acceptance through their bounded settings."
+            )
         if not self.product.strip():
             raise ValueError("product onboarding manifest requires product")
         if not self.display_name.strip():

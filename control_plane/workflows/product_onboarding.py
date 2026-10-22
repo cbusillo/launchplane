@@ -164,6 +164,8 @@ def build_product_profile_record(
         preview=ProductPreviewProfile.model_validate(manifest.preview.model_dump(mode="json")),
         promotion_workflow=manifest.promotion_workflow,
         expected_config=manifest.product_expected_config_profile(),
+        owner=manifest.owner,
+        release_on_acceptance=manifest.release_on_acceptance,
         updated_at=updated_at,
         source=manifest.source_label,
     )
@@ -636,7 +638,6 @@ def plan_product_onboarding_authority_bundle(
 
 
 def product_onboarding_manifest_plan_sha256(manifest: ProductOnboardingManifest) -> str:
-    """Bind new inert registration to its complete reviewed input and absence."""
     return hashlib.sha256(
         json.dumps(manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

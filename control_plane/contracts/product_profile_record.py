@@ -33,8 +33,6 @@ class ProductProfileChangedError(ValueError):
 
 
 class ProductClassificationChangeError(ValueError):
-    """An existing product key cannot be repurposed for another classification."""
-
     code = "product_classification_change_blocked"
 
 
@@ -773,6 +771,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
         else:
             from control_plane.contracts.repository_inventory import normalize_repository
 
+            if self.is_active and (
+                not self.owner.is_set or self.release_on_acceptance != "director_standing"
+            ):
+                raise ValueError(
+                    "Active non-runtime products require a recorded Director Client and director_standing acceptance; other Clients are unsupported."
+                )
             self.driver_id = self.driver_id.strip()
             self.repository = normalize_repository(self.repository, "repository")
             if (
@@ -952,7 +956,6 @@ def product_profile_historical_context_overlap(
 def product_profiles_share_repository(
     first: LaunchplaneProductProfileRecord, second: LaunchplaneProductProfileRecord
 ) -> bool:
-    """Names and known copied IDs are conflict evidence, not an identity resolver."""
     return first.repository.strip().lower() == second.repository.strip().lower() or (
         bool(first.repository_id) and first.repository_id == second.repository_id
     )

@@ -104,6 +104,14 @@ def build_product_production_use_plan(
     if request.release_on_acceptance is not None:
         evidence["release_on_acceptance"] = request.release_on_acceptance
     release_on_acceptance_after = request.release_on_acceptance or profile.release_on_acceptance
+    if (
+        not profile.is_managed_runtime
+        and profile.is_active
+        and release_on_acceptance_after != "director_standing"
+    ):
+        raise ValueError(
+            "Active non-runtime products require director_standing acceptance; other Clients are unsupported."
+        )
     if release_on_acceptance_after == "director_standing":
         if (
             profile.is_managed_runtime and profile.driver_id != "generic-web"

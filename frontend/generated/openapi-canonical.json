@@ -84301,6 +84301,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -84775,6 +84785,9 @@
                         "title": "Lanes",
                         "type": "array"
                       },
+                      "owner": {
+                        "$ref": "#/$defs/ProductOwnerProfile"
+                      },
                       "preview": {
                         "$ref": "#/$defs/ProductOnboardingPreviewManifest"
                       },
@@ -84792,6 +84805,17 @@
                         },
                         "title": "Provider Targets",
                         "type": "array"
+                      },
+                      "release_on_acceptance": {
+                        "default": "held",
+                        "enum": [
+                          "held",
+                          "promote",
+                          "promote_with_rollback_drill",
+                          "director_standing"
+                        ],
+                        "title": "Release On Acceptance",
+                        "type": "string"
                       },
                       "repository": {
                         "title": "Repository",
@@ -85202,6 +85226,29 @@
                       "instance"
                     ],
                     "title": "ProductOnboardingTargetManifest",
+                    "type": "object"
+                  },
+                  "ProductOwnerProfile": {
+                    "additionalProperties": false,
+                    "description": "The person who accepts or rejects what customers see for this product.\n\nAn Owner can veto a change but never merge or deploy one. The numeric GitHub id\nis the identity; the login is for mentions and display and may be renamed.",
+                    "properties": {
+                      "github_id": {
+                        "default": "",
+                        "title": "Github Id",
+                        "type": "string"
+                      },
+                      "github_login": {
+                        "default": "",
+                        "title": "Github Login",
+                        "type": "string"
+                      },
+                      "review_label": {
+                        "default": "owner-review",
+                        "title": "Review Label",
+                        "type": "string"
+                      }
+                    },
+                    "title": "ProductOwnerProfile",
                     "type": "object"
                   },
                   "ProductOwnerSecretInput": {

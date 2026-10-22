@@ -14610,11 +14610,19 @@ def create_launchplane_fastapi_app(
                     code="github_lookup_unavailable",
                     message=str(error),
                 ) from error
-        plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
-            profile=profile,
-            request=owner_request,
-            resolved_owner=resolved_owner,
-        )
+        try:
+            plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
+                profile=profile,
+                request=owner_request,
+                resolved_owner=resolved_owner,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message=str(error),
+            ) from error
         records = {"product_profile": profile.product}
         if owner_request.mode != "apply":
             return accepted_evidence_response(
@@ -18493,7 +18501,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_onboarding(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -18594,6 +18602,15 @@ def create_launchplane_fastapi_app(
             onboarding_manifest is not None
             and onboarding_manifest.classification != "managed_runtime"
         ):
+            if onboarding_request.mode == "apply" and not (
+                isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Only a signed-in admin can record the Director's standing acceptance.",
+                )
             inert_plan_sha256 = product_onboarding_manifest_plan_sha256(onboarding_manifest)
             if onboarding_request.mode == "apply":
                 if not normalized_idempotency_key:

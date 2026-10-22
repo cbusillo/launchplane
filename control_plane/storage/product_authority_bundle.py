@@ -86,8 +86,6 @@ class ProductProfileConflictError(ValueError):
 
 
 class ProductRepositoryOwnershipError(ValueError):
-    """A repository is already owned; repeating a dry run cannot resolve it."""
-
     code = "repository_owned_by_other_product"
 
 
@@ -97,7 +95,6 @@ def require_product_profile_writes(
     *,
     absent_product_ids: tuple[str, ...] = (),
 ) -> None:
-    """Check inert registration and identity under the existing authority lock."""
     profiles = {profile.product: profile for profile in current_profiles}
     if any(product in profiles for product in absent_product_ids):
         raise ProductProfileConflictError("Product was registered before commit.")
