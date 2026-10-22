@@ -637,12 +637,27 @@ or a backup gate.
 
 ## Catch-up sweep
 
-Every 30 minutes the worker requests a reconcile of every product's testing
-target, of every preview target with an existing, not yet destroyed preview
-record, and of every open pull request, drafts included (one list of open pull
-requests per product, with the build-provenance token). A missed event is
-corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
-the events, and a missed or out-of-order event is corrected within one sweep.
+Every 30 minutes the worker requests a reconcile of each mapped active product's
+configured testing target, existing previews needing lifecycle work, retained
+preview reservations, and open pull requests, drafts included. Open-PR discovery
+uses bounded paginated Delivery App `repository_read` requests independently of
+testing lanes, preview enablement, and preview context. Its existing installation,
+tracked repository inventory and managed credential binding must be available;
+an unavailable read is reported and retried on the next sweep, without another
+identity or a new grant.
+
+A PR without configured previews and without existing preview lifecycle work or
+retained reservations takes a PR-only reconcile path. It rereads the PR's state
+and refreshes Client review without build-provenance credentials, provider planning,
+or runtime creation. Existing preview and reservation recovery keeps its normal
+path even when previews are disabled. A failed check write remains best-effort;
+the next open-PR sweep reopens the same reconcile row and retries publication.
+No new event, preview comment or retry ledger is required. Closed-PR cleanup
+suppresses current review projection, decision-base binding, acceptance carry and
+retired-check maintenance. Already-requested saved Client feedback can still be
+delivered through **Retry delivery** after closure or merge; cleanup may also
+retry it when it invokes the publisher. Reconciling is idempotent, so a missed
+or out-of-order event is corrected by the same path on a later sweep.
 
 For PRs with no live preview, the sweep also revisits recorded pending feedback
 and failed cleared-feedback delivery. It reads the PR through the normal reconcile
