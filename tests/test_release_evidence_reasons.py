@@ -9,6 +9,7 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
@@ -71,6 +72,19 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
                 resolved_target=ResolvedTargetEvidence(
                     target_type="application", target_id="site", target_name="site"
                 ),
+            )
+        )
+        assert testing.deploy.target_category is not None
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing.context,
+                instance=testing.instance,
+                provider_id=testing.deploy.provider_id,
+                target_category=testing.deploy.target_category,
+                provider_target_type=testing.deploy.provider_target_type,
+                target_id="site",
+                display_name=testing.deploy.target_name,
+                updated_at=testing.updated_at,
             )
         )
         self.token = self.enterContext(

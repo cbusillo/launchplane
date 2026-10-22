@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 
 import click
 
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -97,6 +99,34 @@ class _GenericWebDeployStore:
         self.profile = profile
         self.deployments: list[DeploymentRecord] = []
         self.inventories: list[EnvironmentInventory] = []
+        self.provider_targets = {
+            (lane.context, lane.instance): ProviderTargetRecord(
+                context=lane.context,
+                instance=lane.instance,
+                provider_id="fake-cloud",
+                target_category="service",
+                provider_target_type="managed-service",
+                target_id="target-123",
+                display_name="sellyouroutboard-testing-app",
+                updated_at=profile.updated_at,
+            )
+            for lane in profile.lanes
+        }
+        self.held_reservations: tuple[LaunchplaneIdempotencyRecord, ...] = ()
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        inventory = self.read_environment_inventory(
+            context_name=context_name, instance_name=instance_name
+        )
+        return GenericWebSourceSnapshot(
+            self.read_product_profile_record(product),
+            inventory,
+            self.read_deployment_record(inventory.deployment_record_id),
+            self.provider_targets[(context_name, instance_name)],
+            self.held_reservations,
+        )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:

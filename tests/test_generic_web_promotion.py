@@ -1,3 +1,6 @@
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.contracts.record_failures import record_failure_summary
 import unittest
 from contextlib import nullcontext
@@ -61,9 +64,29 @@ from control_plane.workflows.ship import build_deployment_record
 class _GenericWebPromotionStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
+        self.provider_targets: dict[tuple[str, str], ProviderTargetRecord] = {}
+        self.held_reservations: tuple[LaunchplaneIdempotencyRecord, ...] = ()
         self.deployments: dict[str, DeploymentRecord] = {}
         self.promotions: dict[str, PromotionRecord] = {}
         self.inventories: dict[tuple[str, str], EnvironmentInventory] = {}
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        inventory = self.read_environment_inventory(
+            context_name=context_name, instance_name=instance_name
+        )
+        try:
+            target = self.provider_targets[(context_name, instance_name)]
+        except KeyError as error:
+            raise FileNotFoundError("current provider target") from error
+        return GenericWebSourceSnapshot(
+            self.read_product_profile_record(product),
+            inventory,
+            self.read_deployment_record(inventory.deployment_record_id),
+            target,
+            self.held_reservations,
+        )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -122,6 +145,19 @@ class _GenericWebPromotionStore:
                     "destination_health": inventory.destination_health,
                 }
             )
+        )
+        target = self.read_deployment_record(inventory.deployment_record_id).deployed_target
+        assert target is not None
+        self.provider_targets[(inventory.context, inventory.instance)] = ProviderTargetRecord(
+            context=inventory.context,
+            instance=inventory.instance,
+            provider_id=target.provider_id,
+            target_category=target.target_category,
+            provider_target_type=target.provider_target_type,
+            target_id=target.target_id,
+            display_name=target.display_name,
+            updated_at="2026-05-01T21:00:00Z",
+            source_label="qualified-test-publication",
         )
         self.write_environment_inventory(inventory)
 

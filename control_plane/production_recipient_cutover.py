@@ -701,6 +701,21 @@ WRITER_RECEIPT_PROGRAM = (
 )
 
 
+def _attempt_execution_started(
+    record: ProductionRecipientRecord, provider_operation_key: str, *, repromote: bool
+) -> bool:
+    attempt_identity = record.execution.get("runtime_identity")
+    return bool(
+        record.execution.get(canonical_sha256(provider_operation_key) + ":old_pause_dispatched_at")
+    ) or bool(
+        not repromote
+        and record.execution.get("trigger_requested_at")
+        and isinstance(attempt_identity, dict)
+        and attempt_identity.get("deployment_record_id")
+        == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+    )
+
+
 @dataclass
 class RecipientCutoverAdapter:
     root: Path
@@ -914,10 +929,24 @@ class RecipientCutoverAdapter:
                 )
 
             automatic_recovery = False
+            effects_admitted = bool(
+                lease.evidence_reservation().provider_effect_started_at
+            ) or _attempt_execution_started(
+                self.record,
+                provider_operation_key,
+                repromote=bool(self.record.publication.get("inverse_backup_policies"))
+                and self.record.phase in {"rolled_back", "preflight_refused", "bootstrapping"},
+            )
 
             def validate_authority() -> None:
                 if not automatic_recovery:
                     self.validate_release()
+                    if not effects_admitted:
+                        self.validate_source()
+
+            def mark_admitted() -> None:
+                nonlocal effects_admitted
+                effects_admitted = True
 
             def begin_recovery() -> None:
                 nonlocal automatic_recovery
@@ -926,7 +955,9 @@ class RecipientCutoverAdapter:
             with self.store.provider_evidence_guard(
                 lease.evidence_reservation, effect_admission_checkpoint=validate_authority
             ):
-                return self._apply(provider_operation_key, lease, backup_check, begin_recovery)
+                return self._apply(
+                    provider_operation_key, lease, backup_check, begin_recovery, mark_admitted
+                )
 
     def _apply(
         self,
@@ -934,6 +965,7 @@ class RecipientCutoverAdapter:
         lease: ProviderOperationLease,
         backup_check: Callable[[], BackupGateEvidence],
         begin_recovery: Callable[[], None],
+        mark_admitted: Callable[[], None],
     ) -> ProviderMutationOutcome:
         record = self.record
         repromote = bool(record.publication.get("inverse_backup_policies")) and record.phase in {
@@ -981,15 +1013,8 @@ class RecipientCutoverAdapter:
             # Historical generic markers can belong to an earlier release or
             # repromotion. Only this attempt's pause dispatch or its original
             # trigger-bound deployment proves source admission already happened.
-            attempt_identity = record.execution.get("runtime_identity")
-            attempt_started = bool(
-                record.execution.get(attempt_prefix + "old_pause_dispatched_at")
-            ) or bool(
-                not repromote
-                and record.execution.get("trigger_requested_at")
-                and isinstance(attempt_identity, dict)
-                and attempt_identity.get("deployment_record_id")
-                == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+            attempt_started = _attempt_execution_started(
+                record, provider_operation_key, repromote=repromote
             )
             # The exact current reservation includes resource/schedule effects
             # that precede writer pause. An older attempt's execution dictionary
@@ -1020,6 +1045,7 @@ class RecipientCutoverAdapter:
             if phase == "deploy_trigger" and not record.execution.get("trigger_requested_at"):
                 save(execution={**record.execution, "trigger_requested_at": utc_now_timestamp()})
             lease.checkpoint_effect(phase)
+            mark_admitted()
             started = True
 
         def recovery_checkpoint(phase: str) -> None:

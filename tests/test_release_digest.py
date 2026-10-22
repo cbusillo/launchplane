@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.product_profile_record import ProductLaneProfile, ProductOwnerProfile
@@ -61,6 +62,24 @@ class ReleaseDigestTests(unittest.TestCase):
         self.store.write_product_profile_record(self.profile)
         self.inventory(self.prod, self.current)
         self.inventory(self.testing, self.head)
+        testing = self.store.read_environment_inventory(
+            context_name=self.testing.context, instance_name=self.testing.instance
+        )
+        deployment = self.store.read_deployment_record(testing.deployment_record_id)
+        target = deployment.deployed_target
+        assert target is not None
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=self.testing.context,
+                instance=self.testing.instance,
+                provider_id=target.provider_id,
+                target_category=target.target_category,
+                provider_target_type=target.provider_target_type,
+                target_id=target.target_id,
+                display_name=deployment.deploy.target_name,
+                updated_at=self.now.isoformat(),
+            )
+        )
         self.policy = PublicIngressNotificationPolicyRecord(
             policy_id="director-digest",
             product=self.profile.product,

@@ -69,9 +69,20 @@ referenced deployment record as well as the inventory. That record must pass
 deployment, post-deploy and destination-health qualification and match the
 lane, artifact, source revision, runtime identity and provider target evidence.
 A copied passing inventory cannot qualify a missing, mismatched or failed
-deployment. The accepted-release worker and direct promotion path recheck this
+deployment. The physical recipient must also match the current provider-target
+binding. A running or reconciliation-required operation on that testing recipient
+refuses fresh admission, including an expired or receiptless original whose effects
+remain uncertain. A hold on a different retired recipient does not disqualify a
+qualified replacement. These facts are read together under the existing authority
+fence; supported original observation, terminal continuation and retesting remain
+available.
+
+The accepted-release worker and direct promotion path recheck this
 source evidence after backup waits and before admitting the first forward
-production effect, including a recipient cutover resumed before dispatch.
+production effect, including a recipient cutover resumed before dispatch. The final source check runs
+inside the native first-effect checkpoint, serialized with testing reservation
+insertion, reacquisition and current authority publication. No provider I/O runs
+under that short read/checkpoint boundary.
 Once that accepted production attempt starts, testing may advance to a newer
 qualified build without aborting it. Acceptance and backup checks continue;
 an already started gated rollback keeps its existing recovery authority.
@@ -407,9 +418,8 @@ fail closed. Every successful production promotion writes production's
 environment record from the deployment it made, so the next review starts from
 the version actually running. When the checklist cannot be compiled, the
 response carries one fixed `unavailable_reason` code, shown on the review page
-with the trace ID and logged with it: `testing_lane_missing`,
-`source_control_access_unavailable`, `production_identity_missing`,
-`candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
+with the trace ID and logged with it. The `ReleaseEvidenceReason` contract in
+[release_review.py](../control_plane/contracts/release_review.py) defines those codes.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
@@ -961,6 +971,18 @@ It starts no provider effect and grants no access. Active leases, no-effect
 reservations, missing or changed records, failed health and unproven runtime
 stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
+
+A queued generic-web backup keeps its existing saved-pair authority. A new testing
+operation or current-recipient rebind alone does not terminally fail that admitted
+capture. Its worker still rechecks the current decision, Client, release hold,
+production boundary and complete saved testing pair at every stage; failed or
+changed saved qualification still refuses. Fresh backup queueing and promotion
+admission use the stronger current-recipient and unresolved-operation checks.
+An unresolved testing operation reports `candidate_operation_unresolved`, while
+fresh release work waits for it to finish. A waiting accepted release retains its
+merge-train hold while its saved pair and continuation checks still qualify.
+Permanent decision, lane, inverse and drill blockers retain their previous effects
+on that hold; the public release view still explains fresh admission waits.
 
 Each step runs under a `client_release_acceptance` grant that names the
 decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
