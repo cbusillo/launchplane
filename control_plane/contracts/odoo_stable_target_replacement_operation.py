@@ -304,7 +304,6 @@ def odoo_stable_target_replacement_operation_is_terminal(
 def odoo_replacement_original_identity(
     record: OdooStableTargetReplacementOperationRecord,
 ) -> tuple[object, ...]:
-    """Original request identity, shared by import and owner-CAS updates."""
     return (
         record.operation_id,
         record.product,

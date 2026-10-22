@@ -1,5 +1,3 @@
-"""Explicit fixtures for reservations admitted before original-origin retention."""
-
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation,
@@ -25,7 +23,6 @@ def reserve_historical_mutation(
     provider_target_key: str = "",
     original_intent: dict[str, object] | None = None,
 ) -> MutationReservationResult:
-    """Insert old-schema evidence directly; never use for new-admission tests."""
     with store._session_factory() as session:
         timestamp = store._database_mutation_timestamp(session)
         record = build_launchplane_mutation_reservation(

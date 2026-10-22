@@ -642,8 +642,11 @@ Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
 `Idempotency-Key`, the product and instance, and a non-empty reason. The service
-authorizes `generic_web_deploy.execute` for the current product/context/instance
-before looking up any reservation. After lookup, it derives the original
+authorizes `generic_web_deploy_recovery.plan` for the current product/context/instance,
+with `generic_web_deploy.execute` retained as a compatibility alternative,
+before looking up any reservation. The plan action is inert and instance-scoped;
+the authenticated Director agent inherits it without a write grant. Other agents
+retain their exact policy scope. After lookup, it derives the original
 operation target from the stored reconciliation snapshot, or from an exact
 typed completed response, and authorizes the stored product/context/instance
 again before returning evidence.
@@ -814,7 +817,9 @@ identity.
 Stage 2 apply is explicit and digest-gated. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
-inspection and requires an exact digest match before it writes anything. The
+inspection under `generic_web_deploy.execute` and requires an exact digest match
+before it writes anything. The dry-run plan action never admits apply, including
+production recovery. The
 digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
 provider classification, action, request, and bounded provider observation

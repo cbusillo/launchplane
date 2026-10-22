@@ -191,8 +191,7 @@ class _SupersessionOriginIntentArguments(_OriginIntentArguments, total=False):
 
 @runtime_checkable
 class ProviderTargetOriginAdapter(Protocol):
-    def provider_target_origin(self) -> ProviderTargetOrigin | None:
-        """Return the captured recipient used by target_key, never a retry lookup."""
+    def provider_target_origin(self) -> ProviderTargetOrigin | None: ...
 
 
 class DurableProviderOperationStore(Protocol):

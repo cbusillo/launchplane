@@ -7,6 +7,7 @@ import click
 from fastapi import Depends, Header, Request
 from pydantic import ValidationError
 
+from control_plane.action_effects import GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryReferenceRequest,
     GenericWebDeployRecoveryReferenceApplyRequest,
@@ -475,7 +476,7 @@ async def _inspect_generic_web_deploy_recovery(
     idempotency_key: str,
     trace_id: str,
     dependencies: GenericWebDeployRecoveryDependencies,
-    authorization_actions: tuple[str, ...] = ("generic_web_deploy.execute",),
+    authorization_actions: tuple[str, ...],
 ) -> _GenericWebDeployRecoveryInspection:
     original_payload: dict[str, object] | None = None
     expected_reservation: LaunchplaneIdempotencyRecord | None = None
@@ -979,6 +980,10 @@ def build_generic_web_deploy_recovery_dry_run_handler(
             idempotency_key=idempotency_key,
             trace_id=trace_id,
             dependencies=dependencies,
+            authorization_actions=(
+                GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,
+                "generic_web_deploy.execute",
+            ),
         )
         return inspection.dry_run_response()
 
@@ -1060,6 +1065,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             idempotency_key=idempotency_key,
             trace_id=trace_id,
             dependencies=dependencies,
+            authorization_actions=("generic_web_deploy.execute",),
         )
         assert isinstance(inspection.request, GenericWebDeployRecoveryApplyRequest)
         recovery_request = inspection.request

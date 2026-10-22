@@ -1,5 +1,3 @@
-"""Value-free original recipient identity, independent of current lane records."""
-
 import re
 from typing import Literal
 from uuid import UUID
@@ -8,10 +6,8 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 
 def requires_provider_target_origin(target_key: str) -> bool:
-    # Rebuild effects append a phase to a canonical physical key. They retain
-    # their separate operation fences, without becoming shared target holders.
-    child_key = re.fullmatch(r"generic-web-provider-target:[0-9a-f]{64}:.+", target_key)
-    return target_key.startswith("generic-web-provider-target:") and child_key is None
+    phase_target_key = re.fullmatch(r"generic-web-provider-target:[0-9a-f]{64}:.+", target_key)
+    return target_key.startswith("generic-web-provider-target:") and phase_target_key is None
 
 
 class ProviderTargetOrigin(BaseModel):

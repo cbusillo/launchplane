@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from click import ClickException
 
+from control_plane.action_effects import GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -702,6 +703,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "reservation_not_found")
 
+    @scoped_agent_test
     def test_generic_web_deploy_recovery_denies_before_reservation_lookup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2289,10 +2291,21 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(payload["proposed_action"], "retry_original_operation")
         self.assertEqual(provider.observation_calls, 1)
 
+    @scoped_agent_test
     def test_generic_web_deploy_recovery_reauthorizes_and_reports_stored_context(self) -> None:
-        for allowed_contexts, expected_status in (
-            (("sellyouroutboard-current",), 403),
-            (("sellyouroutboard-current", "sellyouroutboard-testing"), 200),
+        for allowed_contexts, allowed_actions, expected_status in (
+            (("sellyouroutboard-current",), ("generic_web_deploy.execute",), 403),
+            (
+                ("sellyouroutboard-current", "sellyouroutboard-testing"),
+                ("generic_web_deploy.execute",),
+                200,
+            ),
+            (("sellyouroutboard-current",), (GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,), 403),
+            (
+                ("sellyouroutboard-current", "sellyouroutboard-testing"),
+                (GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,),
+                200,
+            ),
         ):
             with (
                 self.subTest(expected_status=expected_status),
@@ -2322,6 +2335,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 app = _create_recovery_app(
                     root=root,
                     store=store,
+                    actions=allowed_actions,
                     contexts=allowed_contexts,
                 )
                 with patch(
