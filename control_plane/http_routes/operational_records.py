@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Annotated, Literal, Protocol, cast
 
 from fastapi import Depends, Path, Query, Response
@@ -25,12 +26,7 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
-from control_plane.contracts.product_profile_record import (
-    is_exclusive_product_context,
-    product_context_owner_map,
-)
 from control_plane.product_binding_resolution import (
     ProductBindingResolution,
     product_binding_resolution,
@@ -42,7 +38,10 @@ from control_plane.http_routes.support import (
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    director_agent_identity,
 )
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
@@ -784,6 +783,7 @@ def register_managed_secret_read_routes(
     app: ApiRouteRegistrar,
     *,
     dependencies: ReadRouteDependencies,
+    policy_reader: Callable[[], LaunchplaneAuthzPolicy],
 ) -> None:
     def list_product_secret_bindings(
         product: str,
@@ -827,18 +827,9 @@ def register_managed_secret_read_routes(
                 raise product_secret_copy.ProductSecretCopyError(
                     "Product secret bindings require an existing product."
                 )
-            owners = product_context_owner_map(profiles)
-            universal_secret_reader = (
-                "*"
-                in dependencies.read_role_products(
-                    identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
-                )
-            ) and dependencies.authorization_allows(
-                identity=identity,
-                action="secret.list",
-                product=LAUNCHPLANE_SERVICE_CONTEXT,
-                context="",
-                target=AuthorizationTarget(scope="global"),
+            universal_secret_reader = director_agent_identity(identity) or (
+                isinstance(identity, GitHubHumanIdentity)
+                and policy_reader().names_administrator(identity)
             )
 
             def metadata_scope_read_allowed(
@@ -905,20 +896,6 @@ def register_managed_secret_read_routes(
             resolution = None
             if include_resolution:
 
-                def source_read_allowed(record: SecretRecord) -> bool:
-                    return metadata_scope_read_allowed(
-                        record.context,
-                        record.instance,
-                        environment_read=(
-                            record.scope != "global"
-                            and record.integration
-                            == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-                            and is_exclusive_product_context(
-                                context=record.context, product=product, owners=owners
-                            )
-                        ),
-                    )
-
                 def scope_read_allowed(scope: SecretScope, context: str, instance: str) -> bool:
                     if universal_secret_reader:
                         return True
@@ -936,7 +913,6 @@ def register_managed_secret_read_routes(
                     product=product,
                     integration=integration,
                     scopes=frozenset(scopes or ("global", "context", "context_instance")),
-                    source_read_allowed=source_read_allowed,
                     scope_read_allowed=scope_read_allowed,
                 )
         except product_secret_copy.ProductSecretCopyError as error:

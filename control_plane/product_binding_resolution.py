@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane import secrets
 from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
-from control_plane.contracts.secret_record import SecretRecord, SecretScope
+from control_plane.contracts.secret_record import SecretScope
 from control_plane.product_secret_copy import (
     ProductSecretBindingMetadata,
     ProductSecretCopyError,
@@ -36,7 +36,6 @@ def product_binding_resolution(
     product: str,
     integration: str,
     scopes: frozenset[SecretScope],
-    source_read_allowed: Callable[[SecretRecord], bool],
     scope_read_allowed: Callable[[SecretScope, str, str], bool],
 ) -> ProductBindingResolution:
     profile = next(
@@ -61,8 +60,6 @@ def product_binding_resolution(
         if not lane_authorized:
             selected = {}
         for key, (binding, record) in sorted(selected.items()):
-            if not source_read_allowed(record):
-                continue
             visible.append(
                 ProductSecretBindingMetadata(
                     binding_key=key,

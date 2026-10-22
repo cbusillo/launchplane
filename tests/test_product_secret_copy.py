@@ -24,6 +24,7 @@ from control_plane.product_config import (
 from control_plane.product_config_http import ProductConfigApplyEnvelope
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalOperatorPolicyRule,
 )
@@ -34,7 +35,13 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     SecretCopySourceConflictError,
 )
-from tests.http_app_test_support import _asgi_request, _RejectingVerifier
+from tests.http_app_test_support import (
+    _asgi_request,
+    _github_human_identity,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from tests.support.auth import _local_operator_policy
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
@@ -308,7 +315,6 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         binding = response.json()["bindings"][0]
-        self.assertEqual(response.json()["coverage"]["status"], "complete")
         self.assertEqual(binding["binding_key"], "REPAIRSHOPR_TOKEN")
         self.assertEqual(binding["version_id"], self.source.current_version_id)
         self.assertNotIn("source-only-test-token", response.text)
@@ -316,6 +322,95 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         response = await self.post(app=app)
         self.assertEqual(response.status_code, 202, response.text)
         self.assertNotIn("source-only-test-token", response.text)
+
+    async def test_named_administrator_can_qualify_global_selection(self) -> None:
+        human = _github_human_identity()
+        self.write_binding(name="GLOBAL_SOURCE", key="GLOBAL_KEY", scope="global")
+        for administrator in (False, True):
+            with self.subTest(administrator=administrator):
+                rules = [
+                    GitHubHumanPolicyRule(
+                        github_ids=(human.github_id,),
+                        roles=("admin",),
+                        products=("example-site", "launchplane"),
+                        contexts=("launchplane", "example-site"),
+                        actions=("product_profile.read", "secret.list"),
+                    )
+                ]
+                if administrator:
+                    rules.append(
+                        GitHubHumanPolicyRule(
+                            github_ids=(human.github_id,),
+                            roles=("admin",),
+                            products=("launchplane",),
+                            contexts=("launchplane",),
+                            actions=("authz_policy_grant.write",),
+                        )
+                    )
+                manager = HumanSessionManager(
+                    config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                )
+                session = manager.issue(human)
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2, github_humans=tuple(rules)
+                    ),
+                    record_store_factory=lambda: self.store,
+                    human_session_manager=manager,
+                )
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "GET",
+                        "/v1/products/example-site/secret-bindings?include_resolution=true",
+                        headers={"Cookie": manager.session_cookie_header(session)},
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                resolution = response.json()["lane_binding_resolution"]
+                self.assertEqual(
+                    resolution["coverage"]["status"], "complete" if administrator else "scoped"
+                )
+                for lane in resolution["lanes"]:
+                    self.assertEqual(
+                        "GLOBAL_SOURCE" in {binding["name"] for binding in lane["bindings"]},
+                        administrator,
+                    )
+
+    @scoped_agent_test
+    async def test_explicit_context_and_instance_reads_prove_complete_copy_coverage(self) -> None:
+        profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
+        for actions in (("secret.list",), ("product_environment.read",)):
+            with self.subTest(actions=actions):
+                read_rule = _local_operator_policy(actions=actions).local_operators[0]
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2,
+                        local_operators=(
+                            profile_rule,
+                            read_rule,
+                            read_rule.model_copy(update={"instances": ("prod", "testing")}),
+                        ),
+                    ),
+                    record_store_factory=lambda: self.store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="test-operator-token",
+                        local_operator_subject="local-owner-agent",
+                        local_operator_token_label="local-owner-write",
+                    ),
+                )
+                response = await _asgi_request(
+                    app,
+                    "GET",
+                    "/v1/products/example-site/secret-bindings",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["coverage"]["status"], "complete")
+                self.assertTrue(response.json()["bindings"])
 
     @scoped_agent_test
     async def test_environment_read_on_another_product_neither_lists_nor_copies(self) -> None:

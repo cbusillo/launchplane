@@ -902,7 +902,7 @@ only `scopes=context` for a complete answer to that narrower question; that does
 not claim coverage of instance or global delivery sources. Coverage
 depends on authority over every requested scope, even when no binding exists,
 so it cannot reveal whether a hidden source exists. Complete global coverage
-needs the existing universal read standing plus managed-secret list authority;
+needs the existing Director-agent standing or policy-named administrator authority;
 an allow on the empty context alone cannot prove every global source readable.
 Other selection scopes require that standing or explicit `secret.list` to prove
 complete scope coverage. Environment metadata access still returns authorized
@@ -910,10 +910,8 @@ copy names, but selection stays `scoped` without that proof. Metadata enumeratio
 still uses the shared resolver even when selection rows are withheld. Hidden
 context-ownership records cannot change the qualification projection or its
 coverage through inherited product-read rules.
-Individual global sources still require existing `secret.list` at their actual
-source scope. Product-environment metadata access can cover only runtime sources
-in an exclusive product context, never a global or ambiguous source or another
-integration. Existing copy eligibility and grants are unchanged.
+Product-environment metadata access does not prove selection scope coverage.
+Existing copy eligibility and grants are unchanged.
 
 All-scope selection is not a delivery claim: site delivery may exclude global
 or context sources, and worker delivery selects exact-instance sources. Declare
