@@ -433,6 +433,10 @@ The existing idempotency store retains a completion receipt in that same
 transaction, making this a one-time snapshot without a schema change. Worker
 restarts and the `run-once` path reuse its selection; new alerts queued after
 that transaction follow the normal delivery rules.
+The selection receipt does not prove delivery. Activation readback must inspect
+all selected incidents for failed deliveries or exhausted retries as well as
+successful and skipped attempts; an unavailable destination or exhausted summary
+leaves a visible failure and does not revive the superseded backlog.
 GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
 Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 

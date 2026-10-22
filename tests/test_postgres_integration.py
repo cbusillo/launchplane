@@ -42,6 +42,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from psycopg.errors import LockNotAvailable
 
 from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationAuditIdentityConflict,
@@ -1567,7 +1568,7 @@ class RealPostgresOutboxDeployDrainTests(unittest.TestCase):
                             deployment_marker="marker-race",
                         )
                     except OperationalError as error:
-                        self.assertEqual(getattr(error.orig, "sqlstate", ""), "55P03")
+                        self.assertIsInstance(error.orig, LockNotAvailable)
                 finally:
                     resume_marker.set()
                 marker = future.result(timeout=10)

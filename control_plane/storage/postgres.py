@@ -8373,7 +8373,6 @@ class PostgresRecordStore(HumanSessionStore):
             response_status_code=200,
             response_trace_id=receipt_id,
             recorded_at=now,
-            response_payload={"summary_count": len(groups)},
         )
         session.add(self._idempotency_row(receipt))
 
