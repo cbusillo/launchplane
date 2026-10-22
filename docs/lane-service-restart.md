@@ -33,9 +33,11 @@ terminal-agent credentials cannot restart a service.
 The active Odoo product lane must have agreeing provider/Compose records and a
 passing deployment named by its environment inventory, with an agreeing runtime
 identity and immutable artifact manifest. Newer attempts may be skipped only when
-each is a failed deploy with a recognized pre-provider-write `deploy_blocked.*`
-code and no uncertain provider outcome. Newer successes, unclassified failures
-and uncertain effects refuse recovery. The same selection is checked during
+each is a completed failed deploy with a recognized pre-provider-write `deploy_blocked.*`
+code, no attempted post-deploy work and no uncertain provider outcome. Attempts
+started or finished since the current deployment began are checked regardless
+of their position in history. Newer unfinished attempts, successes, unclassified
+failures and uncertain effects refuse recovery. The same selection is checked during
 apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
 and source commit. The same requirements apply to generic-web Compose lanes.
 Other drivers and application targets are refused. Odoo uses

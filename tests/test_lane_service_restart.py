@@ -379,6 +379,34 @@ class ServiceRestartTests(unittest.TestCase):
                 self.assertEqual(self.invoke()[0], 409)
                 self.assertEqual(self.provider.writes, [])
 
+    def test_unfinished_newer_attempt_refuses_despite_sorting_after_inventory(self) -> None:
+        self.record_newer_attempt(
+            code=deploy_blocked_code("compose_keys_missing"), status="pending"
+        )
+        attempt = self.store.read_deployment_record("newer-attempt")
+        self.store.write_deployment_record(
+            attempt.model_copy(
+                update={"deploy": attempt.deploy.model_copy(update={"finished_at": ""})}
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_blocked_code_after_post_deploy_effect_refuses_restart(self) -> None:
+        self.record_newer_attempt(code=deploy_blocked_code("backup_restore_proof_required"))
+        attempt = self.store.read_deployment_record("newer-attempt")
+        self.store.write_deployment_record(
+            attempt.model_copy(
+                update={
+                    "post_deploy_update": attempt.post_deploy_update.model_copy(
+                        update={"attempted": True, "status": "fail"}
+                    )
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
     def test_inventory_identity_must_agree_with_record_and_container(self) -> None:
         inventory = self.store.read_environment_inventory(
             context_name="cm", instance_name="testing"
@@ -508,6 +536,11 @@ class ServiceRestartTests(unittest.TestCase):
         expected = seed_lane(self.store, instance="prod")
         self.provider.config = RestartProvider(expected).config
         self.payload["instance"] = "prod"
+        self.record_acceptance(expected)
+        self.payload["service"] = "web"
+        status, response = self.invoke()
+        self.assertEqual(status, 200, response)
+        self.select_stopped_database()
         self.assertEqual(self.invoke()[0], 409)
         self.assertEqual(self.provider.writes, [])
 
@@ -780,13 +813,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(self.invoke()[0], 409)
         self.assertEqual(self.provider.writes, [])
 
-    def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
-        expected = seed_lane(self.store, instance="prod")
-        self.provider.config["Config"]["Env"] = [
-            f"{k}={v}" for k, v in runtime_identity_env(expected).items()
-        ]
-        self.payload["instance"] = "prod"
-        self.assertEqual(self.invoke()[0], 409)
+    def record_acceptance(self, expected: RuntimeIdentity) -> ReleaseReviewDecisionRecord:
         version = ReleaseVersion(
             artifact_id=expected.artifact_id, source_commit=expected.source_git_ref
         )
@@ -809,6 +836,16 @@ class ServiceRestartTests(unittest.TestCase):
             decided_at="2026-10-10T00:00:00Z",
         )
         self.store.write_release_review_decision_record(decision)
+        return decision
+
+    def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        self.provider.config["Config"]["Env"] = [
+            f"{k}={v}" for k, v in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        self.assertEqual(self.invoke()[0], 409)
+        decision = self.record_acceptance(expected)
         status, response = self.invoke()
         self.assertEqual(status, 200, response)
         self.assertEqual(response["result"]["plan"]["acceptance_record_id"], decision.record_id)

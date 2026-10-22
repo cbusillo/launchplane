@@ -47,6 +47,16 @@ class ServiceRestartRefused(ValueError):
     """A fixed, credential-free diagnosis; no provider write has occurred."""
 
 
+def _deployment_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ServiceRestartRefused("Deployment history has an unavailable timestamp.") from error
+    if parsed.tzinfo is None or parsed.year < 1970:
+        raise ServiceRestartRefused("Deployment history has an ambiguous timestamp.")
+    return parsed
+
+
 def plan_service_restart(
     *,
     store: PostgresRecordStore,
@@ -98,13 +108,24 @@ def plan_service_restart(
     deployment = store.read_deployment_record(inventory.deployment_record_id)
     if not deployment_record_passed(deployment):
         raise ServiceRestartRefused("The lane has no settled current deployment.")
+    current_started_at = _deployment_timestamp(deployment.deploy.started_at)
     for attempt in store.list_deployment_records(
         context_name=request.context, instance_name=request.instance
     ):
         if attempt.record_id == deployment.record_id:
-            break
+            continue
+        attempt_started_at = _deployment_timestamp(attempt.deploy.started_at)
+        attempt_finished_at = (
+            _deployment_timestamp(attempt.deploy.finished_at)
+            if attempt.deploy.finished_at
+            else attempt_started_at
+        )
+        if max(attempt_started_at, attempt_finished_at) < current_started_at:
+            continue
         if not (
             attempt.deploy.status == "fail"
+            and attempt.deploy.finished_at
+            and not attempt.post_deploy_update.attempted
             and attempt.failure is not None
             and attempt.failure.code.startswith(DEPLOY_BLOCKED_PREFIX)
             and attempt.failure.code.removeprefix(DEPLOY_BLOCKED_PREFIX)
@@ -112,8 +133,6 @@ def plan_service_restart(
             and attempt.runtime_source.get("provider_outcome", "") != "uncertain"
         ):
             raise ServiceRestartRefused("A newer deployment may have changed the provider.")
-    else:
-        raise ServiceRestartRefused("The current inventory deployment is unavailable.")
     expected = deployment.runtime_identity
     if (
         expected is None
@@ -392,10 +411,6 @@ class ServiceRestartAdapter:
                 if fresh.digest() != self.request.reviewed_plan_sha256:
                     raise ServiceRestartRefused(
                         "Restart identity changed; inspect and review again."
-                    )
-                if self.plan.service == "database" and fresh.before.running:
-                    raise ServiceRestartRefused(
-                        "Database dependency recovery requires a stopped container."
                     )
                 if self.require_disposable:
                     require_disposable_lane(
