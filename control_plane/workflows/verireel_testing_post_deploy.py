@@ -51,6 +51,57 @@ from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
 MAX_TRANSIENT_QUALIFICATION_ATTEMPTS = 3
+_TESTING_REQUEST_PATHS = {
+    "/sign-up",
+    "/billing",
+    "/dashboard",
+    "/site-config",
+    "/site-config/billing",
+    "/api/auth/sign-up/email",
+}
+
+
+def _testing_request_path(url: str) -> str:
+    path = urlparse(url).path
+    if path.startswith("/v/"):
+        return "/v/<fixture>"
+    return path if path in _TESTING_REQUEST_PATHS else "unknown"
+
+
+def _unknown_testing_effect(
+    site: str,
+    reason: str,
+    *,
+    request: BrowserRequest | None = None,
+    response: BrowserResponse | None = None,
+) -> ProviderMutationUnknownError:
+    method, path, resource_type, status = "unknown", "unknown", "unknown", None
+    try:
+        if response is not None:
+            request = response.request
+            observed_status = response.status
+            if type(observed_status) is int and 100 <= observed_status <= 599:
+                status = observed_status
+        if request is not None:
+            observed_method = request.method
+            if observed_method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                method = observed_method
+            path = _testing_request_path(request.url)
+            observed_type = request.resource_type
+            if observed_type in {"document", "fetch", "xhr"}:
+                resource_type = observed_type
+    except Exception:
+        method, path, resource_type, status = "unknown", "unknown", "unknown", None
+    _LOGGER.warning(
+        "Testing effect unknown site=%s reason=%s method=%s path=%s status=%s resource_type=%s",
+        site,
+        reason,
+        method,
+        path,
+        status,
+        resource_type,
+    )
+    return ProviderMutationUnknownError("Testing product exchange completion is unknown.")
 
 
 class TestingProductCheckFailed(click.ClickException):
@@ -98,9 +149,7 @@ def checkpoint_testing_effect(guard: GenericWebPostDeployGuard, phase: str) -> N
     try:
         guard.checkpoint_effect(phase)
     except Exception as error:
-        raise ProviderMutationUnknownError(
-            "Testing qualification lost its effect fence."
-        ) from error
+        raise _unknown_testing_effect("checkpoint_testing_effect", "effect_fence_lost") from error
 
 
 def recorded_verireel_testing_qualification(
@@ -268,15 +317,17 @@ def _goto(
         response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
         if guard is not None:
             if response is None or response.status >= 400:
-                raise ProviderMutationUnknownError("Testing dynamic page completion is unknown.")
+                raise _unknown_testing_effect(
+                    "goto", "navigation_response_unavailable", response=response
+                )
             if exchanges is None:
-                raise ProviderMutationUnknownError("Testing response observer is unavailable.")
+                raise _unknown_testing_effect("goto", "response_observer_unavailable")
             exchanges.finish_response(response)
+    except ProviderMutationUnknownError:
+        raise
     except Exception as error:
         if guard is not None:
-            raise ProviderMutationUnknownError(
-                "Testing dynamic page completion is unknown."
-            ) from error
+            raise _unknown_testing_effect("goto", "navigation_failed") from error
         raise
     if response is not None and response.status >= 500:
         raise click.ClickException("Testing product gateway is unavailable.")
@@ -315,14 +366,7 @@ class _TestingPageExchanges:
         url = urlparse(request.url)
         if (url.scheme, url.netloc) != (self.origin.scheme, self.origin.netloc):
             return
-        if url.path not in {
-            "/sign-up",
-            "/billing",
-            "/dashboard",
-            "/site-config",
-            "/site-config/billing",
-            "/api/auth/sign-up/email",
-        } and not url.path.startswith("/v/"):
+        if _testing_request_path(request.url) == "unknown":
             return
         name = f"dynamic-request:{len(self.guard.exchanges)}"
         self.requests[request] = name
@@ -339,16 +383,37 @@ class _TestingPageExchanges:
 
     def finish_request(self, request: BrowserRequest) -> None:
         if request in self.failed:
-            raise ProviderMutationUnknownError("Testing response body failed after dispatch.")
+            raise _unknown_testing_effect(
+                "finish_request",
+                "request_failed",
+                request=request,
+                response=self.responses.get(request),
+            )
         if request not in self.completed:
             # Response.finished() has no timeout and can remain pending after
             # requestfailed. The built-in event wait is bounded even in that case.
-            self.page.wait_for_event(
-                "requestfinished", predicate=lambda finished: finished == request, timeout=30_000
-            )
+            try:
+                self.page.wait_for_event(
+                    "requestfinished",
+                    predicate=lambda finished: finished == request,
+                    timeout=30_000,
+                )
+            except Exception:
+                _unknown_testing_effect(
+                    "finish_request",
+                    "request_completion_unobserved",
+                    request=request,
+                    response=self.responses.get(request),
+                )
+                raise
         response = self.responses.get(request)
         if response is None or response.status >= 400 or request in self.failed:
-            raise ProviderMutationUnknownError("Testing dynamic request completion is unknown.")
+            raise _unknown_testing_effect(
+                "finish_request",
+                "response_unavailable_or_failed",
+                request=request,
+                response=response,
+            )
         self.completed.add(request)
         if request in self.requests:
             self.guard.complete_exchange(self.requests[request])
@@ -366,7 +431,7 @@ def _finish_action(
     exchanges: _TestingPageExchanges,
 ) -> None:
     if response.status >= 400:
-        raise ProviderMutationUnknownError("Testing submitted action completion is unknown.")
+        raise _unknown_testing_effect("finish_action", "action_http_error", response=response)
     exchanges.finish_response(response)
 
 
@@ -513,19 +578,18 @@ def verify_verireel_testing_product(
                             assert_verireel_testing_identity(base_url, context)
                         evidence["admin_verification_status"] = "pass"
                     except ProviderMutationUnknownError as error:
+                        _unknown_testing_effect("verify_product", "propagated_unknown")
                         effect_unknown = error
                         raise
                     except Exception as error:
                         try:
                             if page.is_closed() or not browser.is_connected():
-                                raise ProviderMutationUnknownError(
-                                    "Testing browser observability was lost."
-                                )
+                                raise _unknown_testing_effect("verify_product", "browser_lost")
                             exchanges.finish()
                             guard.require_completed_exchanges()
                         except Exception as completion_error:
-                            effect_unknown = ProviderMutationUnknownError(
-                                "Testing product exchange completion is unknown."
+                            effect_unknown = _unknown_testing_effect(
+                                "verify_product", "exchange_completion_unobserved"
                             )
                             raise effect_unknown from completion_error
                         raise error
@@ -545,6 +609,7 @@ def verify_verireel_testing_product(
                                     email=email,
                                 )
                             except ProviderMutationUnknownError as error:
+                                _unknown_testing_effect("cleanup", "propagated_unknown")
                                 effect_unknown = error
                                 raise
                             evidence["cleanup_status"] = "pass"
@@ -558,6 +623,10 @@ def verify_verireel_testing_product(
 
     except Exception:
         if effect_unknown is not None:
+            _LOGGER.warning(
+                "VeriReel testing qualification remains unknown deployment=%s",
+                context.deployment_record_id,
+            )
             raise effect_unknown
         raise
 
@@ -620,6 +689,11 @@ def execute_verireel_testing_post_deploy(
         status = "pass"
         detail = "Testing creator and admin verification passed; fixture removed."
     except ProviderMutationUnknownError:
+        _LOGGER.warning(
+            "VeriReel testing qualification remains unknown phase=%s deployment=%s",
+            phase,
+            context.deployment_record_id,
+        )
         raise
     except Exception as error:
         _LOGGER.warning(

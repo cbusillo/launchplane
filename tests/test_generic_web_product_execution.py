@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 import click
@@ -40,6 +40,7 @@ class _Request:
     def __init__(self, response: _Response, method: str) -> None:
         self.url = response.url
         self.method = method
+        self.resource_type = "fetch" if method == "POST" else "document"
         self.headers = {"next-action": "fixture"}
         self._response = response
 
@@ -348,11 +349,62 @@ class ProductExecutionTests(unittest.TestCase):
             "gateway-error",
         ):
             with self.subTest(failure=failure):
-                with self.assertRaises(ProviderMutationUnknownError):
+                with (
+                    self.assertLogs(verification.__name__, level="WARNING") as logs,
+                    self.assertRaises(ProviderMutationUnknownError),
+                ):
                     self.verify(failure)
+                self.assertIn(context().deployment_record_id, "\n".join(logs.output))
                 self.assertNotIn("delete-user", self.actions)
                 self.assertEqual(self.recorder.receipt.entries[0].terminal, "")
                 self.assertTrue(self.browser.closed)
+
+    def test_unknown_signup_retains_safe_exchange_cause_without_request_values(self) -> None:
+        with (
+            self.assertLogs(verification.__name__, level="WARNING") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
+            self.verify("signup")
+        output = "\n".join(logs.output)
+        for diagnostic in (
+            "request_failed",
+            "finish_request",
+            "POST",
+            "/api/auth/sign-up/email",
+            "200",
+            "fetch",
+        ):
+            self.assertIn(diagnostic, output)
+        self.assertNotIn("https://video.test", output)
+        self.assertNotIn("next-action", output)
+        self.assertNotIn("fixture@example.com", output)
+
+    def test_failed_exchange_diagnostic_omits_dynamic_paths_queries_and_transport_errors(
+        self,
+    ) -> None:
+        page = Mock()
+        guard = GenericWebPostDeployGuard()
+        exchanges = verification._TestingPageExchanges(page, "https://video.test", guard)
+        request = Mock(
+            url="https://video.test/v/private-record?_rsc=private-query",
+            method="GET",
+            resource_type="fetch",
+        )
+        response = Mock(request=request, status=200)
+        exchanges.started(request)
+        exchanges.responded(response)
+        page.wait_for_event.side_effect = TimeoutError("private-transport-detail")
+        with (
+            self.assertLogs(verification.__name__, level="WARNING") as logs,
+            self.assertRaises(TimeoutError),
+        ):
+            exchanges.finish()
+        output = "\n".join(logs.output)
+        self.assertIn("/v/<fixture>", output)
+        self.assertNotIn("private-", output)
+        self.assertNotIn("?_rsc", output)
+        with self.assertRaises(ProviderMutationUnknownError):
+            guard.require_completed_exchanges()
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
         for failure in ("fill", "assertion", "signup-click", "qr-click"):
