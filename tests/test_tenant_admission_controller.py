@@ -37,17 +37,15 @@ MERGE_COMMIT_SHA = "c" * 40
 
 
 class TenantAdmissionControllerTests(unittest.TestCase):
-    def test_tenant_ui_is_ready_on_classification_alone(self) -> None:
+    def test_classification_only_store_cannot_establish_merge_readiness(self) -> None:
         transport = _TenantControllerTransport()
-        result = evaluate_tenant_admission_candidate(
-            request=_request(mutate=False),
-            store=_classification_only_store((_classification(),)),
-            token="token",
-            transport_factory=lambda _token: transport,
-        )
-        self.assertEqual(result.outcome, "ready")
-        assert result.technical_checks is not None
-        self.assertEqual(result.technical_checks.status, "pass")
+        with self.assertRaises(ValueError):
+            evaluate_tenant_admission_candidate(
+                request=_request(mutate=False),
+                store=_classification_only_store((_classification(),)),
+                token="token",
+                transport_factory=lambda _token: transport,
+            )
         self.assertFalse(transport.merge_called)
 
     def test_launchplane_advisory_checks_are_excluded_from_technical_inputs(self) -> None:
@@ -831,6 +829,7 @@ class _TenantControllerTransport:
         self.technical_state = technical_state
         self.include_technical_signals = include_technical_signals
         self.pull_request_payloads = list(pull_request_payloads)
+        self.current_pull_request_payload: dict[str, object] | None = None
         self.uncertain_merge = uncertain_merge
         self.merged = initially_merged
         self.merge_response_sha = merge_response_sha
@@ -860,7 +859,9 @@ class _TenantControllerTransport:
         self.requests.append((method, path, body))
         if method == "GET" and "/pulls/" in path:
             if self.pull_request_payloads:
-                return self.pull_request_payloads.pop(0)
+                self.current_pull_request_payload = self.pull_request_payloads.pop(0)
+            if self.current_pull_request_payload is not None and not self.merged:
+                return self.current_pull_request_payload
             return _pull_request_payload(merged=self.merged)
         if method == "GET" and path.endswith("/protection/required_status_checks"):
             self.technical_checks_read = True
