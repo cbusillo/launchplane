@@ -1086,9 +1086,6 @@ _INTEGRATION_ALLOWANCES_MAX_BODY_BYTES = 16 * 1024
 _INTEGRATION_ALLOWANCES_DENIED_MESSAGE = (
     "Workflow cannot read or change integration allowances for the requested product/context."
 )
-_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE = (
-    "Odoo product lane was not found for the requested allowances."
-)
 _TESTING_HOLD_MAX_BODY_BYTES = 8 * 1024
 _TESTING_HOLD_DENIED_MESSAGE = (
     "Workflow cannot read or change the testing hold for the requested product/context."
@@ -8678,27 +8675,21 @@ def create_launchplane_fastapi_app(
         context: str,
         instance: str,
         trace_id: str,
-        not_found_message: str,
     ) -> None:
-        # Authorization names a product; storage selects by context and instance, so
-        # prove the product owns the lane before reading or writing it.
         try:
-            resolve_odoo_post_deploy_product_route(
-                record_store=record_store, product=product, context=context, instance=instance
+            control_plane_product_config_service.resolve_product_config_profile(
+                cast(control_plane_product_config_service.ProductConfigProfileReader, record_store),
+                product=product,
+                context=context,
+                instance=instance,
             )
-        except OdooPostDeployRouteDependencyError as error:
+        except control_plane_product_config.ProductConfigError as error:
+            profile_error = control_plane_product_config_service.product_config_service_error(error)
             raise _launchplane_http_error(
-                status_code=404,
+                status_code=profile_error.status_code,
                 trace_id=trace_id,
-                code="not_found",
-                message=not_found_message,
-            ) from error
-        except OdooPostDeployProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
+                code=profile_error.code,
+                message=profile_error.message,
             ) from error
         except ValueError as error:
             raise _launchplane_http_error(
@@ -8742,7 +8733,6 @@ def create_launchplane_fastapi_app(
             context=context,
             instance=instance,
             trace_id=trace_id,
-            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         try:
             result = control_plane_integration_allowances.read_integration_allowances(
@@ -8822,7 +8812,6 @@ def create_launchplane_fastapi_app(
             context=allowances_request.context,
             instance=allowances_request.instance,
             trace_id=trace_id,
-            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         typed_store = cast(
             control_plane_integration_allowances.IntegrationAllowancesStore, record_store

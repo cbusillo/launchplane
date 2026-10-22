@@ -483,6 +483,7 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 
             dry_run = await self._post(app, _request_payload())
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
             plan = dry_run.json()["result"]
             missing_key = await self._post(
                 app, _request_payload(mode="apply", reviewed_plan_sha256=plan["plan_sha256"])
@@ -603,6 +604,32 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("hunter2", invalid.text)
         self.assertIn(missing.status_code, {403, 404})
+
+    async def test_refuses_duplicate_lane_ownership(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            profile = store.read_product_profile_record(_PRODUCT)
+            testing_lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            store.write_product_profile_record(
+                profile.model_copy(update={"lanes": (*profile.lanes, testing_lane)})
+            )
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+
+            read = await self._get(app)
+            dry_run = await self._post(app, _request_payload())
+
+        self.assertEqual(read.status_code, 400)
+        self.assertEqual(dry_run.status_code, 400)
+
+
+class GenericWebIntegrationAllowancesRouteTests(IntegrationAllowancesRouteTests):
+    @staticmethod
+    def _store(root: Path) -> FilesystemRecordStore:
+        store = IntegrationAllowancesRouteTests._store(root)
+        profile = store.read_product_profile_record(_PRODUCT)
+        store.write_product_profile_record(profile.model_copy(update={"driver_id": "generic-web"}))
+        return store
 
 
 if __name__ == "__main__":
