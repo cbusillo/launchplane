@@ -1607,6 +1607,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         {
                             "check_runs": [
                                 _required_check_run("ci-gate", "completed", "success"),
+                                _required_check_run("test_shard (0)", "completed", "success"),
                                 _required_check_run("deploy", status, conclusion),
                             ]
                         },
@@ -1626,7 +1627,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     responses=(
                         _protected_branch_with_checks("ci-gate"),
                         [],
-                        {"statuses": [{"context": context, "state": "failure"}]},
+                        {
+                            "statuses": [
+                                {"context": context, "state": "failure"},
+                                *(
+                                    [{"context": "external/gate", "state": "success"}]
+                                    if context != "external/gate"
+                                    else []
+                                ),
+                            ]
+                        },
                         {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
                     )
                 )
@@ -1676,8 +1686,19 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     statuses = _combined_status()
                     if source == "check_run":
                         runs.append(_required_check_run(base_name, "completed", "failure"))
+                        if base_name != candidate_name:
+                            runs.append(_required_check_run(candidate_name, "completed", "success"))
                     else:
-                        statuses = {"statuses": [{"context": base_name, "state": "failure"}]}
+                        statuses = {
+                            "statuses": [
+                                {"context": base_name, "state": "failure"},
+                                *(
+                                    [{"context": candidate_name, "state": "success"}]
+                                    if base_name != candidate_name
+                                    else []
+                                ),
+                            ]
+                        }
                     transport = RecordingMergeTrainGitHubTransport(
                         responses=(
                             _protected_branch_with_checks("ci-gate"),
@@ -2123,7 +2144,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                             .required_checks_status
                         )
-                    if change in {
+                    if consumer == "base" and change == "skipped_replacement":
+                        self.assertEqual(status, "unknown")
+                    elif change in {
                         "replacement",
                         "canonical_case",
                         "old_failed",

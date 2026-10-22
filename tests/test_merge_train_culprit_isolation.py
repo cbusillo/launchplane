@@ -249,6 +249,31 @@ class _TrainSimulation:
 
 
 class CulpritIsolationTests(unittest.TestCase):
+    def test_unproved_implicated_base_success_stops_without_blame(self) -> None:
+        for conclusion in (None, "skipped", "neutral"):
+            with self.subTest(conclusion=conclusion), TemporaryDirectory() as directory:
+                implicated = "test_shard (0)"
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", app_id=None),
+                        [],
+                        {"statuses": []},
+                        {
+                            "check_runs": [
+                                _check_run(1, "ci-gate", "success"),
+                                *([_check_run(2, implicated, conclusion)] if conclusion else []),
+                            ]
+                        },
+                    )
+                )
+                train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 1)
+                train.run(culprits={1}, base_reader=GitHubMergeTrainClient(transport=transport))
+                self.assertEqual(train.blocked, [])
+                self.assertEqual(train.landed, [])
+                assert train.stopped is not None
+                self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+                self.assertEqual(train.stopped["details"]["base_checks_status"], "unknown")
+
     def test_shared_base_failure_is_not_blamed_when_display_name_is_sanitized(self) -> None:
         for name in ("test_shard  (0)", "QA & integration"):
             with self.subTest(name=name), TemporaryDirectory() as directory:
@@ -269,6 +294,7 @@ class CulpritIsolationTests(unittest.TestCase):
                                     }
                                 },
                             },
+                            [],
                             {"statuses": []},
                             {
                                 "check_runs": [

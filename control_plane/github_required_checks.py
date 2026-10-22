@@ -53,7 +53,6 @@ def matches_required_check(
     requirement: RequiredCheckIdentity,
     name: str,
     app_id: int | None,
-    source: Literal["commit_status", "check_run"],
 ) -> bool:
     return name.casefold() == requirement.name.casefold() and (
         requirement.app_id is None or app_id == requirement.app_id
@@ -75,7 +74,6 @@ def evaluate_required_checks(
                 requirement=requirement,
                 name=signal.name,
                 app_id=signal.app_id,
-                source=signal.source,
             )
         )
         if matches:

@@ -2,12 +2,14 @@ import unittest
 
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
+    GitHubMergeTrainSnapshotReader,
     RecordingMergeTrainGitHubTransport,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     _list_check_runs,
     _required_branch_checks,
     _required_checks_status,
+    _required_checks_observation,
 )
 from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
@@ -22,6 +24,10 @@ from tests.test_merge_train_github import (
     _protected_branch_with_checks,
     _required_check_run,
     _owner_review_check,
+    _github_branch,
+    _github_pull_request,
+    _label_events,
+    _conversation_rule,
 )
 
 HEAD = "candidate-sha"
@@ -81,6 +87,230 @@ def _superseded_with_unrelated_running() -> tuple[list[dict[str, object]], dict[
 
 
 class GitHubRequiredCheckVerdictTests(unittest.TestCase):
+    def test_base_requires_success_for_every_implicated_check(self) -> None:
+        for source in ("check_run", "commit_status"):
+            for state, expected in (
+                ("absent", "unknown"),
+                ("success", "pass"),
+                ("failure", "fail"),
+                ("pending", "pending"),
+                ("skipped", "unknown"),
+                ("neutral", "unknown"),
+                ("unrecognized", "unknown"),
+            ):
+                with self.subTest(source=source, state=state):
+                    checks = [_required_check_run("ci-gate", "completed", "success")]
+                    statuses: list[dict[str, object]] = []
+                    if state != "absent":
+                        if source == "check_run":
+                            checks.append(
+                                _required_check_run(
+                                    "implicated",
+                                    "queued" if state == "pending" else "completed",
+                                    None if state == "pending" else state,
+                                )
+                            )
+                        else:
+                            statuses.append({"context": "implicated", "state": state})
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            _protected_branch_with_checks("ci-gate"),
+                            [],
+                            _combined_status(statuses=tuple(statuses)),
+                            {"check_runs": checks},
+                        )
+                    )
+                    self.assertEqual(
+                        GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                            candidate=_batch_candidate(),
+                            failed_check_names=("implicated",),
+                        ),
+                        expected,
+                    )
+
+    def test_base_implicated_subset_and_conflicting_sources_are_not_green(self) -> None:
+        cases: tuple[tuple[list[dict[str, object]], list[dict[str, object]], str], ...] = (
+            ([], [], "unknown"),
+            ([{"context": "second", "state": "success"}], [], "pass"),
+            (
+                [{"context": "second", "state": "success"}],
+                [_required_check_run("second", "completed", "failure")],
+                "fail",
+            ),
+            (
+                [{"context": "second", "state": "success"}],
+                [_required_check_run("second", "completed", "neutral")],
+                "unknown",
+            ),
+        )
+        for extra_statuses, extra_runs, expected in cases:
+            with self.subTest(statuses=extra_statuses, runs=extra_runs):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        [],
+                        _combined_status(statuses=tuple(extra_statuses)),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", "success"),
+                                _required_check_run("FIRST", "completed", "success"),
+                                *extra_runs,
+                            ]
+                        },
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(),
+                        failed_check_names=("first", "second"),
+                    ),
+                    expected,
+                )
+
+    def test_base_supersession_needs_implicated_replacement_evidence(self) -> None:
+        for replacement_status, replacement_conclusion, reported in (
+            ("queued", None, False),
+            ("in_progress", None, False),
+            ("completed", "success", False),
+            ("completed", "success", True),
+        ):
+            with self.subTest(status=replacement_status, reported=reported):
+                checks = [
+                    _actions_check("implicated", 11, 101, 10, "completed", "failure"),
+                    _actions_check("ci-gate", 13, 103, 30, "completed", "success"),
+                ]
+                if reported:
+                    checks.append(_actions_check("implicated", 12, 102, 20, "completed", "success"))
+                runs = [
+                    _run(11, 7, 1, 10, "completed", "failure", "2026-01-01T10:00:00Z"),
+                    _run(
+                        12,
+                        7,
+                        2,
+                        20,
+                        replacement_status,
+                        replacement_conclusion,
+                        "2026-01-01T10:01:00Z",
+                    ),
+                    _run(13, 8, 1, 30, "completed", "success", "2026-01-01T10:00:00Z"),
+                ]
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        [],
+                        {**_combined_status(statuses=()), "sha": HEAD},
+                        {"check_runs": checks},
+                        {"total_count": len(runs), "workflow_runs": runs},
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate().model_copy(
+                            update={"repository": "example/tool", "base_sha": HEAD}
+                        ),
+                        failed_check_names=("implicated",),
+                    ),
+                    "pass" if reported else "unknown",
+                )
+
+    def test_head_snapshot_keeps_queue_visible_without_enforced_policy(self) -> None:
+        for policy in (
+            {"protected": False},
+            {
+                "protected": True,
+                "protection": {
+                    "required_status_checks": {"enforcement_level": "off", "contexts": []}
+                },
+            },
+        ):
+            with self.subTest(policy=policy):
+
+                class SnapshotTransport:
+                    def request(
+                        self, *, method: str, path: str, body: dict[str, object] | None = None
+                    ) -> object:
+                        if path.endswith("/branches/main"):
+                            return {**_github_branch(), **policy}
+                        if "/pulls?" in path:
+                            return [
+                                _github_pull_request(
+                                    n, repository="example/tool", author_association="OWNER"
+                                )
+                                for n in (42, 43)
+                            ]
+                        if path.endswith(("/pulls/42", "/pulls/43")):
+                            return _github_pull_request(
+                                int(path.rsplit("/", 1)[1]),
+                                repository="example/tool",
+                                author_association="OWNER",
+                            )
+                        if path.endswith("/permission"):
+                            return {"permission": "admin"}
+                        if "/events?" in path:
+                            return _label_events()
+                        if "/comments?" in path or "/rules/branches/" in path:
+                            return []
+                        if "/commits/" in path:
+                            head_sha = path.split("/commits/", 1)[1].split("/", 1)[0]
+                            if "/status?" in path:
+                                return {**_combined_status(statuses=()), "sha": head_sha}
+                            if "/check-runs?" in path:
+                                return {
+                                    "check_runs": [
+                                        {
+                                            **_required_check_run(
+                                                "ci-gate", "completed", "success"
+                                            ),
+                                            "head_sha": head_sha,
+                                        }
+                                    ]
+                                }
+                        if path == "/graphql":
+                            return _conversation_rule()
+                        if "/contents/" in path:
+                            return {"encoding": "base64", "content": ""}
+                        raise AssertionError(path)
+
+                transport = SnapshotTransport()
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(repository="example/tool", base_branch="main")
+                self.assertEqual([p.number for p in snapshot.pull_requests], [42, 43])
+                for pr in snapshot.pull_requests:
+                    self.assertEqual(pr.head_sha, f"head-{pr.number}")
+                    self.assertEqual(pr.base_ref, "main")
+                    self.assertEqual(pr.required_checks_status, "unknown")
+                    self.assertTrue(pr.required_checks_observation_error)
+                with self.assertRaises(MergeTrainGitHubError):
+                    GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
+                        candidate=_batch_candidate().model_copy(
+                            update={"repository": "example/tool", "candidate_sha": HEAD}
+                        )
+                    )
+
+    def test_projection_only_policy_has_named_unknown_even_with_owner_pass(self) -> None:
+        from control_plane.product_review_status import OWNER_REVIEW_STATUS_CONTEXT
+
+        for owner_required in (False, True):
+            transport = RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _protected_branch_with_checks(OWNER_REVIEW_STATUS_CONTEXT),
+                    [],
+                    _combined_status(statuses=()),
+                    {"check_runs": [_owner_review_check("success", head_sha=HEAD)]},
+                )
+            )
+            status, diagnostic = _required_checks_observation(
+                transport=transport,
+                repository_path="example/tool",
+                base_branch="main",
+                encoded_head_sha=HEAD,
+                owner_review_required=owner_required,
+                owner_review_app_id=77,
+            )
+            self.assertEqual(status, "unknown")
+            self.assertTrue(diagnostic)
+
     def test_unprotected_tenant_policy_remains_unavailable(self) -> None:
         for strict in (False, True, None):
             with self.subTest(strict=strict):

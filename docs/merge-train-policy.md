@@ -946,6 +946,24 @@ head/candidate records and waiting feedback. Stacked children use the train
 base's technical requirements while preserving their actual parent branch and
 comparison/review bindings.
 
+An unprotected train base or one with no enforced required checks remains visible
+in read-only queue snapshots with an unknown check verdict and a policy diagnostic.
+A policy containing only Launchplane advisory projections also leaves the
+independent technical verdict unknown. Candidate validation, check reuse and landing still require
+usable protected-branch technical requirements; retaining the queue view cannot
+qualify delivery.
+
+The optional `required_checks_observation_error` on persisted batch candidates is
+an additive payload-schema field, omitted when empty so existing records and their
+digests retain their prior shape. Nonempty diagnostics require compatible readers
+on every replica and a reader-capable rollback image while those records exist;
+older strict candidate models reject the added field. This adds no database
+table or Alembic migration. A private installation without Actions read still
+cannot prove a failing job superseded and retains that blocker with a diagnostic.
+An App-pinned commit status needs explicit App attribution; a creator identity
+does not establish it. These retained evidence limits do not authorize grants or
+an alternate credential and do not promise complete provider-verdict equivalence.
+
 Check-run attempts are superseded within their proved provider identity, with
 Actions execution selection as described above. Identical names from different
 Apps, workflows or independent suites are not interchangeable. A reported
@@ -1201,9 +1219,15 @@ unrelated optional workflows cannot change its classification:
   fails on a real check is isolated as below.
 - **Base checks.** Before splitting or blaming a pull request, the controller
   reads the base's required checks and the checks that failed on the candidate,
-  on the candidate's exact base commit. Unrelated base-only checks do not stop
-  isolation. If a candidate check fails there too, or the base's required checks are pending,
-  missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
+  on the candidate's exact base commit. Every implicated check needs actual
+  success evidence there; missing evidence, including a missing member of several
+  implicated names or a superseded job without its replacement, is unknown.
+  Skipped and neutral check runs are also unknown for attribution, even though
+  they satisfy the ordinary required-check gate. Passing required aggregates
+  cannot replace this proof. Unrelated optional base-only checks do not stop
+  isolation. If a candidate check fails there too, its evidence is unproved, or
+  the base's required checks are pending, missing or unreadable, it stays stopped
+  with `reason_code: base_checks_not_green`
   and a reason naming the base branch. No pull request gets `blocked_label`, and
   the failed candidate stays active for fresh reads on the next pass. A rerun
   passing on the same base allows isolation to resume; a changed base or eligible
