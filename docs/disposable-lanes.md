@@ -2928,6 +2928,75 @@ execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
 
+### Abandon an unknown validation on a disposable rehearsal
+
+`action: abandon-validation` explicitly abandons only an original
+`validate-business` attempt whose outcome is unknown on a standalone `switched`
+rehearsal. It uses the existing incomplete-retirement executor and reviewed
+inventory, with the unchanged rehearsal intent and original validation key.
+An active reservation lease, host execution lock, container exec, production
+alias, missing or changed INITIAL/FINAL sanitized source tuple, other unsettled
+effect, or a normal or pending validation outcome refuses the action. A person
+using the rehearsal remains a reason to stop under overall direction.
+
+The dry-run verifies both recorded sanitized source tuples against their actual
+bytes, witnesses and capture lineage. Apply stops and removes only the owned
+working runtime, labeled volumes, private network and provider placement. It
+retains the custody directory, both snapshot byte sets, all original markers,
+receipts and diagnostics. The original journal is archived verbatim on the
+rehearsal record, with its keys and provider-attempt identity. Only after native
+resource absence and placement absence are proven does the transaction release
+the old reservation with an abandonment receipt. The old validation key now
+replays that abandonment receipt; its original journal remains verbatim in the
+archive. Completion of the reservation describes abandonment, not a successful
+validation. Historical abandonment readback remains available after rebuilding
+and returns the preserved receipt without inspecting the replacement. Its `original_outcome` remains
+`unknown`; completion of abandonment proves no commit or rollback result for
+the old validation. This route has no production-lane equivalent.
+
+After deployment, use `scripts/odoo-upgrade-rehearsal.py` from that deployed
+revision. Derive private intent files by changing only `action` on the saved
+original intent. For each step run `dry-run`, review the saved evidence, run
+`apply --reviewed-dry-run` with the same payload/key/evidence file, then
+`readback` with that same payload and key:
+
+1. `abandon-validation`, using the original held validation key.
+2. `rebuild-final`, using a new key. This recreates isolated resources from the
+   retained source snapshots, upgrades a fresh working copy of the recorded
+   FINAL tuple, and starts private web only after the existing isolation and
+   health checks. It uses recorded artifact and upgrade settings; it neither
+   recaptures the business host nor replays the initial upgrade. Both source
+   tuples and the abandonment archive remain unchanged. Admission requires the
+   current preserving retirement receipt to match the latest abandonment.
+   Historical abandonment alone cannot authorize rebuilding after a later
+   disposal deleted those tuples.
+3. `validate-business`, using another new key and its own saved review. This
+   validates the newly built working copy. Validation readback needs that
+   attempt's saved evidence file.
+4. `verify`, with its own key and review, to preserve the post-write Odoo tuple
+   for the rollback rehearsal.
+
+Do not reuse an old validation review for the rebuilt copy. The record says
+`rebuilding` while the new placement and working copy are being produced, so
+normal provider ownership checks remain active. Rebuild readback requires that
+attempt's saved review file. If the host has saved its
+completed rebuild receipt but the service response was lost, original-key
+readback and reconciliation adopt that result without replay. A genuinely
+unknown bootstrap or FINAL restoration with no completed receipt stays held
+with both tuples and evidence preserved; this validation-abandonment route does
+not settle it. Before FINAL restoration starts, a capacity refusal retains a
+bound, completed preparation receipt and stopped runtime. Requalify capacity,
+then review a new `rebuild-final` key to reuse that proven preparation. The same
+key replays its refusal. Changed custody, active execution, mismatched placement,
+or an unsettled restoration marker prevents reuse. Read-only precheck failures
+before any new bootstrap or FINAL effect return
+`rehearsal_rebuild_precheck_refused`; requalify the prerequisite before reviewing
+a new key. A started, uncertain bootstrap or FINAL effect stays held. Verify requires a passing
+validation recorded after the latest abandonment; older validation history
+remains evidence. Ordinary
+retirement and every production hold retain their existing contracts.
+
+
 For a held initial execute that never published its recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
