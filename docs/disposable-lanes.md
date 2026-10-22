@@ -1987,7 +1987,10 @@ and identity. Both source and recipient must use registered remote servers;
 preflight refuses local or missing recipients before testing writes. It refuses
 the provider's local key-generating terminal. Fixed
 commands read `pg_dump` output inside the recorded database container and stream
-the recorded web container's filestore; they create no production dump/archive,
+the recorded web container's filestore. Only the filestore tar may return status
+1, and only when its complete, nonempty C-locale diagnostics contain exclusively
+`file changed as we read it` warnings. Truncated or mixed diagnostics, other
+nonzero statuses and database-dump errors remain failures. The commands create no production dump/archive,
 schedule, attachment pin, password or other persistent source file. A read-only
 probe and source identity checks precede the first testing provider write.
 The source web container's injected runtime identity must match the registered
@@ -2061,9 +2064,15 @@ The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
 the testing filestore. The custom database dump goes through the existing
 SQL-only credential and connection sanitization boundary before a registry
-process runs. Whole-artifact hashes verify copy fidelity. The copy preserves
-pre-existing attachment data and missing-file references as the source export
-contains them; it does not introduce an attachment-repair or completeness policy.
+process runs. Whole-artifact hashes verify copy fidelity. Before recording the
+restored-copy witness or running a registry, the container-export receiver uses
+the rehearsal capture's full attachment validator against the restored database.
+Every file-backed reference must have a safe content-addressed path, its recorded
+size and its SHA-1. Both metadata and content passes share a read-only database
+snapshot and stream the attachment rows. Missing or corrupt references refuse the
+copy; no repair is attempted. Resume rechecks the same integrity gate before
+registry work and preserves an existing copy on refusal. SSH copies retain their
+existing attachment contract.
 Module, integration and website readback still precede the web gate. Successful
 readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the

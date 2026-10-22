@@ -4,6 +4,7 @@ import base64
 import gzip
 import inspect
 import json
+from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -143,7 +144,8 @@ def fresh_testing_mode_refusal(
 TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
 TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
 TESTING_COPY_RUNNER = (
-    """import base64
+    ATTACHMENT_VALIDATION_LIBRARY
+    + """import base64
 import logging
 import os
 from pathlib import Path
@@ -206,6 +208,24 @@ class CopyRunner(OdooDataWorkflowRunner):
     def _run_odoo_shell(self, script, label):
         return self._rehearsal_command(super()._run_odoo_shell, script, label)
 
+    def validate_native_attachments(self) -> None:
+        if sys.argv[7:] != ['container-export']:
+            return
+        connection = self._connect_with_retry(self.local.db_name)
+        try:
+            connection.set_session(readonly=True, isolation_level='REPEATABLE READ')
+            for check_content in (False, True):
+                with connection.cursor(name='launchplane_native_attachments') as cursor:
+                    cursor.itersize = 256
+                    cursor.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')
+                    reason = validate_attachment_files(cursor,
+                        Path('/volumes/data/filestore')/self.local.db_name, None,
+                        check_content=check_content)
+                    if reason != 'verified':
+                        raise RuntimeError('Native attachment validation refused: '+reason)
+        finally:
+            connection.close()
+
     def overwrite_filestore(self, target_owner):
         # Host capture has already staged the fresh local filestore. No SSH key
         # or network source exists inside this container.
@@ -264,6 +284,7 @@ try:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         restored = True
         runner.overwrite_database(dump)
+        runner.validate_native_attachments()
         dump.unlink()
         runner.connect_to_db()
         with runner.local.db_conn.cursor() as cursor:
@@ -275,6 +296,7 @@ try:
             cursor.execute("SELECT value FROM ir_config_parameter WHERE key = %s", (copy_marker,))
             if cursor.fetchone() != (sys.argv[6],):
                 raise RuntimeError("Existing copy lacks this generation's completed restore witness")
+        runner.validate_native_attachments()
     else:
         raise RuntimeError("Unknown fresh testing restore phase")
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
@@ -1133,7 +1155,7 @@ def restore_main():
             arguments.extend(["-e", key + "=" + value])
         output = docker(*arguments, runner, "python3", "-", dump_path, database, spec["readback_spec"],
             base64.b64encode(spec["readback_program"].encode()).decode(), "resume" if resume else "fresh",
-            spec["copy_binding_sha256"], stdin=spec["runner"].encode()).decode()
+            spec["copy_binding_sha256"], gen.get("source_mode", "ssh"), stdin=spec["runner"].encode()).decode()
         markers = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
         if any(markers.get(key) != "true" for key in ("testing_copy_sanitized", "testing_copy_pre_registry_sanitized", "odoo_module_update_completed", "odoo_module_update_modules_configured")):
             raise RuntimeError("Testing copy lacks sanitization or module update proof")
