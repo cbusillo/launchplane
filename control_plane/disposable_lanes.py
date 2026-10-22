@@ -226,6 +226,7 @@ def require_disposable_lane(
     retirement: bool = False,
     separation_only: bool = False,
     preview_refresh: bool = False,
+    same_artifact_restart: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
@@ -309,7 +310,7 @@ def require_disposable_lane(
     if (
         evidence is not None
         and evidence.observer_kind != "director_agent"
-        and not (preview_refresh or retirement)
+        and not (preview_refresh or retirement or same_artifact_restart)
     ):
         raise DisposableLaneSafetyUnknown("Historical observations cannot qualify lane mutations.")
     usage = evaluate_lane_usage(
@@ -322,6 +323,23 @@ def require_disposable_lane(
         require_unused=not (preview_refresh or retirement),
         now=now,
     )
+    if same_artifact_restart:
+        if instance != "testing" or preview is not None:
+            raise DisposableLaneSafetyUnknown(
+                "Existing-container recovery requires an owned testing lane."
+            )
+        if usage.protected or (
+            evidence is not None and evidence.production_resources in {"shared", "separation_ready"}
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "Existing-container recovery is held by use or shared production resources."
+            )
+        return disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            configuration=disposable_lane_configuration(store, context, instance),
+        )
     if preview_refresh:
         # Overall direction makes previews disposable unless there is an actual
         # protected use or needed copy. No source produces a universal positive

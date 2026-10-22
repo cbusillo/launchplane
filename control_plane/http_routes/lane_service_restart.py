@@ -252,6 +252,7 @@ def register_service_restart_route(
                 token=token,
                 health_url=health_url,
                 trace_id=trace,
+                require_disposable=director_testing,
             )
             try:
                 result = run_durable_provider_operation(
@@ -268,7 +269,7 @@ def register_service_restart_route(
             except DisposableLaneSafetyUnknown:
                 refuse(
                     "disposable_lane_safety_unknown",
-                    "The restart target must belong only to the requested lane.",
+                    "Restart requires resolved use, target ownership and resource protections. Inspect /v1/disposable-lanes/observations.",
                 )
                 raise AssertionError
             except ServiceRestartRefused as error:
