@@ -53,6 +53,15 @@ class SelectedRuntimeSyncTests(unittest.TestCase):
         )
         self.assertEqual(dokploy_api.compose_literal_keys(written), {"APP_MODE"})
         self.assertEqual(_delta(result)["changed_keys"], ["APP_MODE"])
+        qualified, updates = lane.sync(
+            provider_env=provider.replace("APP_MODE=old", "APP_MODE=new $VALUE"),
+            selected_keys=("APP_MODE",),
+            requalify_literal_keys=("APP_MODE",),
+        )
+        self.assertEqual(_delta(qualified)["changed_keys"], [])
+        self.assertEqual(
+            dokploy_api.compose_literal_keys(str(updates[0]["env_text"])), {"APP_MODE"}
+        )
         with self.assertRaises(LiveTargetRuntimeError) as refusal:
             lane.sync(provider_env=written, selected_keys=("ODOO_DB_PASSWORD",))
         self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
@@ -152,17 +161,20 @@ class SelectedRuntimeSyncTests(unittest.TestCase):
         lane = _LaneFixture(
             self,
             _instance_record(
-                {"APP_MODE": "managed", "APP_WEBHOOK_URL": "new"}, retired=("OLD_TOKEN",)
+                {"APP_MODE": "managed", "APP_WEBHOOK_URL": "new"},
+                retired=("OLD_TOKEN", "DOKPLOY_TOKEN"),
             ),
         )
-        provider = (
-            "APP_MODE=drifted\nAPP_WEBHOOK_URL=old\nOLD_TOKEN=retained\nPROVIDER_ONLY=untouched"
-        )
+        provider = "APP_MODE=drifted\nAPP_WEBHOOK_URL=old\nOLD_TOKEN=retained\nPROVIDER_ONLY=untouched\nDOKPLOY_TOKEN=legacy-platform-token"
         plan, updates = lane.sync(
             provider_env=provider, apply_changes=False, selected_keys=("APP_WEBHOOK_URL",)
         )
         self.assertEqual(updates, [])
         self.assertEqual(_delta(plan)["changed_keys"], ["APP_WEBHOOK_URL"])
+        credentials = plan["provider_env_platform_credentials"]
+        assert isinstance(credentials, dict)
+        self.assertEqual(credentials["retiring_keys"], ["DOKPLOY_TOKEN"])
+        self.assertEqual(credentials["unretired_keys"], [])
         result, updates = lane.sync(provider_env=provider, selected_keys=("APP_WEBHOOK_URL",))
         self.assertEqual(result["selected_keys"], ["APP_WEBHOOK_URL"])
         applied = result["apply"]
@@ -175,6 +187,7 @@ class SelectedRuntimeSyncTests(unittest.TestCase):
                 "APP_WEBHOOK_URL": "new",
                 "OLD_TOKEN": "retained",
                 "PROVIDER_ONLY": "untouched",
+                "DOKPLOY_TOKEN": "legacy-platform-token",
             },
         )
         readback, updates = lane.sync(
@@ -186,7 +199,8 @@ class SelectedRuntimeSyncTests(unittest.TestCase):
         self.assertEqual(updates, [])
         with closing(PostgresRecordStore(database_url=lane.database_url)) as store:
             self.assertEqual(
-                store.list_runtime_environment_records()[0].retired_provider_keys, ("OLD_TOKEN",)
+                store.list_runtime_environment_records()[0].retired_provider_keys,
+                ("DOKPLOY_TOKEN", "OLD_TOKEN"),
             )
 
     def test_unknown_retired_or_empty_selection_refuses_before_provider_mutation(self) -> None:

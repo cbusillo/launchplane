@@ -858,8 +858,6 @@ def apply_live_target_runtime_environment(
             not selected_keys
             or len(set(selected_keys)) != len(selected_keys)
             or set(selected_keys) - desired_env_map.keys()
-            or set(selected_keys) & site_environment.retired_keys
-            or literal_keys - set(selected_keys)
             or deploy
             or no_cache
             or deploy_timeout_seconds is not None
@@ -973,7 +971,7 @@ def apply_live_target_runtime_environment(
             code="retained_database_credential_changed",
         )
     provider_env_platform_credentials = provider_env_platform_credential_report(
-        live_env_map=live_env_map, retired_keys=retired_keys
+        live_env_map=live_env_map, retired_keys=site_environment.retired_keys
     )
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,

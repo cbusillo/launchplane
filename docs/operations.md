@@ -3045,10 +3045,9 @@ Conventional onboarding creates new products only.
   dry-run, apply and readback, with deployment disabled. Selected sync delivers
   only existing non-retired managed keys and leaves other provider values and
   stored retirement intent unchanged. Its readback can pass while unselected
-  managed keys still drift. The installed caller exposes one repeated `--key`
-  per selection on `live-target-runtime-sync-dry-run` and `-apply`; save and
-  review the names-only plan before apply. Its digest binds the selection,
-  lane, target fingerprint and key/count plan, not secret values or revisions.
+  managed keys still drift. Use the installed caller's
+  [managed runtime sync contract](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md#managed-runtime-sync)
+  for selection flags and reviewed apply evidence.
   The `live-target-runtime.yml` workflow wraps this route with the
   shared Launchplane request action and uploads sanitized request/response
   artifacts.
