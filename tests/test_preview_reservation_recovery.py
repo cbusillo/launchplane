@@ -745,6 +745,25 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 if state != "open":
                     self.assertEqual(result.plan["reason"], "preview_cleanup_pr_state_unknown")
 
+    def test_cleanup_preserves_provider_only_alias_of_actual_planned_target(self) -> None:
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+
+        self.remove_original_intent()
+        self.prepare_cleanup()
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="another-product",
+                instance="prod",
+                provider_id="dokploy",
+                target_id="cm-odoo-preview-pr-42",
+                display_name="Shared target",
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.cleanup()
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
     def test_cleanup_names_invalid_retained_intent_without_spending_retry_budget(self) -> None:
         self.prepare_cleanup()
         with self.store._session_factory() as session:

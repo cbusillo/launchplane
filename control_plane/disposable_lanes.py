@@ -7,6 +7,7 @@ import json
 from typing import Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -32,6 +33,8 @@ class DisposableLaneSafetyUnknown(ValueError):
 
 
 class DisposableLaneStore(Protocol):
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
+
     def list_runtime_key_safety_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
@@ -194,6 +197,28 @@ def resolve_disposable_observation_binding(
     )
 
 
+def require_lane_target_ownership(
+    targets: tuple[DokployTargetIdRecord | ProviderTargetRecord, ...],
+    *,
+    context: str,
+    instance: str,
+    target_id: str = "",
+) -> None:
+    owned_targets = {
+        target.target_id
+        for target in targets
+        if (target.context, target.instance) == (context, instance)
+    }
+    if target_id:
+        owned_targets.add(target_id)
+    if any(
+        target.target_id in owned_targets
+        and (target.context, target.instance) != (context, instance)
+        for target in targets
+    ):
+        raise DisposableLaneSafetyUnknown("The target aliases another lane's target.")
+
+
 def require_disposable_lane(
     store: DisposableLaneStore,
     *,
@@ -249,13 +274,12 @@ def require_disposable_lane(
         )
     except FileNotFoundError:
         target_id = None
-    if target_id is not None and any(
-        (other.context, other.instance) != (context, instance)
-        and other.target_id == target_id.target_id
-        for other in store.list_dokploy_target_id_records()
-    ):
-        raise DisposableLaneSafetyUnknown(
-            "The testing or preview target aliases another lane's target."
+    if target_id is not None:
+        require_lane_target_ownership(
+            store.list_dokploy_target_id_records(),
+            context=context,
+            instance=instance,
+            target_id=target_id.target_id,
         )
     rehearsal_binding = ""
     if target is not None and target.policies.staff_testing_hold is not None:

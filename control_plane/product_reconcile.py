@@ -2039,12 +2039,16 @@ def reconcile_preview_target(
 
 
 def _preview_cleanup_guard(
-    store: ProductReconcileStore, profile: LaunchplaneProductProfileRecord, number: int
+    store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    target_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
         DisposableLaneStore,
         resolve_disposable_preview,
+        require_lane_target_ownership,
     )
 
     if store.read_product_profile_record(profile.product) != profile:
@@ -2059,18 +2063,16 @@ def _preview_cleanup_guard(
             profile.preview.context,
             instance,
         )
-        targets = cast(DisposableLaneStore, store).list_dokploy_target_id_records()
-        owned_targets = {
-            target.target_id
-            for target in targets
-            if (target.context, target.instance) == (profile.preview.context, instance)
-        }
-        if any(
-            target.target_id in owned_targets
-            and (target.context, target.instance) != (profile.preview.context, instance)
-            for target in targets
-        ):
-            raise DisposableLaneSafetyUnknown("The preview target aliases another lane's target.")
+        target_store = cast(DisposableLaneStore, store)
+        require_lane_target_ownership(
+            (
+                *target_store.list_dokploy_target_id_records(),
+                *target_store.list_physical_provider_target_records(),
+            ),
+            context=profile.preview.context,
+            instance=instance,
+            target_id=target_id,
+        )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
@@ -2276,7 +2278,7 @@ def _run_preview_operation(
         return _hold_preview_destroy(plan, previous_plan, failed_attempts)
     database_url = getattr(record_store, "database_url", None)
 
-    def pre_mutation_guard() -> None:
+    def pre_mutation_guard(operation_plan: OdooPreviewApplyInputsResult) -> None:
         # Holding the reservation, just before the provider apply: a PR that closed,
         # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
@@ -2287,7 +2289,9 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
+            _preview_cleanup_guard(
+                record_store, profile, pull_request_number, operation_plan.dry_run_plan.compose_ref
+            )
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -2350,7 +2354,7 @@ def _run_preview_operation(
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
-            pre_mutation_guard=pre_mutation_guard,
+            pre_mutation_guard=lambda: pre_mutation_guard(operation_plan),
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,

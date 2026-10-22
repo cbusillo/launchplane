@@ -14,6 +14,8 @@ from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -54,6 +56,12 @@ from control_plane.workflows.preview_desired_state import render_preview_slug
 
 
 class _GenericWebPreviewStore:
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return ()
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]:
+        return self.provider_targets
+
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.refusals.append(record)
 
@@ -69,6 +77,7 @@ class _GenericWebPreviewStore:
         secret_bindings: tuple[SecretBinding, ...] = (),
     ) -> None:
         self.profile = profile
+        self.provider_targets: tuple[ProviderTargetRecord, ...] = ()
         self.refusals: list[DeploymentRecord] = []
         self.runtime_key_safety_policies = runtime_key_safety_policies
         self.runtime_environment_records = runtime_environment_records
@@ -1932,6 +1941,43 @@ class GenericWebPreviewTests(unittest.TestCase):
         ][0]
         save_environment_payload = cast("dict[str, object]", save_environment["payload"])
         self.assertIn("SMTP_PASSWORD=secret-value", str(save_environment_payload["env"]))
+
+    def test_destroy_keeps_an_application_recorded_for_another_lane(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        store.provider_targets = (
+            ProviderTargetRecord(
+                context="other-product",
+                instance="prod",
+                provider_id="dokploy",
+                target_id="app-1",
+                display_name="Shared application",
+                updated_at=store.profile.updated_at,
+            ),
+        )
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview._find_application_by_name",
+                return_value={"applicationId": "app-1"},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.destroy_dokploy_preview_resource"
+            ) as destroy,
+            self.assertRaisesRegex(ValueError, "aliases"),
+        ):
+            execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product=store.profile.product,
+                    preview_slug="preview-42-site",
+                    destroy_reason="closed PR",
+                ),
+            )
+        destroy.assert_not_called()
 
     def test_execute_generic_web_preview_destroy_deletes_domains_and_application(self) -> None:
         store = _GenericWebPreviewStore(_profile())

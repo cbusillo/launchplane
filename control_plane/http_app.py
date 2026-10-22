@@ -24360,6 +24360,8 @@ def create_launchplane_fastapi_app(
             )
         store = require_provider_operation_store(record_store=record_store, trace_id=trace_id)
         try:
+            if observation.mode == "record" and observation.preview_id:
+                raise ValueError("Preview safety assertions are not supported.")
             if observation.mode == "clear":
                 fingerprint = await run_in_threadpool(
                     store.clear_reviewed_disposable_lane_safety,

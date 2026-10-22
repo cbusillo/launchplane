@@ -193,7 +193,8 @@ Fresh ordinary Compose lanes and Odoo previews use the same admission check
 before their first provider create, including the project's and environment's
 creation. Ordinary lane creation admits its private default bridge; repository
 Compose source is not yet available, so this is not a guarantee for additional
-networks a later deployment might declare. Generic-web testing activation and independent production recipients
+networks a later deployment might declare. Generic-web testing activation and
+independent production recipients
 check before recording fresh placement custody or dispatching resource work.
 Their known Compose source reserves the default bridge and all declared private
 networks. Explicit partial-placement recovery and an existing preview continue
@@ -444,8 +445,9 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. Caller-supplied usage, custody and isolation values are stored as unknown for
-both testing and previews. Observations retain their actor as provenance;
+authenticated actor and current time itself. Preview `record` assertions refuse.
+For testing, caller-supplied usage, custody and isolation values are stored as
+unknown. Observations retain their actor as provenance;
 historical observer names confer no permission. Preview refresh and retirement
 keep their existing protective-report rules.
 

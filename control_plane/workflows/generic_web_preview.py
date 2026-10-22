@@ -37,6 +37,9 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.disposable_lanes import require_lane_target_ownership
 from control_plane.runtime_key_safety import (
     evaluate_preview_copied_runtime_key_safety,
     is_preview_copied_credential,
@@ -62,6 +65,10 @@ _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 
 class GenericWebPreviewProfileStore(Protocol):
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def list_runtime_environment_records(
@@ -1887,6 +1894,15 @@ def _execute_generic_web_preview_destroy_unserialized(
                 "applicationId."
             ),
         )
+    require_lane_target_ownership(
+        (
+            *record_store.list_dokploy_target_id_records(),
+            *record_store.list_physical_provider_target_records(),
+        ),
+        context=resolved_profile.preview.context,
+        instance=request.preview_slug,
+        target_id=application_id,
+    )
     destroy_result = destroy_dokploy_preview_resource(
         host=host,
         token=token,

@@ -1025,7 +1025,7 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             data_evidence="agent:reproducible-test-copy",
             isolation_evidence="agent:inspected-independent-resources",
         )
-        self.assertEqual(recorded.status_code, 202, recorded.text)
+        self.assertEqual(recorded.status_code, 409, recorded.text)
         evidence = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-1")
         assert evidence is not None
         self.assertEqual(
@@ -1033,7 +1033,6 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             ("unknown", "unknown", "unknown"),
         )
         self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
-        self.assertFalse(self.store.list_product_reconcile_requests(product=profile.product))
 
     async def test_clear_rechecks_owned_preview_identity_and_binding(self) -> None:
         from control_plane.contracts.preview_record import PreviewRecord
