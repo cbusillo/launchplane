@@ -3705,8 +3705,10 @@ def deliver_public_ingress_notification_outbox_delivery(
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
             )
-            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
-                # An earlier send may have happened; preserve its uncertain outcome.
+            if (
+                incident.status == "resolved"
+                or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
+            ):
                 if record.provider_operation_key:
                     return record.model_copy(
                         update={
@@ -3716,21 +3718,25 @@ def deliver_public_ingress_notification_outbox_delivery(
                             "lease_expires_at": "",
                         }
                     )
+                if retired_refusal:
+                    reason = "retired_production_refusal"
+                elif incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+                    reason = "retired_source_lag"
+                else:
+                    reason = "superseded_incident_resolved"
                 attempt = PublicIngressNotificationAttemptRecord.model_validate(
                     {
                         **attempt_payload,
                         "delivery_status": "skipped",
-                        "action": "retired_production_refusal"
-                        if retired_refusal
-                        else "retired_source_lag",
+                        "action": reason,
                     }
                 )
                 return record.model_copy(
                     update={
                         "state": "delivered",
-                        "action": "skipped_retired_production_refusal"
-                        if retired_refusal
-                        else "skipped_retired_source_lag",
+                        "action": reason
+                        if reason.startswith("superseded_")
+                        else f"skipped_{reason}",
                         "error_code": "",
                         "lease_owner": "",
                         "lease_expires_at": "",

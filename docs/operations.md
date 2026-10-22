@@ -385,12 +385,32 @@ uv run launchplane service outbox-workers run \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
 
-For a bounded operational probe or smoke check, run one claim/delivery step:
+The one-step command claims work and can send a real message or dispatch a
+workflow. It is a mutation, not a diagnostic probe:
 
 ```bash
 uv run launchplane service outbox-workers run-once \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
+
+Before activating a consumer on an existing database, read
+`GET /v1/outbox/inspection` using service-context `operations.read` authority.
+This read sends nothing. It covers pending, running and reconciliation-required
+rows across every delivery kind, including inactive or orphaned aggregates,
+and current enabled notification-policy destinations. It omits message bodies
+and credential values. `limit` defaults to 1000 and may be raised to 5000;
+`complete: false` means counts and destination coverage are incomplete. The
+read is a bounded census, not a transactionally frozen activation approval.
+Destination references still need ownership verification before sending.
+Discussion reminders and workflow dispatches need their own routing review;
+notification-policy ownership alone does not settle those effects.
+
+Queued incident deliveries whose incident is already resolved complete without
+a provider call. Their terminal outbox action and durable skipped attempt record
+say `superseded_incident_resolved`. This includes queued recovery messages.
+An existing provider-start marker remains an unknown outcome instead of being
+reported as superseded. Still-open incidents retain the existing send, lease,
+retry and completion rules.
 
 Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
 workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
@@ -435,14 +455,11 @@ crash or network ambiguity between marker persistence and run observation stays
 `reconcile_required` with `workflow_dispatch_in_doubt`; admins must not clear
 the marker to force a resend.
 
-Public-ingress monitor GitHub issue notifications are also queued when the
-record store supports the transactional outbox. Observation, incident, and
-pending notification rows commit atomically. Mixed policies queue only the
-GitHub destinations while continuing to deliver and record email and Discord
-attempts directly. Resolved-incident reconciliation verifies the issue is
-actually closed after finding the marker, covering a crash between the marker
-comment and the close request. Email and Discord notification paths remain
-direct-delivery until they are explicitly migrated.
+Public-ingress notifications use the same outbox for GitHub, email and Discord.
+Observation, incident and pending notification rows commit atomically. The
+[incident delivery contract](#lane-health-monitoring) below describes
+destination resolution, retries and uncertain sends. Only file-backed
+rehearsals deliver synchronously.
 
 ## Durable Provider Operations
 
