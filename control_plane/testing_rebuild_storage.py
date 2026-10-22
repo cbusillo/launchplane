@@ -132,6 +132,8 @@ def require_rebuild_successor(
             raise ValueError("A rebuild cannot replace its independent-copy receipt.")
         if current.error and record.error != current.error:
             raise ValueError("A rebuild cannot replace its recorded failure.")
+        if current.admission_refusal and record.admission_refusal != current.admission_refusal:
+            raise ValueError("A rebuild cannot replace its original admission decision.")
         if (
             current.private_readiness_failed_at is not None
             and record.private_readiness_failed_at != current.private_readiness_failed_at
