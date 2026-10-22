@@ -542,6 +542,30 @@ def register_privileged_operation_routes(
                         )
                     }
                 )
+            if record.status == "planned":
+                blocker = current_policy_plan_blocker(record=record, record_store=record_store)
+                if (
+                    blocker is None
+                    and review.access_policy is not None
+                    and review.access_policy.state == "unavailable"
+                ):
+                    blocker = "privileged_operation_planning_unavailable"
+                if blocker is not None:
+                    review = review.model_copy(
+                        update={
+                            "can_approve": False,
+                            "blockers": review.blockers.model_validate(
+                                {
+                                    **review.blockers.model_dump(),
+                                    "state": "error"
+                                    if blocker == "privileged_operation_planning_unavailable"
+                                    or review.blockers.state == "error"
+                                    else "blocked",
+                                    "codes": (*review.blockers.codes, blocker),
+                                }
+                            ),
+                        }
+                    )
             return review
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
@@ -551,14 +575,16 @@ def register_privileged_operation_routes(
                 message="Privileged-operation semantic review is unavailable for this stored descriptor state.",
             ) from error
 
-    def require_current_policy_plan(
+    def current_policy_plan_blocker(
         *,
         record: PrivilegedOperationRecord,
         record_store: object,
-        trace_id: str,
-    ) -> None:
+    ) -> (
+        Literal["privileged_operation_plan_stale", "privileged_operation_planning_unavailable"]
+        | None
+    ):
         if record.safety_class != "policy_admin":
-            return
+            return None
         try:
             planner = read_privileged_operation_descriptor(record.descriptor_id).planner
             if planner is None:
@@ -566,30 +592,30 @@ def register_privileged_operation_routes(
                     "This privileged-operation planner is retired."
                 )
             current_evidence = planner(record_store, record.request)
-        except PrivilegedOperationPlannerError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="privileged_operation_plan_stale",
-                message="The privileged-operation policy plan is stale and must be replanned.",
-            ) from error
-        except (
-            PrivilegedOperationPlanningStoreError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Privileged-operation policy planning is unavailable.",
-            ) from error
+        except PrivilegedOperationPlannerError:
+            return "privileged_operation_plan_stale"
+        except (PrivilegedOperationPlanningStoreError, TypeError, ValueError):
+            return "privileged_operation_planning_unavailable"
         if current_evidence != record.evidence:
+            return "privileged_operation_plan_stale"
+        return None
+
+    def require_current_policy_plan(
+        *,
+        record: PrivilegedOperationRecord,
+        record_store: object,
+        trace_id: str,
+    ) -> None:
+        blocker = current_policy_plan_blocker(record=record, record_store=record_store)
+        if blocker is not None:
+            unavailable = blocker == "privileged_operation_planning_unavailable"
             raise dependencies.common.http_error(
-                status_code=409,
+                status_code=503 if unavailable else 409,
                 trace_id=trace_id,
-                code="privileged_operation_plan_stale",
-                message="The privileged-operation policy plan is stale and must be replanned.",
+                code=blocker,
+                message="Privileged-operation policy planning is unavailable."
+                if unavailable
+                else "The privileged-operation policy plan is stale and must be replanned.",
             )
 
     def read_operation_or_error(

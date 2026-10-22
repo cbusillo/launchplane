@@ -19,9 +19,9 @@ async function openReview(page: Page, state = "available", readOnly = false) {
         operation_id: operationId, descriptor_id: "managed-authz-policy-set", operation_class: "managed_authz_policy_set",
         title: "Managed authorization policy review", requested_by_kind: "github_human",
         lifecycle: { status: "planned", created_at: "2026-10-19T20:00:00Z", updated_at: "2026-10-19T20:00:00Z", approval_recorded: false, execution_recorded: false },
-        blockers: { state: "clear" }, change: { summary: "Remove rules from the reviewed access policy.", metrics: [] },
+        blockers: state === "available" ? { state: "clear" } : { state: "error", codes: ["privileged_operation_planning_unavailable"] }, change: { summary: "Remove rules from the reviewed access policy.", metrics: [] },
         blast_radius: { summary: "The reviewed rules only." }, rollback: { summary: "Separate reviewed change." },
-        evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [], can_approve: true, can_revoke: false,
+        evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [], can_approve: state === "available", can_revoke: false,
         access_policy: { state, rules: [
           { managed_rule_id: "only-role", change: "removed", principal: "GitHub login fixture-alex", roles: ["read_only"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: fixture-testing. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-alex", before: "read_only", after: null, state: "lost" }] },
           { managed_rule_id: "covered-role", change: "removed", principal: "GitHub login fixture-blair", roles: ["admin"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: all. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-blair", before: "admin", after: "admin", state: "retained" }] },
@@ -62,6 +62,9 @@ test("missing current policy evidence is visibly unknown", async ({ page }) => {
   const review = page.getByRole("region", { name: "People and access changes" });
   await expect(review.locator('[data-access-review-state="unavailable"]')).toBeVisible();
   await expect(review).not.toContainText("fixture-alex");
+  await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toBeDisabled();
 });
 
 test("read-only browser does not render principal display", async ({ page }) => {

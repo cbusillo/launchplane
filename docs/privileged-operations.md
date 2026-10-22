@@ -407,7 +407,12 @@ pre-state are unchanged, until withdrawn (cancelled before approval or revoked
 after approval) or executed. Approval and execution keep the existing policy
 checks and compare-and-swap refusal for stale revisions. Changing a policy
 requires preparing the remaining change for fresh review; elapsed time alone
-does not. Reads do not reconcile time-based expiry or append events.
+does not. Pending policy-plan list and detail reviews compare the saved evidence
+with the current planner evidence, using the same comparison as approval. A stale
+plan is readable with a blocker and no approval control; unavailable planning is
+shown as an error, rather than as a current plan. These reads do not expire or
+cancel the plan, reconcile time-based expiry, or append events. Approved and
+terminal records retain their historical review and revoke/cancel behavior.
 
 New records and approvals store an empty `expires_at`. Legacy timestamps and
 terminal `expired` records remain readable with their original digests; pending
@@ -491,8 +496,8 @@ deeper authorized disclosure. Mutation, challenge, worker, agent-summary,
 approval, revoke, cancel, and execution behavior is unchanged.
 The projection explicitly records that it authorizes neither approval nor
 execution and persists no state; its `can_approve` and `can_revoke` values are
-non-authoritative UI affordances derived from persisted lifecycle and blocker
-state.
+non-authoritative UI affordances derived from persisted lifecycle, blockers,
+and current policy-plan availability.
 
 ## HTTP, UI, And Worker
 
