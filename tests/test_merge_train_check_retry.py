@@ -261,6 +261,10 @@ class CandidateCheckRetryTests(TestCase):
         self.assertEqual(result["reason_code"], "candidate_checks_retry_pending")
         self.client.add_pull_request_label.assert_not_called()
 
+        result = self.recover(recorded_at="2026-10-10T12:12:00Z")
+        self.assertEqual(result["reason_code"], "candidate_check_retry_unavailable")
+        self.client.add_pull_request_label.assert_not_called()
+
     def test_delayed_restart_restores_absent_ref_before_reading_failure_evidence(self) -> None:
         self.recover()
         self.record = next(

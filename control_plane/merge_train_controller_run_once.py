@@ -5787,6 +5787,19 @@ def _retry_closed_candidate_after_passing_checks(
     )
 
 
+def _candidate_check_retry_wait_expired(
+    *, candidate: MergeTrainBatchCandidate, recorded_at: str
+) -> bool:
+    return (
+        not candidate.check_rerun_requested_at
+        or (
+            datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+            - datetime.fromisoformat(candidate.check_rerun_requested_at.replace("Z", "+00:00"))
+        ).total_seconds()
+        >= CANDIDATE_CHECK_RETRY_WAIT_SECONDS
+    )
+
+
 def _recover_failed_merge_train_candidate(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
@@ -5841,6 +5854,8 @@ def _recover_failed_merge_train_candidate(
     if not failures.conclusive:
         # A re-run in progress or a failure no longer visible blames nobody yet.
         if failed.check_rerun_attempts:
+            if _candidate_check_retry_wait_expired(candidate=failed, recorded_at=recorded_at):
+                return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
             return {
                 **retry_result,
                 "controller_action": "observe_candidate",
@@ -5879,6 +5894,7 @@ def _recover_failed_merge_train_candidate(
                 "check_rerun_requested_at": recorded_at,
             }
         )
+        publish: Callable[[Callable[[], object]], None] | None = None
         if mutate:
             try:
                 publish = github_client.prepare_candidate_check_retry(candidate=retried)
@@ -5890,7 +5906,7 @@ def _recover_failed_merge_train_candidate(
             reason_code="candidate_checks_retry_requested",
             candidate=retried.model_dump(mode="json"),
         )
-        if mutate:
+        if publish is not None:
             record_id = _persist_replacement_candidate(
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,
@@ -5920,14 +5936,7 @@ def _recover_failed_merge_train_candidate(
         except MergeTrainGitHubError:
             return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
         if not finished:
-            if (
-                not failed.check_rerun_requested_at
-                or (
-                    datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
-                    - datetime.fromisoformat(failed.check_rerun_requested_at.replace("Z", "+00:00"))
-                ).total_seconds()
-                >= CANDIDATE_CHECK_RETRY_WAIT_SECONDS
-            ):
+            if _candidate_check_retry_wait_expired(candidate=failed, recorded_at=recorded_at):
                 return {**retry_result, "reason_code": "candidate_check_retry_unavailable"}
             return {
                 **retry_result,
