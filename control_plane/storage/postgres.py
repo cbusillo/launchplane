@@ -18571,6 +18571,11 @@ class PostgresRecordStore(HumanSessionStore):
         if self._engine.dialect.name != "postgresql":
             yield
             return
+        if self._preview_refresh_is_held(normalized_preview_id, exclusive=not shared):
+            yield
+            return
+        if not shared and self._preview_refresh_is_held(normalized_preview_id, exclusive=False):
+            raise ValueError("A shared preview reservation cannot be upgraded to exclusive.")
         factory = self._session_factory
         if dedicated:
             assert self._preview_lock_engine is not None
@@ -18598,10 +18603,13 @@ class PostgresRecordStore(HumanSessionStore):
         SQLite rehearsals and another thread's lock cannot establish exclusion.
         Probe the original transaction so a lost connection cannot supply proof.
         """
+        return self._preview_refresh_is_held(preview_id, exclusive=True)
+
+    def _preview_refresh_is_held(self, preview_id: str, *, exclusive: bool) -> bool:
         for name, shared, session, transaction in getattr(
             self._preview_execution_context, "held", ()
         ):
-            if name == preview_id and not shared:
+            if name == preview_id and (not exclusive or not shared):
                 if (
                     transaction is None
                     or not transaction.is_active

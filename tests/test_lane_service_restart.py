@@ -4,6 +4,8 @@ from tests.support.auth import scoped_agent_test
 
 import asyncio
 from contextlib import redirect_stderr
+from contextlib import contextmanager
+from collections.abc import Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
@@ -50,6 +52,7 @@ from control_plane.service_auth import (
 )
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
@@ -809,3 +812,81 @@ class ServiceRestartTests(unittest.TestCase):
             helper()
         self.assertEqual(exited.exception.code, 2)
         self.assertEqual(evidence.read_text(), "retained review")
+
+    def use_generic_web(self) -> None:
+        profile = self.store.read_product_profile_record(self.expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"driver_id": "generic-web"})
+        )
+        record_safety(self.store, self.expected.product, self.expected.context, "testing")
+
+    def test_generic_web_restarts_current_artifact_and_replays_without_another_effect(self) -> None:
+        self.use_generic_web()
+        reviewed = self.review()
+        status, response = self.invoke(key="generic-restart")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(response["result"]["plan"], reviewed["result"]["plan"])
+        self.assertTrue(self.invoke(key="generic-restart")[1]["replayed"])
+        self.assertEqual(len(self.provider.writes), 1)
+        self.health.assert_called_once()
+
+    def test_generic_web_rechecks_reviewed_configuration_under_release_exclusion(self) -> None:
+        self.use_generic_web()
+        self.review()
+        with patch.object(self.store, "serialize_preview_refresh") as serialize:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.expected.product
+            ):
+                pass
+        deploy_lock = serialize.call_args.kwargs["preview_id"]
+
+        @contextmanager
+        def release_finishes(**kwargs: object) -> Iterator[None]:
+            if kwargs["preview_id"] == deploy_lock and not kwargs["shared"]:
+                self.provider.config["Mounts"].append({"Name": "replacement-volume"})
+            yield
+
+        with patch.object(self.store, "serialize_preview_refresh", side_effect=release_finishes):
+            status, response = self.invoke(key="generic-release-race")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_generic_web_production_agent_with_no_apply_authority_never_inspects(self) -> None:
+        self.use_generic_web()
+        self.payload.update(instance="prod", mode="apply", reviewed_plan_sha256="a" * 64)
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        with patch(
+            "control_plane.http_routes.lane_service_restart.plan_service_restart",
+            side_effect=AssertionError("denied provider read"),
+        ):
+            status, response = self.invoke(key="generic-production")
+        self.assertEqual(status, 403, response)
+        self.assertEqual(response["error"]["code"], "authorization_denied")
+        self.assertEqual(self.provider.writes, [])
+
+    def test_generic_web_refuses_missing_health_or_current_artifact_identity(self) -> None:
+        self.use_generic_web()
+        self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "db"
+        self.payload["service"] = "db"
+        self.provider.config["State"].pop("Health")
+        self.assertEqual(self.invoke()[0], 409)
+        self.provider.config["State"]["Health"] = {"Status": "unhealthy"}
+        self.provider.config["Config"]["Env"] = []
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_generic_web_unknown_restart_reconciles_without_a_second_effect(self) -> None:
+        self.use_generic_web()
+        self.review()
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="generic-unknown")[0], 409)
+        self.assertEqual(self.invoke(key="generic-unknown")[0], 409)
+        self.payload["mode"] = "reconcile"
+        self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+        status, response = self.invoke(key="generic-unknown")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
