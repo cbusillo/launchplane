@@ -11,9 +11,16 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    DisposableLaneStore,
+    require_disposable_lane,
+    resolve_disposable_observation_binding,
+)
 from control_plane.generic_web_testing_inputs import (
     TESTING_DISPATCH_REFUSED_PHASE,
     testing_input_authority,
@@ -26,6 +33,7 @@ from control_plane.generic_web_testing_settlement import (
     testing_pre_image_settlement_required,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleBaselineChanged,
     has_recorded_application_lifecycle,
     generic_web_provider_deployment_record_id,
     recorded_application_lifecycle,
@@ -42,6 +50,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployEnvelope,
     execute_generic_web_deploy_result,
     should_store_generic_web_deploy_idempotency,
+    resolve_generic_web_deploy_lane,
 )
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
@@ -113,6 +122,12 @@ class _DeploymentRecordReader(Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
+class _ProviderTargetReader(Protocol):
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+
 class _ExecutionInventoryReader(Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
@@ -178,6 +193,7 @@ class GenericWebDeployProviderMutationAdapter:
         retain_event_request: bool = False,
         post_deploy_authority_digest: str = "",
         superseded_testing_candidate: bool = False,
+        standing_testing_permission: bool = False,
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
@@ -202,6 +218,10 @@ class GenericWebDeployProviderMutationAdapter:
         self._settlement_operation = ""
         self._settlement_phase = ""
         self._settlement_no_effect_checkpoint = False
+        self._standing_testing_permission = standing_testing_permission
+        self._standing_effect_started = False
+        self._pre_effect_inventory_digest: str | None = None
+        self._standing_binding_sha256 = ""
         self.execution_check: Callable[[], None] = lambda: None
 
     @property
@@ -362,6 +382,13 @@ class GenericWebDeployProviderMutationAdapter:
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
+            if self._standing_testing_permission:
+                self._standing_binding_sha256 = resolve_disposable_observation_binding(
+                    cast(DisposableLaneStore, self._record_store),
+                    product=self._profile.product,
+                    context=self._lane.context,
+                    instance=self._lane.instance,
+                ).binding_sha256
             if self._lane.generic_web_cutover is not None:
                 from control_plane.generic_web_cutover import (
                     WebCutoverAuthorityStore,
@@ -1546,22 +1573,212 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
             )
 
+    def _require_standing_testing_admission(self) -> None:
+        if not self._standing_testing_permission or self._standing_effect_started:
+            return
+        try:
+            profile, lane = resolve_generic_web_deploy_lane(
+                record_store=self._record_store,
+                product=self._profile.product,
+                instance=self._lane.instance,
+            )
+            if (
+                not profile.is_active
+                or lane.instance != "testing"
+                or lane.generic_web_cutover is not None
+                or profile != self._profile
+                or lane != self._lane
+            ):
+                raise DisposableLaneSafetyUnknown("The qualified testing lane changed.")
+            binding = require_disposable_lane(
+                cast(DisposableLaneStore, self._record_store),
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+            )
+            target = self._resolve_deploy_target()
+            provider_target = cast(
+                _ProviderTargetReader, self._record_store
+            ).read_provider_target_record(context_name=lane.context, instance_name=lane.instance)
+            expected = target.deployed_target
+            resolved = target.resolved_target
+            lane_store = cast(DisposableLaneStore, self._record_store)
+            definition = lane_store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+            target_id = lane_store.read_dokploy_target_id_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+            if (
+                binding != self._standing_binding_sha256
+                or expected is None
+                or provider_target.to_deployed_target_reference() != expected
+                or resolved.target_id != expected.target_id
+                or resolved.target_id != target_id.target_id
+                or resolved.target_name != expected.display_name
+                or resolved.target_type != definition.target_type
+                or resolved.target_type
+                != (expected.provider_target_type or expected.target_category)
+            ):
+                raise DisposableLaneSafetyUnknown(
+                    "The prepared testing recipient or inputs changed."
+                )
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Standing testing deployment lacks current lane qualification."
+            ) from error
+
+    def _proved_no_effect_lifecycle_retry(
+        self,
+        operation_key: str,
+        lease: ProviderOperationLease,
+        recorder: ExecutionRecorder | None,
+        *,
+        require_current_declarations: bool = True,
+    ) -> bool:
+        if recorder is None or recorder.expected_record is None:
+            return False
+        if not isinstance(lease, ProviderEvidenceLease):
+            return False
+        lease.assert_current()
+        reservation = lease.evidence_reservation()
+        record = recorder.expected_record
+        receipt = execution_receipt(record)
+        snapshot = recorded_application_lifecycle(record)
+        target = self._resolve_deploy_target()
+        proved_original = (
+            not reservation.provider_effect_started_at
+            and not reservation.provider_effect_phase
+            and record.record_id == self._deployment_record_id(operation_key)
+            and record.deploy.status == "pending"
+            and record.deploy.deployment_id == GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            and receipt is not None
+            and not receipt.entries
+            and not receipt.settled_image_deployment_id
+            and snapshot is not None
+            and snapshot.mode == "deploy"
+            and snapshot.state in {"prepared", "not_started"}
+            and (snapshot.product, snapshot.context, snapshot.instance, snapshot.target_id)
+            == (
+                self._profile.product,
+                self._lane.context,
+                self._lane.instance,
+                target.resolved_target.target_id,
+            )
+            and (snapshot.artifact_id, snapshot.source_git_ref)
+            == (target.ship_request.artifact_id, target.ship_request.source_git_ref)
+            and snapshot.provider_id == self._deploy_provider.provider_id
+        )
+        if not proved_original or not require_current_declarations:
+            return proved_original
+        assert snapshot is not None
+        return snapshot.extensions == self._lane.generic_web_extensions
+
+    def _current_testing_inventory_digest(self) -> str:
+        try:
+            inventory = cast(
+                _ExecutionInventoryReader, self._record_store
+            ).read_environment_inventory(
+                context_name=self._lane.context, instance_name=self._lane.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        return evidence_digest(inventory.model_dump(mode="json") if inventory else None)
+
+    def _require_effect_admission(self) -> None:
+        if self._standing_effect_started:
+            return
+        self._require_standing_testing_admission()
+        if (
+            self._pre_effect_inventory_digest is not None
+            and self._pre_effect_inventory_digest != self._current_testing_inventory_digest()
+        ):
+            raise ApplicationLifecycleBaselineChanged("The original testing inventory changed.")
+
+    def _record_no_effect_lifecycle_refusal(
+        self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
+    ) -> None:
+        if recorder is None or recorder.expected_record is None:
+            return
+        snapshot = recorded_application_lifecycle(recorder.expected_record)
+        if snapshot is None or recorder.expected_record.deploy.status != "pending":
+            return
+        if not isinstance(lease, ProviderEvidenceLease):
+            raise ProviderMutationUnknownError("Original no-effect lease is unavailable.")
+        lease.assert_current()
+        reservation = lease.evidence_reservation()
+        if reservation.provider_effect_phase or reservation.provider_effect_started_at:
+            return
+        if not self._proved_no_effect_lifecycle_retry(
+            operation_key, lease, recorder, require_current_declarations=False
+        ):
+            raise ProviderMutationUnknownError("Original no-effect retirement is not proved.")
+        if snapshot.state == "not_started":
+            return
+        assert recorder is not None and recorder.expected_record is not None
+        assert isinstance(lease, ProviderEvidenceLease)
+        record = recorder.expected_record
+        snapshot = recorded_application_lifecycle(record)
+        assert snapshot is not None
+        retired = record.model_copy(
+            update={
+                "post_deploy_update": record.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {
+                            **record.post_deploy_update.evidence,
+                            **snapshot.model_copy(update={"state": "not_started"}).evidence(),
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            inventory = cast(
+                _ExecutionInventoryReader, self._record_store
+            ).read_environment_inventory(context_name=record.context, instance_name=record.instance)
+        except FileNotFoundError:
+            inventory = None
+        guard = getattr(self._record_store, "provider_evidence_guard")
+        with guard(lease.evidence_reservation, authority_checkpoint=self.execution_check):
+            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
+                reservation=lease.evidence_reservation(),
+                expected_deployment=record,
+                expected_inventory=inventory,
+                deployment=retired,
+                inventory=None,
+            )
+        recorder.expected_record = retired
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        self._standing_effect_started = self._settlement_operation == provider_operation_key
+        self._pre_effect_inventory_digest = None
         guard = (
             getattr(self._record_store, "provider_evidence_guard", None)
-            if self._application_testing(self._resolve_deploy_target())
+            if self._standing_testing_permission
+            or self._application_testing(self._resolve_deploy_target())
             else None
         )
+        if self._standing_testing_permission and guard is None:
+            raise ProviderMutationRejectedError(
+                DisposableLaneSafetyUnknown("Testing effect admission requires durable storage.")
+            )
         context = nullcontext()
         if guard is not None:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ProviderMutationUnknownError(
                     "Application evidence requires its original execution lease."
                 )
-            context = guard(lease.evidence_reservation)
+            context = guard(
+                lease.evidence_reservation,
+                effect_admission_checkpoint=self._require_effect_admission,
+            )
         with context:
+            try:
+                self._require_standing_testing_admission()
+            except DisposableLaneSafetyUnknown as error:
+                raise ProviderMutationRejectedError(error) from error
             return self._apply(provider_operation_key, lease)
 
     def _apply(
@@ -1615,6 +1832,7 @@ class GenericWebDeployProviderMutationAdapter:
             else:
                 lease.checkpoint_effect(phase)
                 effect_started = True
+                self._standing_effect_started = True
                 known_dispatch_refusal = phase == TESTING_DISPATCH_REFUSED_PHASE
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
@@ -1625,6 +1843,11 @@ class GenericWebDeployProviderMutationAdapter:
             if self._application_testing(resolved_target)
             else None
         )
+        if recorder is not None and isinstance(lease, ProviderEvidenceLease):
+            lease.assert_current()
+            reservation = lease.evidence_reservation()
+            if not reservation.provider_effect_phase and not reservation.provider_effect_started_at:
+                self._pre_effect_inventory_digest = recorder.receipt.inventory_baseline_digest
         try:
             expected_inventory = (
                 cast(_ExecutionInventoryReader, self._record_store).read_environment_inventory(
@@ -1696,6 +1919,21 @@ class GenericWebDeployProviderMutationAdapter:
 
         try:
             resolved_target = self._resolve_deploy_target()
+            proved_no_effect_retry = False
+            if recorder is not None and recorder.expected_record is not None:
+                historical_no_effect = self._proved_no_effect_lifecycle_retry(
+                    provider_operation_key, lease, recorder, require_current_declarations=False
+                )
+                if historical_no_effect:
+                    if not self._proved_no_effect_lifecycle_retry(
+                        provider_operation_key, lease, recorder
+                    ):
+                        raise ApplicationLifecycleBaselineChanged(
+                            "The original testing baseline changed."
+                        )
+                    proved_no_effect_retry = True
+            if self._pre_effect_inventory_digest is not None:
+                self._require_effect_admission()
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -1719,19 +1957,27 @@ class GenericWebDeployProviderMutationAdapter:
                 # provider effect or replacing the last recoverable phase.
                 before_failure_records_commit=(
                     (lambda: checkpoint("provider_dispatch_prepared"))
-                    if resolved_target.testing_runtime_digest
+                    if recorder is not None or resolved_target.testing_runtime_digest
                     else None
                 ),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
+                proved_no_effect_retry=proved_no_effect_retry,
+                established_testing_predecessor=self._standing_testing_permission,
             )
         except TimeoutError as error:
             if self._lane.generic_web_cutover is not None:
                 raise ProviderMutationUnknownError(type(error).__name__) from error
             raise
-        except (FileNotFoundError, ValueError) as error:
+        except (FileNotFoundError, ValueError, ProviderMutationRejectedError) as error:
             if self._lane.generic_web_cutover is not None and effect_started:
                 raise ProviderMutationUnknownError(type(error).__name__) from error
+            try:
+                self._record_no_effect_lifecycle_refusal(provider_operation_key, lease, recorder)
+            except Exception as publication_error:
+                raise ProviderMutationUnknownError(str(publication_error)) from publication_error
+            if isinstance(error, ProviderMutationRejectedError):
+                raise
             raise ProviderMutationRejectedError(error)
         except click.ClickException as error:
             from control_plane.lane_movement import LaneMovementRefused

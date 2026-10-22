@@ -27,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.drivers import native_routes
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
     require_unchanged_production_artifact,
@@ -135,10 +136,14 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import OutboxWithIdempotencyRequest, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
+)
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleBaselineChanged,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
@@ -1222,14 +1227,22 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        explicitly_authorized = native_routes._native_driver_route_authorization_allows(
             endpoint=apply_generic_web_deploy,
             authorization_allows=dependencies.authorization_allows,
             identity=identity,
             product=profile.product,
             context=lane.context,
             instances=(lane.instance,),
-        ):
+        )
+        standing_testing_permission = (
+            not explicitly_authorized
+            and isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and lane.instance == "testing"
+            and lane.generic_web_cutover is None
+        )
+        if not explicitly_authorized and not standing_testing_permission:
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -1288,6 +1301,7 @@ def build_generic_web_write_route_handlers(
             profile=profile,
             lane=lane,
             trace_id=trace_id,
+            standing_testing_permission=standing_testing_permission,
         )
         try:
             return await dependencies.run_provider_mutation(
@@ -1304,6 +1318,28 @@ def build_generic_web_write_route_handlers(
                 ),
                 reconcile_message=("The generic web deploy requires reconciliation before retry."),
             )
+        except ApplicationLifecycleBaselineChanged as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_baseline_changed",
+                message=(
+                    "The unstarted original's captured testing baseline changed. Its saved baseline "
+                    "is preserved. Start a new deployment operation to capture the current "
+                    "baseline after reviewing the change."
+                ),
+            ) from error
+        except DisposableLaneSafetyUnknown as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_safety_unknown",
+                message=(
+                    "Testing deployment requires current lane safety facts. "
+                    "Inspect and collect disposable-lane observations; unresolved "
+                    "usage, data custody or production isolation needs its factual prerequisite."
+                ),
+            ) from error
         except FileNotFoundError as error:
             raise dependencies.http_error(
                 status_code=404,

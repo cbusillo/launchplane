@@ -175,6 +175,30 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         return result, store
 
+    def test_completed_activation_does_not_reinherit_historical_qualified_schedules(self) -> None:
+        result, store = self._deploy()
+        original = recorded_application_lifecycle(
+            store.read_deployment_record(result.deployment_record_id)
+        )
+        assert original is not None
+        with patch(
+            "control_plane.testing_activation.completed_application_predecessor", return_value=True
+        ):
+            snapshot = application_snapshot_for_deploy(
+                store=store,
+                product=original.product,
+                context=original.context,
+                instance=original.instance,
+                provider_id=original.provider_id,
+                target_id=original.target_id,
+                artifact_id=original.artifact_id,
+                source_git_ref=original.source_git_ref,
+                deployment_record_id="independent-successor",
+                extensions=GenericWebLaneExtensions(),
+                rollback=False,
+            )
+        self.assertIsNone(snapshot)
+
     def test_source_refusal_before_lifecycle_effects_leaves_no_draft_for_next_attempt(self) -> None:
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
