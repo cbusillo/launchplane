@@ -817,10 +817,27 @@ identity.
 Stage 2 apply is explicit and digest-gated. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
-inspection under `generic_web_deploy.execute` and requires an exact digest match
-before it writes anything. The dry-run plan action never admits apply, including
-production recovery. The
-digest intentionally excludes `observed_at`, so routine database observation
+inspection and requires an exact digest match before it writes anything.
+`generic_web_deploy.execute` remains the explicit authority for production,
+foreign originals and other identities. The service-marked Director agent on
+the authenticated `local_operator` transport may recover its own native testing
+original without that mixed grant. Its stored caller scope, route, key,
+fingerprint, product, context and exact captured target must agree with the
+original request and current owned testing lane. Event-reconciler originals
+have a different scope and retain their explicit apply authority. Terminal-agent
+mutation transport remains unavailable. See [authorization](authorization-authority.md).
+
+The dry-run plan action itself never admits apply. Own-original adoption,
+supported terminal settlement and completed replay use the existing evidence
+rules without renewed disposable qualification. A forward retry additionally
+requires current disposable-lane evidence, including use, custody and production
+isolation, before reacquiring the original and at actual effect admission.
+`testing_deploy_safety_unknown` names a factual prerequisite: inspect and collect
+`/v1/disposable-lanes/observations`, resolve protections, then refresh the review.
+It is not a request for a grant. Unknown original effects stay fenced and
+cannot be bypassed with another key.
+
+The digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
 provider classification, action, request, and bounded provider observation
 inputs remain part of the digest. Non-legacy digest inputs are unchanged. Only a

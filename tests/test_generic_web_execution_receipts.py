@@ -19,6 +19,9 @@ from control_plane.dokploy.application_runtime import (
     ApplicationTaskObservation,
 )
 from control_plane.http_app import idempotency_request_fingerprint
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorIdentity
+from tests.support.disposable_lanes import record_safety
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceUnqualified,
@@ -2488,16 +2491,17 @@ class ExecutionRecoveryTests(unittest.TestCase):
         qualified: bool = False,
         snapshot: ApplicationLifecycleSnapshot | None = None,
         idempotency_key: str = "",
+        scope: str = "",
     ) -> str:
-        reservation = _write_generic_web_recovery_reservation(
-            self.store,
-            _generic_web_recovery_reservation(
-                original_deploy=self.request,
-                idempotency_key=idempotency_key or phase,
-                state="running",
-                provider_effect_phase=phase,
-            ),
+        reservation = _generic_web_recovery_reservation(
+            original_deploy=self.request,
+            idempotency_key=idempotency_key or phase,
+            state="running",
+            provider_effect_phase=phase,
         )
+        if scope:
+            reservation = reservation.model_copy(update={"scope": scope})
+        reservation = _write_generic_web_recovery_reservation(self.store, reservation)
         operation = build_provider_operation_key(
             scope=reservation.scope,
             route_path=reservation.route_path,
@@ -2964,6 +2968,12 @@ class ExecutionRecoveryTests(unittest.TestCase):
     def test_healthy_image_terminal_unqualified_settles_once_without_inventory_success(
         self,
     ) -> None:
+        self.check_terminal_unqualified_settlement(own=False)
+
+    def test_own_terminal_failure_settles_without_renewed_disposable_qualification(self) -> None:
+        self.check_terminal_unqualified_settlement(own=True)
+
+    def check_terminal_unqualified_settlement(self, *, own: bool) -> None:
         phase = "post_deploy_finished"
         entry = ExecutionEntry(
             kind="product_executor",
@@ -2973,8 +2983,24 @@ class ExecutionRecoveryTests(unittest.TestCase):
             acknowledgement="completed",
             terminal="executor_completed",
         )
-        record_id = self.prepare(phase, ExecutionReceipt(entries=(entry,)))
+        scope = ""
+        if own:
+            self.app = _create_recovery_app(
+                root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
+            )
+            scope = idempotency_scope(
+                LocalOperatorIdentity(
+                    subject="local-owner-agent",
+                    token_label="local-owner-write",
+                    director_agent=True,
+                )
+            )
+        record_id = self.prepare(phase, ExecutionReceipt(entries=(entry,)), scope=scope)
         lane = self.profile.lanes[0]
+        if own:
+            record_safety(
+                self.store, self.profile.product, lane.context, lane.instance, data="only_copy"
+            )
         with (
             patch(
                 "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",

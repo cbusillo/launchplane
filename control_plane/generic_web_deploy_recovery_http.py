@@ -40,6 +40,8 @@ from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
     _GenericWebDeployProviderInspection,
 )
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import AuthorizationAllows, HttpErrorFactory
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -54,6 +56,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     GitHubHumanIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import provider_operation_response_payload
@@ -149,6 +152,7 @@ class _GenericWebDeployRecoveryInspection:
     runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
     adapter: GenericWebDeployProviderMutationAdapter | None = None
     provider_inspection: Any | None = None
+    standing_testing_permission: bool = False
 
     @property
     def recovery_digest(self) -> str:
@@ -477,6 +481,7 @@ async def _inspect_generic_web_deploy_recovery(
     trace_id: str,
     dependencies: GenericWebDeployRecoveryDependencies,
     authorization_actions: tuple[str, ...],
+    allow_own_testing_original: bool = False,
 ) -> _GenericWebDeployRecoveryInspection:
     original_payload: dict[str, object] | None = None
     expected_reservation: LaunchplaneIdempotencyRecord | None = None
@@ -523,14 +528,22 @@ async def _inspect_generic_web_deploy_recovery(
             code="invalid_request",
             message="Request could not be completed.",
         ) from error
-    if not _recovery_authorization_allows(
+    director_testing = (
+        allow_own_testing_original
+        and isinstance(identity, LocalOperatorIdentity)
+        and director_agent_identity(identity)
+        and lane.instance == "testing"
+        and lane.generic_web_cutover is None
+    )
+    requested_authorized = _recovery_authorization_allows(
         dependencies=dependencies,
         identity=identity,
         actions=authorization_actions,
         product=profile.product,
         context=lane.context,
         instance=lane.instance,
-    ):
+    )
+    if not director_testing and not requested_authorized:
         raise dependencies.http_error(
             status_code=403,
             trace_id=trace_id,
@@ -767,14 +780,23 @@ async def _inspect_generic_web_deploy_recovery(
             else:
                 legacy_provider_effect_started_at = reservation.provider_effect_started_at
 
-    if not _recovery_authorization_allows(
+    own_testing_original = (
+        director_testing
+        and reservation.scope == idempotency_scope(identity)
+        and operation_product == profile.product
+        and operation_context == lane.context
+        and operation_instance == lane.instance
+        and not legacy_snapshot_without_product
+    )
+    stored_authorized = _recovery_authorization_allows(
         dependencies=dependencies,
         identity=identity,
         actions=authorization_actions,
         product=operation_product,
         context=operation_context,
         instance=operation_instance,
-    ):
+    )
+    if not own_testing_original and not (requested_authorized and stored_authorized):
         raise dependencies.http_error(
             status_code=403,
             trace_id=trace_id,
@@ -957,6 +979,8 @@ async def _inspect_generic_web_deploy_recovery(
         runtime_close_out_evidence=runtime_close_out_evidence,
         adapter=adapter,
         provider_inspection=provider_inspection,
+        standing_testing_permission=own_testing_original
+        and not (requested_authorized and stored_authorized),
     )
 
 
@@ -1066,6 +1090,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             trace_id=trace_id,
             dependencies=dependencies,
             authorization_actions=("generic_web_deploy.execute",),
+            allow_own_testing_original=True,
         )
         assert isinstance(inspection.request, GenericWebDeployRecoveryApplyRequest)
         recovery_request = inspection.request
@@ -1118,6 +1143,24 @@ def build_generic_web_deploy_recovery_apply_handler(
             )
         if inspection.adapter is None:
             raise RuntimeError("Generic web deploy recovery apply requires an adapter.")
+        if (
+            inspection.proposed_action == "retry_original_operation"
+            and not inspection.adapter.testing_settlement_pending
+            and inspection.standing_testing_permission
+        ):
+            try:
+                inspection.adapter.require_standing_testing_retry()
+            except DisposableLaneSafetyUnknown as error:
+                raise dependencies.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="testing_deploy_safety_unknown",
+                    message=(
+                        "Testing recovery requires current lane safety facts before forward work. "
+                        "Inspect and collect disposable-lane observations; resolve use, custody "
+                        "and production isolation protections."
+                    ),
+                ) from error
         recovery_metadata = _recovery_metadata(inspection)
         if (
             inspection.proposed_action == "retry_original_operation"
@@ -1224,21 +1267,29 @@ def build_generic_web_deploy_recovery_apply_handler(
                 code="reservation_changed",
                 message="Generic web deploy recovery reservation changed before retry.",
             )
-        result = resume_acquired_provider_operation(
-            store=record_store,
-            reservation=retry.record,
-            response_trace_id=trace_id,
-            adapter=_GenericWebRecoveryApplyAdapter(
-                delegate=inspection.adapter,
-                recovery_metadata=recovery_metadata,
-                execution_inspection=action_inspection.provider_inspection
-                if execution_recovery
-                else None,
-                original_reconciliation_key=action_inspection.reservation.reconciliation_key
-                if execution_recovery
-                else "",
-            ),
-        )
+        try:
+            result = resume_acquired_provider_operation(
+                store=record_store,
+                reservation=retry.record,
+                response_trace_id=trace_id,
+                adapter=_GenericWebRecoveryApplyAdapter(
+                    delegate=inspection.adapter,
+                    recovery_metadata=recovery_metadata,
+                    execution_inspection=action_inspection.provider_inspection
+                    if execution_recovery
+                    else None,
+                    original_reconciliation_key=action_inspection.reservation.reconciliation_key
+                    if execution_recovery
+                    else "",
+                ),
+            )
+        except DisposableLaneSafetyUnknown as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_safety_unknown",
+                message="Testing recovery safety changed before forward work. Refresh disposable-lane observations.",
+            ) from error
         if result.status in {"completed", "adopted", "replayed"} and result.record is not None:
             return _apply_response(
                 trace_id=trace_id,

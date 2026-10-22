@@ -1573,6 +1573,16 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
             )
 
+    def require_standing_testing_retry(self) -> None:
+        self._standing_testing_permission = True
+        self._standing_binding_sha256 = resolve_disposable_observation_binding(
+            cast(DisposableLaneStore, self._record_store),
+            product=self._profile.product,
+            context=self._lane.context,
+            instance=self._lane.instance,
+        ).binding_sha256
+        self._require_standing_testing_admission()
+
     def _require_standing_testing_admission(self) -> None:
         if not self._standing_testing_permission or self._standing_effect_started:
             return
