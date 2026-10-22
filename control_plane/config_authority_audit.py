@@ -3131,7 +3131,9 @@ def _allow_reason(
     allow_context = allow_context or {}
     normalized = path.replace("\\", "/")
     key_text = _semantic_full_key_text(key)
-    if _is_codeowners_path(normalized) or _is_renovate_config_path(normalized):
+    if _is_codeowners_path(normalized):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if _is_renovate_config_path(normalized) and not _is_renovate_written_content(key_text):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized.startswith("docs/")
@@ -4233,6 +4235,10 @@ def _is_codeowners_path(path: str) -> bool:
 
 def _is_renovate_config_path(path: str) -> bool:
     return path in {"renovate.json", ".github/renovate.json"}
+
+
+def _is_renovate_written_content(key_text: str) -> bool:
+    return "AUTOREPLACESTRINGTEMPLATE" in key_text or "POSTUPGRADETASKS" in key_text
 
 
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:

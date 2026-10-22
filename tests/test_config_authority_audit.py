@@ -1088,6 +1088,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "packageRules": [
                             {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False}
                         ],
+                        "customManagers": [
+                            {
+                                "autoReplaceStringTemplate": (
+                                    "API_BASE_URL=https://api.production.example.com"
+                                )
+                            }
+                        ],
+                        "postUpgradeTasks": {
+                            "commands": ["curl https://deploy.production.example.com"]
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -1096,18 +1106,20 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
             payload = build_config_authority_audit(control_plane_root=root)
 
-        renovate_findings = [
-            finding for finding in _findings(payload) if finding["path"] == "renovate.json"
-        ]
+        allow_reasons = {
+            finding["key"]: finding["allow_reason"]
+            for finding in _findings(payload)
+            if finding["path"] == "renovate.json"
+        }
         self.assertEqual(
-            {finding["key"] for finding in renovate_findings},
-            {"$schema", "extends[0]", "packageRules[0].matchPackageNames[1]"},
-        )
-        self.assertTrue(
-            all(
-                finding["allow_reason"] == "repo_metadata_ergonomics"
-                for finding in renovate_findings
-            )
+            allow_reasons,
+            {
+                "$schema": "repo_metadata_ergonomics",
+                "extends[0]": "repo_metadata_ergonomics",
+                "packageRules[0].matchPackageNames[1]": "repo_metadata_ergonomics",
+                "customManagers[0].autoReplaceStringTemplate": "",
+                "postUpgradeTasks.commands[0]": "",
+            },
         )
 
     def test_codeowners_and_local_filesystem_paths_are_repo_mechanics(self) -> None:
