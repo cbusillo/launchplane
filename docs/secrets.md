@@ -634,10 +634,6 @@ decryption key state denies the reveal or resolution.
   allowances read (`GET /v1/product-config/integration-allowances`) lists the
   integration keys stored for that lane with their declared class and reason,
   and the product environment read shows both on each managed secret.
-  Allowance reads, dry-runs and applies use the recorded product's exact,
-  unambiguous lane ownership for every driver, including generic-web. They
-  retain action authorization, reviewed-plan and commit-time ownership checks;
-  applying an allowance to a production lane is refused.
 - Generic-web deploys, promotions and rollbacks read the lane's integration keys
   back after the deploy: the runtime key-safety rules run over every managed
   secret delivered to the lane whose key names an integration, and the result

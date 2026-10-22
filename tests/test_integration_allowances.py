@@ -605,22 +605,26 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("hunter2", invalid.text)
         self.assertIn(missing.status_code, {403, 404})
 
-    async def test_refuses_duplicate_lane_ownership(self) -> None:
+    async def test_refuses_a_lane_claimed_by_another_product(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = self._store(root)
             profile = store.read_product_profile_record(_PRODUCT)
-            testing_lane = next(lane for lane in profile.lanes if lane.instance == "testing")
             store.write_product_profile_record(
-                profile.model_copy(update={"lanes": (*profile.lanes, testing_lane)})
+                profile.model_copy(update={"product": "other-product"})
+            )
+            before = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
             )
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 
             read = await self._get(app)
             dry_run = await self._post(app, _request_payload())
+            after = store.read_dokploy_target_record(context_name=_CONTEXT, instance_name="testing")
 
-        self.assertEqual(read.status_code, 400)
-        self.assertEqual(dry_run.status_code, 400)
+        self.assertEqual(read.status_code, 403)
+        self.assertEqual(dry_run.status_code, 403)
+        self.assertEqual(after, before)
 
 
 class GenericWebIntegrationAllowancesRouteTests(IntegrationAllowancesRouteTests):
