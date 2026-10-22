@@ -19,7 +19,6 @@ from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
     evaluate_tenant_admission_candidate,
-    TenantAdmissionControllerError,
     TenantAdmissionControllerRunOnceEnvelope,
     execute_tenant_admission_controller_run_once,
 )
@@ -40,7 +39,7 @@ MERGE_COMMIT_SHA = "c" * 40
 class TenantAdmissionControllerTests(unittest.TestCase):
     def test_classification_only_store_cannot_establish_merge_readiness(self) -> None:
         transport = _TenantControllerTransport()
-        with self.assertRaises(TenantAdmissionControllerError):
+        with self.assertRaises(ValueError):
             evaluate_tenant_admission_candidate(
                 request=_request(mutate=False),
                 store=_classification_only_store((_classification(),)),

@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_controller_state import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
 from control_plane.github_app_configuration import ADVISORY_GITHUB_APP_ID_ENV_KEY
 from control_plane.merge_train_controller_run_once import (
     MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
@@ -22,11 +23,12 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
+    MergeTrainGitHubStaleHeadError,
 )
 from control_plane.product_review_status import OWNER_REVIEW_STATUS_CONTEXT
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
-    TenantAdmissionControllerError,
+    TenantAdmissionControllerGitHubClient,
     TenantAdmissionControllerStaleCandidateError,
     TenantAdmissionControllerRunOnceResult,
     evaluate_tenant_admission_candidate,
@@ -152,38 +154,30 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
         self.assertEqual(self._run(transport).outcome, "merged")
         self.assertTrue(transport.merge_called)
 
-    def test_changed_decision_is_read_at_recheck_and_immediately_before_merge(self) -> None:
+    def test_veto_saved_after_readiness_blocks_the_fresh_pre_merge_evaluation(self) -> None:
         original_checkpoint = MergeTrainControllerLeaseContext.checkpoint
-        for phase in ("pre_merge_recheck", "merge_pull_request"):
-            with self.subTest(phase=phase):
-                self.store.write_product_review_decision_record(
-                    _decision(
-                        decision="accepted", record_id="latest", decided_at="2026-10-22T09:00:00Z"
-                    )
-                )
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", record_id="latest")
+        )
 
-                def checkpoint(
-                    lease: MergeTrainControllerLeaseContext, **updates: object
-                ) -> MergeTrainControllerStateRecord:
-                    record = original_checkpoint(lease, **updates)
-                    if updates.get("active_phase") == phase:
-                        self.store.write_product_review_decision_record(
-                            _decision(record_id="latest", decided_at="2026-10-22T09:00:00Z")
-                        )
-                    return record
+        def checkpoint(
+            lease: MergeTrainControllerLeaseContext, **updates: object
+        ) -> MergeTrainControllerStateRecord:
+            record = original_checkpoint(lease, **updates)
+            if updates.get("active_phase") == "pre_merge_recheck":
+                self.store.write_product_review_decision_record(_decision(record_id="latest"))
+            return record
 
-                transport = _ClientReviewTransport()
-                with patch.object(MergeTrainControllerLeaseContext, "checkpoint", checkpoint):
-                    if phase == "merge_pull_request":
-                        with self.assertRaises(TenantAdmissionControllerStaleCandidateError):
-                            self._run(transport)
-                    else:
-                        self.assertEqual(self._run(transport).outcome, "blocked")
-                self.assertFalse(transport.merge_called)
-                state = self.store.list_merge_train_controller_state_records(
-                    repository=_candidate().repository, base_branch="main"
-                )[0]
-                self.assertEqual(state.status, "idle")
+        transport = _ClientReviewTransport()
+        with patch.object(MergeTrainControllerLeaseContext, "checkpoint", checkpoint):
+            self.assertEqual(self._run(transport).outcome, "blocked")
+        self.assertFalse(transport.merge_called)
+        state = self.store.list_merge_train_controller_state_records(
+            repository=_candidate().repository, base_branch="main"
+        )[0]
+        self.assertEqual(state.status, "idle")
+        lease = self._acquire_train_lease()
+        lease.release()
 
     def test_resumed_unmerged_effect_rechecks_veto_but_merged_effect_is_adopted(self) -> None:
         for merged, expected in ((False, "blocked"), (True, "adopted")):
@@ -206,7 +200,8 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                 self.assertEqual(result.outcome, expected)
                 self.assertFalse(resumed.merge_called)
 
-    def test_failed_final_review_read_does_not_retain_an_uncertain_merge_fence(self) -> None:
+    def test_failed_pre_merge_review_read_does_not_retain_an_uncertain_merge_fence(self) -> None:
+        original_review = TenantAdmissionControllerGitHubClient.require_current_client_review
         for endpoint in ("pulls", "check-runs"):
             for failure in (
                 MergeTrainGitHubError("provider unavailable", status_code=503),
@@ -219,18 +214,29 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                     def request(
                         *, method: str, path: str, body: dict[str, object] | None = None
                     ) -> object:
-                        state = self.store.list_merge_train_controller_state_records(
-                            repository=_candidate().repository, base_branch="main"
-                        )[0]
-                        if (
-                            state.active_phase == "merge_pull_request"
-                            and method == "GET"
-                            and f"/{endpoint}" in path
-                        ):
+                        if method == "GET" and f"/{endpoint}" in path:
                             raise failure
                         return original_request(method=method, path=path, body=body)
 
-                    with patch.object(transport, "request", side_effect=request):
+                    def require_review(
+                        client: TenantAdmissionControllerGitHubClient,
+                        *,
+                        candidate: TenantMergeCandidate,
+                    ) -> None:
+                        state = self.store.list_merge_train_controller_state_records(
+                            repository=_candidate().repository, base_branch="main"
+                        )[0]
+                        if state.active_phase == "pre_merge_recheck":
+                            with patch.object(transport, "request", side_effect=request):
+                                original_review(client, candidate=candidate)
+                        else:
+                            original_review(client, candidate=candidate)
+
+                    with patch.object(
+                        TenantAdmissionControllerGitHubClient,
+                        "require_current_client_review",
+                        require_review,
+                    ):
                         with self.assertRaises(type(failure)):
                             self._run(transport)
                     self.assertFalse(transport.merge_called)
@@ -242,33 +248,86 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                     self.assertEqual(state.status, "idle")
 
     def test_definite_merge_refusal_releases_the_shared_controller_fence(self) -> None:
-        transport = _ClientReviewTransport()
-        original_request = transport.request
+        for status in (403, 404, 405, 409, 422):
+            with self.subTest(status=status):
+                transport = _ClientReviewTransport()
+                original_request = transport.request
 
-        def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
-            if method == "PUT" and path.endswith("/merge"):
-                transport.merge_called = True
-                raise MergeTrainGitHubError("merge refused", status_code=405)
-            return original_request(method=method, path=path, body=body)
+                def request(
+                    *, method: str, path: str, body: dict[str, object] | None = None
+                ) -> object:
+                    if method == "PUT" and path.endswith("/merge"):
+                        transport.merge_called = True
+                        error_type = (
+                            MergeTrainGitHubStaleHeadError
+                            if status == 409
+                            else MergeTrainGitHubError
+                        )
+                        raise error_type("merge refused", status_code=status)
+                    return original_request(method=method, path=path, body=body)
 
-        with patch.object(transport, "request", side_effect=request):
-            with self.assertRaises(MergeTrainGitHubMergeRejectedError):
-                self._run(transport)
-        self.assertTrue(transport.merge_called)
-        self.assertFalse(transport.merged)
-        state = self.store.list_merge_train_controller_state_records(
-            repository=_candidate().repository, base_branch="main"
-        )[0]
-        lease = self._acquire_train_lease()
-        lease.release()
-        self.assertEqual(state.status, "idle")
+                expected_error = (
+                    TenantAdmissionControllerStaleCandidateError
+                    if status == 409
+                    else MergeTrainGitHubMergeRejectedError
+                    if status == 405
+                    else MergeTrainGitHubError
+                )
+                with patch.object(transport, "request", side_effect=request):
+                    with self.assertRaises(expected_error):
+                        self._run(transport)
+                self.assertTrue(transport.merge_called)
+                self.assertFalse(transport.merged)
+                state = self.store.list_merge_train_controller_state_records(
+                    repository=_candidate().repository, base_branch="main"
+                )[0]
+                lease = self._acquire_train_lease()
+                lease.release()
+                self.assertEqual(state.status, "idle")
+
+    def test_unknown_merge_outcomes_retain_the_shared_controller_fence(self) -> None:
+        for failure in (
+            MergeTrainGitHubError("request timed out", status_code=408),
+            MergeTrainGitHubError("provider unavailable", status_code=503),
+            MergeTrainGitHubError("response lost"),
+            TimeoutError("transport timed out"),
+        ):
+            with self.subTest(failure=repr(failure)):
+                self.store.write_product_review_decision_record(
+                    _decision(decision="accepted", record_id="latest")
+                )
+                transport = _ClientReviewTransport()
+                original_request = transport.request
+
+                def request(
+                    *, method: str, path: str, body: dict[str, object] | None = None
+                ) -> object:
+                    if method == "PUT" and path.endswith("/merge"):
+                        transport.merge_called = True
+                        raise failure
+                    return original_request(method=method, path=path, body=body)
+
+                with patch.object(transport, "request", side_effect=request):
+                    with self.assertRaises(type(failure)):
+                        self._run(transport)
+                self.assertTrue(transport.merge_called)
+                state = self.store.list_merge_train_controller_state_records(
+                    repository=_candidate().repository, base_branch="main"
+                )[0]
+                self.assertEqual(state.status, "reconcile_required")
+                with self.assertRaises(MergeTrainControllerAdoptionRejectedError):
+                    self._acquire_train_lease()
+                self.store.write_product_review_decision_record(_decision(record_id="latest"))
+                resumed = _ClientReviewTransport()
+                self.assertEqual(self._run(resumed).outcome, "blocked")
+                self.assertFalse(resumed.merge_called)
 
     def test_missing_saved_decision_reader_fails_closed(self) -> None:
         with patch.object(self.store, "list_product_review_decision_records", None):
             for mutate in (False, True):
                 with self.subTest(mutate=mutate):
                     transport = _ClientReviewTransport()
-                    with self.assertRaises(TenantAdmissionControllerError):
+                    with self.assertRaises(ValueError):
                         execute_tenant_admission_controller_run_once(
                             request=_request(mutate=mutate),
                             store=self.store,
