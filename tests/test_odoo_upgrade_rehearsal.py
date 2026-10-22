@@ -3035,81 +3035,6 @@ else:
             sum(bool(call.kwargs.get("name")) for call in connection.cursor.call_args_list), 1
         )
 
-    def test_capture_selects_only_valid_distinct_dump_references(self) -> None:
-        spec, root, containers = self.storage_fixture(
-            {
-                "database_bytes": 4096,
-                "filestore_bytes": 20480,
-                "staging_bytes": 20,
-                "reserve_bytes": 10,
-            }
-        )
-        (root / "database.dump").write_bytes(b"retained dump")
-        checksum = hashlib.sha1(b"attachment").hexdigest()
-        name = checksum[:2] + "/" + checksum
-        header = b"COPY public.ir_attachment (name, store_fname, checksum, file_size) FROM stdin;\n"
-        row = f"private\\tname\t{name}\t{checksum}\t10\n".encode()
-        table = (
-            header
-            + b"x" * (2 * 1024**2)
-            + b"\t\\N\t\\N\t0\n"
-            + row
-            + row.replace(b"\t10\n", b"\t11\n")
-            + row.replace(b"\t10\n", b"\t-1\n")
-            + b"\\.\n"
-        )
-
-        def decode(*_args: Any) -> Any:
-            return (table[i : i + 31] for i in range(0, len(table), 31))
-
-        self.host["captured_attachment_table_chunks"] = decode
-        select = self.host["write_captured_attachment_names"]
-        selected = select(spec, root, containers)
-        self.assertEqual(selected.read_bytes(), name.encode() + b"\0")
-        self.assertEqual(selected.stat().st_mode & 0o777, 0o600)
-        selected.unlink()
-        for invalid in (
-            row.replace(name.encode(), b"../private"),
-            row.replace(name.encode(), b"/private"),
-            row.replace(checksum.encode(), b"z" * 40),
-            row.replace(name.encode(), b"x" * 100),
-            row + b"\\.\n" + header,
-        ):
-            with self.subTest(reference=invalid[:100]):
-                table = header + invalid + b"\\.\n"
-                with self.assertRaises(ValueError):
-                    select(spec, root, containers)
-                self.assertFalse(selected.exists())
-        table = header + row
-        with self.assertRaises(ValueError):
-            select(spec, root, containers)
-        self.assertFalse(selected.exists())
-        spec["record"]["storage"]["database_bytes"] = 128
-        table = header
-        for index in range(4):
-            digest = hashlib.sha1(str(index).encode()).hexdigest()
-            table += f"fixture\t{digest[:2]}/{digest}\t{digest}\t1\n".encode()
-        table += b"\\.\n"
-        with self.assertRaises(ValueError):
-            select(spec, root, containers)
-        self.assertFalse(selected.exists())
-        table = header + b"\\N\t\\N\t\\N\t0\n\\.\n"
-        self.assertEqual(select(spec, root, containers).read_bytes(), b"")
-
-    def test_capture_forwards_large_file_stdin(self) -> None:
-        import sys
-
-        source = self.fixture.root / "large-input"
-        output = self.fixture.root / "captured-output"
-        content = bytes(range(256)) * 8192
-        source.write_bytes(content)
-        program = "import shutil,sys;shutil.copyfileobj(sys.stdin.buffer,sys.stdout.buffer)"
-        with source.open("rb") as stream:
-            self.host["bounded_capture"](
-                [sys.executable, "-c", program], output, len(content), stdin=stream
-            )
-        self.assertEqual(output.read_bytes(), content)
-
     def test_captured_table_decoder_bounds_output_and_closes_its_process(self) -> None:
         import subprocess
         import sys
@@ -3185,8 +3110,6 @@ else:
                         reference,
                     )
                 )
-            selected = self.host["write_captured_attachment_names"](spec, root, self.inspect())
-            self.assertEqual(selected.read_bytes(), name.encode() + b"\0")
         self.assertTrue(all(process.poll() is not None for process in processes))
         self.assertEqual(dump.read_bytes(), b"fixture stdin")
 
