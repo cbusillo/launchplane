@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>cbusillo/odoo-devkit//renovate/default"],
+  "packageRules": [
+    {
+      "description": "Ruff and mypy updates can change lint results, so each gets its own pull request.",
+      "matchPackageNames": ["ruff"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "ruff"
+    },
+    {
+      "matchPackageNames": ["mypy"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "mypy"
+    },
+    {
+      "description": "macOS persistent-profile shutdown regression; qualification: #3830.",
+      "matchPackageNames": ["@playwright/test"],
+      "allowedVersions": "!/^1\\.64\\./"
+    }
+  ]
+}
