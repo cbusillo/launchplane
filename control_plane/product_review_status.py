@@ -182,8 +182,7 @@ class OwnerReviewStatusPublisher:
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
                 return None
-            if facts.state == "closed":
-                return None
+            closed = facts.state == "closed"
             written: OwnerReviewStatus | None = None
             try:
                 with store.product_review_lock(
@@ -207,40 +206,42 @@ class OwnerReviewStatusPublisher:
                                 "pull_request_number": pull_request_number,
                             },
                         )
-                    intent = change_client_review(
-                        body=facts.body,
-                        labels=facts.labels,
-                        review_label=profile.owner.review_label,
-                        pure_dependency_update=facts.pure_dependency_update,
-                        director_standing=profile.release_on_acceptance == "director_standing",
-                    )
-                    synthetic = not intent.explicit_override and recorded_train_candidate(
-                        store=store,
-                        repository=repository,
-                        head={
-                            "ref": facts.head_ref,
-                            "sha": facts.head_sha,
-                            "repo": {"full_name": facts.head_repository},
-                        },
-                        base_branch=facts.base_branch,
-                    )
-                    if not synthetic:
-                        written = self._write_status(
-                            store=store,
-                            profile=profile,
-                            pull_request_number=pull_request_number,
-                            facts=facts,
-                            token=token,
-                            existing_only=not profile.owner.is_set
-                            and profile.owner.review_label.strip().casefold() not in facts.labels,
+                    if not closed:
+                        intent = change_client_review(
+                            body=facts.body,
+                            labels=facts.labels,
+                            review_label=profile.owner.review_label,
+                            pure_dependency_update=facts.pure_dependency_update,
+                            director_standing=profile.release_on_acceptance == "director_standing",
                         )
+                        synthetic = not intent.explicit_override and recorded_train_candidate(
+                            store=store,
+                            repository=repository,
+                            head={
+                                "ref": facts.head_ref,
+                                "sha": facts.head_sha,
+                                "repo": {"full_name": facts.head_repository},
+                            },
+                            base_branch=facts.base_branch,
+                        )
+                        if not synthetic:
+                            written = self._write_status(
+                                store=store,
+                                profile=profile,
+                                pull_request_number=pull_request_number,
+                                facts=facts,
+                                token=token,
+                                existing_only=not profile.owner.is_set
+                                and profile.owner.review_label.strip().casefold()
+                                not in facts.labels,
+                            )
             except Exception:
                 _LOGGER.warning(
                     "Client review status could not be written.",
                     exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
-            if retire_leftovers:
+            if retire_leftovers and not closed:
                 for retire in (self._retire_owner_acceptance_check,):
                     try:
                         retire(repository=repository, facts=facts, token=token)

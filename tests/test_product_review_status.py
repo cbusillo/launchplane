@@ -1,5 +1,7 @@
 import json
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
@@ -75,13 +77,15 @@ class _GitHub:
         self.head_ref = "pr-42"
         self.base_ref = ""
         self.state: str | None = "open"
+        self.merged = False
         self.statuses: list[dict[str, object]] = []
         self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
         self.comments: list[dict[str, object]] = []
         self.writes: list[tuple[str, str, dict[str, object]]] = []
         self.fail_writes = False
-        self.revoked_app_tokens = 0
+        self.minted_app_tokens: list[str] = []
+        self.revoked_app_tokens: list[str] = []
         self.revoked_delivery_tokens: list[str] = []
         self.lose_comment_response = False
         self.fail_comment_reads = False
@@ -100,7 +104,7 @@ class _GitHub:
             if revoked_token == "feedback-token":
                 self.revoked_delivery_tokens.append(revoked_token)
             else:
-                self.revoked_app_tokens += 1
+                self.revoked_app_tokens.append(revoked_token)
             return None
         if method != "GET":
             assert isinstance(body, dict)
@@ -110,6 +114,7 @@ class _GitHub:
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
                 "state": self.state,
+                "merged": self.merged,
                 "body": self.body,
                 "head": {
                     "sha": self.head_sha,
@@ -170,6 +175,14 @@ class _GitHub:
             return check_run
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
 
+    def app_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
+        token = replace(
+            _app_token(repository, repository_id),
+            token=f"app-token-{len(self.minted_app_tokens)}",
+        )
+        self.minted_app_tokens.append(token.token)
+        return token
+
     def _record_review_check(self, check_run: dict[str, object]) -> None:
         if check_run["name"] != "launchplane/owner-review":
             return
@@ -210,7 +223,7 @@ def _publisher(github: _GitHub) -> OwnerReviewStatusPublisher:
         public_origin=_PUBLIC_ORIGIN,
         github_token=lambda **_: "feedback-token",
         api_request=github,
-        github_app_token=_app_token,
+        github_app_token=github.app_token,
         github_feedback_app_id=lambda **_: 99,
     )
 
@@ -266,7 +279,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
             patch("control_plane.product_review_status.resolve_advisory_github_app_identity"),
             patch(
                 "control_plane.product_review_status.mint_repository_installation_token",
-                side_effect=lambda **kwargs: _app_token(
+                side_effect=lambda **kwargs: github.app_token(
                     kwargs["repository"], kwargs["repository_id"]
                 ),
             ),
@@ -277,39 +290,95 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(github.check_runs[-1]["name"], "launchplane/owner-review")
         self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
-        self.assertEqual(github.revoked_app_tokens, 1)
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
         self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
 
-    def test_closed_pr_leaves_check_and_pending_decision_feedback_untouched(self) -> None:
+    def test_closed_pr_delivers_saved_feedback_without_current_review_effects(self) -> None:
         github = _GitHub()
         self._publish(github)
+        github.check_runs.append(
+            {
+                "id": 32,
+                "name": "launchplane/owner-acceptance",
+                "app": {"id": _APP_ID},
+                "status": "in_progress",
+            }
+        )
         decision = _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
         self.store.write_product_review_decision_record(decision)
         github.state = "closed"
-        writes = list(github.writes)
+        github.base_ref = "main"
+        checks = [dict(run) for run in github.check_runs]
+        minted = list(github.minted_app_tokens)
         with (
             patch("control_plane.product_review_status.record_decision_base") as base,
             patch("control_plane.product_review_status.carry_owner_acceptance") as carry,
-            patch(
-                "control_plane.product_review_status.OwnerReviewStatusPublisher._advisory_token",
-                autospec=True,
-                side_effect=lambda _publisher, repository, repository_id: _app_token(
-                    repository, repository_id
-                ),
-            ) as advisory,
         ):
-            self._publish(github, retire_leftovers=True)
-        self.assertEqual(github.writes, writes)
-        self.assertEqual(github.check_runs[0]["status"], "in_progress")
+            for _ in range(2):
+                result = _publisher(github).publish(
+                    store=self.store,
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    retire_leftovers=True,
+                )
+                self.assertIsNone(result)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.check_runs, checks)
+        self.assertEqual(github.minted_app_tokens, minted)
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
         self.assertEqual(
-            self.store.list_product_review_decision_records(
-                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            saved,
+            (
+                decision.model_copy(
+                    update={
+                        "feedback_url": f"https://github.com/{_REPOSITORY}/pull/{_PULL_REQUEST}"
+                        f"#issuecomment-{github.comments[0]['id']}"
+                    }
+                ),
             ),
-            (decision,),
         )
         base.assert_not_called()
         carry.assert_not_called()
-        advisory.assert_not_called()
+
+    def test_closed_pr_lock_failures_cannot_update_review_checks(self) -> None:
+        for failure in ("enter", "exit"):
+            with self.subTest(failure=failure):
+                github = _GitHub()
+                github.state = "closed"
+                github.check_runs.append(
+                    {
+                        "id": 32,
+                        "name": "launchplane/owner-acceptance",
+                        "app": {"id": _APP_ID},
+                        "status": "in_progress",
+                    }
+                )
+                checks = [dict(run) for run in github.check_runs]
+                self.store.write_product_review_decision_record(
+                    _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+                )
+
+                @contextmanager
+                def failing_lock(**_: object) -> Iterator[None]:
+                    if failure == "enter":
+                        raise RuntimeError("Review lock acquisition failed")
+                    yield
+                    raise RuntimeError("Review lock transaction commit failed")
+
+                with patch.object(self.store, "product_review_lock", failing_lock):
+                    self._publish(github, retire_leftovers=True)
+
+                self.assertEqual(bool(github.comments), failure == "exit")
+                self.assertEqual(github.minted_app_tokens, [])
+                self.assertEqual(github.check_runs, checks)
+                self.assertTrue(
+                    all(
+                        path == f"/repos/{_REPOSITORY}/issues/{_PULL_REQUEST}/comments"
+                        for _, path, _ in github.writes
+                    )
+                )
 
     def test_unknown_pr_state_does_not_suppress_review_refresh(self) -> None:
         github = _GitHub()
@@ -347,6 +416,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
                 self.assertEqual((own["status"], own.get("conclusion")), ("completed", "neutral"))
                 self.assertEqual(foreign["status"], "in_progress")
+                self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
                 self.assertEqual(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -371,6 +441,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
                 self.assertEqual(github.writes, [])
                 self.assertEqual(github.check_runs[0]["status"], "in_progress")
+                self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
@@ -764,6 +835,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         assert isinstance(output, dict)
         self.assertEqual(output["title"], "Retired")
         self.assertIn("launchplane/owner-review", output["summary"])
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     def test_absent_or_foreign_leftovers_are_not_created_or_touched(self) -> None:
         github = _GitHub(labels=())
@@ -1029,7 +1101,14 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(github.comments), 1)
 
     async def test_retry_saved_feedback_without_preview_preserves_the_decision(self) -> None:
+        for state, merged in (("open", False), ("closed", False), ("closed", True)):
+            with self.subTest(state=state, merged=merged):
+                await self._retry_saved_feedback_without_preview(state=state, merged=merged)
+
+    async def _retry_saved_feedback_without_preview(self, *, state: str, merged: bool) -> None:
         github = _GitHub()
+        github.state = state
+        github.merged = merged
         self.store.write_product_profile_record(_profile())
         original = _decision(
             decision="accepted", head_sha=_OLDER_HEAD_SHA, decided_at="2026-09-25T12:00:00Z"
@@ -1068,6 +1147,11 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertFalse(response.json()["can_decide"])
             self.assertTrue(response.json()["latest_decision"]["feedback_url"])
+            self.assertEqual(
+                response.json()["latest_decision"]["feedback_url"],
+                f"https://github.com/{_REPOSITORY}/pull/{_PULL_REQUEST}"
+                f"#issuecomment-{github.comments[0]['id']}",
+            )
         saved = self.store.list_product_review_decision_records(
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )
@@ -1078,7 +1162,12 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(saved[0].feedback_requested)
         self.assertEqual(len(github.comments), 1)
-        self.assertEqual(github.statuses[0]["state"], "pending")
+        if state == "closed":
+            self.assertEqual(github.check_runs, [])
+            self.assertEqual(github.minted_app_tokens, [])
+        else:
+            self.assertEqual(github.statuses[0]["state"], "pending")
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     async def test_feedback_retry_requires_owner_session_and_a_matching_saved_decision(
         self,

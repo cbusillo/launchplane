@@ -69,10 +69,14 @@ publisher rereads the PR and saved decisions, even when there is no new preview
 comment to post, or when an open PR's preview is being destroyed. The open-PR
 sweep also refreshes reviews for products without previews or testing lanes;
 failed publication retries through the same reconcile row on a later sweep.
-The publisher skips all decision feedback, carry and check effects when its
-fresh PR read observes a closed change, even if cleanup replaced its original
-reason with a retry limit, busy operation or recovery failure. An unavailable
-read is not evidence of closure; normal best-effort retry behavior remains.
+When its fresh PR read observes a closed change, the publisher can still deliver
+already-requested saved Client feedback. It skips current review projection,
+decision-base binding, acceptance carry and retired-check maintenance, even if
+cleanup replaced its original reason with a retry limit, busy operation or
+recovery failure. **Retry delivery** remains available after closure or merge;
+closed cleanup may also retry saved feedback when it invokes the publisher.
+An unavailable read is not evidence of closure; normal best-effort retry behavior
+remains.
 When a product has no Client and the PR has no review label, only an existing
 Advisory App review check bound to that repository, PR and current head is
 completed neutrally. A PR with no earlier matching check stays silent. A review

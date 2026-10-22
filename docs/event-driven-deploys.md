@@ -641,7 +641,10 @@ or runtime creation. Existing preview and reservation recovery keeps its normal
 path even when previews are disabled. A failed check write remains best-effort;
 the next open-PR sweep reopens the same reconcile row and retries publication.
 No new event, preview comment or retry ledger is required. Closed-PR cleanup
-continues to suppress review publication. Reconciling is idempotent, so a missed
+suppresses current review projection, decision-base binding, acceptance carry and
+retired-check maintenance. Already-requested saved Client feedback can still be
+delivered through **Retry delivery** after closure or merge; cleanup may also
+retry it when it invokes the publisher. Reconciling is idempotent, so a missed
 or out-of-order event is corrected by the same path on a later sweep.
 
 For PRs with no live preview, the sweep also revisits recorded pending feedback
