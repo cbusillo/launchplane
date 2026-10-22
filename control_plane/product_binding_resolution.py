@@ -37,6 +37,7 @@ def product_binding_resolution(
     integration: str,
     scopes: frozenset[SecretScope],
     source_read_allowed: Callable[[SecretRecord], bool],
+    scope_read_allowed: Callable[[SecretScope, str, str], bool],
 ) -> ProductBindingResolution:
     profile = next(
         (item for item in store.list_product_profile_records() if item.product == product), None
@@ -54,10 +55,11 @@ def product_binding_resolution(
             scopes=scopes,
         )
         visible = []
-        lane_authorized = True
+        lane_authorized = all(
+            scope_read_allowed(scope, lane.context, lane.instance) for scope in scopes
+        )
         for key, (binding, record) in sorted(selected.items()):
             if not source_read_allowed(record):
-                lane_authorized = False
                 continue
             visible.append(
                 ProductSecretBindingMetadata(

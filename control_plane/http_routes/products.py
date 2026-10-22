@@ -1575,8 +1575,23 @@ def register_product_environment_read_routes(
             coverage=read_coverage(
                 profile_store,
                 collections=("product_profiles",),
-                population="active_product_profiles_for_requested_driver",
-                authorization_complete=service_reader,
+                population="active_product_profiles",
+                authorization_complete=(
+                    service_reader
+                    or (
+                        identity is not None
+                        and "*"
+                        in common.read_role_products(
+                            identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
+                        )
+                        and common.authorization_allows(
+                            identity=identity,
+                            action="product_profile.read",
+                            product="launchplane",
+                            context=LAUNCHPLANE_SERVICE_CONTEXT,
+                        )
+                    )
+                ),
                 exclusions=("inactive_products",),
             ),
         )

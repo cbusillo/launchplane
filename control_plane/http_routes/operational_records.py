@@ -40,7 +40,10 @@ from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+)
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
 from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
@@ -817,9 +820,65 @@ def register_managed_secret_read_routes(
             )
         try:
             require_secret_status_read_store(record_store)
-            bindings = product_secret_copy.product_secret_binding_metadata(
-                cast(product_secret_copy.ProductSecretCopyStore, record_store), product=product
+            store = cast(product_secret_copy.ProductSecretCopyStore, record_store)
+            profiles = store.list_product_profile_records()
+            profile = next((item for item in profiles if item.product == product), None)
+            if profile is None:
+                raise product_secret_copy.ProductSecretCopyError(
+                    "Product secret bindings require an existing product."
+                )
+            owners = product_context_owner_map(profiles)
+            universal_secret_reader = (
+                "*"
+                in dependencies.read_role_products(
+                    identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
+                )
+            ) and dependencies.authorization_allows(
+                identity=identity,
+                action="secret.list",
+                product=LAUNCHPLANE_SERVICE_CONTEXT,
+                context="",
+                target=AuthorizationTarget(scope="global"),
             )
+
+            def metadata_scope_read_allowed(
+                context: str,
+                instance: str,
+                *,
+                environment_read: bool,
+                inherit_agent_read_role: bool = True,
+            ) -> bool:
+                target = AuthorizationTarget(
+                    scope="instance" if instance else "context",
+                    instances=(instance,) if instance else (),
+                )
+                return dependencies.authorization_allows(
+                    identity=identity,
+                    action="secret.list",
+                    product=LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=context,
+                    target=target,
+                    inherit_agent_read_role=inherit_agent_read_role,
+                ) or (
+                    environment_read
+                    and dependencies.authorization_allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product=product,
+                        context=context,
+                        target=target,
+                        inherit_agent_read_role=inherit_agent_read_role,
+                    )
+                )
+
+            copy_authorization_complete = universal_secret_reader or all(
+                metadata_scope_read_allowed(
+                    lane.context, instance, environment_read=True, inherit_agent_read_role=False
+                )
+                for lane in profile.lanes
+                for instance in ("", lane.instance)
+            )
+            bindings = product_secret_copy.product_secret_binding_metadata(store, product=product)
             visible_bindings = []
             for binding in bindings:
                 instance = str(binding["instance"])
@@ -845,34 +904,31 @@ def register_managed_secret_read_routes(
                     visible_bindings.append(binding)
             resolution = None
             if include_resolution:
-                store = cast(product_secret_copy.ProductSecretCopyStore, record_store)
-                owners = product_context_owner_map(store.list_product_profile_records())
 
                 def source_read_allowed(record: SecretRecord) -> bool:
-                    target = AuthorizationTarget(
-                        scope="instance" if record.instance else "context",
-                        instances=(record.instance,) if record.instance else (),
+                    return metadata_scope_read_allowed(
+                        record.context,
+                        record.instance,
+                        environment_read=(
+                            record.scope != "global"
+                            and record.integration
+                            == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+                            and is_exclusive_product_context(
+                                context=record.context, product=product, owners=owners
+                            )
+                        ),
                     )
-                    return dependencies.authorization_allows(
-                        identity=identity,
-                        action="secret.list",
-                        product=LAUNCHPLANE_SERVICE_CONTEXT,
-                        context=record.context,
-                        target=target,
-                    ) or (
-                        record.scope != "global"
-                        and record.integration
-                        == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-                        and is_exclusive_product_context(
-                            context=record.context, product=product, owners=owners
-                        )
-                        and dependencies.authorization_allows(
-                            identity=identity,
-                            action="product_environment.read",
-                            product=product,
-                            context=record.context,
-                            target=target,
-                        )
+
+                def scope_read_allowed(scope: SecretScope, context: str, instance: str) -> bool:
+                    if universal_secret_reader:
+                        return True
+                    if scope == "global":
+                        return False
+                    return metadata_scope_read_allowed(
+                        context,
+                        instance if scope == "context_instance" else "",
+                        environment_read=False,
+                        inherit_agent_read_role=False,
                     )
 
                 resolution = product_binding_resolution(
@@ -881,6 +937,7 @@ def register_managed_secret_read_routes(
                     integration=integration,
                     scopes=frozenset(scopes or ("global", "context", "context_instance")),
                     source_read_allowed=source_read_allowed,
+                    scope_read_allowed=scope_read_allowed,
                 )
         except product_secret_copy.ProductSecretCopyError as error:
             raise dependencies.http_error(
@@ -907,7 +964,7 @@ def register_managed_secret_read_routes(
                 record_store,
                 collections=("product_profiles", "secret_records", "secret_bindings"),
                 population="configured_runtime_copy_metadata_in_exclusive_declared_product_contexts",
-                authorization_complete=len(visible_bindings) == len(bindings),
+                authorization_complete=copy_authorization_complete,
                 exclusions=(
                     "global_secrets",
                     "historical_and_undeclared_lanes",

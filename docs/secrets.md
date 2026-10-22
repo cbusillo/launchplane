@@ -870,7 +870,7 @@ excluded.
 The existing product catalog (`GET /v1/product-profiles`) and binding response
 include `coverage`: `population`, `source`, `authorization`, `status` and explicit
 `exclusions`. Catalog coverage is for active products within the requested
-`driver_id`, not inactive products or other drivers. A product-scoped catalog
+`driver_id`; an empty driver filter includes all drivers. A product-scoped catalog
 reports `scoped` even when its returned subset is empty. It never reveals hidden
 product identities or counts.
 
@@ -893,8 +893,16 @@ resolver. `lane_binding_resolution` states these inputs and reports each declare
 lane's selected binding metadata and coverage. It reads no versions or values.
 
 Selection uses the existing secret resolver's precedence before authorization.
-An unreadable winner is withheld and makes coverage `scoped`; a readable shadow
-never replaces it. Global sources require existing `secret.list` at their actual
+An unreadable winner is withheld; a readable shadow never replaces it. Coverage
+depends on authority over every requested scope, even when no binding exists,
+so it cannot reveal whether a hidden source exists. Complete global coverage
+needs the existing universal read standing plus managed-secret list authority;
+an allow on the empty context alone cannot prove every global source readable.
+Other selection scopes require explicit `secret.list` to prove complete scope
+coverage. Environment metadata access still returns authorized names, but stays
+`scoped` without that proof. Hidden context-ownership records cannot change the
+coverage status through inherited product-read rules.
+Individual global sources still require existing `secret.list` at their actual
 source scope. Product-environment metadata access can cover only runtime sources
 in an exclusive product context, never a global or ambiguous source or another
 integration. Existing copy eligibility and grants are unchanged.
@@ -904,6 +912,10 @@ or context sources, and worker delivery selects exact-instance sources. Declare
 the appropriate scopes when qualifying one of those paths. Historical and
 undeclared lanes and other integrations remain outside the stated population;
 runtime delivery, value validity and health need their own evidence.
+The binding endpoint also accepts inactive products; active-fleet qualification
+starts from the active catalog. `integration` and `scopes` affect only the opt-in
+resolution view and do not filter or broaden copy `bindings` when that view is
+not requested.
 
 Consumers must preserve server coverage and requested selection evidence. Missing
 coverage from an older server or projection is `unknown`; zero client omissions

@@ -270,7 +270,9 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    def _environment_read_app(self, *, products: tuple[str, ...]) -> FastAPI:
+    def _environment_read_app(
+        self, *, products: tuple[str, ...], instances: tuple[str, ...] = ("prod", "testing")
+    ) -> FastAPI:
         """No secret actions: the standing environment read for ``products`` only."""
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
         config_rule = (
@@ -281,7 +283,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         read_rule = (
             _local_operator_policy(actions=("product_environment.read",), products=products)
             .local_operators[0]
-            .model_copy(update={"instances": ("prod", "testing")})
+            .model_copy(update={"instances": instances})
         )
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -484,20 +486,88 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
 
     @scoped_agent_test
     async def test_selection_does_not_use_lane_read_to_expose_a_global_source(self) -> None:
+        app = self._environment_read_app(products=("example-site",))
+        url = "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=global"
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
         self.write_binding(name="HIDDEN_GLOBAL", key="HIDDEN_KEY", scope="global")
         response = await _asgi_request(
-            self._environment_read_app(products=("example-site",)),
+            app,
             "GET",
-            "/v1/products/example-site/secret-bindings?include_resolution=true",
+            url,
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        resolution = response.json()["lane_binding_resolution"]
+        self.assertEqual(resolution["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["lane_binding_resolution"], resolution)
+        self.assertNotIn("HIDDEN_GLOBAL", response.text)
+        self.assertNotIn("HIDDEN_KEY", response.text)
+
+    @scoped_agent_test
+    async def test_guessed_integration_does_not_reveal_hidden_source_existence(self) -> None:
+        app = self._environment_read_app(products=("example-site",))
+        url = "/v1/products/example-site/secret-bindings?include_resolution=true&integration=other_integration&scopes=context_instance"
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.write_binding(
+            name="HIDDEN_OTHER",
+            key="OTHER_KEY",
+            scope="context_instance",
+            instance="testing",
+            integration="other_integration",
+        )
+        after = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(
+            before.json()["lane_binding_resolution"], after.json()["lane_binding_resolution"]
+        )
+        self.assertEqual(after.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
+        self.assertNotIn("HIDDEN_OTHER", after.text)
+        self.assertNotIn("OTHER_KEY", after.text)
+
+    @scoped_agent_test
+    async def test_copy_coverage_does_not_reveal_hidden_binding_existence(self) -> None:
+        app = self._environment_read_app(products=("other-site",))
+        url = "/v1/products/example-site/secret-bindings"
+        self.store.write_secret_record(self.source.model_copy(update={"status": "disabled"}))
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.store.write_secret_record(self.source)
+        after = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(before.json()["coverage"], after.json()["coverage"])
+        self.assertEqual(after.json()["coverage"]["status"], "scoped")
+
+    async def test_director_standing_catalog_reports_complete_without_explicit_service_grant(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/product-profiles",
             headers={"Authorization": "Bearer test-operator-token"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["coverage"]["status"], "complete")
-        resolution = response.json()["lane_binding_resolution"]
-        self.assertEqual(resolution["coverage"]["status"], "scoped")
-        self.assertNotIn("HIDDEN_GLOBAL", response.text)
-        self.assertNotIn("HIDDEN_KEY", response.text)
-        self.assertNotIn("omitted_count", response.text)
+        self.assertEqual(response.json()["profiles"][0]["product"], self.profile.product)
 
     async def test_selection_applies_explicit_integration_and_scope_inputs(self) -> None:
         self.write_binding(
@@ -553,11 +623,6 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
 
     @scoped_agent_test
     async def test_catalog_reports_scoped_coverage_without_hidden_product_metadata(self) -> None:
-        self.store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(
-                _generic_site_profile_payload("unreadable-site")
-            )
-        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(
@@ -566,7 +631,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                     LocalOperatorPolicyRule(
                         subjects=("local-owner-agent",),
                         token_labels=("local-owner-write",),
-                        products=("example-site",),
+                        products=("example-site", "launchplane"),
                         contexts=("*",),
                         actions=("agent.read",),
                     ),
@@ -579,6 +644,17 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 local_operator_token_label="local-owner-write",
             ),
         )
+        before = await _asgi_request(
+            app,
+            "GET",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload("unreadable-site")
+            )
+        )
         response = await _asgi_request(
             app,
             "GET",
@@ -590,8 +666,8 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             [item["product"] for item in response.json()["profiles"]], ["example-site"]
         )
         self.assertEqual(response.json()["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["coverage"], response.json()["coverage"])
         self.assertNotIn("unreadable-site", response.text)
-        self.assertNotIn("total_count", response.text)
 
     @scoped_agent_test
     async def test_hidden_winner_never_falls_back_to_an_authorized_shadow(self) -> None:
@@ -625,12 +701,19 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lanes["prod"]["bindings"], [])
         self.assertEqual(lanes["prod"]["coverage"]["status"], "scoped")
         self.assertEqual(lanes["testing"]["bindings"][0]["name"], "CONTEXT_SHADOW")
-        self.assertEqual(lanes["testing"]["coverage"]["status"], "complete")
+        self.assertEqual(lanes["testing"]["coverage"]["status"], "scoped")
 
     @scoped_agent_test
     async def test_ambiguous_context_does_not_inherit_environment_read(self) -> None:
         profiles = self.store.list_product_profile_records()
         foreign = self.profile.model_copy(update={"product": "foreign-site"})
+        context_app = self._environment_read_app(products=("example-site",), instances=())
+        context_url = (
+            "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context"
+        )
+        before = await _asgi_request(
+            context_app, "GET", context_url, headers={"Authorization": "Bearer test-operator-token"}
+        )
         with patch.object(
             self.store, "list_product_profile_records", return_value=(*profiles, foreign)
         ):
@@ -640,11 +723,20 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 "/v1/products/example-site/secret-bindings?include_resolution=true",
                 headers={"Authorization": "Bearer test-operator-token"},
             )
+            after = await _asgi_request(
+                context_app,
+                "GET",
+                context_url,
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["bindings"], [])
         self.assertEqual(response.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
         self.assertNotIn(self.source.name, response.text)
         self.assertNotIn("foreign-site", response.text)
+        self.assertEqual(
+            before.json()["lane_binding_resolution"], after.json()["lane_binding_resolution"]
+        )
 
     def test_copy_bundle_rechecks_product_and_context_ownership(self) -> None:
         for alter_profile in (True, False):
