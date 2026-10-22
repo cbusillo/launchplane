@@ -269,10 +269,13 @@ def rehearsal_inputs(
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if (
-            request.action == "verify"
-            and previous.business_validations
-            and not previous.business_validations[-1].passed
+        if request.action == "verify" and (
+            (previous.business_validations and not previous.business_validations[-1].passed)
+            or (
+                previous.abandoned_validations
+                and len(previous.business_validations)
+                <= previous.abandoned_validations[-1].validation_count
+            )
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if request.action in {
@@ -623,17 +626,23 @@ class OdooRehearsalAdapter:
             }
         ).binding_sha256
 
-    def can_retry_empty_prepare(self, record: OdooUpgradeRehearsalRecord, phase: str) -> bool:
+    def can_retry_empty_placement(self, record: OdooUpgradeRehearsalRecord, phase: str) -> bool:
         from control_plane.dokploy import post_deploy
         from control_plane.dokploy.sandbox_placement import created_placement
 
-        if (
-            self.request.action != "prepare"
-            or phase
-            or record.state != "planned"
-            or any((record.project_id, record.environment_id, record.compose_id))
-            or record.copies
-            or record.elapsed_seconds
+        if phase or not (
+            self.request.action == "prepare"
+            and record.state == "planned"
+            and not any((record.project_id, record.environment_id, record.compose_id))
+            and not record.copies
+            and not record.elapsed_seconds
+            or self.request.action == "rebuild-final"
+            and record.state in {"retired", "rebuilding"}
+            and bool(record.abandoned_validations)
+            and (
+                record.state == "retired"
+                or not any((record.project_id, record.environment_id, record.compose_id))
+            )
         ):
             return False
         fresh, _, _ = self.inputs()
@@ -695,7 +704,7 @@ class OdooRehearsalAdapter:
                 "reviewed_plan_sha256": self.initial_prepare_binding(record)
                 if self.request.action == "prepare"
                 else self.request.reviewed_plan_sha256
-                if self.request.action == "validate-business"
+                if self.request.action in {"validate-business", "rebuild-final"}
                 else record.binding_sha256,
             }
         )
@@ -744,7 +753,7 @@ class OdooRehearsalAdapter:
         reason = "operation_not_recoverable"
         if journal["operation_state"] == "reconcile_required" and not record.compose_id:
             try:
-                if self.can_retry_empty_prepare(record, str(journal["provider_effect_phase"])):
+                if self.can_retry_empty_placement(record, str(journal["provider_effect_phase"])):
                     reason = "empty_original_placement_observed"
                 else:
                     self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
@@ -1064,11 +1073,18 @@ class OdooRehearsalAdapter:
         return rehearsal_inputs(self.root, self.store, self.product, self.request, self.principal)
 
     def reviewed_binding(self, record: OdooUpgradeRehearsalRecord) -> str:
-        return (
-            self.initial_prepare_binding(record)
-            if self.request.action == "prepare"
-            else record.binding_sha256
-        )
+        if self.request.action == "prepare":
+            return self.initial_prepare_binding(record)
+        if self.request.action == "rebuild-final":
+            return record.model_copy(
+                update={
+                    "state": "rebuilding",
+                    "project_id": "",
+                    "environment_id": "",
+                    "compose_id": "",
+                }
+            ).binding_sha256
+        return record.binding_sha256
 
     def run_script(
         self, record: OdooUpgradeRehearsalRecord, script: str, checkpoint: Callable[[], None]
@@ -1524,10 +1540,13 @@ class OdooRehearsalAdapter:
                 ):
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
-                if self.request.action == "prepare" and not provider_effect_phase:
+                if (
+                    self.request.action in {"prepare", "rebuild-final"}
+                    and not provider_effect_phase
+                ):
                     if self.reviewed_binding(
                         record
-                    ) != self.request.reviewed_plan_sha256 or not self.can_retry_empty_prepare(
+                    ) != self.request.reviewed_plan_sha256 or not self.can_retry_empty_placement(
                         record, provider_effect_phase
                     ):
                         return ProviderObservation("unknown")
@@ -1633,7 +1652,14 @@ class OdooRehearsalAdapter:
                 require_unaliased_rehearsal(self.store, fresh)
 
             rebuilding = self.request.action == "rebuild-final"
-            if (self.request.action == "prepare" and not self._continue_prepare_host) or rebuilding:
+            reuse_rebuild = (
+                rebuilding
+                and record.state == "rebuilding"
+                and all((record.project_id, record.environment_id, record.compose_id))
+            )
+            if (self.request.action == "prepare" and not self._continue_prepare_host) or (
+                rebuilding and not reuse_rebuild
+            ):
                 existing_placement: tuple[str, str, str] = ("", "", "")
                 if not recovering_project:
                     try:
@@ -1673,20 +1699,9 @@ class OdooRehearsalAdapter:
                             prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
                         )
                     )
-                if rebuilding:
-                    checkpoint()
-                    lease.checkpoint_effect("rebuild_final_placement")
-                    updated = record.model_copy(
-                        update={
-                            "state": "rebuilding",
-                            "project_id": "",
-                            "environment_id": "",
-                            "compose_id": "",
-                        }
-                    )
-                    self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
-                    record = updated
-                if not any((record.project_id, record.environment_id, record.compose_id)):
+                if rebuilding or not any(
+                    (record.project_id, record.environment_id, record.compose_id)
+                ):
                     # Only a genuinely new placement can be refused cleanly.
                     # Partial creation stays on its original recovery protocol.
                     try:
@@ -1723,6 +1738,18 @@ class OdooRehearsalAdapter:
                                 else RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
                             )
                         ) from None
+                if rebuilding:
+                    checkpoint()
+                    updated = record.model_copy(
+                        update={
+                            "state": "rebuilding",
+                            "project_id": "",
+                            "environment_id": "",
+                            "compose_id": "",
+                        }
+                    )
+                    self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
+                    record = updated
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
                 prepare_rehearsal_local_credentials(
@@ -1772,7 +1799,7 @@ class OdooRehearsalAdapter:
                     or evidence.get("testing_resources_binding_sha256") != resources.binding_sha256
                 ):
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-            elif self.request.action == "prepare":
+            elif self.request.action == "prepare" or reuse_rebuild:
                 checkpoint()
                 if created_placement(self.root, record.rehearsal_id) != (
                     record.project_id,

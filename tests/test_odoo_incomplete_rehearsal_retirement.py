@@ -13,6 +13,7 @@ from control_plane.odoo_upgrade_rehearsal import (
 from control_plane.testing_local_credentials import prepare_rehearsal_local_credentials
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
+    RehearsalPrerequisite,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from tests import test_odoo_upgrade_rehearsal as rehearsal
@@ -995,25 +996,39 @@ class LaterPhaseRetirementTests(unittest.TestCase):
             patch(
                 "control_plane.dokploy.sandbox_placement.create_isolated_placement",
                 side_effect=create,
-            ),
+            ) as allocation,
             patch("control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity"),
             patch.object(OdooRehearsalAdapter, "check_business_entrypoint"),
             patch.object(adapter, "run_script", side_effect=resources),
             patch.object(
                 adapter,
                 "host",
-                return_value={
-                    "state": "switched",
-                    "copies": [copy.model_dump(mode="json") for copy in retired.copies],
-                    "elapsed_seconds": retired.elapsed_seconds,
-                },
+                side_effect=[
+                    {"refusal_code": "rehearsal_rebuild_capacity_insufficient"},
+                    {
+                        "state": "switched",
+                        "copies": [copy.model_dump(mode="json") for copy in retired.copies],
+                        "elapsed_seconds": retired.elapsed_seconds,
+                    },
+                ],
             ),
             patch(
                 "control_plane.odoo_upgrade_rehearsal._source_values",
                 side_effect=AssertionError("No production recapture"),
             ),
         ):
-            outcome = self.fixture.run_operation(adapter, "new-final-copy")
+            refused = self.fixture.run_operation(adapter, "capacity-refusal")
+            self.assertEqual(refused.response_status_code, 409)
+            prepared = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+            assert prepared is not None
+            self.assertEqual(prepared.state, "rebuilding")
+            self.assertFalse(self.store.list_held_provider_target_reservations())
+            with patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=(prepared.project_id, prepared.environment_id, prepared.compose_id),
+            ):
+                outcome = self.fixture.run_operation(adapter, "new-final-copy")
+            allocation.assert_called_once()
         self.assertEqual(outcome.status, "completed")
         rebuilt = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
         assert rebuilt is not None
@@ -1033,6 +1048,111 @@ class LaterPhaseRetirementTests(unittest.TestCase):
             side_effect=AssertionError("Historical readback must not inspect the replacement"),
         ):
             self.assertEqual(abandonment.readback()["original_outcome"], "unknown")
+
+    def test_rebuild_determinate_prechecks_leave_retired_record_and_no_hold(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+
+        self.test_unknown_validation_retires_working_copy_and_archives_original()
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        for target, error in (
+            (
+                "control_plane.odoo_upgrade_rehearsal.source.read_dokploy_config",
+                ValueError("missing bootstrap"),
+            ),
+            (
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+            ),
+            (
+                "control_plane.odoo_upgrade_rehearsal.OdooRehearsalAdapter.check_business_entrypoint",
+                RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE),
+            ),
+        ):
+            with (
+                self.subTest(target=target),
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch("control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity"),
+                patch.object(OdooRehearsalAdapter, "check_business_entrypoint"),
+                patch(target, side_effect=error),
+                patch(
+                    "control_plane.dokploy.sandbox_placement.create_isolated_placement"
+                ) as create,
+            ):
+                with self.assertRaises((RehearsalRefused, BridgeNetworkCapacityRefused)):
+                    self.fixture.run_operation(self.fixture.adapter("rebuild-final"), target)
+                create.assert_not_called()
+                self.assertEqual(
+                    self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), retired
+                )
+                self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_empty_rebuild_can_reconcile_only_before_provider_effects(self) -> None:
+        self.test_unknown_validation_retires_working_copy_and_archives_original()
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert retired is not None
+        adapter = self.fixture.adapter("rebuild-final")
+        for state in ("retired", "rebuilding"):
+            record = retired.model_copy(
+                update={"state": state, "project_id": "", "environment_id": "", "compose_id": ""}
+            )
+            previous = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+            assert previous is not None
+            self.store.compare_and_write_odoo_upgrade_rehearsal(previous, record)
+            with (
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.source.read_dokploy_config",
+                    return_value=("host", "token"),
+                ),
+                patch(
+                    "control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None
+                ),
+                patch.object(adapter, "host", return_value={"completed": False}),
+            ):
+                self.assertTrue(adapter.observe("key", "", adapter.reconciliation_key()).retry_safe)
+                self.assertEqual(
+                    adapter.observe("key", "project_id", adapter.reconciliation_key()).outcome,
+                    "unknown",
+                )
+
+    def test_verify_requires_validation_of_the_rebuilt_working_copy(self) -> None:
+        from tests.test_odoo_rehearsal_business_validation import identity, receipt
+        from control_plane.contracts.odoo_rehearsal_business_validation import (
+            BusinessValidationReceipt,
+        )
+        from control_plane.odoo_upgrade_rehearsal import rehearsal_inputs
+
+        old = self.switched
+        validation = BusinessValidationReceipt.model_validate(receipt(identity(old)))
+        self.switched = old.model_copy(update={"business_validations": (validation,)})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(old, self.switched)
+        self.test_rebuild_uses_new_resources_and_the_retained_final_tuple()
+        verify = self.fixture.adapter("verify")
+        with self.assertRaises(RehearsalRefused):
+            rehearsal_inputs(
+                verify.root, self.store, verify.product, verify.request, verify.principal
+            )
+        rebuilt = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert rebuilt is not None
+        fresh = receipt(
+            {**identity(rebuilt), "attempt_sha256": canonical_json_sha256({"new": "copy"})}
+        )
+        self.fixture.adapter("validate-business").publish(
+            rebuilt,
+            {
+                "state": "switched",
+                "copies": [copy.model_dump(mode="json") for copy in rebuilt.copies],
+                "elapsed_seconds": rebuilt.elapsed_seconds,
+                "business_validation": fresh,
+            },
+        )
+        rehearsal_inputs(verify.root, self.store, verify.product, verify.request, verify.principal)
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
@@ -1690,7 +1810,46 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             rehearsal_storage_capacity=Mock(return_value=True),
             capture=Mock(side_effect=AssertionError("No source recapture")),
         )
+        host["rehearsal_storage_capacity"].side_effect = [False, True]
+        self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"] = canonical_json_sha256(
+            {"old": "attempt"}
+        )
+        refused = self.fixture.run_host(self.spec)
+        self.assertEqual(refused["refusal_code"], "rehearsal_rebuild_capacity_insufficient")
+        restore.assert_not_called()
+        upgrade.assert_not_called()
+        prepared_calls = host["compose"].call_count
+        self.spec["attempt_sha256"] = canonical_json_sha256({"refused": "unsafe-stage"})
+        prepared = self.root / (
+            "rebuild-prepared-"
+            + self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"]
+            + ".json"
+        )
+        saved = prepared.read_bytes()
+        unknown = self.root / (
+            "rebuild-final-" + canonical_json_sha256({"unknown": "attempt"}) + ".started"
+        )
+        for unsafe in ("active", "unknown-final", "binding", "unknown-bootstrap"):
+            with self.subTest(unsafe=unsafe):
+                if unsafe == "active":
+                    self.fixture.fixture.containers["script-runner"]["ExecIDs"] = ["active"]
+                elif unsafe == "unknown-final":
+                    unknown.touch()
+                elif unsafe == "binding":
+                    prepared.write_bytes(b"{}")
+                else:
+                    prepared.unlink()
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(self.spec)
+                restore.assert_not_called()
+                upgrade.assert_not_called()
+                self.fixture.fixture.containers["script-runner"]["ExecIDs"] = None
+                unknown.unlink(missing_ok=True)
+                prepared.write_bytes(saved)
+                prepared.chmod(0o600)
+        self.spec["attempt_sha256"] = canonical_json_sha256({"new": "reviewed-key"})
         result = self.fixture.run_host(self.spec)
+        self.assertEqual(host["compose"].call_count, prepared_calls + 1)
         self.assertEqual(result["state"], "switched")
         self.assertEqual(result["copies"], copies)
         names = host["database_names"](self.spec)

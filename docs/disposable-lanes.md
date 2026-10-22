@@ -2957,9 +2957,15 @@ Do not reuse an old validation review for the rebuilt copy. The record says
 normal provider ownership checks remain active. If the host has saved its
 completed rebuild receipt but the service response was lost, original-key
 readback and reconciliation adopt that result without replay. A genuinely
-unknown rebuild with no completed receipt stays held with both tuples and
-evidence preserved; this validation-abandonment route does not settle it. A
-refusal or unknown observation never authorizes replay or another rebuild. Ordinary
+unknown bootstrap or FINAL restoration with no completed receipt stays held
+with both tuples and evidence preserved; this validation-abandonment route does
+not settle it. Before FINAL restoration starts, a capacity refusal retains a
+bound, completed preparation receipt and stopped runtime. Requalify capacity,
+then review a new `rebuild-final` key to reuse that proven preparation. The same
+key replays its refusal. Changed custody, active execution, mismatched placement,
+or an unsettled restoration marker refuses reuse. Verify requires a passing
+validation recorded after the latest abandonment; older validation history
+remains evidence. Ordinary
 retirement and every production hold retain their existing contracts.
 
 

@@ -674,6 +674,7 @@ class IncompleteRehearsalRetirement:
                 archived += (
                     AbandonedRehearsalValidation(
                         original=original,
+                        validation_count=len(record.business_validations),
                         attempt_sha256=original_validation_attempt(original),
                         host_disposal=progress.host_disposal,
                     ),
