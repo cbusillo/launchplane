@@ -270,7 +270,6 @@ def read_dokploy_target_placement(
     target_id: str,
     clock: Callable[[], float] = time.monotonic,
 ) -> InventoryTargetLocation:
-    """Validate full membership, then read only this target and its server."""
     deadline = clock() + 25
     projects, _ = _read_inventory_membership(host=host, token=token, deadline=deadline, clock=clock)
     matches = [

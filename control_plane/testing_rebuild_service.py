@@ -1,5 +1,7 @@
 """The native testing rebuild inside the existing durable replacement action."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -13,6 +15,7 @@ import click
 from pydantic import Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
 )
@@ -231,7 +234,6 @@ def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> Can
 def unavailable_provider_placement(
     *, host: str, token: str, target_id: str, target_name: str, server_id: str
 ) -> str:
-    """Fresh complete membership qualifies only the owned target's placement."""
     try:
         location = read_dokploy_target_placement(
             host=host, token=token, target_category="compose", target_id=target_id
@@ -581,6 +583,16 @@ class NativeTestingRebuildAdapter:
         )
         self.checkpoints = RecordTestingRebuildStore(store)
 
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.intent.profile.product,
+            context=self.operation.context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.intent.old.target_id,
+        )
+
     def target_key(self) -> str:
         return generic_web_provider_target_key(
             provider_id="dokploy",
@@ -604,7 +616,7 @@ class NativeTestingRebuildAdapter:
         with self.store.testing_replacement_execution_lock(self.operation.operation_id) as check:
             if check is None:
                 return ProviderObservation("unknown")
-            return ProviderObservation("absent", retry_safe=True)
+            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -846,7 +858,6 @@ class NativeTestingRebuildExecution:
     def resume_admission_rollback(
         self, checkpoint: TestingRebuildRecord, reason: str
     ) -> TestingRebuildRecord:
-        """Latch changed admission before waiting; settle the original forward, then undo it."""
         if not isinstance(checkpoint.plan.old, UnavailableTestingPredecessor):
             raise ValueError("Unavailable-predecessor recovery cannot replace healthy retirement.")
         self.guard(recovery=True)
@@ -1105,9 +1116,6 @@ class NativeTestingRebuildExecution:
                 "Testing serving configuration changed outside the original rebuild."
             )
         if unavailable_recovery:
-            # Reversing our own route artifact does not act on the old copy.
-            # Forward publication/retirement check old jobs separately; those
-            # jobs cannot authorize or trap the original artifact inverse.
             return
         self.require_old_quiescent()
 
@@ -1658,8 +1666,6 @@ class NativeTestingRebuildExecution:
             plan_digest=plan.digest,
             observation_sha256=preimage.observation_sha256,
             preimage_sha256=route_document_digest(self.route, None),
-            # The fixed host emits unknown only for positively inventoried
-            # members with an uncertain lifecycle, never incomplete inventory.
             predecessor_state="present" if state in {"available", "unknown"} else state,
         )
 
@@ -1804,8 +1810,6 @@ class NativeTestingRebuildExecution:
     def route_backend(self) -> str | None:
         frame = self.transport.read()
         if self.route.unavailable_preimage is not None:
-            # This is an effect's exact artifact predicate, never serving or
-            # health evidence. Settlement must not re-admit the old runtime.
             if frame["owned_file"] == self.route.unavailable_preimage.file_content:
                 return None
             if frame["owned_file"] == route_document_content(self.route, self.route.new_backend):
@@ -1981,8 +1985,6 @@ class NativeTestingRebuildExecution:
             or stop.response_payload.get("cause") != "predecessor_already_unavailable"
         ):
             return False
-        # This existing proof verifies the original stop key, intent, target,
-        # and absence of dispatch. A health-abort exclusion is not success.
         if not isinstance(
             self.retirement_exclusion(plan, after_health_failure=True), TestingStopExclusionReadback
         ):
@@ -2312,11 +2314,16 @@ def rebuild_result(
     )
 
 
-def read_public_testing_health(base_url: str, path: str) -> HealthcheckEvidence:
+def read_public_testing_health(
+    base_url: str, path: str, expected_identity: RuntimeIdentity | None = None
+) -> HealthcheckEvidence:
     """A redirect, timeout or missing identity never proves a healthy origin."""
     from urllib.error import HTTPError, URLError
     from urllib.request import HTTPRedirectHandler, Request, build_opener
-    from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
+    from control_plane.contracts.runtime_identity import (
+        runtime_identity_from_health_payload,
+        health_payload_runtime_identity_status,
+    )
 
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(
@@ -2330,17 +2337,34 @@ def read_public_testing_health(base_url: str, path: str) -> HealthcheckEvidence:
             if response.geturl() != url:
                 return HealthcheckEvidence(status="pending", urls=(url,))
             payload = json.loads(response.read(262144).decode())
+            if not isinstance(payload, dict):
+                raise ValueError("Health document is unavailable.")
             identity = runtime_identity_from_health_payload(payload)
+            classification: dict[str, Any] = {}
+            if expected_identity is not None:
+                status, detail, identity = health_payload_runtime_identity_status(
+                    expected=expected_identity, payload=payload
+                )
+                classification = {
+                    "runtime_identity_status": status,
+                    "runtime_identity_detail": detail,
+                }
             return HealthcheckEvidence(
                 verified=True,
                 urls=(url,),
                 timeout_seconds=5,
                 status="pass",
                 observed_runtime_identity=identity,
+                **classification,
             )
     except HTTPError as error:
         error.close()
-        return HealthcheckEvidence(verified=True, urls=(url,), timeout_seconds=5, status="fail")
+        return HealthcheckEvidence(
+            verified=not 300 <= error.code < 400,
+            urls=(url,),
+            timeout_seconds=5,
+            status="pending" if 300 <= error.code < 400 else "fail",
+        )
     except (URLError, TimeoutError, OSError, ValueError):
         return HealthcheckEvidence(status="pending", urls=(url,))
 
@@ -2384,6 +2408,8 @@ def execute_native_testing_rebuild(
         # The worker already preserves timeout uncertainty on the same operation.
         raise
     except NativeTestingRebuildPending:
+        raise
+    except ScheduleMaterializationTooLarge:
         raise
     except Exception as error:
         if native_rebuild_effects_started(store, operation):

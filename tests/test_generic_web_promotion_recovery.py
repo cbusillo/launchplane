@@ -458,6 +458,7 @@ class PromotionRecoveryTests(unittest.TestCase):
             lease_owner="interrupted",
             reconciliation_key=adapter.reconciliation_key(),
             provider_target_key=adapter.target_key(),
+            provider_target_origin=adapter.provider_target_origin(),
         ).record
         assert reserved is not None
         self.assertEqual(self.dry_run()["proposed_action"], "wait_for_active_lease")

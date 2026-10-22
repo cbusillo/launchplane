@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.text_fields import require_text
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.odoo_preview_import_source import PREVIEW_FISHBOWL_SOURCE_ENV_KEY
@@ -61,7 +62,12 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+from control_plane.dokploy.preview_inventory import (
+    complete_preview_compose_inventory as _complete_preview_compose_inventory,
+)
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy.network_capacity import require_bridge_network_capacity
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -162,7 +168,7 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     def _normalize_request(self) -> "OdooPreviewApplyInputsRequest":
         if self.fishbowl_source is not None and self.operation != "refresh":
             raise ValueError("Only preview refresh accepts a Fishbowl source.")
-        self.product = _required_text(self.product, "Odoo preview apply inputs requires product")
+        self.product = require_text(self.product, "Odoo preview apply inputs requires product")
         if self.preview_slug.strip():
             self.preview_slug = self.preview_slug.strip()
         self.preview_url = self.preview_url.strip()
@@ -176,7 +182,7 @@ class OdooPreviewApplyInputsRequest(BaseModel):
         self.source_git_ref = self.source_git_ref.strip()
         if self.manifest is not None and not self.source_git_ref:
             self.source_git_ref = self.manifest.source_commit
-        self.source = _required_text(self.source, "Odoo preview apply inputs requires source")
+        self.source = require_text(self.source, "Odoo preview apply inputs requires source")
         return self
 
 
@@ -191,7 +197,7 @@ class OdooPreviewApplyPlanProvenance(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_provenance(self) -> "OdooPreviewApplyPlanProvenance":
-        self.plan_id = _required_text(self.plan_id, "Odoo preview plan provenance requires plan_id")
+        self.plan_id = require_text(self.plan_id, "Odoo preview plan provenance requires plan_id")
         self.plan_sha256 = self.plan_sha256.strip().lower()
         if len(self.plan_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in self.plan_sha256
@@ -237,19 +243,19 @@ class OdooPreviewApplyInputsResult(BaseModel):
         self.omitted_integration_credential_keys = tuple(
             sorted(set(self.omitted_integration_credential_keys))
         )
-        self.product = _required_text(
+        self.product = require_text(
             self.product, "Odoo preview apply inputs result requires product"
         )
-        self.context = _required_text(
+        self.context = require_text(
             self.context, "Odoo preview apply inputs result requires context"
         )
-        self.template_instance = _required_text(
+        self.template_instance = require_text(
             self.template_instance, "Odoo preview apply inputs result requires template_instance"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview apply inputs result requires preview_slug"
         )
-        self.repository = _required_text(
+        self.repository = require_text(
             self.repository, "Odoo preview apply inputs result requires repository"
         )
         if self.plan_request.product != self.product:
@@ -846,7 +852,7 @@ class OdooPreviewDokployDryRunBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "OdooPreviewDokployDryRunBlocker":
-        self.message = _required_text(self.message, "Odoo preview dry-run blocker requires message")
+        self.message = require_text(self.message, "Odoo preview dry-run blocker requires message")
         return self
 
 
@@ -867,7 +873,7 @@ class OdooPreviewDokployOperation(BaseModel):
         if self.method != "LOCAL" and not self.path:
             raise ValueError("Dokploy API operation requires path")
         self.alternate_paths = _normalized_optional_paths(self.alternate_paths)
-        self.target = _required_text(self.target, "Dokploy operation requires target")
+        self.target = require_text(self.target, "Dokploy operation requires target")
         self.payload_keys = _normalized_unique_texts(self.payload_keys)
         return self
 
@@ -898,25 +904,25 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "OdooPreviewDokployDryRunPlan":
-        self.product = _required_text(self.product, "Odoo preview dry-run plan requires product")
-        self.repository = _required_text(
+        self.product = require_text(self.product, "Odoo preview dry-run plan requires product")
+        self.repository = require_text(
             self.repository, "Odoo preview dry-run plan requires repository"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview dry-run plan requires preview_slug"
         )
         self.preview_url = self.preview_url.strip()
         self.domain_host = self.domain_host.strip().lower()
-        self.compose_ref = _required_text(
+        self.compose_ref = require_text(
             self.compose_ref, "Odoo preview dry-run plan requires compose_ref"
         )
-        self.compose_name = _required_text(
+        self.compose_name = require_text(
             self.compose_name, "Odoo preview dry-run plan requires compose_name"
         )
         self.environment_id = self.environment_id.strip()
         self.template_compose_id = self.template_compose_id.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
-        self.summary = _required_text(self.summary, "Odoo preview dry-run plan requires summary")
+        self.summary = require_text(self.summary, "Odoo preview dry-run plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready Odoo preview dry-run plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -936,7 +942,7 @@ class OdooPreviewDokployApplyStep(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_step(self) -> "OdooPreviewDokployApplyStep":
-        self.target = _required_text(self.target, "Odoo preview apply step requires target")
+        self.target = require_text(self.target, "Odoo preview apply step requires target")
         self.detail = self.detail.strip()
         return self
 
@@ -1397,57 +1403,6 @@ def _original_compose_id_from_complete_inventory(
     return matches[0] if matches else ""
 
 
-def _complete_preview_compose_inventory(
-    *, host: str, token: str
-) -> tuple[tuple[str, str, str], ...]:
-    projects = dokploy_api.dokploy_request(host=host, token=token, path="/api/project.all")
-    if not isinstance(projects, list) or len(projects) > 1000:
-        raise click.ClickException("Original preview inventory is incomplete.")
-    entries: list[tuple[str, str, str]] = []
-    environments_seen: set[str] = set()
-    composes_seen: set[str] = set()
-    for project in projects:
-        if not isinstance(project, dict):
-            raise click.ClickException("Original preview inventory is incomplete.")
-        environments = project.get("environments")
-        if not isinstance(environments, list):
-            raise click.ClickException("Original preview inventory is incomplete.")
-        for environment in environments:
-            if not isinstance(environment, dict):
-                raise click.ClickException("Original preview inventory is incomplete.")
-            environment_id = environment.get("environmentId")
-            if (
-                not isinstance(environment_id, str)
-                or not environment_id.strip()
-                or environment_id in environments_seen
-                or len(environments_seen) >= 10000
-            ):
-                raise click.ClickException("Original preview environment inventory is ambiguous.")
-            environments_seen.add(environment_id)
-            collections = [
-                environment[key] for key in ("compose", "composes") if key in environment
-            ]
-            composes = collections[0] if len(collections) == 1 else None
-            if not isinstance(composes, list):
-                raise click.ClickException("Original preview compose inventory is incomplete.")
-            for compose in composes:
-                if not isinstance(compose, dict):
-                    raise click.ClickException("Original preview compose inventory is incomplete.")
-                name, identifier = compose.get("name"), compose.get("composeId")
-                if (
-                    not isinstance(name, str)
-                    or not name.strip()
-                    or not isinstance(identifier, str)
-                    or not identifier.strip()
-                    or identifier in composes_seen
-                    or len(entries) >= 10000
-                ):
-                    raise click.ClickException("Original preview compose inventory is incomplete.")
-                composes_seen.add(identifier)
-                entries.append((environment_id, identifier, name))
-    return tuple(sorted(entries))
-
-
 def _destroyed_preview_absence_verified(
     *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
 ) -> bool:
@@ -1854,6 +1809,10 @@ def _execute_refresh(
             module_install_update_evidence=module_install_update_evidence,
             steps=tuple(steps),
         )
+    except NativeSourceAuthorizationDenied:
+        # A refused read is not an ordinary deploy failure. Let the durable
+        # caller release an unused attempt or retain earlier provider custody.
+        raise
     except click.ClickException as exc:
         rollback_errors: tuple[str, ...] = ()
         if isinstance(exc, dokploy_post_deploy.OdooPostDeployReadbackFailure):
@@ -1980,6 +1939,9 @@ def _resolve_or_create_compose(
         raise click.ClickException(
             "Odoo preview compose create requires the template compose serverId."
         )
+    require_bridge_network_capacity(
+        host=host, token=token, server_id=server_id, required_networks=1
+    )
     provider_effect_checkpoint("compose_create")
     created = dokploy_api.dokploy_request(
         host=host,
@@ -2487,13 +2449,6 @@ def _blocker(
     return OdooPreviewDokployDryRunBlocker(code=code, message=message)
 
 
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
-
-
 def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:
     return f"{manifest.image.repository}@{manifest.image.digest}"
 
@@ -2507,7 +2462,7 @@ def _resolve_manifest_image_reference(
     normalized_image_reference = image_reference.strip()
     if manifest is None:
         return _validated_immutable_image_reference(
-            _required_text(
+            require_text(
                 normalized_image_reference,
                 f"{label} requires image_reference or manifest.",
             ),

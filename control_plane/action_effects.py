@@ -8,6 +8,7 @@ from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ACTION, WALKTHR
 
 ActionEffect = Literal["read", "plan", "projection_sync", "write"]
 AGENT_READ_ROLE_ACTION = "agent.read"
+GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION = "generic_web_deploy_recovery.plan"
 ODOO_CONNECTION_ISOLATION_ACTIONS = MappingProxyType(
     {
         "dry-run": "odoo_connection_isolation.plan",
@@ -68,6 +69,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "backup_gate.write": ActionDeclaration("write"),
         "deployment.read": ActionDeclaration("read"),
         "deployment.write": ActionDeclaration("write"),
+        # Agenda metadata cannot accept a release, change runtime settings or grant access.
+        "discussion_topic.write": ActionDeclaration("write", director_agent_write=True),
         "detached_application_retirement.apply": ActionDeclaration("write"),
         "detached_application_retirement.plan": ActionDeclaration("plan"),
         "dokploy_target.inspect": ActionDeclaration("read"),
@@ -99,6 +102,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "every_code_work_request.update": ActionDeclaration("write"),
         "every_code_work_request.write": ActionDeclaration("write"),
         "generic_web_deploy.execute": ActionDeclaration("write"),
+        GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION: ActionDeclaration("plan"),
         "generic_web_deploy_recovery_provider_evidence.read": ActionDeclaration("read"),
         "generic_web_onboarding.plan": ActionDeclaration("plan"),
         "generic_web_preview_authz.plan": ActionDeclaration("plan"),
@@ -269,8 +273,6 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "verireel_prod_rollback.execute": ActionDeclaration("write"),
         "verireel_stable_environment.read": ActionDeclaration("read"),
         "verireel_testing_deploy.execute": ActionDeclaration("write"),
-        "work_graph.issue_inbox.reconcile": ActionDeclaration("write"),
-        "work_graph.rank": ActionDeclaration("plan"),
     }
 )
 

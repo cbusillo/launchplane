@@ -4,6 +4,13 @@ Only the separately owned compose and its data are writable. Source SSH is read
 only, and raw failure material remains outside every application mount.
 """
 
+from control_plane._odoo_rehearsal_business_validation import (
+    BUSINESS_VALIDATION_ENTRYPOINT,
+    BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+    BUSINESS_VALIDATION_RECEIPT_LIBRARY,
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+    BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
+)
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -17,6 +24,17 @@ ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
+    + "\nBUSINESS_VALIDATION_ENTRYPOINT = "
+    + repr(BUSINESS_VALIDATION_ENTRYPOINT)
+    + "\nBUSINESS_VALIDATION_RECEIPT_MAX_BYTES = "
+    + repr(BUSINESS_VALIDATION_RECEIPT_MAX_BYTES)
+    + "\n"
+    + "\nPRODUCT_COMMAND_TIMEOUT_SECONDS = "
+    + repr(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS)
+    + "\nPRODUCT_COMMAND_OUTPUT_MAX_BYTES = "
+    + repr(BUSINESS_VALIDATION_OUTPUT_MAX_BYTES)
+    + "\n"
+    + BUSINESS_VALIDATION_RECEIPT_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -73,8 +91,8 @@ def digest(path):
     return value.hexdigest()
 
 
-def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def bounded_capture(arguments,path,bound,*,stdin=None):
+    process=subprocess.Popen(arguments,stdin=stdin,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     errors=b''
     try:
         size=0
@@ -170,6 +188,9 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
+        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     expected=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][spec['target_image']]
     if version.split('.')[0]!=expected.split('.')[0]:
@@ -188,6 +209,12 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations:
+        if validations[-1].get('passed') is not True:
+            raise RuntimeError('Product validation has not passed')
+        receipt['business_validation_sha256']=hashlib.sha256(
+            json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
     return receipt
 
@@ -279,6 +306,118 @@ def private_health(spec,containers):
     docker('exec',containers['script-runner'][0],'python3','-c',program,expected,spec['record']['rehearsal_id'],spec['record']['target_artifact']['artifact_id'])
 
 
+def business_validation_precheck(spec,containers):
+    record=spec['record']
+    plan=spec['business_validation_identity']
+    database=database_names(spec)['final_upgrade']
+    if (record['state']!='switched' or plan['database']!=database
+            or plan['source_commit']!=record['target_artifact']['source_commit']
+            or sql(containers,"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete'",database)!=witness(spec,database)):
+        raise RuntimeError('Validation copy binding changed')
+    private_health(spec,containers)
+    result=docker('exec','-i','-e','ODOO_DB_NAME='+database,containers['script-runner'][0],
+        'python3','-',database,spec['readback_spec'],stdin=spec['readback_program'].encode())
+    if b'integration_readback_ok=true' not in result.splitlines():
+        raise RuntimeError('Validation connection isolation changed')
+
+
+def product_command(arguments, *, stdin=None):
+    # Discard product stderr and failed stdout, which can contain Client data.
+    process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
+    output=bytearray()
+    try:
+        if stdin is not None:
+            process.stdin.write(stdin)
+            process.stdin.close()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout,selectors.EVENT_READ)
+            while True:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired('product validation',PRODUCT_COMMAND_TIMEOUT_SECONDS)
+                chunk=os.read(process.stdout.fileno(),65536)
+                if not chunk:
+                    break
+                if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
+                    raise ValueError('Product output exceeds its bound')
+                output.extend(chunk)
+        status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
+        if status:
+            raise ValueError('Product validation failed')
+        return bytes(output)
+    except (ValueError,OSError,subprocess.TimeoutExpired):
+        raise RehearsalCommandFailure({'step':'business_validation',
+            'exit_status':process.returncode or -1,'error_text':'Product validation unavailable'}) from None
+    finally:
+        process.stdout.close()
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def business_validation(spec,containers):
+    expected=spec['business_validation_identity']
+    output=product_command(['docker','exec','-i','-e','ODOO_DB_NAME='+expected['database'],
+        containers['script-runner'][0],'python3',BUSINESS_VALIDATION_ENTRYPOINT],
+        stdin=json.dumps(expected,separators=(',',':')).encode())
+    markers=[line.split(b'=',1)[1] for line in output.splitlines()
+        if line.startswith(b'business_validation_result=')]
+    if len(markers)!=1 or len(markers[0])>2*BUSINESS_VALIDATION_RECEIPT_MAX_BYTES:
+        raise RuntimeError('Validation evidence is unavailable')
+    try:
+        result=json.loads(bytes.fromhex(markers[0].decode()))
+        return checked_business_receipt(result,expected)
+    except (ValueError,TypeError,KeyError):
+        # Do not attach a parser exception or its input to provider logs.
+        raise RuntimeError('Invalid product validation receipt') from None
+
+
+def pending_business_outcome(spec,root,receipt,lock_held):
+    path=root/(spec['receipt_action']+'.outcome.json')
+    if not path.exists() and not path.is_symlink():
+        return None
+    metadata=path.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+            or metadata.st_uid!=os.getuid() or metadata.st_size>262144):
+        raise RuntimeError('Invalid validation outcome custody')
+    saved=json.loads(path.read_text())
+    if (set(saved)!={'intent_sha256','record_binding_sha256','attempt_sha256','result'}
+            or any(saved[key]!=spec[key] for key in ('record_binding_sha256','attempt_sha256'))
+            or saved['intent_sha256']!=spec['record']['intent_sha256']):
+        raise RuntimeError('Validation outcome binding changed')
+    result=saved['result']
+    if (set(result)!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
+            'public_route','business_host_frozen','business_validation'}
+            or result['intent_sha256']!=saved['intent_sha256'] or result['state']!='switched'
+            or result['copies']!=spec['record']['copies'] or result['resources_preserved'] is not True
+            or result['public_route'] is not False or result['business_host_frozen'] is not False):
+        raise RuntimeError('Invalid retained validation result')
+    validation=checked_business_receipt(result['business_validation'],spec['business_validation_identity'])
+    verified=False
+    if lock_held:
+        try:
+            database,image=current(spec)
+            containers=inspection(spec,database,image)
+            validate_snapshots(spec,root,containers,result['copies'])
+            business_validation_precheck(spec,containers)
+            verified=True
+        except Exception:
+            pass
+    if verified:
+        save(receipt,result)
+        return result
+    return {'intent_sha256':saved['intent_sha256'],'state':'switched',
+        'copies':result['copies'],'elapsed_seconds':result['elapsed_seconds'],
+        'resources_preserved':True,'public_route':False,'business_host_frozen':False,
+        'completed':False,'business_validation_postcheck_verified':False,'diagnostics_private':True,
+        'pending_business_validation':{key:saved[key] for key in
+            ('intent_sha256','record_binding_sha256','attempt_sha256')} | {'receipt':validation}}
+
+
 def sanitize_capture(spec,containers,database,raw):
     try:
         docker('cp',str(raw/'database.dump'),containers['script-runner'][0]+':/tmp/rehearsal.dump')
@@ -293,6 +432,25 @@ def sanitize_capture(spec,containers,database,raw):
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
+def source_filestore_archive_command(filestore: str) -> str:
+    check='''from pathlib import Path
+import stat
+import sys
+root=Path(sys.argv[1])
+if not root.is_dir():
+    raise RuntimeError('Source filestore is unavailable')
+for shard in range(256):
+    try:
+        metadata=(root/f'{shard:02x}').lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError('Source filestore shard is aliased or unavailable')
+'''
+    archive=['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-']
+    return shlex.join(['python3','-c',check,filestore])+' && exec '+shlex.join(archive)
+
+
 def capture(spec,root,containers,database):
     started=time.monotonic()
     raw=root/'raw-source'
@@ -304,8 +462,10 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    remote=shlex.join(['tar','-cf','-','-C',filestore,'.'])
-    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'])
+    names=write_captured_attachment_names(spec,raw,containers)
+    remote=source_filestore_archive_command(filestore)
+    with names.open('rb') as listed:
+        bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:
@@ -324,6 +484,9 @@ def capture(spec,root,containers,database):
     started=time.monotonic()
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
+        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
@@ -383,6 +546,26 @@ def refusal_result(spec, code):
         'copies':record['copies'],'elapsed_seconds':record['elapsed_seconds'],
         'resources_preserved':True,'public_route':False,'business_host_frozen':False,
         'completed':False,'refusal_code':code,'attempt_sha256':spec['attempt_sha256']}
+
+
+def emit_refusal(spec,root,code):
+    path=refusal_receipt(spec,root,code)
+    if path is None:
+        raise RuntimeError('Missing refusal attempt identity')
+    # Creation itself is the complete no-effect proof. There is no
+    # partial JSON/rename window to strand a killed refusal writer.
+    descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    result=refusal_result(spec,code)
+    emit_rehearsal_result(result)
 
 
 def read_refusal(spec, root):
@@ -499,7 +682,12 @@ def observe(spec, root, receipt, lock_held=False):
     namespace=record['rehearsal_id']
     action=spec['action']
     if not receipt.is_file() or receipt.is_symlink():
-        if not (root/(action+'.started')).exists():
+        if action=='validate-business':
+            pending=pending_business_outcome(spec,root,receipt,lock_held)
+            if pending is not None:
+                emit_rehearsal_result(pending)
+                return
+        if not (root/(spec.get('receipt_action',action)+'.started')).exists():
             refused=read_refusal(spec,root)
             if refused is not None:
                 emit_rehearsal_result(refused)
@@ -512,7 +700,7 @@ def observe(spec, root, receipt, lock_held=False):
                 validate_snapshots(spec,root,{},[copy],retired=True)
                 copies.append(copy)
         prepare_not_started=False
-        marker=root/(action+'.started')
+        marker=root/(spec.get('receipt_action',action)+'.started')
         raw=root/'raw-source'
         if (action=='prepare' and record['state']=='planned' and not copies
                 and not marker.exists() and not marker.is_symlink()
@@ -527,7 +715,7 @@ def observe(spec, root, receipt, lock_held=False):
             'elapsed_seconds':record['elapsed_seconds'],'resources_preserved':True,'public_route':False,
             'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
             'prepare_not_started':prepare_not_started,
-            'custody':custody_observation(spec,root,action)}
+            'custody':custody_observation(spec,root,spec.get('receipt_action',action))}
         custody=result['custody']
         if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
             failure=read_command_failure(spec,root)
@@ -597,7 +785,12 @@ def main():
     if action=='retire-incomplete':
         incomplete_retirement(spec,root)
         return
+    if action=='validate-business':
+        # Each original operation has its own effect marker and receipt. A
+        # later reviewed attempt cannot replay or adopt an earlier attempt.
+        action+='-'+spec['attempt_sha256']
     receipt=root/(action+'.json')
+    spec['receipt_action']=action
     if spec['mode']=='observe':
         lock_path=root/'.execution.lock'
         if lock_path.is_symlink():
@@ -631,6 +824,7 @@ def main():
         started=time.monotonic()
         spec['phase_elapsed']={}
         names=database_names(spec)
+        action=spec['action']
         database,image=current(spec)
         if action=='prepare':
             (root/(action+'.started')).touch(mode=0o600)
@@ -654,6 +848,8 @@ def main():
             try:
                 containers=inspection(spec,database,image)
                 validate_snapshots(spec,root,containers,record['copies'])
+                if action=='validate-business':
+                    business_validation_precheck(spec,containers)
                 if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
                     spec,root,containers,action):
                     code='rehearsal_storage_capacity_insufficient'
@@ -664,25 +860,9 @@ def main():
                 # malformed provider observations are determinate refusals too.
                 code='rehearsal_precheck_refused'
             if code:
-                path=refusal_receipt(spec,root,code)
-                if path is None:
-                    raise RuntimeError('Missing refusal attempt identity')
-                # Creation itself is the complete no-effect proof. There is no
-                # partial JSON/rename window to strand a killed refusal writer.
-                descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                result=refusal_result(spec,code)
-                emit_rehearsal_result(result)
+                emit_refusal(spec,root,code)
                 return
-            (root/(action+'.started')).touch(mode=0o600)
+            (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
             copies=list(record['copies'])
             if action=='execute':
                 raw=capture(spec,root,containers,names['source'])
@@ -722,6 +902,9 @@ def main():
                 private_health(spec,containers)
                 spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
                 state='switched'
+            elif action=='validate-business':
+                validation=business_validation(spec,containers)
+                state='switched'
             elif action=='verify':
                 private_health(spec,containers)
                 # Fence the disposable writer before preserving its post-write
@@ -737,6 +920,12 @@ def main():
         elapsed={**record['elapsed_seconds'],**spec.get('phase_elapsed',{}),action:time.monotonic()-started}
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
+        if action=='validate-business':
+            result['business_validation']=validation
+            save(root/(spec['receipt_action']+'.outcome.json'),{
+                'intent_sha256':record['intent_sha256'],'record_binding_sha256':spec['record_binding_sha256'],
+                'attempt_sha256':spec['attempt_sha256'],'result':result})
+            business_validation_precheck(spec,containers)
         save(receipt,result)
         emit_rehearsal_result(result)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -968,6 +969,17 @@ def run_odoo_stable_operation_worker_loop(
     config_scan_thread: Thread | None = None
     standing_review_backoff = StandingReleaseReviewBackoff()
     invitation_backoff = ReleaseInvitationBackoff()
+    rehearsal_resume_thread: Thread | None = None
+    last_rehearsal_resume_at: float | None = None
+
+    def resume_rehearsals() -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals as sweep
+
+        try:
+            if isinstance(record_store, PostgresRecordStore):
+                sweep(record_store, control_plane_root_path, stop_event=worker_stop_event)
+        except Exception:
+            logging.exception("Rehearsal checkpoint sweep unavailable.")
 
     def advance_releases() -> None:
         try:
@@ -1005,6 +1017,19 @@ def run_odoo_stable_operation_worker_loop(
         while not worker_stop_event.is_set():
             if max_iterations is not None and iterations >= max_iterations:
                 break
+            if (
+                isinstance(record_store, PostgresRecordStore)
+                and (
+                    last_rehearsal_resume_at is None
+                    or monotonic() - last_rehearsal_resume_at >= poll_seconds
+                )
+                and (rehearsal_resume_thread is None or not rehearsal_resume_thread.is_alive())
+            ):
+                last_rehearsal_resume_at = monotonic()
+                rehearsal_resume_thread = Thread(
+                    target=resume_rehearsals, name="rehearsal-checkpoint-resume", daemon=False
+                )
+                rehearsal_resume_thread.start()
             if hasattr(record_store, "request_product_reconcile") and (
                 last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
             ):
@@ -1090,6 +1115,8 @@ def run_odoo_stable_operation_worker_loop(
             invitation_thread.join()
         if config_scan_thread is not None:
             config_scan_thread.join()
+        if rehearsal_resume_thread is not None:
+            rehearsal_resume_thread.join()
     return OdooStableOperationWorkerLoopResult(
         status="stopped" if worker_stop_event.is_set() else "completed",
         iterations=iterations,
@@ -2356,9 +2383,9 @@ def _execute_target_replacement_with_checkpoint(
                 ),
             }
         )
-    except DurableOperationAuthorizationDeniedError as error:
+    except (DurableOperationAuthorizationDeniedError, ScheduleMaterializationTooLarge) as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
+            "Odoo stable target replacement operation %s was refused at a provider boundary: %s",
             operation.operation_id,
             error,
         )

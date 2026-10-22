@@ -172,6 +172,18 @@ class RecipientWriterControlTests(unittest.TestCase):
                 adapter=adapter,
             )
         self.assertEqual(result.response_status_code, 202, result.response_payload)
+        assert result.record is not None
+        capsule = f.store.read_provider_target_origin(result.record)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (f.record.product, self.binding.context, "testing", "testing-peer-id"),
+        )
         return result.response_payload["result"]
 
     def test_two_pause_resume_cycles_bind_each_resume_to_its_original_pause(self) -> None:

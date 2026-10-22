@@ -8,7 +8,6 @@ from control_plane.dokploy.native_copy_stream import _read_remote
 
 
 def require_complete_container_inventory(containers: list[dict[str, Any]]) -> None:
-    """Missing ownership or mount fields are unknown, never absence."""
     for item in containers:
         config, state, mounts = item.get("Config"), item.get("State"), item.get("Mounts")
         if (
@@ -32,7 +31,6 @@ def require_complete_container_inventory(containers: list[dict[str, Any]]) -> No
 
 
 def retained_inventory_sha256(containers: list[dict[str, Any]], spec: dict[str, Any]) -> str:
-    """Bind exact observed members without exporting their environment values."""
     import hashlib
     import json
 

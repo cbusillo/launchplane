@@ -15,12 +15,16 @@ from control_plane.legacy_preview_reconciliation import (
     LEGACY_PREVIEW_RECONCILIATION_ROUTE,
     LegacyPreviewReconciliationRequest,
     plan_legacy_preview,
+    serialize_legacy_preview_operation,
 )
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.product_retirement import canonical_sha256
+from control_plane.legacy_preview_completion import reconciled_preview
+from control_plane.drivers.registry import product_profile_uses_odoo_driver
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_slug,
-    serialize_generic_web_preview_operation,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -100,11 +104,8 @@ def register_legacy_preview_reconciliation_route(
                 anchor_pr_number=preview.anchor_pr_number,
                 label="Reconciliation",
             )
-            with serialize_generic_web_preview_operation(
-                record_store=store,
-                profile=profile,
-                preview_slug=slug,
-                product_mutation=reconciliation.mode == "apply",
+            with serialize_legacy_preview_operation(
+                store, reconciliation, product_mutation=reconciliation.mode == "apply"
             ):
                 if reconciliation.mode == "apply":
                     if not store.read_product_profile_record(profile.product).is_active:
@@ -144,8 +145,21 @@ def register_legacy_preview_reconciliation_route(
                             "Reviewed plan is missing, blocked, changed or bound to another caller."
                         )
                     destroyed_at = utc_now_timestamp()
+                    terminal = reconciled_preview(
+                        bound.preview,
+                        destroyed_at=destroyed_at,
+                        reason=reconciliation.reason,
+                        receipt_id=(
+                            build_launchplane_idempotency_record_id(response_trace_id=trace_id)
+                            if product_profile_uses_odoo_driver(bound.profile)
+                            else ""
+                        ),
+                    )
                     result.update(
-                        mode="apply", preview_state="destroyed", destroyed_at=destroyed_at
+                        mode="apply",
+                        preview_state="destroyed",
+                        destroyed_at=destroyed_at,
+                        terminal_preview_digest=canonical_sha256(terminal.model_dump(mode="json")),
                     )
                 else:
                     result["mode"] = reconciliation.mode
@@ -196,7 +210,7 @@ def register_legacy_preview_reconciliation_route(
         response_model=AcceptedEvidenceResponse,
         status_code=202,
         operation_id="reconcile_legacy_generic_web_preview",
-        summary="Inspect or reconcile one provider-absent legacy generic-web preview",
+        summary="Inspect or reconcile one provider-absent legacy preview",
         responses={
             status: {"model": dependencies.error_response_model}
             for status in (400, 403, 404, 409, 503)

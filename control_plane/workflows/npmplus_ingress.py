@@ -430,13 +430,6 @@ def _plan_operations(
     )
 
 
-def _payload_matches(
-    existing_host: NpmplusProxyHost,
-    desired_payload: NpmplusProxyHostPayload,
-) -> bool:
-    return _comparable_payload(existing_host) == _comparable_payload(desired_payload)
-
-
 def _create_change_categories(
     desired_payload: NpmplusProxyHostPayload,
 ) -> tuple[NpmplusIngressChangeCategory, ...]:

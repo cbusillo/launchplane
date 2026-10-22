@@ -1,4 +1,6 @@
 from copy import deepcopy
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from contextlib import nullcontext
 import json
 from typing import Any
@@ -772,6 +774,14 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             idempotency_key="original-key",
             request_fingerprint="original-request",
             provider_target_key=dokploy_generic_web_provider_target_key(current),
+            provider_target_origin=ProviderTargetOrigin(
+                product="example-site",
+                context=current.context,
+                instance=current.instance,
+                provider_id=current.provider_id,
+                target_type=current.target_category,
+                target_id=current.target_id,
+            ),
             reconciliation_key="original-binding",
             lease_owner="original-worker",
         )
@@ -1042,6 +1052,31 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
 
     async def test_source_drift_after_mount_keeps_custody_before_adoption(self) -> None:
         await self.assert_source_drift_preserves_allocation(MOUNT_CREATE)
+
+    async def test_binding_drift_after_project_retains_returned_identity(self) -> None:
+        await self.plan()
+        changed = self.profile.model_copy(update={"display_name": "Concurrent metadata change"})
+        acknowledged: dict[str, Any] = {}
+
+        def create_then_change(
+            host: str, token: str, path: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            response = self.mutate(host, token, path, payload)
+            if path == PROJECT_CREATE_PATH:
+                acknowledged.update(response)
+                self.store.write_product_profile_record(changed)
+            return response
+
+        self.provider.side_effect = create_then_change
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        readback = (await self.post(mode="readback")).json()["result"]
+        phase = json.loads(readback["provider_effect_phase"])
+        self.assertEqual(phase["project"], self.placement["project_id"])
+        self.assertEqual(phase["default_environment"], acknowledged["environment"]["environmentId"])
+        self.assertEqual(self.provider.call_args_list[-1].args[2], PROJECT_CREATE_PATH)
+        self.profile = changed
+        self.assert_production_unchanged()
 
     async def test_production_existing_mount_or_volume_and_host_path_inputs_refuse(self) -> None:
         for changes in (

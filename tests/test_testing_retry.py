@@ -289,9 +289,31 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
     def test_existing_active_operation_and_unprivileged_caller_refused(self) -> None:
         body = self.reviewed()
         operation = self.store.list_odoo_stable_target_replacement_operation_records()[-1]
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            operation.model_copy(update={"status": "reconciliation_required", "finished_at": ""})
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
         )
+
+        original = operation
+        held_key = original.idempotency_key + ":stranded-original"
+        held = original.model_copy(
+            update={
+                "operation_id": build_odoo_stable_target_replacement_operation_id(
+                    product=original.product,
+                    context=original.context,
+                    instance=original.instance,
+                    created_at=original.created_at,
+                    idempotency_key=held_key,
+                    idempotency_scope=original.idempotency_scope,
+                ),
+                "idempotency_key": held_key,
+                "status": "reconciliation_required",
+                "finished_at": "",
+                "result": None,
+                "error_code": "provider_outcome_unknown",
+                "error_message": "Fixture original remains unverified.",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
         refused = self.post(body, "active-attempt")
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "failed")

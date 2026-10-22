@@ -421,9 +421,6 @@ def execute_testing_rebuild(
         if record.step == "rolling_back":
             provider.guard(plan, recovery=True)
             if isinstance(plan.old, UnavailableTestingPredecessor):
-                # Undo only our exact file through its original physical fence.
-                # Current old processes/routers are not serving authority for
-                # this inverse and cannot require a fabricated health result.
                 resuming = record.rollback_started
                 save(rollback_started=True)
                 provider.switch(plan, plan.new, plan.old, reconcile_only=resuming)

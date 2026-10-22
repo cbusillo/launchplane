@@ -13,6 +13,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
+import { providerAttentionQualifier } from "./provider-hold-attention";
+
 import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
@@ -26,7 +29,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -66,12 +69,17 @@ interface InspectionStep {
 export function ProductIndexRoute({
   resource,
   onRetry,
+  admin, fixtureMode, refreshToken,
 }: {
+  admin: boolean; fixtureMode: DevFixtureMode; refreshToken: number;
   resource: ResourceState<ProductSiteOverview[]>;
   onRetry: () => void;
 }) {
+  const attention = useProviderHoldAttention(admin, fixtureMode, refreshToken);
+  const serviceAttentionQualifier = fixtureMode ? "Demo mode. Service operation attention is not loaded." : !admin ? "Service operation attention is unavailable for this session; only authorized lane incidents are shown." : providerAttentionQualifier(attention.resource);
+  const attentionPanel = <ProviderHoldAttention admin={admin} fixtureMode={fixtureMode} resource={attention.resource} onNext={attention.next} onRefresh={attention.refresh} />;
   const products = (resource.data ?? []).map(product => expireProductEvidence(product));
-  useEvidenceExpiry(products.flatMap(product => product.environments), products.map(product => product.preview.provenance.stale_after));
+  useEvidenceExpiry(products.flatMap(product => product.environments), [...products.map(product => product.preview.provenance.stale_after), attention.resource.data?.stale_after ?? ""]);
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
     loading && !products.length
@@ -89,23 +97,23 @@ export function ProductIndexRoute({
   }, [viewState]);
 
   if (loading && !products.length) {
-    return <ProductIndexSkeleton />;
+    return <><ProductIndexSkeleton />{attentionPanel}</>;
   }
   if (resource.status === "error" && !products.length) {
     const accessDenied = resource.statusCode === 401 || resource.statusCode === 403;
     return (
-      <RouteError
+      <><RouteError
         eyebrow="Product Ops"
         message={resource.error}
         onRetry={accessDenied ? undefined : onRetry}
         returnTo={accessDenied ? null : undefined}
         title={accessDenied ? "Product inventory access denied" : "Product inventory unavailable"}
         traceId={resource.traceId}
-      />
+      />{attentionPanel}</>
     );
   }
   if (resource.status === "ready" && !products.length) {
-    return <NoProducts onRetry={onRetry} />;
+    return <><NoProducts onRetry={onRetry} />{attentionPanel}</>;
   }
 
   return (
@@ -134,7 +142,8 @@ export function ProductIndexRoute({
         />
       ) : null}
 
-      <ProductIncidentOverview products={products} />
+      <ProductIncidentOverview products={products} serviceAttentionQualifier={serviceAttentionQualifier} />
+      {attentionPanel}
 
       <div className="directory-head" aria-hidden="true">
         <span>Product</span>
@@ -365,13 +374,15 @@ function DirectoryLane({
 }) {
   const tone = environmentOperationalTone(environment);
   const headline = environment ? ingressHeadline(environment) : "Not recorded";
+  const reasons = operationalAttentionReasons(environment);
   return (
     <span className="directory-lane" data-lane={lane} data-operational={tone}>
       <span className="lane-name">{lane === "prod" ? "Production" : "Testing"}</span>
       <strong>
-        {tone === "danger" ? "Issue · " : tone === "warning" ? "Warning · " : ""}
+        {tone === "warning" ? "Warning · " : ""}
         {headline}
       </strong>
+      {reasons.length ? <small className="directory-attention">{reasons.join(" · ")}</small> : null}
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
       <small className="directory-evidence-detail">
         {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
@@ -618,9 +629,11 @@ interface ActiveProductIncident {
 function ProductIncidentOverview({
   compact = false,
   products,
+  serviceAttentionQualifier,
 }: {
   compact?: boolean;
   products: ProductSiteOverview[];
+  serviceAttentionQualifier?: string;
 }) {
   const incidents = products.flatMap((product) =>
     product.environments.flatMap((environment) =>
@@ -667,6 +680,7 @@ function ProductIncidentOverview({
           </p>
         </div>
       </div>
+      {serviceAttentionQualifier ? <p>{serviceAttentionQualifier}</p> : null}
       {incidents.length ? (
         <ul className="product-incident-list">
           {incidents.map((incident) => (
@@ -724,6 +738,7 @@ function EnvironmentRow({
     (candidate) => candidate.role === "primary",
   ) ?? environment.topology.observed.tls_domains[0];
   const topologyWarnings = environment.topology.warnings;
+  const attentionReasons = operationalAttentionReasons(environment);
 
   return (
     <article
@@ -756,7 +771,12 @@ function EnvironmentRow({
               environment.topology.desired.public_website === "none" ? "Not applicable" : domain
             )}
           </dd>
-          <small>{ingressHeadline(environment)}</small>
+          {attentionReasons.length ? (
+            <>
+              <small className="environment-attention">{attentionReasons.join(" · ")}</small>
+              {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
+            </>
+          ) : <small>{ingressHeadline(environment)}</small>}
         </div>
         <div>
           <dt>TLS evidence</dt>
@@ -1248,13 +1268,24 @@ function compareEnvironments(
   );
 }
 
+// A no-website lane may retain an older public observation; it is history, not current health.
+function recordedPublicObservation(environment: ProductEnvironmentSummary): string | null {
+  if (environment.topology.desired.public_website !== "none" || !environment.public_ingress.observed_at) return null;
+  return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
+}
+
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
+  // No summary, current or retained, may stand as the headline of a red lane.
+  if (environmentOperationalTone(environment) === "danger") {
+    return "Needs attention";
+  }
+  const retained = recordedPublicObservation(environment);
+  if (retained) {
+    return retained;
+  }
   if (environment.topology.desired.public_website === "none") {
-    if (environment.public_ingress.observed_at) {
-      return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
-    }
     const tone = environmentOperationalTone(environment);
-    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
+    return tone === "verified" ? "Private checks passed" : "Verification incomplete";
   }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {

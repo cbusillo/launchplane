@@ -91,6 +91,7 @@ class _LaneFixture:
         before_provider_mutation: Callable[[], None] | None = None,
         requalify_literal_keys: tuple[str, ...] = (),
         readback_env: str | None = None,
+        selected_keys: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         updates: list[dict[str, object]] = []
 
@@ -127,6 +128,7 @@ class _LaneFixture:
                 deploy_trigger=Mock(),
                 before_provider_mutation=before_provider_mutation,
                 requalify_literal_keys=requalify_literal_keys,
+                selected_keys=selected_keys,
             )
         return result, updates
 

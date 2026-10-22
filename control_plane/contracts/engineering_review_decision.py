@@ -173,8 +173,3 @@ def build_engineering_review_decision_binding(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-
-
-def validate_sha256(value: str, field_name: str) -> None:
-    if value and not _SHA256_PATTERN.fullmatch(value):
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest.")

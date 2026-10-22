@@ -1226,7 +1226,13 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 payload=payload,
             )
 
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
         with (
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            ),
             patch(
                 "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                 return_value=("https://fixture.invalid", "fixture-token"),

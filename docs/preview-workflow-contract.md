@@ -19,9 +19,6 @@ publish the product artifact; Launchplane owns preview event semantics,
 idempotency, provider mutation, durable records, unsupported notices, feedback
 comments, inventory, and cleanup.
 
-This contract is the migration target for preview-enabled product repos that
-currently carry bespoke preview-control-plane workflows.
-
 ## Ownership Boundary
 
 Product repos own:
@@ -63,14 +60,11 @@ The decision is deliberately small:
   `status="unsupported"` from a trusted base-branch workflow.
 - `ignore`: make no Launchplane mutation.
 
-The same contract applies to SYO, VeriReel, Odoo CM, and future products. Driver
-routes may differ by product family, but event interpretation stays the same.
-
 Product repo adapters can ask Launchplane to render that decision from a GitHub
 event payload before doing product-owned work:
 
 ```shell
-uv run launchplane work-graph preview-workflow-decision \
+uv run launchplane preview-workflow-decision \
   --event-file "$GITHUB_EVENT_PATH" \
   --event-name "$GITHUB_EVENT_NAME" \
   --product sell-your-outboard \
@@ -84,6 +78,11 @@ routes, check out pull-request code, or mutate a provider. It emits the normaliz
 event, decision, route path, feedback status, and run-scoped idempotency key as
 JSON so product workflows can branch on the shared contract instead of
 duplicating event semantics.
+
+Preview operations for one pull request are serialized rather than cancelable.
+A close followed immediately by reopen may complete destroy before the
+subsequent refresh; the final event converges the preview to the current
+requested state without canceling cleanup in progress.
 
 Same-repository preview build jobs that need an importable helper for the
 GitHub event decision and image tags should use
@@ -520,34 +519,3 @@ Use
 `cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>`
 for the OIDC transport only when a Launchplane-owned reusable workflow does not
 exist yet. Pin the full reviewed Launchplane commit SHA.
-
-## Migration Checklist
-
-- Replace product-rendered preview comments with `/v1/previews/pr-feedback`.
-- Move unsupported fork and Dependabot notices to a base-branch
-  `pull_request_target` job that does not check out PR code.
-- Replace bespoke refresh/destroy event branching with the shared decision
-  contract.
-- For conventional generic-web products, call
-  `reusable-generic-web-preview.yml@<launchplane-sha>` so Launchplane owns the
-  build/publish/lifecycle/evidence composition while the product repo supplies
-  only code-adjacent Docker inputs and its verification command.
-- Keep the product verification command and domain behavior product-owned; the
-  facade runs it without OIDC and records only its primitive result facts.
-- Use run-scoped idempotency keys for every Launchplane mutation.
-- Keep product configuration, preview URL policy, provider credentials, and
-  cleanup truth in Launchplane records rather than product-repo files.
-- Verify one refresh, one destroy, and one unsupported-notice path per migrated
-  product repo.
-- Treat preview operations for one pull request as serialized rather than
-  cancelable. A close followed immediately by reopen may complete destroy before
-  the subsequent refresh; the final event converges the preview to the current
-  requested state without canceling cleanup in progress.
-
-## Source Workflows
-
-This contract was shaped from the current preview paths in SYO, VeriReel, and
-Odoo CM. Odoo CM is the reference thin workflow after its preview feedback moved
-to Launchplane. The generic-web preview facade moves the remaining build,
-lifecycle, verification-evidence, and feedback composition behind one reusable
-entrypoint.

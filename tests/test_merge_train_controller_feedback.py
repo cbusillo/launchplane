@@ -172,6 +172,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertNotIn("updated", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
+        diagnostic = "missing-example-gate"
         response: dict[str, Any] = {
             "result": {
                 "repository": "cbusillo/example",
@@ -180,6 +181,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 "candidate": {
                     "status": "building",
                     "required_checks_status": "pending",
+                    "required_checks_observation_error": diagnostic,
                     "entries": [{"pull_request_number": 7}],
                 },
             },
@@ -191,6 +193,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual(1, len(payloads))
         self.assertEqual("waiting", payloads[0]["event"])
         self.assertIn("waiting", cast(str, payloads[0]["message"]))
+        self.assertIn(diagnostic, cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_merged_landing_plan_completed(self) -> None:
         response: dict[str, Any] = {

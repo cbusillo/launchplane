@@ -26,8 +26,9 @@ product's review label remains an explicit override requiring real test notes.
 `Nothing for the Client to test: <reason>` with a nonempty reason marks an
 engineering-only change; it cannot be used with the review label. When the
 Director reroutes an already labeled request, use [pending request withdrawal](#withdrawing-a-pending-request). Missing notes,
-empty template comments, or a malformed engineering-only declaration visibly
-refuse preview readiness and merge admission for repositories feeding a Client
+empty template comments, or a malformed engineering-only declaration (including
+other "nothing to test" wording such as `Nothing for Justin to test.`, which
+the check names instead of waiting for the Client) visibly refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
 not a checked-in repository list. Shared inputs require valid notes and remain
 covered by the consuming product's release review; they do not gain a separate
@@ -61,8 +62,11 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
-The preview reconciler refreshes the Client-review check even while waiting for
-a verified build or after a failed preview apply. Valid engineering-only notes
+The preview reconciler refreshes the Client-review check independently of
+preview planning and delivery, including a deferred operation, an unknown
+provider outcome, or a failure to recover the original preview proof. The
+publisher rereads the PR and saved decisions, even when there is no new preview
+comment to post. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
@@ -273,6 +277,11 @@ and changes no release acceptance. It does not rewrite test notes or publish a
 successful Client-review check. Set truthful engineering notes separately; real
 test notes or a later review label request review normally, including on the
 same head. The normal preview reconciler refreshes the check after those edits.
+
+An unlabeled request needs no label withdrawal: edit its notes truthfully and
+the next event reconcile or open-PR sweep refreshes the check. A held preview
+operation remains held; check reclassification neither retries it nor records
+Client acceptance. Withdrawal still requires a labeled pending request.
 
 Recovery and readback can observe a closed PR; a new withdrawal still requires
 an open PR. A published history receipt remains historical proof after closure.

@@ -29,8 +29,6 @@ def select_testing_route_raw(
     selected = {}
     services = {}
     middlewares = {}
-    # Declared stopped-container routes may reference this already-applied,
-    # value-free HTTPS redirect without any application router being present.
     supplied_middlewares = raw.get("middlewares")
     if external_middlewares and not isinstance(supplied_middlewares, dict):
         raise RuntimeError("Applied middleware inventory is unavailable")
@@ -99,8 +97,6 @@ def select_testing_route_raw(
                     and isinstance(supplied_middlewares, dict)
                     and qualified not in supplied_middlewares
                 ):
-                    # A complete map can prove removal of an admitted external
-                    # dependency; preserve that fact for the shared observer.
                     continue
                 raise RuntimeError("Applied middleware inventory is incomplete")
             middlewares[qualified] = {
@@ -130,7 +126,6 @@ class TestingRoutePending(ValueError):
 
 
 class TestingRouteAuthorityChanged(ValueError):
-    """A positively enabled route conflicts with the original lane authority."""
 
 
 class UnavailableTestingRoutePreimage(FrozenRecord):
@@ -161,6 +156,12 @@ class TestingLaneRoute(FrozenRecord):
     unavailable_preimage: UnavailableTestingRoutePreimage | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    application_file_name: str = Field(
+        default="", pattern=r"^(?:[A-Za-z0-9_-]+\.yml)?$", exclude_if=lambda value: not value
+    )
+    application_file_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
 
     @field_validator("template", "legacy_routers", mode="before")
     @classmethod
@@ -173,6 +174,8 @@ class TestingLaneRoute(FrozenRecord):
 
     @model_validator(mode="after")
     def validate_lane(self) -> Self:
+        if bool(self.application_file_name) != bool(self.application_file_sha256):
+            raise ValueError("The original application route requires its exact file identity.")
         if self.route_id != testing_route_id(self.product, self.context):
             raise ValueError("Testing traffic identity belongs to another lane.")
         if self.old_backend == self.new_backend:
@@ -370,11 +373,13 @@ def applied_service_backend(raw: dict[str, Any], service: str, provider: str) ->
     return str(servers[0]["url"])
 
 
-def redirects_to_https(raw: dict[str, Any], router: dict[str, Any]) -> bool:
+def redirects_to_https(
+    raw: dict[str, Any], router: dict[str, Any], provider: str = "docker"
+) -> bool:
     for reference in router.get("middlewares", []):
         if not isinstance(reference, str):
             raise ValueError("Testing predecessor middleware is malformed.")
-        reference = reference if "@" in reference else reference + "@docker"
+        reference = reference if "@" in reference else reference + "@" + provider
         middleware = raw.get("middlewares", {}).get(reference)
         if (
             isinstance(middleware, dict)
@@ -382,6 +387,19 @@ def redirects_to_https(raw: dict[str, Any], router: dict[str, Any]) -> bool:
         ):
             return True
     return False
+
+
+def application_load_balancer_configuration(value: Any) -> Any:
+    """Compare source and runtime with ordinary Traefik defaults materialized."""
+    if not isinstance(value, dict):
+        return value
+    configuration = dict(value)
+    configuration.setdefault("passHostHeader", True)
+    configuration.setdefault("strategy", "wrr")
+    forwarding = configuration.get("responseForwarding", {})
+    if isinstance(forwarding, dict):
+        configuration["responseForwarding"] = {"flushInterval": "100ms", **forwarding}
+    return configuration
 
 
 def compile_testing_route(
@@ -396,7 +414,53 @@ def compile_testing_route(
     public_entrypoints: tuple[str, ...],
     owned_document: dict[str, Any] | None = None,
     recorded_template: dict[str, Any] | None = None,
+    application_document: dict[str, Any] | None = None,
+    application_file_name: str = "",
+    application_file_sha256: str = "",
+    recorded_application_route: TestingLaneRoute | None = None,
 ) -> TestingLaneRoute:
+    route = _compile_testing_route(
+        product=product,
+        context=context,
+        host=host,
+        old_backend=old_backend,
+        old_backend_addresses=old_backend_addresses,
+        new_backend=new_backend,
+        raw=raw,
+        public_entrypoints=public_entrypoints,
+        owned_document=owned_document,
+        recorded_template=recorded_template,
+        application_document=application_document,
+        application_file_name=application_file_name,
+        application_file_sha256=application_file_sha256,
+        recorded_application_route=recorded_application_route,
+    )
+    assert route is not None
+    return route
+
+
+def admit_testing_route_predecessor(**arguments: Any) -> None:
+    """Validate retained source and applied authority without inventing a successor."""
+    _compile_testing_route(new_backend=None, **arguments)
+
+
+def _compile_testing_route(
+    *,
+    product: str,
+    context: str,
+    host: str,
+    old_backend: str,
+    old_backend_addresses: tuple[str, ...] = (),
+    new_backend: str | None,
+    raw: dict[str, Any],
+    public_entrypoints: tuple[str, ...],
+    owned_document: dict[str, Any] | None = None,
+    recorded_template: dict[str, Any] | None = None,
+    application_document: dict[str, Any] | None = None,
+    application_file_name: str = "",
+    application_file_sha256: str = "",
+    recorded_application_route: TestingLaneRoute | None = None,
+) -> TestingLaneRoute | None:
     """Bind actual predecessor authority; the caller proves backend physical custody.
 
     A later rebuild loads its template from the existing route-binding's original
@@ -409,16 +473,95 @@ def compile_testing_route(
         for name, router in matches.items()
         if name.endswith("@docker")
     }
+    if application_document is not None:
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]+\.yml", application_file_name) or not re.fullmatch(
+            r"[a-f0-9]{64}", application_file_sha256
+        ):
+            raise ValueError("The retained application file has no physical custody.")
+        http = application_document.get("http")
+        if not isinstance(http, dict) or not isinstance(http.get("routers"), dict):
+            raise ValueError("The retained application routing document is unavailable.")
+        for name, router in matches.items():
+            if not name.endswith("@file") or name.removesuffix("@file") not in http["routers"]:
+                continue
+            expected = router_configuration(http["routers"][name.removesuffix("@file")])
+            observed = router_configuration(router)
+            for configuration in (expected, observed):
+                configuration["service"] = (
+                    str(configuration.get("service") or "").removesuffix("@file") + "@file"
+                )
+                configuration["middlewares"] = [
+                    reference if "@" in reference else reference + "@file"
+                    for reference in configuration["middlewares"]
+                ]
+                if not configuration.get("priority", 0):
+                    configuration["priority"] = len(str(configuration["rule"]).encode("utf-8"))
+                if configuration.get("ruleSyntax") in {None, "default", "v3"}:
+                    configuration.pop("ruleSyntax", None)
+            service = str(expected["service"]).removesuffix("@file")
+            configured = http.get("services", {}).get(service)
+            applied = raw.get("services", {}).get(service + "@file")
+            if (
+                expected != observed
+                or not isinstance(configured, dict)
+                or not isinstance(applied, dict)
+                or application_load_balancer_configuration(configured.get("loadBalancer"))
+                != application_load_balancer_configuration(applied.get("loadBalancer"))
+            ):
+                raise ValueError(
+                    "The applied application predecessor differs from its actual file."
+                )
+            legacy[name] = router_configuration(router)
+    elif application_file_name or application_file_sha256:
+        raise ValueError("The retained application file is unavailable.")
     legacy_backends = {
-        applied_service_backend(raw, str(matches[name].get("service") or ""), "docker")
+        applied_service_backend(
+            raw, str(matches[name].get("service") or ""), name.rsplit("@", 1)[-1]
+        )
         for name in legacy
     }
+    admitted_backends = {old_backend, *old_backend_addresses}
+    if recorded_application_route is not None:
+        previous = recorded_application_route
+        if (
+            previous.product,
+            previous.context,
+            previous.host,
+            previous.template,
+            previous.application_file_name,
+            previous.application_file_sha256,
+        ) != (
+            product,
+            context,
+            host,
+            recorded_template,
+            application_file_name,
+            application_file_sha256,
+        ) or legacy != previous.legacy_routers:
+            raise ValueError("The original application's retained route custody changed.")
+        admitted_backends.add(previous.legacy_backend)
     if len(legacy_backends) > 1 or any(
-        backend not in {old_backend, *old_backend_addresses} for backend in legacy_backends
+        backend not in admitted_backends for backend in legacy_backends
     ):
         raise ValueError("Docker predecessor differs from its physically verified copy.")
     legacy_backend = next(iter(legacy_backends), "")
     if owned_document is not None:
+        if new_backend is None:
+            if (
+                recorded_application_route is None
+                or recorded_template != recorded_application_route.template
+            ):
+                raise ValueError("Owned testing route requires its original completed template.")
+            if (
+                observe_testing_route(recorded_application_route, raw, owned_document)
+                != old_backend
+            ):
+                raise ValueError(
+                    "The completed application route does not select its retained copy."
+                )
+            return None
         if recorded_template is None:
             raise ValueError("Owned testing route requires its recorded template authority.")
         plan = TestingLaneRoute(
@@ -432,6 +575,8 @@ def compile_testing_route(
             legacy_routers=legacy,
             legacy_backend=legacy_backend,
             public_entrypoints=public_entrypoints,
+            application_file_name=application_file_name,
+            application_file_sha256=application_file_sha256,
         )
         if owned_document != route_document(plan, old_backend):
             raise ValueError("Testing route file differs from the serving copy's authority.")
@@ -446,13 +591,14 @@ def compile_testing_route(
     used_entrypoints: set[str] = set()
     equivalents: dict[tuple[str, ...], dict[str, Any]] = {}
     for index, (name, router) in enumerate(sorted(matches.items())):
+        provider = name.rsplit("@", 1)[-1]
         configuration = router_configuration(router)
         rule = str(router.get("rule") or "")
         exact_rules = {f"Host(`{host}`)", f'Host("{host}")'}
         if (
             router.get("status") != "enabled"
             or rule not in exact_rules
-            or applied_service_backend(raw, str(router.get("service") or ""), "docker")
+            or applied_service_backend(raw, str(router.get("service") or ""), provider)
             != legacy_backend
         ):
             raise ValueError("Testing predecessor is not the exact healthy lane backend.")
@@ -476,11 +622,12 @@ def compile_testing_route(
             "entryPoints": sorted(set(points)),
             "priority": priority,
             "middlewares": [
-                reference if "@" in reference else reference + "@docker" for reference in references
+                reference if "@" in reference else reference + "@" + provider
+                for reference in references
             ],
         }
         service = str(router.get("service") or "")
-        service = service if "@" in service else service + "@docker"
+        service = service if "@" in service else service + "@" + provider
         behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
         behavior.pop("service", None)
         group = tuple(sorted(set(points)))
@@ -494,7 +641,7 @@ def compile_testing_route(
         for reference in router.get("middlewares", []):
             if not isinstance(reference, str):
                 raise ValueError("Testing predecessor middleware is malformed.")
-            reference = reference if "@" in reference else reference + "@docker"
+            reference = reference if "@" in reference else reference + "@" + provider
             if reference.endswith("@file"):
                 middlewares.append(reference)
                 continue
@@ -510,12 +657,12 @@ def compile_testing_route(
             # This managed public header must survive retirement of its Docker producer.
             owned_middlewares[connection_middleware] = {"headers": current["headers"]}
             middlewares.append(connection_middleware + "@file")
-        if not redirects_to_https(raw, router):
+        if not redirects_to_https(raw, router, provider):
             owned_middlewares[connection_middleware] = {
                 "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
             }
         if (
-            not redirects_to_https(raw, router)
+            not redirects_to_https(raw, router, provider)
             and connection_middleware + "@file" not in middlewares
         ):
             middlewares.append(connection_middleware + "@file")
@@ -541,6 +688,8 @@ def compile_testing_route(
         desired["priority"] = priority + 1
         routers[identifier + "-" + str(index)] = desired
         services = document["http"]["services"]
+    if new_backend is None:
+        return None
     plan = TestingLaneRoute(
         product=product,
         context=context,
@@ -558,6 +707,8 @@ def compile_testing_route(
         legacy_routers=legacy,
         legacy_backend=legacy_backend,
         public_entrypoints=public_entrypoints,
+        application_file_name=application_file_name,
+        application_file_sha256=application_file_sha256,
     )
     observe_testing_route(plan, raw, None)
     return plan
@@ -577,7 +728,6 @@ def compile_unavailable_testing_route(
     recorded_template: dict[str, Any] | None = None,
     recorded_backend: str | None = None,
 ) -> TestingLaneRoute:
-    """Use declared ingress without claiming a stopped Docker router is applied."""
     static = yaml.safe_load(static_configuration)
     if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
         raise ValueError("The managed proxy's listener configuration is unavailable.")
@@ -790,7 +940,6 @@ def compile_unavailable_testing_route(
 
 
 def testing_route_static_sha256(static_configuration: str, template: dict[str, Any]) -> str:
-    """Bind the listeners and certificate resolvers used by this route."""
     static = yaml.safe_load(static_configuration)
     if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
         raise ValueError("The managed proxy's listener configuration is unavailable.")
@@ -815,7 +964,6 @@ def testing_route_static_sha256(static_configuration: str, template: dict[str, A
 
 
 def declared_testing_ingress(configured_compose: str) -> dict[str, str]:
-    """The provider's web ingress labels, independent of rendering and application data."""
     try:
         configuration = yaml.safe_load(configured_compose)
     except yaml.YAMLError as error:
@@ -889,7 +1037,9 @@ def observe_testing_route(
             name not in plan.legacy_routers
             or router.get("status") != "enabled"
             or router_configuration(router) != plan.legacy_routers[name]
-            or applied_service_backend(raw, str(router.get("service") or ""), "docker")
+            or applied_service_backend(
+                raw, str(router.get("service") or ""), name.rsplit("@", 1)[-1]
+            )
             != (plan.legacy_backend or plan.old_backend)
         ):
             if router.get("status") == "enabled":

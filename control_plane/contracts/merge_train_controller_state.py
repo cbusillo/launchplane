@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+from control_plane.contracts.text_fields import require_text
 
 
 MergeTrainControllerStateStatus = Literal["idle", "running", "reconcile_required"]
@@ -97,20 +98,20 @@ class MergeTrainControllerStateRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainControllerStateRecord":
-        self.controller_key = _normalize_required(
+        self.controller_key = require_text(
             self.controller_key, "merge train controller state requires controller_key"
         )
         self.repository = _normalize_repository(self.repository)
-        self.base_branch = _normalize_required(
+        self.base_branch = require_text(
             self.base_branch, "merge train controller state requires base_branch"
         )
-        self.policy_key = _normalize_required(
+        self.policy_key = require_text(
             self.policy_key, "merge train controller state requires policy_key"
         )
-        self.policy_sha256 = _normalize_required(
+        self.policy_sha256 = require_text(
             self.policy_sha256, "merge train controller state requires policy_sha256"
         )
-        self.updated_at = _normalize_required(
+        self.updated_at = require_text(
             self.updated_at, "merge train controller state requires updated_at"
         )
         self.lease_owner = self.lease_owner.strip()
@@ -164,7 +165,7 @@ class MergeTrainControllerStateRecord(BaseModel):
 
 def build_merge_train_controller_key(*, repository: str, base_branch: str) -> str:
     normalized_repository = _normalize_repository(repository).replace("/", ":")
-    normalized_base_branch = _normalize_required(
+    normalized_base_branch = require_text(
         base_branch, "merge train controller key requires base_branch"
     )
     return f"merge-train-controller:{normalized_repository}:{normalized_base_branch}"
@@ -202,17 +203,10 @@ def build_merge_train_controller_resume_detail(
     return detail
 
 
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
-
-
 def _normalize_repository(repository: str) -> str:
     # Lowercased like batch records, so every spelling of one repository shares a
     # controller key and lease (GitHub repository names are case-insensitive).
-    normalized = _normalize_required(
+    normalized = require_text(
         repository, "merge train controller state requires repository"
     ).lower()
     if "/" not in normalized:

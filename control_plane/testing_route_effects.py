@@ -398,7 +398,6 @@ class TestingRouteEffects:
         return ProviderObservation("absent", retry_safe=True)
 
     def observe_for_abort(self, effect_phase: str, attempt_number: int) -> ProviderObservation:
-        """Seal only the original forward attempt; never prepare or resend it."""
         if self.inverse:
             raise ValueError("Abort settlement belongs only to the original forward effect.")
         self.recovery_guard()
@@ -408,7 +407,6 @@ class TestingRouteEffects:
                 return ProviderObservation("unknown")
             outcome = "excluded"
         elif self.writer_was_busy(attempt_number):
-            # This exact call returned without entering its critical section.
             outcome = "excluded"
         else:
             outcome = self.settle(attempt)

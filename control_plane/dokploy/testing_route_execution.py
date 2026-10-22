@@ -382,7 +382,6 @@ state=pending
 save
 if test "$desired" = absent; then
     test "$(digest)" = "$expected"
-    # The same physical lock, generation and receipt cover this exact lane file.
     test ! -L "$path"
     if test -e "$path"; then rm -- "$path"; fi
     sync -f .

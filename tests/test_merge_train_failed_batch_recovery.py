@@ -10,6 +10,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
+from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_batch_pull_request import (
     batch_pull_request_body,
@@ -27,7 +28,11 @@ from control_plane.merge_train_controller_run_once import (
     _reflow_stale_candidate_record,
     try_reflow_failed_merge_train_candidate,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainGitHubError,
+    MergeTrainBaseCheckObservation,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerLeaseLostError
@@ -57,7 +62,11 @@ class _RerunProvider(_BatchProvider):
             return _protected_branch_with_checks("ci-gate")
         if method == "GET" and "/check-runs?" in path:
             self.requests.append((method, path, body))
-            failed = {**_required_check_run("ci-gate", "completed", "failure"), "id": 1}
+            failed = {
+                **_required_check_run("ci-gate", "completed", "failure"),
+                "id": 1,
+                "check_suite": {"id": 10},
+            }
             rerun = {
                 **_required_check_run(
                     "ci-gate",
@@ -65,6 +74,7 @@ class _RerunProvider(_BatchProvider):
                     "success" if self.checks_pass else None,
                 ),
                 "id": 2,
+                "check_suite": {"id": 10},
             }
             return {
                 "check_runs": []
@@ -175,7 +185,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client.candidate_block_label_events.return_value = []
         client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
         client.read_merge_train_snapshot.return_value = self.snapshot
-        client.read_base_check_status.return_value = base_status
+        client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            cast(MergeTrainCheckStatus, base_status)
+        )
         client.probe_batch_entry_conflicts.return_value = conflicts
         client.add_pull_request_label.return_value = None
         if not observe_checks:
@@ -660,7 +672,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),)
             )
         )
-        client.read_base_check_status.return_value = base_status
+        client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            cast(MergeTrainCheckStatus, base_status)
+        )
         client.probe_batch_entry_conflicts.return_value = conflicts
         self.reflow_client = client
         client.add_pull_request_label.return_value = None

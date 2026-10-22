@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, NoReturn
 from uuid import uuid4
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+
 import click
 
 from fastapi import Depends, Header, Path as PathParameter
@@ -170,6 +172,8 @@ def register_testing_replacement_resource_routes(
                     in_progress_message="Testing resource preparation is running with the original key.",
                     reconcile_message="The original preparation has an unknown outcome; do not create another target.",
                 )
+            except BridgeNetworkCapacityRefused as error:
+                refuse(409, error.code, str(error))
             except DurableOperationAuthorizationDeniedError:
                 refuse(
                     403,

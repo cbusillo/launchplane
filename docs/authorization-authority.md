@@ -128,6 +128,15 @@ reviewed digests, original-key replay, generation and custody fences, staff
 holds, active/unknown-operation refusal and the worker's safety checks remain
 in force. See [testing retry](testing-deploy-retry.md).
 
+Generic-web deploy recovery dry runs authorize the instance-scoped
+`generic_web_deploy_recovery.plan` action, with the existing execute grant as a
+compatibility alternative. The authenticated Director agent inherits this inert
+plan permission. Both the current lane and the stored original lane must pass
+authorization; exact request, reference, reservation and target checks remain.
+Apply still requires `generic_web_deploy.execute`, including production recovery.
+An unknown provider outcome still holds the original fence; planning never
+settles, retries or releases it.
+
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
 in `tests/test_projection_sync.py`; an action without that proof stays `write`.
@@ -1115,7 +1124,26 @@ planner and the locked write both enforce that boundary. See the
 A `local_operators`
 caller may set an ordinary protective testing hold. Lifting an ordinary staff
 hold remains an administrator action because it requests testing reconciliation,
-which can deploy. The authenticated Director agent has the separate bounded
+which can deploy. The product's testing overview exposes **Review lift** and
+**Lift testing hold** only to the service-verified signed-in administrator.
+The existing testing-hold endpoints accept that browser session, with origin,
+fetch-metadata and single-use CSRF protection on the review and apply requests.
+The card displays the stored reason, recorder, time and an HTTPS issue link
+recorded in the reason. Missing historical metadata is shown as not recorded.
+The administrator
+reviews the current hold, supplies an audit reason and confirms that testing
+can deploy before submitting its digest-bound lift. The existing authenticated
+idempotency receipt retains the original hold, lift reason, actor scope, time
+and trace. A lost response retains the original reviewed request and key for
+retry, including after reloading the tab. If that request cannot settle, an
+administrator can explicitly start a separate review of the current hold;
+the earlier key is shown as unverified in this tab across reloads. Closing the
+tab or clearing its storage discards this local history, not the service's audit
+receipt. This does not claim the earlier request failed or succeeded.
+Isolation staging interlocks retain
+their separate activation flow.
+The Director's agent can set a testing hold but not lift one.
+The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
 the service must have marked its original hold as a qualified rehearsal, and
 the original actor, current safety evidence, bindings and unresolved-effect

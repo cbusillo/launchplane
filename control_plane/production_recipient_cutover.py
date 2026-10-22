@@ -1,5 +1,7 @@
 """Accepted-release worker integration for independent private production recipients."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +62,7 @@ from control_plane.workflows.production_promotion_backup import (
     require_production_promotion_backup,
 )
 from control_plane.dokploy import api, source
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
@@ -706,8 +709,19 @@ class RecipientCutoverAdapter:
     trace_id: str
     backup_record_id: str
     validate_release: Callable[[], None]
+    validate_source: Callable[[], None]
     rollback_observed: bool = False
     rollback_resume_pending: bool = False
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.record.product,
+            context=self.record.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.record.retained_target_id.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -899,14 +913,27 @@ class RecipientCutoverAdapter:
                     + canonical_sha256(provider_operation_key)[:24],
                 )
 
-            with self.store.provider_evidence_guard(lease.evidence_reservation):
-                return self._apply(provider_operation_key, lease, backup_check)
+            automatic_recovery = False
+
+            def validate_authority() -> None:
+                if not automatic_recovery:
+                    self.validate_release()
+
+            def begin_recovery() -> None:
+                nonlocal automatic_recovery
+                automatic_recovery = True
+
+            with self.store.provider_evidence_guard(
+                lease.evidence_reservation, effect_admission_checkpoint=validate_authority
+            ):
+                return self._apply(provider_operation_key, lease, backup_check, begin_recovery)
 
     def _apply(
         self,
         provider_operation_key: str,
         lease: ProviderOperationLease,
         backup_check: Callable[[], BackupGateEvidence],
+        begin_recovery: Callable[[], None],
     ) -> ProviderMutationOutcome:
         record = self.record
         repromote = bool(record.publication.get("inverse_backup_policies")) and record.phase in {
@@ -924,6 +951,7 @@ class RecipientCutoverAdapter:
         started = False
         terminal_deployment = False
         old_paused = False
+        source_admitted = False
         preparation = ProductionRecipientAdapter(
             self.root,
             self.store,
@@ -949,8 +977,36 @@ class RecipientCutoverAdapter:
             record = replacement
             self.record = record
 
+        def attempt_has_effects() -> bool:
+            # Historical generic markers can belong to an earlier release or
+            # repromotion. Only this attempt's pause dispatch or its original
+            # trigger-bound deployment proves source admission already happened.
+            attempt_identity = record.execution.get("runtime_identity")
+            attempt_started = bool(
+                record.execution.get(attempt_prefix + "old_pause_dispatched_at")
+            ) or bool(
+                not repromote
+                and record.execution.get("trigger_requested_at")
+                and isinstance(attempt_identity, dict)
+                and attempt_identity.get("deployment_record_id")
+                == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+            )
+            # The exact current reservation includes resource/schedule effects
+            # that precede writer pause. An older attempt's execution dictionary
+            # cannot supply this witness for a fresh repromotion.
+            if isinstance(lease, ProviderEvidenceLease):
+                attempt_started = attempt_started or bool(
+                    lease.evidence_reservation().provider_effect_started_at
+                )
+            return attempt_started
+
         def check_local() -> None:
+            nonlocal source_admitted
             self.validate_release()
+            if not source_admitted:
+                if not attempt_has_effects():
+                    self.validate_source()
+                source_admitted = True
             require_writer_exclusive(self.store, record)
             backup_check()
 
@@ -1253,10 +1309,21 @@ class RecipientCutoverAdapter:
             )
             return self.result("pass")
         except Exception as error:
+            if (
+                isinstance(error, GenericWebPromotionSourceRefused)
+                and not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                # Saved preparation can predate this operation's first dispatch.
+                # Only the exact reservation and own markers prove zero effects;
+                # the shared runner still decides whether it can release the key.
+                raise ProviderMutationRejectedError(error) from error
             if not started and not record.execution:
                 raise ProviderMutationRejectedError(
                     ValueError("Recipient release gates refused bootstrap.")
                 ) from error
+            begin_recovery()
             terminal_deployment = (
                 terminal_deployment
                 or isinstance(error, api.DokployDeploymentFailed)

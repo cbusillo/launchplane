@@ -549,16 +549,12 @@ confirmation phrase, a non-empty reason and related issue, and an unchanged
 managed-comment observation. If the managed comment is already absent, apply
 records `already_absent` without claiming a GitHub mutation.
 
-- work graph chooser route:
+- repository context and merge-delivery routes:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
-  - `GET /v1/work-graph/snapshot` (native FastAPI)
-  - `GET /v1/work-graph/github/issues` (native FastAPI)
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
-  - `POST /v1/work-graph/rank` (native FastAPI)
-  - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
@@ -625,7 +621,7 @@ typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
-driver, preview, work-graph, merge-train, and Every Code route families, plus
+driver, preview, merge-train, and Every Code route families, plus
 the seven evidence-ingress writes and twelve Generic Web provider writes, are
 registered from dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
@@ -669,13 +665,10 @@ after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
 write route also goes in `BROWSER_WRITE_ROUTES` in
 `frontend/src/browser-write-contract.ts`;
 `frontend/tests/action-model.test.mjs` checks that those routes match the write
-manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
-generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
-It also covers browser-human privileged-operation approval and revocation; the
-service-internal execution path is intentionally absent.
-Issue reconciliation remains a bearer-only service operation rather than a
-browser client binding. Generated request, success, validation, and error
-bindings are the API boundary consumed by the UI. Handwritten frontend types
+manifest. Use those manifests for the current selection rather than maintaining
+a second operation list here.
+Generated request, success, validation, and error bindings are the API boundary
+consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
 The same canonical export also feeds the narrower checked
@@ -700,14 +693,9 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated work-graph snapshot,
-issue-inbox, Every Code summary, merge-train policy-target, and merge-train
-controller-status read models directly. Work-graph ranking is the only
-Engineering Ops POST in the generated browser write contract; it is stateless
-and accepts the current generated snapshot. Issue reconciliation remains
-read-only in the browser: the UI explains the native GitHub Actions OIDC or
-trusted Director-agent write identity boundary and renders no Dry Run or Apply
-button. Merge-train UI is also status-only: target selection comes exclusively
+The Engineering Ops browser routes consume the generated Every Code summary,
+merge-train policy-target, and controller-status read models directly.
+Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
 Each route aborts superseded reads, distinguishes denied and empty responses,
@@ -811,32 +799,20 @@ idempotency key so the service can replay or reconcile the original operation.
 It must not generate a replacement key merely because the browser stopped
 waiting.
 
-The cookie-capable mutation inventory is intentionally limited to:
-
-- `POST /auth/logout`
-- `POST /v1/work-graph/rank`
-- `POST /v1/agent/write-intents/evaluate`
-- `POST /v1/drivers/generic-web/prod-promotion`
-- `POST /v1/drivers/generic-web/prod-promotion-workflow`
-- `POST /v1/product-config/apply`
-- `POST /v1/merge-train/policies/import`
-- `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
-- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
-
-Every other authenticated mutation route intentionally rejects session-cookie
-authentication and continues to require its existing GitHub Actions OIDC,
-`local_operator`/`local_admin` bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the existing mixed-identity routes above
-also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The Launchplane UI exposes only the separately
-generated UI write slice; this inventory is a server-side cookie-capable surface
-list, not a promise of UI controls for every route. In particular, GitHub issue
-inbox reconciliation is displayed as unavailable because it remains a GitHub
-Actions OIDC service operation. Managed-secret root re-encryption is explicitly
-bearer-only even when a valid human session cookie is present; rotating the
-service root is not a browser mutation surface.
+Each route's authentication dependency selects its accepted identities;
+see the dependency definitions and route wiring in
+[`http_app.py`](../control_plane/http_app.py) and
+[`http_routes/`](../control_plane/http_routes/), with wiring and CSRF coverage in
+the [browser mutation tests](../tests/test_http_app_browser_mutation.py).
+Browser-capable mutations use
+the CSRF boundary above and still enforce their route-specific authorization.
+On routes that also accept bearer identities, bearer requests retain their
+existing verification rather than using browser origin, fetch-metadata, or CSRF
+proof. A cookie does not weaken or replace bearer verification. The Launchplane
+UI's selected write surface is defined by the OpenAPI manifests described above.
+Managed-secret root re-encryption remains bearer-only even when a valid human
+session cookie is present; rotating the service root is not a browser mutation
+surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -1209,21 +1185,6 @@ idempotency records. PR-feedback status preserves
 the worker transition semantics: missing feedback returns `404 not_found`, and
 already applied or ignored feedback returns `409 feedback_already_final`.
 
-`POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
-returns the queue payload under `result.queue`. The route requires the
-`work_graph.rank` action for product/context `launchplane`, accepts GitHub
-Actions OIDC and GitHub human-session callers, rejects Director-agent bearer tokens
-at the identity boundary even if a policy grant is too broad, performs no
-storage writes, and does not make Launchplane authoritative for copied GitHub or
-Code Plans state.
-
-`POST /v1/work-graph/github/issues/reconcile` retains its injected-provider
-contract. The deployed service has no reconcile provider and, after
-authorization, refuses with `400 invalid_request`. `dry_run` requires
-`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. When a
-provider is supplied, the route returns its reconcile evidence under
-`result.reconcile`.
-
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
 `service_authz` action/product/context declared by the matching merge-train
@@ -1428,7 +1389,7 @@ batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
-repository ownership/awareness read model used by work graph and agent context.
+repository ownership/awareness read model used by agent context.
 The route requires
 `product_environment.read` for product/context `launchplane`, performs no
 writes, and distinguishes Launchplane-managed runtime repos from awareness-only
@@ -1436,26 +1397,13 @@ Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 
-`GET /v1/work-graph/snapshot` is a native FastAPI route that returns the
-current Launchplane-assembled work graph snapshot for the same authorization
-boundary. It composes product overviews and Every Code work-request records into
-the typed snapshot contract.
-The deployed service assembles the work graph from product profiles and durable
-work-request records. It does not read GitHub Projects, list inbox issues, or
-reconcile Project membership. Engineering > Work graph keeps these non-Project
-items; source counts report zero planning facts. The inbox read remains empty
-and unconfigured, and reconcile refuses without a provider. No Project/inbox
-environment bundle or `GH_TOKEN` is delivered by self-deploy. See
-[Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298).
-
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, work graph snapshot, Every Code
-summary, and preview readiness projections under named sections. Each section
-reports `available`, `unauthorized`, or `unavailable`; optional work-graph
-planning provider failures mark only that section unavailable instead of dropping
-the whole context or silently omitting the failure. The endpoint writes no
+composes the existing repo-product mapping, Every Code summary, preview
+readiness, and optional exact tenant-admission projections under named sections.
+Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
+writes no
 records, fetches no issue bodies, and must preserve the lower-level
 redaction/provenance rules.
 
@@ -2523,8 +2471,6 @@ The conventional generic-web contract requires an admin-supplied root
 preview base URL and writes it as the context-scoped
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
 binds that mutable runtime value; no real domain becomes checked-in authority.
-Repeated onboarding merges that owned key into the existing preview-context
-record instead of replacing unrelated runtime values.
 Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
 manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized
@@ -2911,7 +2857,13 @@ metadata.
 Live target runtime sync uses the native FastAPI
 `POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
 or `mode: "apply"`, product/context/instance, and optional apply-only deploy
-controls. Dry-run requires `live_target_runtime.plan`; apply requires
+controls. Optional `selected_keys` is a nonempty list of unique existing managed
+key names. It restricts the plan, delivery and persistence readback to those
+keys, preserves every unselected provider value, and applies no retirements.
+Unknown, missing or retired selected keys fail before provider mutation.
+Selection cannot deploy or stage testing separation; any literal qualification
+must also be selected. Omitting the field retains full-lane sync behavior.
+Dry-run requires `live_target_runtime.plan`; apply requires
 `live_target_runtime.apply`. The route resolves DB-backed runtime environment
 records, managed runtime secrets, and the tracked Dokploy target in the deployed
 Launchplane service, evaluates runtime key-safety policy, compares desired and
@@ -4543,7 +4495,7 @@ The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
 `mode` (`100644` or `100755`). An omitted mode preserves an existing regular
 file's mode and defaults to `100644` for a new file; symlinks are refused.
-It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
+It accepts at most 32 files, 2 MiB of old-plus-new changed content (including
 deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
 or merge settings. The base must match the verified OIDC `sha`. A new branch
@@ -4552,6 +4504,17 @@ current default-branch head; a stale new proposal receives 409
 `updater_proposal_conflict` and reruns against the new base. An exact existing
 branch can resume its original bounded proposal after verifying its tree and
 single parent; it never updates that branch.
+
+The whole-file budget includes unchanged bytes within every submitted file. It
+is deliberately larger than the 1 MiB JSON ingress limit so small changes to
+large source files or lockfiles can fit without a second edit representation.
+The body limit still bounds all submitted content, JSON escaping and metadata;
+raising the old-plus-new budget does not raise that limit or file count. Callers
+omit genuinely unchanged files and measure the complete serialized request and
+old-plus-new changed-file bytes. An oversized coherent candidate is explicitly
+refused; do not skip necessary changes, truncate files or split it into competing
+pending proposals. The service still consumes whole UTF-8 file contents as data
+and performs no caller-supplied patch execution.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set

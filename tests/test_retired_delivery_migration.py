@@ -24,7 +24,12 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
 )
 from control_plane.storage.postgres import Base, PostgresRecordStore
-from control_plane.storage.schema_migration import alembic_config
+from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_migration import (
+    SCHEMA_MIGRATION_TARGET_REVISION,
+    alembic_config,
+    schema_migration_target,
+)
 
 
 def seed_retired_history(engine: Engine) -> None:
@@ -90,12 +95,6 @@ def assert_retired_delivery_drop(test: unittest.TestCase, database_url: str) -> 
             set(inspect(engine).get_table_names()), before_tables - set(migration.RETIRED_TABLES)
         )
         test.assertEqual(history_snapshot(engine, preserved_names), preserved)
-        store = PostgresRecordStore(database_url=database_url)
-        try:
-            store.verify_schema()
-            test.assertEqual(store.expire_ordinary_agent_deliveries(), 0)
-        finally:
-            store.close()
         with test.assertRaises(RuntimeError):
             command.downgrade(config, migration.down_revision)
         with engine.connect() as connection:
@@ -104,6 +103,20 @@ def assert_retired_delivery_drop(test: unittest.TestCase, database_url: str) -> 
                 migration.revision,
             )
         test.assertTrue(set(migration.RETIRED_TABLES).isdisjoint(inspect(engine).get_table_names()))
+        test.assertEqual(history_snapshot(engine, preserved_names), preserved)
+        command.upgrade(
+            config,
+            schema_migration_target(
+                current_revision=migration.revision,
+                target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+            ),
+        )
+        store = PostgresRecordStore(database_url=database_url)
+        try:
+            store.verify_schema()
+            test.assertEqual(store.expire_ordinary_agent_deliveries(), 0)
+        finally:
+            store.close()
         test.assertEqual(history_snapshot(engine, preserved_names), preserved)
     finally:
         engine.dispose()
@@ -119,7 +132,7 @@ class RetiredDeliveryMigrationTests(unittest.TestCase):
     def test_fresh_head_has_only_supported_tables_and_no_retired_models(self) -> None:
         with TemporaryDirectory() as directory:
             url = f"sqlite+pysqlite:///{Path(directory) / 'records.db'}"
-            command.upgrade(alembic_config(url), migration.revision)
+            command.upgrade(alembic_config(url), EXPECTED_ALEMBIC_HEAD_REVISION)
             engine = create_engine(url)
             try:
                 tables = set(inspect(engine).get_table_names())

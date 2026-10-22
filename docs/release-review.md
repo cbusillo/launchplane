@@ -64,6 +64,35 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+For generic-web testing lanes, candidate construction reads the inventory's
+referenced deployment record as well as the inventory. That record must pass
+deployment, post-deploy and destination-health qualification and match the
+lane, artifact, source revision, runtime identity and provider target evidence.
+A copied passing inventory cannot qualify a missing, mismatched or failed
+deployment. The accepted-release worker and direct promotion path recheck this
+source evidence after backup waits and before admitting the first forward
+production effect, including a recipient cutover resumed before dispatch.
+Once that accepted production attempt starts, testing may advance to a newer
+qualified build without aborting it. Acceptance and backup checks continue;
+an already started gated rollback keeps its existing recovery authority.
+Recipient resumption uses that original attempt's dispatch evidence. A new
+repromotion must qualify its source again, regardless of older dispatch facts.
+The testing lane must still name the current stored context and instance under
+an applicable generic-web driver; a removed or rebound source cannot keep
+using a cached inventory from its former lane.
+
+Losing qualification before a fresh promotion's first provider effect holds
+that step without changing the saved Client or Director acceptance, including
+`director_standing`. Run the normal supported testing deployment and
+qualification again. A qualified retest of the same accepted artifact and
+revision can retry that unstarted promotion while its verified backup remains
+current, unconsumed and bound to unchanged production authority. A different
+release needs its own acceptance. This does not restart a failed backup or
+replace expired backup evidence; the separate continuation capability is
+tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
+The source check does not impose testing qualification on production baselines
+or replace Odoo's release-tuple contract.
+
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
 not-found, and rate-limit responses are not retried. Each failed attempt logs
@@ -698,20 +727,14 @@ or caching that poll as a completed idempotent response. Repeat the same payload
 and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
-The drain also has an absolute ten-minute pre-effect budget. Its persisted
-`drain_started_at` and `drain_deadline_at` survive polling and process restart;
-legacy drains anchor those fields to their last stored observation on first
-updated poll. At the deadline the route returns `409/self_deploy_drain_timeout`
-with remaining blocker IDs, expires its admission pause and admits no provider
-write. That request cannot later dispatch; retry after diagnosis with a new
-intent and fresh marker. Product recovery fences are retained. This budget is
-independent of the longer worker stop/provider/health budget after dispatch.
+The bounded deadline, timeout alert and supported fresh-request continuation are
+documented in [operations](operations.md#self-deploy-drain-timeout-and-continuation).
 Final admission rechecks the fence and running operations under the same lock.
 The typed Odoo and shared backup queues also contain workflow-started operations;
 their claims pause at this worker boundary and resume after replacement. Worker
-debug logs report that pause, and the runtime read exposes its cause. Generic-web
-workflow requests outside Client releases retain their existing reservations;
-this boundary covers Client-started generic-web releases and product-event effects.
+debug logs report that pause, and the runtime read exposes its cause. Agent-started
+rehearsals also participate through their route, independently of caller scope.
+Other families keep their existing request and worker-claim boundaries.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. Running reservations remain blockers even
 after lease expiry: losing a heartbeat does not prove a provider call ended.
@@ -903,6 +926,29 @@ rollback outcome stops the run for reconciliation. A failed drill or second
 backup never starts re-promotion. Automatic rollback after a failed promotion
 remains permitted even when the Client's forward release authority is revoked.
 
+Generic-web testing qualification admits each fresh forward production attempt.
+After that attempt starts, a newer or failed testing deployment does not interrupt
+its accepted production work. The generic drill's rollback checks Client release
+authority until its own first marked effect. The recipient inverse checks until
+its own replacement-writer pause dispatch; earlier peer parking still requires
+authority. After the relevant boundary, they finish the bound restore or protective
+cleanup under the original lease and target/publication fences, even if a newer
+decision or hold stops fresh work.
+They do not depend on testing. Separate recovery Apply still requires the current
+accepted release and the original operation key. The second backup and promotion
+still require the accepted artifact and source to qualify in testing again. A
+same-artifact qualified retest uses the existing acceptance and checklist digest
+for an unstarted source-held promotion with still-current backup evidence.
+Failed backup operations and expired or consumed captures retain their existing
+fail-closed outcomes; a retest does not recapture or restart them.
+
+A typed source refusal before any promotion provider effect leaves that accepted
+promotion step unstarted.
+The service can retry it after testing qualifies, including after repeated
+refusals. Repeated refusals do not turn an unstarted step into an interrupted
+deployment. An existing or dispatched attempt keeps its original recovery fence;
+a qualified retest cannot stand in for proof that its uncertain effects ended.
+
 Before the first backup, a generic-web drill requires a deployable passing
 production record for the checklist's exact artifact and source commit. A
 missing target is shown as a release blocker without changing production.
@@ -917,7 +963,7 @@ stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
 
 Each step runs under a `client_release_acceptance` grant that names the
-decision. Before a step is queued, the worker checks all of the following:
+decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
 
 - the decision is still the product's newest one, `accepted`, published, and by
   the product's recorded Client;
@@ -933,8 +979,11 @@ remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
 fenced for reconciliation rather than repeating the release.
 
-A changed candidate, a newer decision, or a hold therefore stops the release
-before its next step and never falls back to a newer testing build. A failed or
+A changed testing candidate stops the next fresh backup or promotion, and never
+falls back to a newer testing build. A newer decision or a hold stops fresh planned
+release work. Once a generic rollback starts, or a recipient inverse dispatches its
+own replacement-writer pause, its protective restore finishes under its original
+fences. A failed or
 cancelled step stops forward progress; the successful rollback drill never runs
 for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,

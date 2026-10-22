@@ -9,6 +9,7 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
@@ -57,6 +58,21 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
         seed(self.store)
         self.store.write_environment_inventory(inventory("prod", BASE))
         self.store.write_environment_inventory(inventory("testing", HEAD))
+        testing = inventory("testing", HEAD)
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id=testing.deployment_record_id,
+                context=testing.context,
+                instance=testing.instance,
+                artifact_identity=testing.artifact_identity,
+                source_git_ref=testing.source_git_ref,
+                runtime_identity=testing.runtime_identity,
+                deploy=testing.deploy,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="site", target_name="site"
+                ),
+            )
+        )
         self.token = self.enterContext(
             patch("control_plane.release_review.resolve_launchplane_github_token", return_value="t")
         )

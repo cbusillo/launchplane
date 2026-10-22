@@ -49,6 +49,7 @@ class _ReuseTransport:
         self.change_unbound_fields = False
         self.base_history: list[dict[str, object]] = []
         self.unavailable_path = ""
+        self.repository_full_name = "example/merge-train-repo"
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.requests.append(MergeTrainGitHubRequest(method=method, path=path, body=body))
@@ -92,6 +93,8 @@ class _ReuseTransport:
             result_sha = "candidate-after-" + head.removeprefix("head-")
             self.refs[base] = result_sha
             return {"sha": result_sha}
+        if suffix == "/rules/branches/main?per_page=100&page=1":
+            return []
         if suffix.startswith("/branches/"):
             branch = suffix.removeprefix("/branches/")
             if branch == "main":
@@ -126,7 +129,7 @@ class _ReuseTransport:
                 "base": {
                     "sha": self.base_sha,
                     "ref": "main",
-                    "repo": {"full_name": "example/merge-train-repo"},
+                    "repo": {"full_name": self.repository_full_name},
                 },
             }
         if suffix.startswith("/compare/"):
@@ -184,6 +187,11 @@ class HeadCheckReuseTests(unittest.TestCase):
         self.assertEqual(restored, built)
         assert restored.structural_provenance is not None
         self.assertTrue(restored.structural_provenance.complete)
+
+    def test_provider_repository_casing_does_not_prevent_reuse(self) -> None:
+        # GitHub reports the repository's own casing; the candidate stores it lowercased.
+        self.transport.repository_full_name = self.candidate.repository.upper()
+        self.assertIsNotNone(self.build().head_check_reuse)
 
     def test_different_tree_publishes_full_candidate_ci(self) -> None:
         self.transport.candidate_tree = "tree-with-base-change"
@@ -249,10 +257,13 @@ class HeadCheckReuseTests(unittest.TestCase):
                 self.assertIn(built.candidate_ref.removeprefix("refs/heads/"), self.transport.refs)
 
     def test_observation_rechecks_head_and_current_required_policy(self) -> None:
-        built = self.build()
+        built = self.build().model_copy(
+            update={"required_checks_observation_error": "prior missing requirement"}
+        )
         self.transport.requests.clear()
         observed = self.client.observe_batch_candidate_checks(candidate=built)
         self.assertEqual(observed.status, "passed")
+        self.assertFalse(observed.required_checks_observation_error)
         self.assertTrue(any("/check-runs" in request.path for request in self.transport.requests))
         self.transport.required_names += ("new-check",)
         fallback = self.client.observe_batch_candidate_checks(candidate=observed)

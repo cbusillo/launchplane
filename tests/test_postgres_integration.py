@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
@@ -72,6 +73,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
+from tests import test_legacy_odoo_preview_reconciliation as legacy_odoo_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -1182,7 +1184,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
             WALKTHROUGH_LOGIN_PREFIX,
             WALKTHROUGH_MARKER_PREFIX,
         )
-        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE
+        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE, TestingRead
         from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
         from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 
@@ -1241,7 +1243,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                         close=connection.close,
                     )
 
-                def probe() -> bool:
+                def probe() -> TestingRead:
                     output = io.StringIO()
                     with (
                         patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connect)}),
@@ -1258,22 +1260,22 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                         redirect_stdout(output),
                     ):
                         exec(compile(ACCOUNT_DATABASE_PROBE, "native-database-probe", "exec"), {})
-                    return json.loads(output.getvalue())["clear"] is True
+                    return TestingRead(json.loads(output.getvalue())["reason"])
 
                 owner.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                     (WALKTHROUGH_LOCK_PREFIX + spec["binding"],),
                 )
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.DISPATCH_UNSETTLED)
                 owner.commit()
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 spec["mode"] = "usage"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (17,)
                 )
                 owner.commit()
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 # A completed task's history does not masquerade as staff use
                 # when a new task is admitted on this same isolated copy.
                 owner.execute("UPDATE res_users SET active=false WHERE id=17")
@@ -1293,7 +1295,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 )
                 owner.commit()
                 spec.update(mode="lane_usage", task_id="2" * 32)
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 owner.execute(
                     "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
                     (
@@ -1308,26 +1310,25 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                     ),
                 )
                 owner.commit()
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.PROTECTED_SIGNIN)
 
                 owner.execute("DELETE FROM res_users_log")
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
                 )
                 owner.commit()
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.PROTECTED_SIGNIN)
 
                 spec["mode"] = "isolation"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 key = next(iter(CONNECTION_ISOLATION_PARAMETERS))
                 owner.execute(
                     "UPDATE ir_config_parameter SET value=%s WHERE key=%s", ("changed", key)
                 )
                 owner.commit()
-                with self.assertRaises(RuntimeError):
-                    probe()
+                self.assertEqual(probe(), TestingRead.ISOLATION_REFUSED)
                 spec["mode"] = "quiescence"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
 
 
 @unittest.skipUnless(
@@ -1886,6 +1887,12 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_lane_health_history_orders_offset_fractional_and_equal_instants(self) -> None:
+        from tests.test_lane_health_history import assert_history_time_bounds
+
+        with _store_for_fresh_head_database() as store:
+            assert_history_time_bounds(self, store)
+
     def test_setup_recovery_receipt_commits_before_unknown_provider_effect(self) -> None:
         from tests.test_merge_train_setup_recovery_receipt import (
             assert_committed_reservation_survives_unknown_delete,
@@ -4000,7 +4007,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_preview_dependency"))
-                self.assertEqual(migrate_schema(database_url=url), migration.revision)
+                self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -5440,6 +5447,32 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
+        from control_plane.contracts.discussion_topic import DiscussionTopicInput
+
+        topic = DiscussionTopicInput(
+            title="Decide: Contact links", issue_url="https://git.example.test/issues/7"
+        )
+        with _store_for_fresh_head_database() as store:
+            barrier = threading.Barrier(2)
+
+            def add(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.add_discussion_topic("site-a", "contact", topic)
+
+            def close(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.close_discussion_topic("site-a", "contact")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                added = list(pool.map(add, range(2)))
+                closed = list(pool.map(close, range(2)))
+            self.assertEqual(added[0], added[1])
+            self.assertEqual(closed[0], closed[1])
+            self.assertNotEqual(added[0], closed[0])
+            self.assertEqual(store.list_discussion_topics("site-b"), ())
+            self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
+
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.postgres import LaunchplaneDeploymentRow
@@ -9317,6 +9350,156 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(stored_restore.status, "running")
         self.assertEqual(stored_import.status, "pending")
 
+    def test_standing_acceptance_and_first_effect_serialize_in_both_orders(self) -> None:
+        from control_plane import client_release as releases
+        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from control_plane.storage.postgres import MutationEffectAdmissionRefusedError
+        from tests.test_generic_web_client_release import GenericWebClientReleaseTests
+
+        for effect_first in (True, False):
+            with self.subTest(effect_first=effect_first), _head_postgres_database() as database_url:
+                fixture = GenericWebClientReleaseTests()
+                with patch(
+                    "tests.test_generic_web_client_release.PostgresRecordStore",
+                    side_effect=lambda **_: PostgresRecordStore(database_url=database_url),
+                ):
+                    fixture.setUp()
+                try:
+                    store = fixture.store
+                    fixture.switch("director_standing")
+                    decision = fixture.accept()
+                    next_decision = decision.model_copy(
+                        update={
+                            "record_id": decision.record_id + "-next",
+                            "acceptance_source": "director_standing",
+                            "decided_at": (
+                                datetime.now(timezone.utc) + timedelta(seconds=1)
+                            ).isoformat(),
+                        }
+                    )
+                    key = releases._step_key(decision, releases.ClientReleaseStep("promote", 1))
+                    reserved = store.reserve_mutation(
+                        scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint="f" * 64,
+                        lease_owner="admitted-A",
+                        provider_target_key="production-A",
+                        reconciliation_key="production-A",
+                    ).record
+                    assert reserved is not None
+                    grant = releases.client_release_grant(
+                        decision=decision,
+                        action="generic_web_prod_promotion.execute",
+                        context=fixture.context,
+                        authorized_at=decision.decided_at,
+                    )
+                    url = make_url(database_url)
+                    second = PostgresRecordStore(
+                        database_url=url.set(
+                            query={**url.query, "application_name": "release-admission-contender"}
+                        ).render_as_string(hide_password=False)
+                    )
+                    try:
+                        entered, proceed = threading.Event(), threading.Event()
+                        original_lock = store._lock_product_authority_bundle_write
+
+                        def held_lock(session: Any) -> None:
+                            original_lock(session)
+                            entered.set()
+                            if not proceed.wait(10):
+                                raise RuntimeError("release admission barrier timed out")
+
+                        def authority(active: PostgresRecordStore) -> None:
+                            if not releases._generic_web_release_authority_allows(active, grant):
+                                raise releases.ClientReleaseNotReady("newer_decision")
+
+                        def checkpoint(active: PostgresRecordStore) -> Any:
+                            with active.provider_evidence_guard(
+                                lambda: reserved,
+                                effect_admission_checkpoint=lambda: authority(active),
+                            ):
+                                return active.checkpoint_mutation_provider_effect(
+                                    reservation=reserved, effect_phase="first_production_effect"
+                                )
+
+                        def create(active: PostgresRecordStore) -> Any:
+                            return active.create_release_review_decision_record_if_absent(
+                                next_decision,
+                                validate_before_insert=lambda: (
+                                    releases._require_standing_release_available(
+                                        active, fixture.profile.product
+                                    )
+                                ),
+                            )
+
+                        with (
+                            patch.object(
+                                store, "_lock_product_authority_bundle_write", side_effect=held_lock
+                            ),
+                            ThreadPoolExecutor(max_workers=2) as executor,
+                        ):
+                            first = executor.submit(checkpoint if effect_first else create, store)
+                            self.assertTrue(entered.wait(5))
+                            contender = executor.submit(
+                                create if effect_first else checkpoint, second
+                            )
+                            try:
+                                waiting = 0
+                                deadline = time.monotonic() + 5
+                                with store._engine.connect().execution_options(
+                                    isolation_level="AUTOCOMMIT"
+                                ) as connection:
+                                    while time.monotonic() < deadline:
+                                        waiting = int(
+                                            connection.scalar(
+                                                text(
+                                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='release-admission-contender' AND wait_event_type='Lock'"
+                                                )
+                                            )
+                                            or 0
+                                        )
+                                        if waiting:
+                                            break
+                                        time.sleep(0.01)
+                                self.assertGreater(
+                                    waiting,
+                                    0,
+                                    "The contender must reach the shared PostgreSQL authority lock",
+                                )
+                            finally:
+                                proceed.set()
+                            first.result(timeout=10)
+                            if effect_first:
+                                with self.assertRaises(releases.ClientReleaseNotReady):
+                                    contender.result(timeout=10)
+                            else:
+                                with self.assertRaises(
+                                    MutationEffectAdmissionRefusedError
+                                ) as refused:
+                                    contender.result(timeout=10)
+                                self.assertIsInstance(
+                                    refused.exception.cause, releases.ClientReleaseNotReady
+                                )
+                        current = store.read_idempotency_record(
+                            scope=reserved.scope,
+                            route_path=reserved.route_path,
+                            idempotency_key=reserved.idempotency_key,
+                        )
+                        assert current is not None
+                        self.assertEqual(bool(current.provider_effect_started_at), effect_first)
+                        latest = store.list_release_review_decision_records(
+                            product=fixture.profile.product
+                        )[0]
+                        self.assertEqual(
+                            latest.record_id,
+                            decision.record_id if effect_first else next_decision.record_id,
+                        )
+                    finally:
+                        second.close()
+                finally:
+                    fixture.doCleanups()
+
 
 def _attempt_stale_owner_completion(
     database_url: str,
@@ -9895,7 +10078,9 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
                 )
             finally:
                 engine.dispose()
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            # Historical data is checked by the current runtime only after the
+            # additive release migrations have supplied its required tables.
+            alembic_command.upgrade(config, SCHEMA_MIGRATION_TARGET_REVISION)
             store = PostgresRecordStore(database_url=database_url)
             try:
                 store.verify_schema()
@@ -11527,6 +11712,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
 
         for scenario in (
             TestingReplacementRecoveryTests.test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof,
+            TestingReplacementRecoveryTests.test_recovery_excludes_surviving_worker_then_cancels_with_proof_and_wakes_reconcile,
             TestingReplacementRecoveryTests.test_disposable_supersession_refuses_same_target_production_and_protected_data,
         ):
             with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
@@ -12630,6 +12816,323 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+def _application_testing_fixture(case: unittest.TestCase, *, direct_original: bool = False) -> Any:
+    from tests.test_testing_application_flow import ApplicationFlowTests
+
+    database = _head_postgres_database()
+    fixture = ApplicationFlowTests()
+    fixture.direct_original = direct_original
+    fixture.database_url = database.__enter__()
+    case.addCleanup(database.__exit__, None, None, None)
+    fixture.setUp()
+    case.addCleanup(fixture.doCleanups)
+
+    policy = testing_activation.activation_hold_policy(fixture.product, fixture.context)
+    fixture.store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                revision=1, policy_sha256=authz_policy_sha256(policy)
+            ),
+            revision=1,
+            status="active",
+            source="test:application-activation",
+            updated_at=fixture.old.now(),
+            policy=policy,
+        )
+    )
+    return fixture
+
+
+class RealPostgresDirectApplicationTestingActivationTests(unittest.TestCase):
+    def test_direct_original_continuation_uses_native_operation_custody(self) -> None:
+        fixture = _application_testing_fixture(self, direct_original=True)
+        fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+
+class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
+    """Application custody lives in the real original intent, including JSONB progress."""
+
+    def setUp(self) -> None:
+        self.fixture = _application_testing_fixture(self)
+
+    def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.contracts.ingress_route_audit_record import (
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+        )
+        from contextlib import ExitStack
+
+        fixture = self.fixture
+        _, ingress, _ = fixture.private_addressed()
+        fixture.prepare()
+        store = fixture.store
+        edge = store.read_edge_endpoint_record(ingress.request.edge_endpoint_key)
+        audit = store.list_ingress_route_audit_records(
+            product=fixture.product, context_name=fixture.context
+        )[0]
+        writers = [PostgresRecordStore(database_url=store.database_url) for _ in range(3)]
+        for writer in writers:
+            self.addCleanup(writer.close)
+        publishing, locked, release = threading.Event(), threading.Event(), threading.Event()
+        attempted = [threading.Event() for _ in writers]
+        backend_pids: list[int] = []
+        original_write, publication_lock = (
+            store.write_testing_activation,
+            store._lock_product_authority_bundle_write,
+        )
+
+        def write(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                publishing.set()
+                try:
+                    original_write(**kwargs)
+                finally:
+                    publishing.clear()
+            else:
+                original_write(**kwargs)
+
+        deadline = 0.0
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def hold_publication(session: Any) -> None:
+            publication_lock(session)
+            if publishing.is_set():
+                locked.set()
+                if not release.wait(remaining()):
+                    raise TimeoutError(
+                        "Shared concurrency budget expired before the test released publication."
+                    )
+
+        def blocked_writer(index: int, session: Any) -> None:
+            backend_pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+            attempted[index].set()
+            locks[index](session)
+
+        locks = [writer._lock_product_authority_bundle_write for writer in writers]
+        actions = [
+            lambda: writers[0].write_edge_endpoint_record(
+                edge.model_copy(update={"source_label": "test:concurrent-edge"})
+            ),
+            lambda: writers[1].write_ingress_route_audit_record(
+                audit.model_copy(
+                    update={
+                        "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit",
+                        "recorded_at": fixture.old.now(1),
+                    }
+                )
+            ),
+            lambda: writers[2].reserve_mutation(
+                scope="private-concurrent",
+                route_path="/fixture-private-reservation",
+                idempotency_key="private-concurrent",
+                request_fingerprint="private-concurrent",
+                lease_owner="private-concurrent",
+                reconciliation_key="private-concurrent",
+                provider_target_key=ingress.target_key(),
+            ),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(store, "write_testing_activation", side_effect=write))
+            stack.enter_context(
+                patch.object(
+                    store, "_lock_product_authority_bundle_write", side_effect=hold_publication
+                )
+            )
+            for index, writer in enumerate(writers):
+                stack.enter_context(
+                    patch.object(
+                        writer,
+                        "_lock_product_authority_bundle_write",
+                        side_effect=lambda session, index=index: blocked_writer(index, session),
+                    )
+                )
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                deadline = time.monotonic() + 60
+                publication = workers.submit(fixture.activate)
+
+                def require_publication_pending(stage: str) -> None:
+                    if publication.done():
+                        outcome = publication.result()
+                        self.fail(
+                            "Publication finished "
+                            + stage
+                            + ": status="
+                            + str(outcome.status)
+                            + "; phase="
+                            + fixture.adapter.current().phase
+                        )
+
+                try:
+                    while not locked.wait(min(0.05, remaining())):
+                        require_publication_pending("before its checkpoint")
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before the publication checkpoint; phase="
+                                + fixture.adapter.current().phase
+                            )
+                    require_publication_pending("before contender observation")
+                    contenders = [workers.submit(action) for action in actions]
+                    while not all(event.is_set() for event in attempted):
+                        require_publication_pending("before all writer lock callbacks")
+                        for contender in contenders:
+                            if contender.done():
+                                contender.result()
+                                self.fail(
+                                    "A private writer completed before the held publication was released."
+                                )
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before all private writer lock callbacks."
+                            )
+                        time.sleep(min(0.01, remaining()))
+                    blocked = False
+                    while remaining():
+                        require_publication_pending("before PostgreSQL blocking witnesses")
+                        with store._engine.connect() as connection:
+                            blocked = all(
+                                bool(
+                                    connection.scalar(
+                                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                        {"pid": pid},
+                                    )
+                                )
+                                for pid in backend_pids
+                            )
+                        if blocked:
+                            break
+                        time.sleep(min(0.01, remaining()))
+                    self.assertTrue(
+                        blocked,
+                        "Shared concurrency budget expired before all three PostgreSQL blocking witnesses.",
+                    )
+                    require_publication_pending("while private writers were blocked")
+                    self.assertFalse(any(contender.done() for contender in contenders))
+                finally:
+                    release.set()
+                try:
+                    self.assertEqual(publication.result(timeout=remaining()).status, "completed")
+                except TimeoutError:
+                    if publication.done():
+                        raise
+                    self.fail("Shared concurrency budget expired while publication committed.")
+                for contender in contenders:
+                    try:
+                        contender.result(timeout=remaining())
+                    except TimeoutError:
+                        if contender.done():
+                            raise
+                        self.fail(
+                            "Shared concurrency budget expired while a private writer committed."
+                        )
+        self.assertTrue(fixture.adapter.current().published)
+        self.assertEqual(
+            store.read_edge_endpoint_record(edge.endpoint_key).source_label, "test:concurrent-edge"
+        )
+        self.assertIsNotNone(
+            store.read_ingress_route_audit_record(
+                TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit"
+            )
+        )
+        self.assertTrue(
+            any(
+                row.provider_target_key == ingress.target_key()
+                for row in store.list_held_provider_target_reservations()
+            )
+        )
+
+    def test_unfinished_preparing_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_unfinished_private_forward_recovers_and_successor("preparing")
+
+    def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")
+
+    def test_private_same_address_lineage_monitor_and_second_generation(self) -> None:
+        self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
+
+    def test_original_intent_progress_and_native_forward_continuation(self) -> None:
+        self.fixture.test_second_native_generation_keeps_both_original_operations_and_old_data()
+
+    def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
+        self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()
+
+    def test_expired_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_expired_execution_rolls_back_target_and_delivery()
+
+    def test_replaced_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_replaced_execution_rolls_back_target_and_delivery()
+
+    def test_later_supported_hold_correction_prevents_publication(self) -> None:
+        self.fixture.test_later_supported_hold_correction_refuses_final_publication()
+
+    def test_new_staff_use_prevents_fresh_creation(self) -> None:
+        self.fixture.test_new_staff_use_refuses_before_fresh_creation()
+
+    def test_supported_application_route_original_intent_and_key_replay(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
+
+    def test_in_progress_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, in_progress=True)
+
+    def test_refused_http_apply_readback_and_receipt_remain_unqualified(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, failed=True)
+
+    def test_pre_effect_refusal_releases_for_fresh_review(self) -> None:
+        self.fixture.test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key()
+
+    def test_post_inspector_permanent_refusal_keeps_custody_and_continues(self) -> None:
+        self.fixture.test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues()
+
+    def test_failed_private_candidate_retains_resources_for_distinct_generation(self) -> None:
+        self.fixture.test_lost_failed_private_application_keeps_resources_and_new_generation()
+
+    def test_publication_refusal_restores_route_before_next_generation(self) -> None:
+        self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
+
+    def test_terminal_private_job_correction_before_health_keeps_original_custody(self) -> None:
+        self.fixture.test_terminal_private_candidate_correction_does_not_require_passing_health()
+
+    def test_answered_unused_placement_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_placement_correction_retains_unused_candidate()
+
+    def test_staged_private_inputs_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_staged_private_inputs_correction_retains_unused_candidate()
+
+    def test_answered_mount_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_mount_correction_retains_unused_candidate()
+
+    def test_answered_configuration_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_configuration_correction_retains_unused_candidate()
+
+    def test_generic_publication_error_continues_original_forward(self) -> None:
+        self.fixture.test_addressed_generic_publication_error_retries_forward_without_route_rewrite()
+
+    def test_staff_use_pauses_forward_until_reviewed_clear(self) -> None:
+        self.fixture.test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse()
+
+    def test_verified_public_failure_restores_original(self) -> None:
+        self.fixture.test_verified_public_http_failure_restores_original_and_allows_successor()
+
+    def test_verified_private_failure_retains_candidate(self) -> None:
+        self.fixture.test_verified_private_http_failure_retains_candidate_and_allows_successor()
+
+    def test_proxy_restart_before_inverse_preserves_original_directions(self) -> None:
+        self.fixture.test_proxy_restart_before_inverse_retains_distinct_inverse_custody()
+
+    def test_proxy_restart_after_lost_inverse_preserves_original_child(self) -> None:
+        self.fixture.test_proxy_restart_after_lost_inverse_reply_reuses_original_child()
+
+    def test_staff_use_pauses_persisted_inverse_until_reviewed_clear(self) -> None:
+        self.fixture.test_persisted_inverse_pauses_for_staff_use_then_restores_original()
+
+    def test_route_restores_before_foreign_job_holds_negative_receipt(self) -> None:
+        self.fixture.test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt()
+
+
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient_qualification as qualification
@@ -13146,6 +13649,7 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
         self.fixture.test_reviewed_native_inverse_works_without_minting_a_client_release_step()
 
     def test_effect_checkpoint_and_budget_admission_serialize_on_two_connections(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
         from control_plane.production_recipient_budget import require_budget_checkpoint
         from control_plane.workflows.generic_web_deploy_provider import (
             generic_web_provider_target_key,
@@ -13168,6 +13672,14 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=record.product,
+                context=record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=record.retained_target_id.target_id,
+            ),
         ).record
         assert peer is not None
         url = make_url(f.database_url)
@@ -14135,27 +14647,37 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             self.assertIsNone(superseded.cancellation)
             self.assertTrue(current.reconcile_requested_at)
 
-    def test_retirement_custody_survives_schema_downgrade_and_reupgrade(self) -> None:
+    def test_retirement_custody_survives_its_migration_downgrade_and_reupgrade(self) -> None:
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
         from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
         from control_plane.storage.migrations.versions import (
             cd192c59f009_retained_testing_generations as migration,
         )
 
-        with _isolated_postgres_database() as url:
-            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
+        with _head_postgres_database() as url:
             fixture = TestingGenerationRetirementTests()
             fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
             fixture.apply()
             before = fixture.store.read_retained_testing_generation(fixture.operation.operation_id)
-            config = _alembic_config(url)
-            alembic_command.downgrade(config, migration.down_revision)
+            # Exercise this history-preserving migration itself. Unrelated later
+            # irreversible migrations deliberately refuse a whole-chain downgrade.
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.downgrade()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.upgrade()
             fixture.store.verify_schema()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
@@ -14454,6 +14976,24 @@ class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTranspor
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
+    def test_checkpointed_rehearsal_resumes_original_job_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_deploy_checkpoints_exact_remote_execute_and_worker_resumes_without_replay()
+
+    def test_checkpoint_executor_exclusion_and_original_binding_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_rehearsal_checkpoint_preserves_live_executor_and_original_binding()
+
     def test_rehearsal_record_compare_and_write_and_native_alias_fence(self) -> None:
         from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
 
@@ -14930,6 +15470,748 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         )
 
 
+class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
+    def test_delayed_expired_insertion_cannot_clear_an_existing_fence_incident(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
+        from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
+
+        from control_plane.contracts.public_ingress_monitoring import (
+            PublicIngressNotificationDestination,
+        )
+        from tests.test_public_ingress_monitor import _notification_policy
+
+        with _head_postgres_database() as url:
+            monitor = PostgresRecordStore(database_url=url)
+            writer = PostgresRecordStore(database_url=url)
+            self.addCleanup(monitor.close)
+            self.addCleanup(writer.close)
+            monitor.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            monitor.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="fixture",
+                        kind="github_issue",
+                        github_repository="fixture/monitor",
+                        github_label="fixture",
+                    ),
+                )
+            )
+            first = _hold_deploy_fence(monitor, idempotency_key="original")
+            checked_at = _minutes_after(first.updated_at, 60)
+            opened = run_public_ingress_monitor_once(record_store=monitor, checked_at=checked_at)
+            self.assertEqual(opened.open_incident_count, 1)
+            opened_outbox = {
+                row.delivery_id
+                for row in monitor.list_outbox_delivery_records(kind="public_ingress_notification")
+            }
+            self.assertTrue(opened_outbox)
+
+            self.assertEqual(
+                monitor.adopt_reconciled_mutation(
+                    reservation=first,
+                    response_status_code=202,
+                    response_trace_id="fixture-completed",
+                    response_payload={"settled": True},
+                ).status,
+                "adopted",
+            )
+            snapshot = decode_generic_web_provider_reconciliation_target(first.reconciliation_key)
+            snapshot = snapshot.model_copy(update={"target_id": "replacement-target"})
+            reconciliation_key = "generic-web-provider-target:" + base64.urlsafe_b64encode(
+                snapshot.model_dump_json(exclude_none=True).encode()
+            ).decode().rstrip("=")
+            origin = ProviderTargetOrigin(
+                product=snapshot.product,
+                context=snapshot.context,
+                instance=snapshot.instance,
+                provider_id=snapshot.provider_id,
+                target_type=snapshot.target_type,
+                target_id=snapshot.target_id,
+            )
+            inserted, release = threading.Event(), threading.Event()
+            retain = writer._retain_original_mutation_intent
+
+            def paused_receipt(*args: Any, **kwargs: Any) -> None:
+                retain(*args, **kwargs)
+                args[0].flush()
+                inserted.set()
+                if not release.wait(10):
+                    raise AssertionError("monitor never reached transition")
+
+            transition = monitor.write_public_ingress_transition_with_outbox
+            future: Any = None
+
+            def commit_before_transition(**kwargs: Any) -> Any:
+                self.assertEqual(kwargs["observation"].status, "pass")
+                release.set()
+                future.result(10)
+                return transition(**kwargs)
+
+            with (
+                patch.object(
+                    writer, "_retain_original_mutation_intent", side_effect=paused_receipt
+                ),
+                patch.object(writer, "_database_mutation_timestamp", return_value=first.created_at),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                future = pool.submit(
+                    writer.reserve_mutation,
+                    scope="different-producer",
+                    route_path="/test/provider-operation",
+                    idempotency_key="replacement",
+                    request_fingerprint="replacement-fingerprint",
+                    lease_owner="replacement-owner",
+                    lease_seconds=60,
+                    reconciliation_key=reconciliation_key,
+                    provider_target_key=origin.target_key(),
+                    provider_target_origin=origin,
+                )
+                try:
+                    self.assertTrue(inserted.wait(10))
+                    with patch.object(
+                        monitor,
+                        "write_public_ingress_transition_with_outbox",
+                        side_effect=commit_before_transition,
+                    ):
+                        observed = run_public_ingress_monitor_once(
+                            record_store=monitor, checked_at=_minutes_after(checked_at, 1)
+                        )
+                finally:
+                    release.set()
+                    future.result(10)
+            self.assertEqual(observed.resolved_incident_count, 0)
+            self.assertEqual(len(monitor.list_public_ingress_incident_records(status="open")), 1)
+            self.assertFalse(any(record.status == "pass" for record in observed.records))
+            self.assertFalse(
+                any(
+                    record.status == "pass"
+                    for record in monitor.list_public_ingress_observation_records()
+                )
+            )
+
+            self.assertEqual(
+                {
+                    row.delivery_id
+                    for row in monitor.list_outbox_delivery_records(
+                        kind="public_ingress_notification"
+                    )
+                },
+                opened_outbox,
+            )
+            self.assertFalse(monitor.list_public_ingress_incident_event_records(event="recovered"))
+
+    def test_two_stores_preserve_winner_origin_and_fresh_reacquisition_nonce(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
+            for store in stores:
+                self.addCleanup(store.close)
+            origins = [
+                ProviderTargetOrigin(
+                    product=product,
+                    context="fixture-context",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_type="compose",
+                    target_id="fixture-target",
+                )
+                for product in ("first-product", "second-product")
+            ]
+            barrier = threading.Barrier(2)
+
+            def reserve(index: int) -> Any:
+                barrier.wait(10)
+                return stores[index].reserve_mutation(
+                    scope=f"private-scope-{index}",
+                    route_path="/fixture",
+                    idempotency_key=f"private-key-{index}",
+                    request_fingerprint=f"private-fingerprint-{index}",
+                    lease_owner="fixture",
+                    reconciliation_key="opaque-family",
+                    provider_target_key=origins[index].target_key(),
+                    provider_target_origin=origins[index],
+                    original_intent={"family": index},
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(reserve, index) for index in range(2)]
+                results = [future.result(10) for future in futures]
+            self.assertEqual(
+                sorted(result.status for result in results), ["acquired", "target_busy"]
+            )
+            winner = next(
+                index for index, result in enumerate(results) if result.status == "acquired"
+            )
+            held = results[winner].record
+            capsule = stores[1 - winner].read_provider_target_origin(held)
+            assert capsule is not None
+            self.assertEqual(capsule.origin, origins[winner])
+            self.assertEqual(
+                stores[1 - winner].read_original_mutation_intent(held), {"family": winner}
+            )
+            self.assertEqual(
+                stores[winner].release_reserved_mutation(reservation=held).status, "released"
+            )
+            with patch.object(
+                stores[1 - winner], "_database_mutation_timestamp", return_value=held.created_at
+            ):
+                reacquired = (
+                    stores[1 - winner]
+                    .reserve_mutation(
+                        scope=held.scope,
+                        route_path=held.route_path,
+                        idempotency_key=held.idempotency_key,
+                        request_fingerprint=held.request_fingerprint,
+                        lease_owner="new-owner",
+                        reconciliation_key=held.reconciliation_key,
+                        provider_target_key=held.provider_target_key,
+                        provider_target_origin=origins[winner],
+                        original_intent={"family": winner},
+                    )
+                    .record
+                )
+            after = stores[winner].read_provider_target_origin(reacquired)
+            assert after is not None
+            self.assertEqual(held.record_id, reacquired.record_id)
+            self.assertEqual(held.created_at, reacquired.created_at)
+            self.assertNotEqual(capsule.operation_nonce, after.operation_nonce)
+
+    def test_receipt_failure_rolls_back_before_other_store_can_acquire(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        with _head_postgres_database() as url:
+            first, second = (PostgresRecordStore(database_url=url) for _ in range(2))
+            self.addCleanup(first.close)
+            self.addCleanup(second.close)
+            origin = ProviderTargetOrigin(
+                product="fixture",
+                context="fixture",
+                instance="testing",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id="fixture-target",
+            )
+            retained, release = threading.Event(), threading.Event()
+            retain = first._retain_original_mutation_intent
+
+            def fail_after_receipt(*args: Any) -> None:
+                retain(*args)
+                args[0].flush()
+                retained.set()
+                if not release.wait(10):
+                    raise AssertionError("rollback barrier not released")
+                raise RuntimeError("fixture receipt rollback")
+
+            def reserve(store: PostgresRecordStore, key: str) -> Any:
+                return store.reserve_mutation(
+                    scope="fixture",
+                    route_path="/fixture",
+                    idempotency_key=key,
+                    request_fingerprint=key,
+                    lease_owner="fixture",
+                    reconciliation_key="opaque",
+                    provider_target_key=origin.target_key(),
+                    provider_target_origin=origin,
+                )
+
+            with (
+                patch.object(
+                    first, "_retain_original_mutation_intent", side_effect=fail_after_receipt
+                ),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                failed = pool.submit(reserve, first, "rolled-back")
+                try:
+                    self.assertTrue(retained.wait(10))
+                    succeeding = pool.submit(reserve, second, "winner")
+                    self.wait_for_advisory_wait(second)
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(RuntimeError, "fixture receipt rollback"):
+                    failed.result(10)
+                winner = succeeding.result(10)
+            self.assertEqual(winner.status, "acquired")
+            self.assertIsNotNone(first.read_provider_target_origin(winner.record))
+            with first._session_factory() as session:
+                rows = list(session.scalars(select(LaunchplaneIdempotencyRow)))
+            self.assertEqual(
+                {row.payload.get("idempotency_key") for row in rows},
+                {"winner", winner.record.record_id},
+            )
+
+    def test_portable_origin_and_monitor_contracts_on_native_storage(self) -> None:
+        from tests import test_provider_target_origin as origins
+        from tests import test_provider_target_hold_monitor as monitors
+
+        scenarios = (
+            (
+                origins,
+                origins.ProviderTargetOriginTests,
+                "test_corrupt_full_receipt_is_unavailable_without_changing_family_reader",
+            ),
+            (
+                origins,
+                origins.ProviderTargetOriginTests,
+                "test_supersession_requires_new_origin_and_mints_distinct_nonce_atomically",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_two_holds_counted_and_live_current_never_hides_old_stuck",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_unused_application_history_cannot_block_prod_observation",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_completed_old_incident_cannot_change_reused_target_lane_source",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_completed_exact_reference_settles_hold_without_claiming_success",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_missing_row_and_different_incarnation_never_settle_reference",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_missing_or_corrupt_receipt_is_unavailable_even_after_completion",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_operation_set_is_material_heartbeat_and_order_are_not",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_completed_reference_with_drifted_sql_projection_is_never_settlement",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_acceptance_rechecks_classification_after_lease_change_or_elapsed_grace",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_participant_terminal_failure_settles_exact_reference_and_mixed_generic",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_missing_corrupt_mismatched_or_nonterminal_record_never_settles",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_heartbeat_is_stable_but_new_membership_before_acceptance_is_rejected",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_import_preserves_original_identity_and_terminal_record_and_completion_cas",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_corrupt_provider_source_keeps_other_probes_and_scheduler_running",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_mixed_legacy_participants_remain_unverified_in_both_completion_orders",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_missing_legacy_is_material_but_never_settles_and_order_is_stable",
+            ),
+        )
+        for module, case_type, method in scenarios:
+            with self.subTest(method=method), _store_for_fresh_head_database() as store:
+                with (
+                    patch.object(module, "PostgresRecordStore", return_value=store),
+                    patch.object(store, "ensure_schema", side_effect=store.verify_schema),
+                ):
+                    case = case_type(method)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
+    def wait_for_advisory_wait(self, store: PostgresRecordStore) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with store._engine.connect() as connection:
+                waiting = connection.scalar(
+                    text(
+                        "select exists(select 1 from pg_locks where locktype='advisory' and not granted "
+                        "and database=(select oid from pg_database where datname=current_database()))"
+                    )
+                )
+            if waiting:
+                return
+        self.fail("contender never reached the existing advisory membership gate")
+
+    def test_monitor_transition_and_generic_insertion_serialize_in_both_orders(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
+        from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
+
+        for insertion_first in (True, False):
+            with self.subTest(insertion_first=insertion_first), _head_postgres_database() as url:
+                monitor, writer = (PostgresRecordStore(database_url=url) for _ in range(2))
+                self.addCleanup(monitor.close)
+                self.addCleanup(writer.close)
+                monitor.write_product_profile_record(
+                    _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+                )
+                old = _hold_deploy_fence(monitor, idempotency_key="original")
+                checked_at = _minutes_after(old.updated_at, 60)
+                self.assertEqual(
+                    run_public_ingress_monitor_once(
+                        record_store=monitor, checked_at=checked_at
+                    ).open_incident_count,
+                    1,
+                )
+                self.assertEqual(
+                    monitor.adopt_reconciled_mutation(
+                        reservation=old,
+                        response_status_code=202,
+                        response_trace_id="completed",
+                        response_payload={},
+                    ).status,
+                    "adopted",
+                )
+                origin = ProviderTargetOrigin(
+                    product="example-site",
+                    context="example-site",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_type="compose",
+                    target_id="replacement",
+                )
+                held, release, timestamp_captured = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                retain = writer._retain_original_mutation_intent
+                read = monitor._provider_target_holds
+
+                def paused_receipt(*args: Any) -> None:
+                    retain(*args)
+                    args[0].flush()
+                    held.set()
+                    if not release.wait(10):
+                        raise AssertionError("insertion barrier not released")
+
+                def paused_source(*args: Any, **kwargs: Any) -> Any:
+                    if kwargs.get("for_update"):
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("monitor barrier not released")
+                    return read(*args, **kwargs)
+
+                def clock(_session: Any) -> str:
+                    timestamp_captured.set()
+                    return old.created_at if insertion_first else _minutes_after(checked_at, 1)
+
+                def insert_hold() -> Any:
+                    return writer.reserve_mutation(
+                        scope="opaque-producer",
+                        route_path="/fixture",
+                        idempotency_key="replacement",
+                        request_fingerprint="replacement",
+                        lease_owner="fixture",
+                        lease_seconds=60,
+                        reconciliation_key="opaque",
+                        provider_target_key=origin.target_key(),
+                        provider_target_origin=origin,
+                    )
+
+                def observe() -> Any:
+                    return run_public_ingress_monitor_once(
+                        record_store=monitor, checked_at=_minutes_after(checked_at, 1)
+                    )
+
+                with (
+                    patch.object(writer, "_database_mutation_timestamp", side_effect=clock),
+                    patch.object(
+                        writer,
+                        "_retain_original_mutation_intent",
+                        side_effect=paused_receipt if insertion_first else retain,
+                    ),
+                    patch.object(
+                        monitor,
+                        "_provider_target_holds",
+                        side_effect=read if insertion_first else paused_source,
+                    ),
+                    ThreadPoolExecutor(max_workers=2) as pool,
+                ):
+                    initial = pool.submit(insert_hold if insertion_first else observe)
+                    try:
+                        self.assertTrue(held.wait(10))
+                        contender = pool.submit(observe if insertion_first else insert_hold)
+                        self.wait_for_advisory_wait(monitor)
+                        if not insertion_first:
+                            self.assertFalse(
+                                timestamp_captured.is_set(),
+                                "lease time captured before membership gate",
+                            )
+                    finally:
+                        release.set()
+                    first_result, second_result = initial.result(10), contender.result(10)
+                observed = second_result if insertion_first else first_result
+                admitted = first_result if insertion_first else second_result
+                self.assertEqual(admitted.status, "acquired")
+                self.assertEqual(observed.resolved_incident_count, 0 if insertion_first else 1)
+                if insertion_first:
+                    self.assertEqual(observed.pass_count, 0)
+                    self.assertEqual(observed.authority_changed_count, 1)
+
+    def test_typed_admission_and_monitor_lane_exclusion_in_both_orders(self) -> None:
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
+        )
+        from tests.test_provider_target_hold_monitor import ProviderTargetHoldMonitorTests
+
+        for admission_first in (False, True):
+            with self.subTest(admission_first=admission_first), _head_postgres_database() as url:
+                monitor, writer = (PostgresRecordStore(database_url=url) for _ in range(2))
+                self.addCleanup(monitor.close)
+                self.addCleanup(writer.close)
+                fixture = ProviderTargetHoldMonitorTests()
+                fixture.store = monitor
+                from tests.test_public_ingress_monitor import _profile
+                from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+                fixture.profile = _profile()
+                fixture.origin = ProviderTargetOrigin(
+                    product=fixture.profile.product,
+                    context="example-site",
+                    instance="testing",
+                    provider_id="fixture",
+                    target_type="compose",
+                    target_id="fixture",
+                )
+                old = fixture.typed_operation("old")
+                self.assertEqual(fixture.observe(old.updated_at).open_incident_count, 1)
+                monitor.write_odoo_stable_target_replacement_operation_record(
+                    old.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "finished_at": old.updated_at,
+                        }
+                    )
+                )
+                replacement = old.model_copy(
+                    update={
+                        "operation_id": build_odoo_stable_target_replacement_operation_id(
+                            product=old.product,
+                            context=old.context,
+                            instance=old.instance,
+                            created_at=old.created_at,
+                            idempotency_key="new",
+                            idempotency_scope=old.idempotency_scope,
+                        ),
+                        "idempotency_key": "new",
+                    }
+                )
+                held, release = threading.Event(), threading.Event()
+                read = monitor._provider_target_holds
+
+                def source(*args: Any, **kwargs: Any) -> Any:
+                    if kwargs.get("for_update"):
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("monitor source barrier was not released")
+                    return read(*args, **kwargs)
+
+                def before_insert(
+                    _connection: Any,
+                    _cursor: Any,
+                    statement: str,
+                    _params: Any,
+                    _context: Any,
+                    _many: bool,
+                ) -> None:
+                    if statement.startswith(
+                        "INSERT INTO launchplane_odoo_stable_target_replacement_operations"
+                    ):
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("typed admission barrier was not released")
+
+                if admission_first:
+                    event.listen(writer._engine, "before_cursor_execute", before_insert)
+                try:
+                    with (
+                        patch.object(
+                            monitor,
+                            "_provider_target_holds",
+                            side_effect=read if admission_first else source,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as pool,
+                    ):
+                        if admission_first:
+                            initial = pool.submit(
+                                writer.write_odoo_stable_target_replacement_operation_record,
+                                replacement,
+                            )
+                            try:
+                                self.assertTrue(held.wait(10))
+                                observed = pool.submit(fixture.observe, old.updated_at).result(10)
+                                self.assertEqual(observed.skipped_count, 1)
+                                self.assertEqual(observed.resolved_incident_count, 0)
+                            finally:
+                                release.set()
+                                initial.result(10)
+                        else:
+                            monitor_future = pool.submit(fixture.observe, old.updated_at)
+                            try:
+                                self.assertTrue(held.wait(10))
+                                contender = pool.submit(
+                                    writer.write_odoo_stable_target_replacement_operation_record,
+                                    replacement,
+                                )
+                                self.wait_for_advisory_wait(monitor)
+                            finally:
+                                release.set()
+                            observed = monitor_future.result(10)
+                            contender.result(10)
+                            self.assertEqual(observed.resolved_incident_count, 1)
+                finally:
+                    release.set()
+                    if admission_first:
+                        event.remove(writer._engine, "before_cursor_execute", before_insert)
+                self.assertEqual(fixture.observe(old.updated_at).fail_count, 1)
+
+    def test_publisher_holding_authority_cannot_deadlock_or_publish_stale_provider_pass(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
+        from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
+
+        with _head_postgres_database() as url:
+            monitor, publisher = (PostgresRecordStore(database_url=url) for _ in range(2))
+            self.addCleanup(monitor.close)
+            self.addCleanup(publisher.close)
+            monitor.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            old = _hold_deploy_fence(monitor, idempotency_key="original")
+            checked_at = _minutes_after(old.updated_at, 60)
+            self.assertEqual(
+                run_public_ingress_monitor_once(
+                    record_store=monitor, checked_at=checked_at
+                ).open_incident_count,
+                1,
+            )
+            self.assertEqual(
+                monitor.adopt_reconciled_mutation(
+                    reservation=old,
+                    response_status_code=202,
+                    response_trace_id="completed",
+                    response_payload={},
+                ).status,
+                "adopted",
+            )
+            at_shared_lock, publisher_locked = threading.Event(), threading.Event()
+
+            def before_try_lock(
+                _connection: Any,
+                _cursor: Any,
+                statement: str,
+                _parameters: Any,
+                _context: Any,
+                _executemany: bool,
+            ) -> None:
+                if "pg_try_advisory_xact_lock_shared" in statement:
+                    at_shared_lock.set()
+                    if not publisher_locked.wait(10):
+                        raise AssertionError("publisher did not obtain authority lock")
+
+            def publish() -> None:
+                self.assertTrue(at_shared_lock.wait(10))
+                with publisher._session_factory() as session:
+                    publisher._lock_product_authority_bundle_write(session)
+                    publisher_locked.set()
+                    row = session.get(
+                        LaunchplaneIdempotencyRow, old.record_id, with_for_update=True
+                    )
+                    self.assertIsNotNone(row)
+                    session.commit()
+
+            event.listen(monitor._engine, "before_cursor_execute", before_try_lock)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    publication = pool.submit(publish)
+                    observation = pool.submit(
+                        run_public_ingress_monitor_once,
+                        record_store=monitor,
+                        checked_at=_minutes_after(checked_at, 1),
+                    )
+                    observed = observation.result(10)
+                    publication.result(10)
+            finally:
+                event.remove(monitor._engine, "before_cursor_execute", before_try_lock)
+                publisher_locked.set()
+            self.assertEqual(observed.pass_count, 0)
+            self.assertEqual(observed.resolved_incident_count, 0)
+            self.assertEqual(observed.authority_changed_count, 1)
+            self.assertEqual(len(monitor.list_public_ingress_incident_records(status="open")), 1)
+            self.assertFalse(
+                any(
+                    record.status == "pass"
+                    for record in monitor.list_public_ingress_observation_records()
+                )
+            )
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresProviderHoldAttentionTests(unittest.TestCase):
+    def test_bounded_parent_keyset_and_corrupt_source(self) -> None:
+        from tests.test_provider_hold_attention import ProviderHoldAttentionTests
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            portable = ProviderHoldAttentionTests()
+            portable.store = store
+            portable.test_keyset_pages_bound_projection_and_keep_inactive_original_scope()
+            portable.test_indexed_payload_contradiction_is_unavailable_never_empty()
+
+
 class RealPostgresBrowserRouteRepairTests(browser_repair_tests._BrowserRouteRepairFixture):
     def setUp(self) -> None:
         from control_plane.dokploy import source
@@ -15200,3 +16482,268 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
             saved.record_id,
         )
         self.assertEqual(waiter_store.list_deployment_records(), ())
+
+
+class RealPostgresGenericSiblingOwnershipTests(
+    generic_sibling_tests.LegacyGenericSiblingOwnershipTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        with self.provider_inventory():
+            plan = await self.plan()
+            with peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                    .with_for_update()
+                )
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+            self.assertEqual((await self.apply(plan)).status_code, 202)
+
+
+class RealPostgresLegacyOdooPreviewReconciliationTests(
+    legacy_odoo_tests.LegacyOdooPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_receipt_contention_refuses_without_authority_lock_cycle(self) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = self.produced_sibling()
+        self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+        plan = await self.plan()
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+        )
+        bound = bind_legacy_preview(self.store, request)
+        self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        for identifier in bound.sibling_receipt_ids:
+            with self.subTest(receipt=identifier), peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                    .with_for_update()
+                )
+                # A writer that owns the receipt can need authority next. Apply
+                # must fail immediately rather than waiting in the inverse order.
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
+        self,
+    ) -> None:
+        original = self.historical_generation().model_copy(
+            update={
+                "runtime_identity": None,
+                "state": "verifying",
+                "finished_at": "",
+                "ready_at": "",
+            }
+        )
+        latest = original.model_copy(update={"generation_id": "latest-interrupted", "sequence": 2})
+        for generation in (original, latest):
+            self.store.write_preview_generation_record(generation)
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "state": "pending",
+                    "active_generation_id": latest.generation_id,
+                    "serving_generation_id": "",
+                    "latest_generation_id": latest.generation_id,
+                }
+            )
+        )
+        closed = await self.closed_preview()
+        self.assertEqual(closed.state, "destroyed")
+        self.assertEqual(closed.active_generation_id, "")
+        self.assertEqual(closed.serving_generation_id, "")
+        self.assertEqual(closed.latest_generation_id, latest.generation_id)
+        for generation in (original, latest):
+            self.assertEqual(
+                self.store.read_preview_generation_record(generation.generation_id), generation
+            )
+
+    async def test_actual_odoo_executor_held_elsewhere_blocks_before_provider_observation(
+        self,
+    ) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.contracts.preview_execution import (
+            odoo_preview_target_key,
+            preview_execution_lock_name,
+        )
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product,
+                preview_id=self.preview.preview_id,
+                reason="fixture",
+            ),
+        )
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        name = preview_execution_lock_name(
+            odoo_preview_target_key(
+                context=self.profile.preview.context,
+                compose_name=bound.application_name,
+            )
+        )
+        with peer.testing_replacement_execution_lock(name) as check:
+            self.assertIsNotNone(check)
+            response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.reads)
+        self.assertTrue((await self.plan())["apply_eligible"])
+
+    async def test_custom_physical_executor_shares_logical_preview_fence(self) -> None:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from datetime import datetime, timedelta, timezone
+        from control_plane.workflows.launchplane import generate_preview_id
+
+        now = datetime.now(timezone.utc)
+        await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
+        self.reads.clear()
+        fake = FakePreviewProvider()
+        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        entered = threading.Event()
+        release = threading.Event()
+        execute = fake.execute_apply
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        owner_pid: list[int] = []
+
+        def blocked_execute(**kwargs: Any) -> dict[str, object]:
+            entry = next(
+                item
+                for item in self.store._preview_execution_context.held
+                if item[0] == logical and not item[1]
+            )
+            owner_pid.append(entry[2].scalar(text("SELECT pg_backend_pid()")))
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test provider release was not delivered.")
+            return execute(**kwargs)
+
+        operation.adapter._execute_apply = blocked_execute
+        with patch.object(operation.adapter, "capture_schedule_binding"):
+            execution = asyncio.create_task(asyncio.to_thread(operation.run, self.store))
+            inspection = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                inspection = asyncio.create_task(self.call("inspect"))
+                waiting = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        waiting = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks owner JOIN pg_locks waiter "
+                                    "ON waiter.locktype = owner.locktype AND waiter.database = owner.database "
+                                    "AND waiter.classid = owner.classid AND waiter.objid = owner.objid "
+                                    "AND waiter.objsubid = owner.objsubid "
+                                    "WHERE owner.locktype = 'advisory' AND owner.granted "
+                                    "AND owner.pid = :owner_pid AND NOT waiter.granted"
+                                ),
+                                {"owner_pid": owner_pid[0]},
+                            )
+                        )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(
+                    waiting, "Reconciliation never waited for the actual logical executor"
+                )
+                self.assertFalse(self.reads)
+            finally:
+                release.set()
+                tasks = [execution] + ([inspection] if inspection is not None else [])
+                outcomes = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), 10
+                )
+            result = outcomes[0]
+            if isinstance(result, BaseException):
+                raise result
+            self.assertEqual(result.response_status_code, 202, result.response_payload)
+            self.assertEqual(result.response_payload["result"]["status"], "pass")
+            self.assertEqual(
+                result.response_payload["records"]["lifecycle_evidence_status"], "applied"
+            )
+            runtime = operation.adapter._runtime_identity
+            assert runtime is not None
+            preview = self.store.read_preview_record(self.preview.preview_id)
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, runtime.preview_generation_id)
+            generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.runtime_identity, runtime)
+            response = outcomes[1]
+            if isinstance(response, BaseException):
+                raise response
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertFalse(self.reads)
+
+    def test_lost_logical_transaction_cannot_reacquire_proof_after_autobegin(self) -> None:
+        from control_plane.workflows.launchplane import generate_preview_id
+        from control_plane.legacy_preview_reconciliation import (
+            serialize_legacy_preview_operation,
+            LegacyPreviewReconciliationRequest,
+            bind_legacy_preview,
+        )
+
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product,
+            preview_id=self.preview.preview_id,
+            reason="fixture",
+        )
+        with serialize_legacy_preview_operation(self.store, request):
+            entry = next(
+                value for value in self.store._preview_execution_context.held if value[0] == logical
+            )
+            session = entry[2]
+            session.rollback()
+            session.execute(text("SELECT 1"))
+            with self.assertRaises(ValueError):
+                self.store.preview_refresh_is_excluded(preview_id=logical)
+            with self.assertRaises(ValueError):
+                bind_legacy_preview(self.store, request)
+        self.assertFalse(self.reads)

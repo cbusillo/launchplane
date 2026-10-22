@@ -118,7 +118,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: cbusillo/codex-skills
-          ref: c28a756968fa0ccce2dd02ea5fedd6f988b1475d
+          ref: 5923e84d2a3358dfcea8ca5abc610b35770794c4
           path: .test-quality-catalog
           persist-credentials: false
 
@@ -126,6 +126,68 @@ jobs:
         run: >-
           uv run --no-project --no-config
           .test-quality-catalog/scripts/check_test_quality.py --repo . --format github
+
+      - name: Check new comments and docstrings
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" != "$(git rev-parse HEAD)" || "$(git rev-parse --is-shallow-repository)" != false ]]; then
+            echo "Comment comparison requires the exact event head and complete commit history." >&2
+            exit 1
+          fi
+          case "$EVENT_NAME" in
+            push)
+              if [[ "$EVENT_REF" = refs/heads/launchplane/train/* ]]; then
+                repository="$(printf '%s' "${GITHUB_REPOSITORY:-}" | tr '[:upper:]' '[:lower:]')"
+                train_prefix="refs/heads/launchplane/train/${repository}/${DEFAULT_BRANCH//\//-}/"
+                if [[ -z "$DEFAULT_BRANCH" || -z "$repository" || "$EVENT_REF" != "$train_prefix"* || "$EVENT_REF" = "$train_prefix" ]]; then
+                  echo "Comment comparison requires a default-branch train candidate." >&2
+                  exit 1
+                fi
+                git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null
+                git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+                comparison_dir="$(mktemp -d)"
+                trap 'rm -rf "$comparison_dir"' EXIT
+                git rev-list --first-parent "refs/remotes/origin/${DEFAULT_BRANCH}" > "$comparison_dir/base"
+                git rev-list --first-parent "$HEAD_SHA" > "$comparison_dir/head"
+                BASE_SHA="$(awk 'NR == FNR { base[$0] = 1; next } ($0 in base) && !found { print; found = 1 }' "$comparison_dir/base" "$comparison_dir/head")"
+                if [[ -z "$BASE_SHA" ]]; then
+                  echo "Train candidate has no verified first-parent base for comment comparison." >&2
+                  exit 1
+                fi
+                if [[ "$BASE_SHA" = "$HEAD_SHA" ]]; then
+                  echo "Candidate is already a protected first-parent commit; scanning its empty contribution."
+                fi
+              elif [[ -z "$DEFAULT_BRANCH" || "$EVENT_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+                echo "Comment comparison requires a protected-default push or supported train candidate." >&2
+                exit 1
+              fi
+              ;;
+            pull_request)
+              if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ ]]; then
+                echo "Pull-request comment comparison requires the event base SHA." >&2
+                exit 1
+              fi
+              BASE_SHA="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+              ;;
+            schedule)
+              BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
+              ;;
+            *) echo "No comment comparison range for ${EVENT_NAME}." >&2; exit 1 ;;
+          esac
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ ]]; then
+            echo "Comment comparison requires a full nonzero base SHA." >&2
+            exit 1
+          fi
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"
+          uv run --no-project --no-config \
+            .test-quality-catalog/scripts/check_new_comments.py --repo . --base "$BASE_SHA" --format github
 
   audit_policy:
     needs: candidate_ci

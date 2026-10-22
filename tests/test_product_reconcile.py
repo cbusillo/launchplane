@@ -3,14 +3,19 @@ from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed, DokployScheduleExecutionFailed
 from control_plane.contracts.record_failures import record_failure_summary
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone, tzinfo
+from dataclasses import replace
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    ApplicationTaskObservation,
+)
 from email.message import Message
 import io
 import json
 import os
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -66,6 +71,7 @@ from control_plane.contracts.product_reconcile import (
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.deploy_reference import provider_image_reference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
@@ -150,6 +156,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
+from tests.support.application_runtime import converged_application_runtime
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from control_plane.drivers.generic_web_preview_dispatch import GenericWebPreviewVerificationRequest
 from control_plane.generic_web_verification_http import (
@@ -685,18 +692,26 @@ class ProductReconcileTestCase(unittest.TestCase):
         )
 
     def hold_testing(self) -> None:
+        try:
+            previous = self.store.read_dokploy_target_record(
+                context_name="cm", instance_name="testing"
+            )
+        except FileNotFoundError:
+            previous = DokployTargetRecord(
+                context="cm", instance="testing", updated_at="2026-09-30T09:00:00Z"
+            )
         self.store.write_dokploy_target_record(
-            DokployTargetRecord(
-                context="cm",
-                instance="testing",
-                policies=DokployTargetPolicies(
-                    staff_testing_hold=DokployTargetStaffTestingHold(
-                        reason="Staff are testing checkout.",
-                        recorded_by="site-operator",
-                        recorded_at="2026-09-30T09:00:00Z",
-                    )
-                ),
-                updated_at="2026-09-30T09:00:00Z",
+            previous.model_copy(
+                update={
+                    "policies": DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Staff are testing checkout.",
+                            recorded_by="site-operator",
+                            recorded_at="2026-09-30T09:00:00Z",
+                        )
+                    ),
+                    "updated_at": "2026-09-30T09:00:00Z",
+                }
             )
         )
 
@@ -1378,23 +1393,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             ),
             patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
         ):
-            old_operation = self.store.read_odoo_stable_target_replacement_operation_record(
-                old_operation_id
-            )
-            self.store.write_odoo_stable_target_replacement_operation_record(
-                old_operation.model_copy(
-                    update={
-                        "status": "reconciliation_required",
-                        "finished_at": "",
-                        "error_code": "provider_outcome_unknown",
-                    }
-                )
-            )
-            self.request()
-            unresolved = self.reconcile()
-            self.assertEqual(unresolved["queued_operation_id"], old_operation_id)
-            self.assertEqual(unresolved["queued_operation_status"], "reconciliation_required")
-            self.store.write_odoo_stable_target_replacement_operation_record(old_operation)
             for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
                 self.request()
                 queued = cast(str, self.reconcile()["queued_operation_id"])
@@ -1786,6 +1784,73 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def settle_terminal_testing_original(self) -> DeploymentRecord:
+        from tests.test_generic_web_deploy_recovery import _create_recovery_app, _OPERATOR_TOKEN
+        from tests.support.auth import local_operator_policy
+        from tests.test_service import _invoke_app
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.workflows.generic_web_application_snapshot import (
+            generic_web_provider_deployment_record_id,
+        )
+
+        (original,) = self.store.list_held_provider_target_reservations()
+        snapshot = decode_generic_web_provider_reconciliation_target(original.reconciliation_key)
+        app = _create_recovery_app(
+            root=self.root,
+            store=self.store,
+            authz_policy=local_operator_policy(
+                actions=("generic_web_deploy.execute",),
+                products=("site",),
+                contexts=("cm",),
+            ),
+        )
+        body = {
+            "schema_version": 1,
+            "product": "site",
+            "instance": "testing",
+            "original_deploy": snapshot.original_event_deploy,
+            "reason": "Settle original terminal qualification without repeating effects.",
+        }
+        provider = getattr(self, "application_inputs_provider", self.deploys)
+        with patch(
+            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+            return_value=provider,
+        ):
+            status, dry = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/admin/generic-web/deploy-recovery/dry-run",
+                authorization=f"Bearer {_OPERATOR_TOKEN}",
+                payload=body,
+                headers={"Idempotency-Key": original.idempotency_key},
+            )
+            self.assertEqual(status, 200, dry)
+            self.assertEqual(dry["proposed_action"], "settle_testing_failure", dry)
+            status, settled = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/admin/generic-web/deploy-recovery/apply",
+                authorization=f"Bearer {_OPERATOR_TOKEN}",
+                payload={**body, "expected_recovery_digest": dry["recovery_digest"]},
+                headers={"Idempotency-Key": original.idempotency_key},
+            )
+            self.assertEqual(
+                (status, settled.get("reservation_state")), (202, "completed"), settled
+            )
+        operation = build_provider_operation_key(
+            scope=original.scope,
+            route_path=original.route_path,
+            idempotency_key=original.idempotency_key,
+            request_fingerprint=original.request_fingerprint,
+            reconciliation_key=original.reconciliation_key,
+        )
+        return self.store.read_deployment_record(
+            generic_web_provider_deployment_record_id(operation, context="cm", instance="testing")
+        )
+
     def application_input_provider(self) -> tuple[dict[str, object], list[str]]:
         self.store.write_dokploy_target_record(
             DokployTargetRecord(
@@ -1825,8 +1890,35 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         def update(**kwargs: object) -> None:
             payload["env"] = kwargs["env_text"]
 
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            from control_plane.dokploy.api import parse_dokploy_env_text
+
+            values = parse_dokploy_env_text(str(payload["env"]))
+            source = values.get("LAUNCHPLANE_SOURCE_GIT_REF", DEPLOYABLE)
+            artifact = values.get(
+                "LAUNCHPLANE_ARTIFACT_ID", f"{IMAGE_REPOSITORY}@{_digest(source)}"
+            )
+            record_id = values.get("LAUNCHPLANE_DEPLOYMENT_RECORD_ID", "fixture-no-deployment")
+            return ApplicationRuntimeObservation(
+                application_id="target-123",
+                app_name="site-testing-app",
+                service_id="fixture-service",
+                service_image=provider_image_reference(artifact_id=artifact),
+                service_deployment_record_id=record_id,
+                desired_replicas=1,
+                rollout_state="completed",
+                rollout_started_at="2026-10-19T00:00:30Z",
+                running_container_images=((artifact,),),
+                running_container_deployment_record_ids=(record_id,),
+                running_container_health=("",),
+                pending_task_count=0,
+            )
+
+        self.application_runtime = runtime
+
         for patcher in (
             patch.object(provider, "_read_provider_config", return_value=("fixture", "unused")),
+            patch.object(provider, "observe_testing_application_runtime", side_effect=runtime),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=lambda **_: dict(payload),
@@ -1854,6 +1946,290 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         return payload, triggered
+
+    def prepare_application_runtime_test(self) -> list[str]:
+        _payload, triggered = self.application_input_provider()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"APP_SETTING": "fixture"},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        return triggered
+
+    def rolled_back_application_runtime(self) -> ApplicationRuntimeObservation:
+        return replace(
+            self.application_runtime(),
+            rollout_state="rollback_completed",
+            service_image=f"{IMAGE_REPOSITORY}:sha-{OLDER}",
+            service_deployment_record_id="old-deployment",
+            running_container_images=(),
+            running_container_deployment_record_ids=(),
+            running_container_health=(),
+            pending_task_count=1,
+        )
+
+    def test_provider_job_success_after_swarm_rollback_never_credits_testing(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            first = self.run_once()
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.last_plan["deploy_status"], "fail")
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+        self.assertEqual(len(triggered), 1)
+        records = self.store.list_deployment_records(context_name="cm", instance_name="testing")
+        self.assertTrue(records)
+        self.assertTrue(
+            all(
+                record.deploy.status == "fail" and record.runtime_identity is None
+                for record in records
+            )
+        )
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+    def test_unreadable_rollout_at_deadline_retains_original_without_delivery_credit(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        with (
+            patch.object(
+                self.application_inputs_provider,
+                "observe_testing_application_runtime",
+                side_effect=lambda **_: replace(
+                    self.application_runtime(),
+                    task_evidence_complete=False,
+                    running_container_images=(),
+                    running_container_deployment_record_ids=(),
+                    running_container_health=(),
+                ),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.monotonic", return_value=0),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic", return_value=1e30
+            ),
+        ):
+            self.request()
+            original = self.run_once()
+        self.assertEqual(original.state, "failed")
+        (held,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+        self.request()
+        repeated = self.run_once()
+        self.assertEqual(repeated.state, "failed")
+        (retained,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(retained.record_id, held.record_id)
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+    def test_application_without_managed_inputs_repairs_runtime_drift_once(self) -> None:
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        _payload, triggered = self.application_input_provider()
+        profile = self.store.read_product_profile_record("site")
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        self.assertFalse(testing_input_authority(self.store, profile, lane))
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            return (
+                replace(self.rolled_back_application_runtime(), task_evidence_complete=False)
+                if len(triggered) == 1
+                else self.application_runtime()
+            )
+
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=runtime,
+        ):
+            self.request()
+            repaired = self.reconcile()
+            self.request()
+            unchanged = self.reconcile()
+        self.assertEqual(repaired["reason"], "testing_runtime_drift")
+        self.assertEqual(unchanged["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 2)
+
+    def test_actual_runtime_drift_repairs_once_without_inventory_rewrite(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        initial = self.reconcile()
+        old_inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            return (
+                self.rolled_back_application_runtime()
+                if len(triggered) == 1
+                else self.application_runtime()
+            )
+
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=runtime,
+        ):
+            self.request()
+            repaired = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(repaired["reason"], "testing_runtime_drift")
+        self.assertNotEqual(initial["deploy_idempotency_key"], repaired["deploy_idempotency_key"])
+        self.assertNotEqual(old_inventory.deployment_record_id, repaired["deployment_record_id"])
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 2)
+
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: (
+                self.rolled_back_application_runtime()
+                if len(triggered) == 2
+                else self.application_runtime()
+            ),
+        ):
+            self.request()
+            later_repair = self.reconcile()
+        self.assertEqual(later_repair["reason"], "testing_runtime_drift")
+        self.assertNotEqual(
+            later_repair["deploy_idempotency_key"], repaired["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(triggered), 3)
+
+    def test_pending_runtime_before_skip_waits_without_new_deployment(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        runtime = replace(self.application_runtime(), rollout_state="updating")
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            return_value=runtime,
+        ):
+            self.request()
+            pending = self.run_once()
+        self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(pending.state, "done")
+        self.assertEqual(len(triggered), 1)
+
+    def test_failed_runtime_repair_replays_even_when_its_service_spec_remains(self) -> None:
+        self.assert_failed_runtime_repair_replays("completed")
+
+    def test_paused_failed_runtime_repair_replays_without_another_deploy(self) -> None:
+        self.assert_failed_runtime_repair_replays("paused")
+
+    def test_paused_rollback_repair_replays_without_another_deploy(self) -> None:
+        self.assert_failed_runtime_repair_replays("rollback_paused")
+
+    def assert_failed_runtime_repair_replays(self, rollout_state: str) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        baseline = self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            if len(triggered) == 1:
+                return self.rolled_back_application_runtime()
+            current = self.application_runtime()
+            return replace(
+                current,
+                rollout_state=rollout_state,
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                tasks=(
+                    ApplicationTaskObservation(
+                        image=current.running_container_images[0][0],
+                        deployment_record_id=current.service_deployment_record_id,
+                        state="failed",
+                    ),
+                ),
+            )
+
+        with (
+            patch.object(
+                self.application_inputs_provider,
+                "observe_testing_application_runtime",
+                side_effect=runtime,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                return_value=1e30,
+            ),
+        ):
+            self.request()
+            failed = self.run_once()
+            for _ in range(2):
+                self.request()
+                repeated = self.run_once()
+                self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+                self.assertEqual(
+                    repeated.last_plan["deploy_idempotency_key"],
+                    failed.last_plan["deploy_idempotency_key"],
+                )
+        self.assertEqual(failed.last_plan["deploy_status"], "fail")
+        self.assertEqual(len(triggered), 2)
+        self.assertEqual(
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing"),
+            baseline,
+        )
+
+    def test_known_application_without_target_configuration_cannot_skip_runtime_proof(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        self.store.delete_dokploy_target_record(expected_record=target)
+        with patch.object(
+            self.application_inputs_provider, "observe_testing_application_runtime"
+        ) as observe:
+            self.request()
+            pending = self.run_once()
+        self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(pending.last_plan["action"], "wait")
+        self.assertEqual(pending.state, "done")
+        observe.assert_not_called()
+        self.assertEqual(len(triggered), 1)
+
+    def test_interrupted_job_success_cannot_resurrect_rolled_back_runtime(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        with patch(
+            "control_plane.dokploy.api.wait_for_target_deployment",
+            side_effect=ProviderMutationUnknownError("lost reply"),
+        ):
+            interrupted = self.run_once()
+        self.assertEqual(interrupted.state, "failed")
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            self.request()
+            recovered = self.run_once()
+        self.assertEqual(recovered.state, "failed")
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
 
     def test_same_image_missing_managed_inputs_is_repaired_once_and_rotation_converges(
         self,
@@ -1994,6 +2370,26 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         self.reconcile()
+        self.hold_testing()
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            wraps=self.application_runtime,
+        ) as observe:
+            self.request()
+            unchanged = self.reconcile()
+        self.assertEqual(unchanged["reason"], "already_deployed")
+        observe.assert_called_once()
+        self.assertEqual(len(triggered), 1)
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            self.request()
+            drift_held = self.reconcile()
+        self.assertEqual(drift_held["reason"], "staff_testing")
+        self.assertEqual(len(triggered), 1)
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
                 scope="instance",
@@ -2098,8 +2494,10 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             )
 
         def upsert(**kwargs: Any) -> Any:
-            self.input_schedule = dict(kwargs["schedule_payload"])
-            return {**self.input_schedule, "scheduleId": "cleanup"}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                self.input_schedule = dict(kwargs["schedule_payload"])
+                return {**self.input_schedule, "scheduleId": "cleanup"}
 
         for patcher in (
             patch.object(
@@ -2449,9 +2847,10 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch("control_plane.dokploy.api.dokploy_request", side_effect=save):
-            first = self.reconcile()
+            first = self.run_once()
+        self.assertEqual(first.state, "failed")
         self.assertEqual(len(triggered), 1)
-        record = self.store.read_deployment_record(str(first["deployment_record_id"]))
+        record = self.settle_terminal_testing_original()
         self.assertEqual(record.runtime_source[DELIVERY_RECEIPT_KEY], captured_digest)
         self.assertEqual(parse_dokploy_env_text(str(payload["env"]))["APP_SETTING"], "first")
         self.assertFalse(self.store.list_held_provider_target_reservations())
@@ -2536,20 +2935,29 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         policies = self.store.list_runtime_key_safety_policy_records
         saved: list[str] = []
         schedule_write = cast(Any, api.upsert_dokploy_application_schedule).side_effect
-        publish = self.store.write_deployment_record
+        publish = self.store.publish_generic_web_testing_result
         cleanup_writes: list[str] = []
 
         def upsert(**kwargs: Any) -> Any:
             if saved:
                 cleanup_writes.append("hold")
                 if cleanup_failure:
-                    raise click.ClickException("Lost held-schedule reply")
+                    guard = kwargs.get("provider_mutation_guard")
+
+                    @contextmanager
+                    def lost_reply() -> Iterator[None]:
+                        with guard() if callable(guard) else nullcontext():
+                            yield
+                            raise click.ClickException("Lost held-schedule reply")
+
+                    kwargs["provider_mutation_guard"] = lost_reply
             return schedule_write(**kwargs)
 
-        def write(record: DeploymentRecord) -> Any:
+        def write(**kwargs: Any) -> Any:
+            record = kwargs["deployment"]
             if saved and publication_failure and record.deploy.status == "fail":
                 raise RuntimeError("Failed refusal publication")
-            return publish(record)
+            return publish(**kwargs)
 
         def save(**kwargs: Any) -> dict[str, object]:
             nonlocal revoked
@@ -2613,7 +3021,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             patch(
                 "control_plane.dokploy.api.upsert_dokploy_application_schedule", side_effect=upsert
             ),
-            patch.object(self.store, "write_deployment_record", side_effect=write),
+            patch.object(self.store, "publish_generic_web_testing_result", side_effect=write),
             patch.object(
                 self.store,
                 "list_runtime_key_safety_policy_records",
@@ -2889,12 +3297,13 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch("control_plane.dokploy.api.dokploy_request", side_effect=save):
-            first = self.reconcile()
+            first = self.run_once()
+        self.assertEqual(first.state, "failed")
         self.assertEqual(len(triggered), 1)
         self.assertEqual(
             parse_dokploy_env_text(str(payload["env"]))["APP_TOKEN"], "fixture-selected-secret"
         )
-        record = self.store.read_deployment_record(str(first["deployment_record_id"]))
+        record = self.settle_terminal_testing_original()
         self.assertEqual(record.runtime_source[DELIVERY_RECEIPT_KEY], captured)
         self.request()
         self.reconcile()
@@ -2942,6 +3351,14 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         with patch.object(self.application_inputs_provider, "execute_artifact_deploy") as execute:
             result = self.settle_refused_testing_dispatch(original)
+            if cleanup_failure:
+                self.assertIsNone(result)
+                self.assertEqual(
+                    self.store.list_held_provider_target_reservations()[0].record_id,
+                    original.record_id,
+                )
+                execute.assert_not_called()
+                return
             assert result is not None
             self.assertEqual(result.status, "completed")
             self.assertEqual(
@@ -3065,8 +3482,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch("control_plane.dokploy.api.dokploy_request", side_effect=save):
-            first = self.reconcile()
-        record = self.store.read_deployment_record(str(first["deployment_record_id"]))
+            first = self.run_once()
+        self.assertEqual(first.state, "failed")
+        record = self.settle_terminal_testing_original()
         self.assertEqual(record.runtime_source[DELIVERY_RECEIPT_KEY], captured)
         self.assertEqual(parse_dokploy_env_text(str(payload["env"]))["APP_SETTING"], "first")
         self.assertEqual(len(triggered), 1)
@@ -3171,7 +3589,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             "binding_deleted"
         )
         with patch.object(
-            self.store, "write_deployment_record", side_effect=RuntimeError("publication failed")
+            self.store,
+            "publish_generic_web_testing_result",
+            side_effect=RuntimeError("publication failed"),
         ):
             with self.assertRaisesRegex(RuntimeError, "publication failed"):
                 self.settle_refused_testing_dispatch(original)
@@ -3289,7 +3709,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["action"], "deploy")
         self.assertEqual(len(triggered), 1)
 
-    def test_interrupted_settlement_resumes_after_input_reversion_with_fresh_successor(
+    def test_lost_settlement_reply_stays_fenced_after_input_reversion(
         self,
     ) -> None:
         from control_plane.dokploy import api
@@ -3298,9 +3718,6 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             testing_attempt_was_settled,
         )
         from control_plane.provider_operations import ProviderMutationUnknownError
-        from control_plane.workflows.generic_web_application_snapshot import (
-            recorded_application_lifecycle,
-        )
 
         settings, original, schedule, triggered = self.prepare_interrupted_testing_inputs(
             lifecycle=True
@@ -3311,8 +3728,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         upsert = cast(Any, api.upsert_dokploy_application_schedule).side_effect
 
         def lost_restore_reply(**kwargs: Any) -> Any:
-            upsert(**kwargs)
-            raise ProviderMutationUnknownError("lost schedule restoration reply")
+            guard = kwargs.get("provider_mutation_guard")
+
+            @contextmanager
+            def lost_reply() -> Iterator[None]:
+                with guard() if callable(guard) else nullcontext():
+                    yield
+                    raise ProviderMutationUnknownError("lost schedule restoration reply")
+
+            return upsert(**{**kwargs, "provider_mutation_guard": lost_reply})
 
         self.request()
         with (
@@ -3332,31 +3756,28 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertFalse(triggered)
         self.store.write_runtime_environment_record(settings)
         self.request()
-        with patch.object(
-            self.application_inputs_provider,
-            "observe_artifact_deploy",
-            return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
+        with (
+            patch.object(
+                self.application_inputs_provider,
+                "observe_artifact_deploy",
+                return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
+            ),
+            patch.object(api, "upsert_dokploy_application_schedule") as repeated_restore,
         ):
             self.assertEqual(self.run_once().state, "failed")
+        repeated_restore.assert_not_called()
         completed = self.store.read_idempotency_record(
             scope=original.scope,
             route_path=original.route_path,
             idempotency_key=original.idempotency_key,
         )
         assert completed is not None
-        self.assertTrue(testing_attempt_was_settled(completed))
-        self.assertFalse(self.store.list_held_provider_target_reservations())
-        self.request()
-        repaired = self.reconcile()
-        self.assertNotEqual(repaired["deploy_idempotency_key"], original.idempotency_key)
-        self.assertEqual(len(triggered), 1)
-        deployed = self.store.read_deployment_record(str(repaired["deployment_record_id"]))
-        baseline = recorded_application_lifecycle(deployed)
-        assert baseline is not None
-        self.assertEqual(baseline.originals["cleanup"], schedule)
-        self.request()
-        self.assertEqual(self.reconcile()["reason"], "already_deployed")
-        self.assertEqual(len(triggered), 1)
+        self.assertFalse(testing_attempt_was_settled(completed))
+        (retained,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(retained.record_id, original.record_id)
+        self.assertEqual(retained.provider_effect_phase, TESTING_PRE_IMAGE_SETTLEMENT_PHASE)
+        self.assertEqual(self.input_schedule, schedule)
+        self.assertFalse(triggered)
 
     def test_settlement_lost_lease_keeps_original_fence_and_baseline(self) -> None:
         settings, original, _schedule, triggered = self.prepare_interrupted_testing_inputs(
@@ -3553,7 +3974,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
             ),
             patch.object(
-                self.store, "write_deployment_record", side_effect=RuntimeError("DB write failed")
+                self.store,
+                "publish_generic_web_testing_result",
+                side_effect=RuntimeError("DB write failed"),
             ),
             patch.object(self.store, "checkpoint_mutation_provider_effect") as checkpoint,
             patch("control_plane.dokploy.api.upsert_dokploy_application_schedule") as upsert,
@@ -3614,16 +4037,25 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             lifecycle=True
         )
         before = self.store.list_deployment_records(context_name="cm", instance_name="testing")[0]
-        self.store.write_deployment_record(
-            before.model_copy(
-                update={
-                    "post_deploy_update": PostDeployUpdateEvidence(),
-                }
-            )
+        missing = before.model_copy(
+            update={
+                "post_deploy_update": PostDeployUpdateEvidence(),
+            }
         )
+        with self.assertRaises(ValueError):
+            self.store.write_deployment_record(missing)
+        read_deployment = self.store.read_deployment_record
         self.github.add_run(30, NEWEST)
         self.request()
         with (
+            # Model a historical missing baseline without bypassing protected ingestion.
+            patch.object(
+                self.store,
+                "read_deployment_record",
+                side_effect=lambda record_id: (
+                    missing if record_id == before.record_id else read_deployment(record_id)
+                ),
+            ),
             patch.object(
                 self.application_inputs_provider,
                 "observe_artifact_deploy",
@@ -3909,6 +4341,122 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         return cast(str, plan["deployment_record_id"])
 
+    def test_fresh_image_only_native_settlement_permits_event_successor(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError(
+                "Interrupted after original image observation."
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (first_original,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+        settled = self.settle_terminal_testing_original()
+        self.assertEqual(settled.post_deploy_update.status, "fail")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+        self.request()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError(
+                "Interrupted successor needs its own recovery."
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (second_original,) = self.store.list_held_provider_target_reservations()
+        self.assertNotEqual(second_original.idempotency_key, first_original.idempotency_key)
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.request()
+        self.assertEqual(self.run_once().state, "failed")
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        (held_second,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(held_second.record_id, second_original.record_id)
+
+        self.settle_terminal_testing_original()
+        self.request()
+        successor = self.reconcile()
+        self.assertEqual(successor["deploy_operation_status"], "completed")
+        self.assertEqual(successor["deploy_status"], "pass")
+        self.assertNotEqual(successor["deploy_idempotency_key"], second_original.idempotency_key)
+        self.assertEqual(len(self.deploys.runtime_identities), 3)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        self.assertEqual(len(self.deploys.runtime_identities), 3)
+
+    def test_settled_image_only_successor_with_known_failure_replays_its_own_intent(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebProviderDeploymentFailed,
+        )
+        from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError(
+                "Interrupted after original image observation."
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (original,) = self.store.list_held_provider_target_reservations()
+        self.settle_terminal_testing_original()
+        self.deploys.deploy_error = GenericWebProviderDeploymentFailed(
+            self.deploys.observation.model_copy(update={"deployment_status": "error"})
+        )
+        self.request()
+        failed = self.run_once()
+        key = failed.last_plan["deploy_idempotency_key"]
+        assert isinstance(key, str)
+        self.assertNotEqual(key, original.idempotency_key)
+        self.assertEqual(failed.last_plan["deploy_status"], "fail")
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        result = self.store.read_idempotency_record(
+            scope=original.scope,
+            route_path=original.route_path,
+            idempotency_key=key,
+        )
+        assert result is not None
+        self.assertFalse(testing_attempt_was_settled(result))
+        for _ in range(2):
+            self.request()
+            repeated = self.run_once()
+            self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+            self.assertEqual(repeated.last_plan["deploy_idempotency_key"], key)
+            self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_pending_generic_web_qualification_surfaces_original_unknown_fence(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+        self.github.add_run(40, NEWEST)
+        with patch(
+            "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile"
+        ) as selector:
+            executor = selector.return_value
+            executor.side_effect = ProviderMutationUnknownError("Product response was lost.")
+            self.request()
+            first = self.run_once()
+            current = self.store.read_environment_inventory(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertEqual(current.post_deploy_update.status, "pending")
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.state, "failed")
+        self.assertEqual(repeated.state, "failed")
+        self.assertEqual(repeated.last_plan["reason"], "testing_qualification_pending")
+        self.assertTrue(repeated.last_error)
+        executor.assert_called_once()
+
     @staticmethod
     def _testing_qualification_evidence(*args: object) -> object:
         from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
@@ -4046,7 +4594,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
             result.evidence.update(
                 failure_kind="transient",
-                transient_attempts=str(previous_transient_attempts(args[1], context) + 1),
+                transient_attempts=str(previous_transient_attempts(context) + 1),
                 creator_verification_status="fail",
             )
             return result.model_copy(update={"status": "fail"})
@@ -4067,6 +4615,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 
         self.prepare_unqualified_verireel_testing()
+        self.application_input_provider()
 
         def failure(*args: object) -> PostDeployUpdateEvidence:
             result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
@@ -4098,7 +4647,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.reconcile()["reason"], "already_deployed")
         qualify.assert_called_once()
 
-    def test_interrupted_declared_qualification_is_failed_without_repeating_post_deploy(
+    def test_unknown_declared_qualification_stays_fenced_without_repeating_post_deploy(
         self,
     ) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
@@ -4112,9 +4661,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.run_once().state, "failed")
             self.request()
             repeated = self.run_once()
-        self.assertEqual(repeated.last_plan["deploy_operation_status"], "adopted")
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
         self.assertEqual(repeated.state, "failed")
-        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(len(self.store.list_held_provider_target_reservations()), 1)
         qualify.assert_called_once()
 
     def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:
@@ -4157,6 +4706,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
     ) -> None:
 
         self.prepare_unqualified_verireel_testing()
+        self.application_input_provider()
         transitioned = False
 
         def qualify_then_transition(*args: object) -> object:
@@ -4196,6 +4746,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
     def test_a_changed_runtime_input_requalifies_previously_passing_testing(self) -> None:
         self.prepare_unqualified_verireel_testing()
+        self.application_input_provider()
         with patch(
             "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
             side_effect=self._testing_qualification_evidence,
@@ -4248,6 +4799,36 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
 
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                target_type="application",
+                target_name=self.deploys.target_name,
+                updated_at=self.deploys.observation.started_at,
+            )
+        )
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance="testing",
+                target_id=self.deploys.target_id,
+                updated_at=self.deploys.observation.started_at,
+            )
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="testing",
+                provider_id=self.deploys.provider_id,
+                target_category="application",
+                provider_target_type="application",
+                target_id=self.deploys.target_id,
+                display_name=self.deploys.target_name,
+                updated_at=self.deploys.observation.started_at,
+            )
+        )
+
     def record_legacy_baseline(self, commit: str = OLDER, *, sha_tagged: bool = False) -> None:
         identity = RuntimeIdentity(
             context="cm",
@@ -4289,13 +4870,18 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.request()
 
         provider = DokployGenericWebDeployProvider()
+
+        def execute(**kwargs: Any) -> GenericWebProviderDeploymentObservation | None:
+            self.deploys.application_runtime = converged_application_runtime(
+                kwargs["resolved_deploy_target"], kwargs["runtime_identity"]
+            )
+            return provider.execute_artifact_deploy(**kwargs)
+
         with (
             patch.object(
                 provider, "_read_provider_config", return_value=("https://provider.test", "test")
             ),
-            patch.object(
-                self.deploys, "execute_artifact_deploy", wraps=provider.execute_artifact_deploy
-            ),
+            patch.object(self.deploys, "execute_artifact_deploy", side_effect=execute),
             patch("control_plane.dokploy.api.latest_deployment_for_target", return_value={}),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value={"env": ""}
@@ -4458,10 +5044,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(self.deploys.runtime_identities, [])
 
     def failed_deploy(self) -> ProductReconcileRequestRecord:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebProviderDeploymentFailed,
+        )
+
         self.github.add_run(20, DEPLOYABLE)
         self.deploys.observation = self.deploys.observation.model_copy(
             update={"deployment_status": "error"}
         )
+        self.deploys.deploy_error = GenericWebProviderDeploymentFailed(self.deploys.observation)
         self.request()
         self.run_once()
         # A failed provider effect is held until its terminal failure is observed.
@@ -4472,6 +5063,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         return failed
 
     def retry_after_lane_change(self, failed: ProductReconcileRequestRecord) -> None:
+        self.deploys.deploy_error = None
         self.deploys.observation = self.deploys.observation.model_copy(
             update={"deployment_status": "success"}
         )
@@ -4490,7 +5082,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
     def test_failed_deploy_replays_until_its_target_source_changes(self) -> None:
         self.store.write_dokploy_target_record(
-            DokployTargetRecord(context="cm", instance="testing", updated_at="2026-10-02T00:00:00Z")
+            self.store.read_dokploy_target_record(
+                context_name="cm", instance_name="testing"
+            ).model_copy(update={"updated_at": "2026-10-02T00:00:00Z"})
         )
         failed = self.failed_deploy()
         scan_effect = self.artifact_scanner.side_effect
@@ -4564,7 +5158,13 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         failed = self.failed_deploy()
         self.deploys.target_id = "repaired-target"
         self.store.write_provider_target_record(
-            provider_target.model_copy(update={"target_id": self.deploys.target_id})
+            provider_target.model_copy(
+                update={
+                    "target_id": self.deploys.target_id,
+                    "target_category": "application",
+                    "provider_target_type": "application",
+                }
+            )
         )
         self.store.write_dokploy_target_id_record(
             target_id.model_copy(update={"target_id": self.deploys.target_id})
@@ -4823,7 +5423,11 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         self.store.write_dokploy_target_record(
             DokployTargetRecord(
-                context=lane.context, instance="testing", updated_at="2026-10-01T00:00:00Z"
+                context=lane.context,
+                instance="testing",
+                target_type="application",
+                target_name=self.deploys.target_name,
+                updated_at="2026-10-01T00:00:00Z",
             )
         )
         self.store.write_dokploy_target_id_record(
@@ -4839,7 +5443,8 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 context=lane.context,
                 instance="testing",
                 provider_id=self.deploys.provider_id,
-                target_category="service",
+                target_category="application",
+                provider_target_type="application",
                 target_id=self.deploys.target_id,
                 display_name="testing",
                 updated_at="2026-10-01T00:00:00Z",
@@ -4884,11 +5489,26 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                     resolved, product="site"
                 ),
                 provider_target_key=adapter.target_key(),
+                provider_target_origin=adapter.provider_target_origin(),
             ).record
             held = self.store.mark_mutation_reconcile_required(
                 reservation=reserved, reconciliation_key=reserved.reconciliation_key
             ).record
             assert held is not None
+        from control_plane.storage.postgres import (
+            LaunchplaneIdempotencyRow,
+            ORIGINAL_MUTATION_INTENT_ROUTE,
+        )
+        from sqlalchemy import delete
+
+        with self.store._session_factory.begin() as session:
+            session.execute(
+                delete(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == reserved.record_id,
+                )
+            )
+
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch.object(
@@ -5052,23 +5672,34 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         # A renamed app changes reconciliation metadata, but not its target identity.
         self.deploys.target_name = "renamed-testing-app"
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
         self.store.write_dokploy_target_record(
-            DokployTargetRecord(
-                context="cm",
-                instance="testing",
-                target_name=self.deploys.target_name,
-                updated_at="2026-10-02T01:00:00Z",
+            target.model_copy(
+                update={
+                    "target_name": self.deploys.target_name,
+                    "updated_at": "2026-10-02T01:00:00Z",
+                }
             )
         )
         self.deploys.observation = succeeded
         self.request()
-        settled = self.run_once()
-        self.assertEqual(settled.state, "done")
-        self.assertEqual(settled.last_plan["deploy_operation_status"], "adopted")
+        still_held = self.run_once()
+        self.assertEqual(still_held.state, "failed")
         self.assertEqual(
-            settled.last_plan["deploy_idempotency_key"], first.last_plan["deploy_idempotency_key"]
+            still_held.last_plan["deploy_idempotency_key"],
+            first.last_plan["deploy_idempotency_key"],
         )
+        settled = self.settle_terminal_testing_original()
+        self.assertEqual(settled.post_deploy_update.status, "fail")
+        self.assertEqual(settled.deploy.deployment_id, succeeded.deployment_id)
         self.assertEqual(len(self.deploys.runtime_identities), 1)
+        self.deploys.deploy_error = None
+        self.request()
+        successor = self.reconcile()
+        self.assertNotEqual(
+            successor["deploy_idempotency_key"], first.last_plan["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
 
     def test_the_reconcile_may_deploy_only_the_generic_web_testing_lane(self) -> None:
         def allowed(*, product: str = "site", instance: str = "testing") -> bool:
@@ -5096,6 +5727,39 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_preview_provider_read_denial_keeps_its_classification(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            side_effect=NativeSourceAuthorizationDenied("private fixture detail"),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "authorization_denied")
+        self.assertNotIn("private fixture detail", failed.model_dump_json())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_preview_capacity_refusal_keeps_typed_reason_without_provider_effects(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            side_effect=BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(
+            failed.last_plan["last_failed_error_code"], "host_bridge_network_capacity_short"
+        )
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_reset_preview_head_cannot_replace_the_serving_newer_build(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
@@ -6855,6 +7519,71 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(cast(dict[str, object], result["pr_feedback"])["status"], "failed")
         self.assertEqual(self.owner_review_status_calls, [("site", 5)])
 
+    def test_review_publisher_runs_when_unknown_preview_recovery_fails(self) -> None:
+        from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            return_value={"status": "fail", "provider_effect_attempted": True},
+        ) as apply:
+            self.request("preview", 5)
+            self.assertEqual(self.run_once().state, "failed")
+            self.assertEqual(apply.call_count, 1)
+            self.owner_review_status_calls.clear()
+            writes = list(self.comments.writes)
+            held_before = self.store.list_held_odoo_preview_reservations(product="site")
+            self.github.pull_request["body"] = (
+                f"## Client test notes\n{ENGINEERING_RELEASE_TESTS}\nCheck prices at release."
+            )
+
+            self.request("preview", 5)
+            held = self.run_once()
+
+            self.assertEqual(held.state, "failed")
+            self.assertEqual(apply.call_count, 1)
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+            self.assertEqual(self.comments.writes, writes)
+
+    def test_review_publication_failure_preserves_preview_feedback(self) -> None:
+        previous = self.reconcile_preview()["pr_feedback"]
+        writes = list(self.comments.writes)
+
+        with patch.object(
+            self, "write_owner_review_status", side_effect=ValueError("Invalid public origin")
+        ):
+            result = self.reconcile_preview()
+
+        self.assertEqual(result["pr_feedback"], previous)
+        self.assertEqual(self.comments.writes, writes)
+
+    def test_review_publisher_runs_for_a_deferred_preview(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.reconcile_preview_target",
+            return_value=ReconcileOutcome(
+                {"target": "preview", "deferred": "preview_operation_busy"}, deferred=True
+            ),
+        ):
+            pending = self.run_once()
+
+        self.assertEqual(pending.state, "pending")
+        self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+        self.assertNotIn("pr_feedback", pending.last_plan)
+        self.assertEqual(self.comments.writes, [])
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -7102,10 +7831,38 @@ class ProductReconcileCompletionTests(ProductReconcileTestCase):
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
 
     def test_independent_testing_operation_does_not_wake_event_reconciliation(self) -> None:
-        operation = self.queued_operation().model_copy(
-            update={"idempotency_scope": "independent-testing-operation"}
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
         )
-        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+
+        admit = self.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane
+
+        def independent(
+            record: OdooStableTargetReplacementOperationRecord,
+        ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+            scope = "independent-testing-operation"
+            return admit(
+                record.model_copy(
+                    update={
+                        "idempotency_scope": scope,
+                        "operation_id": build_odoo_stable_target_replacement_operation_id(
+                            product=record.product,
+                            context=record.context,
+                            instance=record.instance,
+                            created_at=record.created_at,
+                            idempotency_key=record.idempotency_key,
+                            idempotency_scope=scope,
+                        ),
+                    }
+                )
+            )
+
+        with patch.object(
+            self.store,
+            "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
+            side_effect=independent,
+        ):
+            operation = self.queued_operation()
         self.assertTrue(self.complete(operation, "pass"))
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
 

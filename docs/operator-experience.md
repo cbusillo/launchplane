@@ -65,6 +65,26 @@ evidence. A `403` remains an authorization failure, and an ordinary `503` or
 transport failure retains visibly stale cached evidence. No mutation is retried
 by this transition.
 
+The Product Ops index includes a read-only **Service operation attention**
+section for signed-in admins, including when the product inventory is empty,
+loading, or unavailable. It preserves original scopes after removal and labels
+unproved ownership explicitly. A known running operation is recorded work, not
+a claim of a stuck failure. Fresh individual lane facts remain independent.
+Loading, denied, unavailable, stale, unknown-origin and partial service evidence
+qualifies the incident overview so healthy lanes cannot hide retained work.
+Missing service authority is unavailable evidence, not zero operations.
+
+The panel keeps only one bounded page. **Next operation page** replaces that
+page; **Refresh operation attention** and the shell refresh return to the first
+page. A continuation never establishes global absence, even when empty.
+Background reads use existing cancellation, polling and evidence deadlines.
+Logout/session loss removes the panel and its cache; a service `401` or `403`
+clears sensitive attention rows. Transient failures may retain explicitly stale
+evidence. Demo mode never sends this service request. The panel offers no
+recovery mutation, retry, release or clear control. See
+[service attention](operations.md) for the
+retained-operation read and its proof limits.
+
 ## Representative Admin Journeys
 
 The clean-slate product model is grounded in recent Launchplane work rather than
@@ -761,6 +781,25 @@ bodies, and worker hostnames before response serialization.
 
 ## UI Rebuild
 
+### Host network capacity
+
+The existing environment overview's **Placement and runtime** panel shows free
+and total bridge-network slots for its current Dokploy host, the admission need
+and spare margin, and the observation time. Its **Refresh host capacity** control
+replaces the snapshot. Short capacity is visibly warned; unavailable or denied
+reads carry no invented count and never retain a prior successful count as new
+evidence. This snapshot does not change the lane's runtime identity or health
+status, reserve capacity, or authorize cleanup.
+
+The normal environment read stays record-backed and advertises capacity-read
+availability. The panel reads separately through the same authorized
+`GET /v1/products/{product}/environments/{environment}` with
+`include_host_network_capacity=true`. Authorization precedes provider reads.
+The service resolves the selected host from that lane's stored target and fresh
+provider placement, then uses the shared bounded capacity reader. Changed target
+or host placement during observation returns unavailable. No fleet inventory,
+new grant, provider mutation, host configuration or cleanup is involved.
+
 When the API contract is ready, rebuild the UI around:
 
 - product list and product overview
@@ -811,10 +850,9 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - Delivery Governance remains separate from product environment navigation. It
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
-- Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
-  `/ui/engineering/every-code` routes belong to designs
-  [DIRECTION.md](../DIRECTION.md) retires (work graphs and Every Code). They
-  receive no investment and are scheduled for deletion.
+- The unused Work graph and Issue inbox routes are removed.
+- Existing `/ui/engineering/every-code` belongs to the Every Code design that
+  [DIRECTION.md](../DIRECTION.md) retires. It receives no new UI work.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections

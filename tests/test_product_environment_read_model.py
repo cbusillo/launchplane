@@ -9,6 +9,7 @@ from typing import cast
 import unittest
 import os
 
+from control_plane.action_effects import ACTION_DECLARATIONS
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
@@ -714,11 +715,11 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     action_allowed=lambda *_: False,
                 )
 
-    def test_action_authz_map_matches_live_service_handlers(self) -> None:
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/post-deploy"],
-            "odoo_post_deploy.execute",
-        )
+    def test_action_authz_map_names_declared_actions(self) -> None:
+        self.assertTrue(ACTION_AUTHZ_BY_ROUTE)
+        for route, authz_action in ACTION_AUTHZ_BY_ROUTE.items():
+            with self.subTest(route=route):
+                self.assertIn(authz_action, ACTION_DECLARATIONS)
 
     def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

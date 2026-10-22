@@ -5,6 +5,7 @@ leases, candidate history and landing checkpoints use the production code.
 """
 
 import unittest
+from control_plane.merge_train_github import MergeTrainBaseCheckObservation
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -84,8 +85,8 @@ class RecoveryReplayTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
 
-            def read_base_check_status(self, **_: Any) -> str:
-                return "pass" if base_green else "fail"
+            def read_base_check_observation(self, **_: Any) -> MergeTrainBaseCheckObservation:
+                return MergeTrainBaseCheckObservation("pass" if base_green else "fail")
 
             def add_pull_request_label(self, *, pull_request_number: int, **_: Any) -> None:
                 nonlocal snapshot

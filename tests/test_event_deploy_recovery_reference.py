@@ -20,6 +20,7 @@ from control_plane.contracts.idempotency_record import parse_launchplane_mutatio
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     ExistingMutationReservationLookupResult,
@@ -28,14 +29,16 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
     build_generic_web_provider_reconciliation_key,
 )
-from tests.support.profiles import product_profile_payload
+from tests.support.profiles import product_profile_payload, _product_profile_payload_with_prod
 from tests.support.stores import sqlite_database_url
 from tests.test_generic_web_deploy_recovery import (
     _create_recovery_app,
     _generic_web_recovery_reservation,
     _generic_web_recovery_target,
     _generic_web_deploy_result,
+    _invoke_recovery,
     _write_generic_web_recovery_reservation,
+    _write_recovery_target_authority,
     _RecoveryObservationProvider,
 )
 from tests.test_service import _invoke_app
@@ -55,6 +58,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
         )
+        _write_recovery_target_authority(self.store)
         self.manifest = ArtifactIdentityManifest(
             artifact_id="recorded-build",
             source_commit="abc123",
@@ -168,7 +172,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
 
     def test_read_and_unknown_dry_run_do_not_write_or_disclose_coordinates(self) -> None:
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="unknown")
+            GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=self.reservation
         )
         before = self.store.list_held_provider_target_reservations()
         with (
@@ -209,6 +213,80 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             "original_deploy",
         ):
             self.assertNotIn(sensitive, serialized)
+
+    def test_director_agent_without_write_grants_can_plan_exact_unknown_original(self) -> None:
+        self.app = _create_recovery_app(
+            root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
+        )
+        provider = _RecoveryObservationProvider(
+            GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=self.reservation
+        )
+        before = self.store.list_held_provider_target_reservations()
+        with (
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=provider,
+            ),
+            patch.object(self.store, "reserve_mutation", side_effect=AssertionError("write")),
+            patch.object(
+                self.store, "mark_mutation_reconcile_required", side_effect=AssertionError("write")
+            ),
+            patch.object(
+                self.store, "adopt_reconciled_mutation", side_effect=AssertionError("write")
+            ),
+        ):
+            code, read = self.read()
+            self.assertEqual(code, 200, read)
+            code, plan = self.review(read["recovery_reference"])
+            self.assertEqual(code, 200, plan)
+            self.assertEqual(plan["proposed_action"], "hold_unknown")
+            self.assertFalse(plan["retry_safe"])
+            code, original_plan = _invoke_recovery(
+                self.app,
+                original_deploy=self.original,
+                idempotency_key=self.reservation.idempotency_key,
+                reason="Inspect held testing deployment.",
+            )
+            self.assertEqual(code, 200, original_plan)
+            self.assertEqual(original_plan["recovery_digest"], plan["recovery_digest"])
+            code, refused = self.review(read["recovery_reference"], digest=plan["recovery_digest"])
+            self.assertEqual(code, 403, refused)
+            self.assertEqual(refused["error"]["code"], "authorization_denied")
+        self.assertEqual(before, self.store.list_held_provider_target_reservations())
+        self.assertEqual(provider.observation_calls, 2)
+
+    def test_director_agent_plan_permission_does_not_admit_recovery_writes(self) -> None:
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+        )
+        self.app = _create_recovery_app(
+            root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
+        )
+        with patch.object(
+            self.store,
+            "lookup_existing_mutation_reservation",
+            side_effect=AssertionError("write authority must precede reservation inspection"),
+        ):
+            for instance in ("testing", "prod"):
+                with self.subTest(instance=instance):
+                    original = GenericWebDeployEnvelope.model_validate(self.original)
+                    original.deploy.instance = instance
+                    code, refused = _invoke_app(
+                        self.app,
+                        method="POST",
+                        path="/v1/admin/generic-web/deploy-recovery/apply",
+                        authorization="Bearer local-operator-token",
+                        payload={
+                            "product": self.product,
+                            "instance": instance,
+                            "original_deploy": original.model_dump(mode="json"),
+                            "reason": "Inspecting an original grants no recovery write.",
+                            "expected_recovery_digest": "a" * 64,
+                        },
+                        headers={"Idempotency-Key": self.reservation.idempotency_key},
+                    )
+                    self.assertEqual(code, 403, refused)
+                    self.assertEqual(refused["error"]["code"], "authorization_denied")
 
     def test_missing_and_ambiguous_reservations_refuse(self) -> None:
         with patch.object(self.store, "list_held_provider_target_reservations", return_value=()):
@@ -307,7 +385,8 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                 deployment_id="provider-deployment",
                 started_at="2026-08-15T12:00:00Z",
                 finished_at="2026-08-15T12:05:00Z",
-            )
+            ),
+            reservation=self.reservation,
         )
         _, read = self.read()
         with (
@@ -467,7 +546,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
 
     def test_retry_preserves_retained_request_and_completes_existing_reservation(self) -> None:
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="absent")
+            GenericWebProviderDeploymentObservation(outcome="absent"), reservation=self.reservation
         )
         _, read = self.read()
         result = _generic_web_deploy_result().model_dump(mode="json")
@@ -544,7 +623,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             status="found", record=self.reservation, observed_at=expired_observation.isoformat()
         )
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="absent")
+            GenericWebProviderDeploymentObservation(outcome="absent"), reservation=self.reservation
         )
         with (
             patch.object(self.store, "lookup_existing_mutation_reservation", return_value=lookup),

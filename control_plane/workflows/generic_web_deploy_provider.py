@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
 import re
+from time import monotonic, sleep
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
@@ -19,7 +20,10 @@ from control_plane.contracts.deploy_target import (
     DeployTargetCompatibilityType,
     ProviderTargetRecord,
 )
-from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
+from control_plane.contracts.deploy_reference import (
+    validate_provider_deploy_reference,
+    canonical_docker_image_repository as _image_repository,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
@@ -46,6 +50,13 @@ from control_plane.workflows.dokploy_deploy import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    application_runtime_attempt_observed,
+    application_runtime_matches,
+    application_runtime_settled_spec_matches,
+    fetch_application_runtime,
+)
 
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
@@ -87,6 +98,13 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     deploy_mode: str
     provider_deploy_mode: str
     deploy_timeout_seconds: int = Field(ge=1)
+
+
+@runtime_checkable
+class GenericWebApplicationExecutionProvider(Protocol):
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]: ...
 
 
 _GENERIC_WEB_RECONCILIATION_KEY_PREFIX = "generic-web-provider-target:"
@@ -456,24 +474,6 @@ class GenericWebRuntimeCloseOutEvidence(BaseModel):
 _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
 
 
-def _image_repository(image_reference: str) -> str:
-    """Return the canonical repository of an image reference, without tag or digest."""
-
-    reference = image_reference.strip().split("@", 1)[0]
-    registry_and_path, separator, last_segment = reference.rpartition("/")
-    repository = f"{registry_and_path}{separator}{last_segment.split(':', 1)[0]}".lower()
-    first_segment, _, remainder = repository.partition("/")
-    if not remainder:
-        return f"docker.io/library/{repository}"
-    if first_segment == "index.docker.io":
-        first_segment = "docker.io"
-    elif "." not in first_segment and ":" not in first_segment and first_segment != "localhost":
-        return f"docker.io/{repository}"
-    if first_segment == "docker.io" and "/" not in remainder:
-        return f"docker.io/library/{remainder}"
-    return f"{first_segment}/{remainder}"
-
-
 def evaluate_generic_web_runtime_close_out(
     *,
     observation: GenericWebRuntimeArtifactObservation,
@@ -609,6 +609,125 @@ class GenericWebDeployRuntimeArtifactProvider(Protocol):
 
 
 @runtime_checkable
+class GenericWebTestingApplicationRuntimeProvider(Protocol):
+    def observe_testing_application_runtime(
+        self,
+        *,
+        control_plane_root: Path,
+        target_id: str,
+    ) -> ApplicationRuntimeObservation: ...
+
+
+def qualify_testing_application_observation(
+    *,
+    provider: GenericWebDeployProvider,
+    control_plane_root: Path,
+    target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
+    wait: bool = False,
+    deadline: float | None = None,
+) -> GenericWebProviderDeploymentObservation:
+    """A provider job is insufficient proof of application testing convergence."""
+    if (
+        target.ship_request.instance != "testing"
+        or target.resolved_target.target_type != "application"
+        or observation.outcome != "present"
+    ):
+        return observation
+    if not isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+        return GenericWebProviderDeploymentObservation(outcome="unknown")
+    if observation.deployment_status in {"canceled", "cancelled", "killed"}:
+        # Cancellation does not prove the provider worker stopped dispatching.
+        return GenericWebProviderDeploymentObservation(outcome="unknown")
+    if wait and deadline is None:
+        deadline = monotonic() + target.deploy_timeout_seconds
+    while True:
+        runtime: ApplicationRuntimeObservation | None
+        try:
+            runtime = provider.observe_testing_application_runtime(
+                control_plane_root=control_plane_root,
+                target_id=target.resolved_target.target_id,
+            )
+            if runtime.application_id != target.resolved_target.target_id:
+                raise ValueError("Runtime observation belongs to another target.")
+            if observation.deployment_status in {"error", "failed"} and runtime.rollout_settled:
+                # A pull/login failure can end before any service update. This
+                # proves a failed, currently settled effect, never its absence.
+                return GenericWebProviderDeploymentFailed(observation).observation
+            if application_runtime_matches(
+                runtime,
+                artifact_reference=target.ship_request.artifact_id,
+                provider_reference=dokploy_deploy_artifact_reference(
+                    ship_request=target.ship_request,
+                    target_type="application",
+                ),
+                deployment_record_id=deployment_record_id,
+            ):
+                return observation
+            if runtime.rollout_state in {"paused", "rollback_paused", "rollback_completed"}:
+                belongs_to_attempt = application_runtime_attempt_observed(
+                    runtime,
+                    artifact_reference=target.ship_request.artifact_id,
+                    provider_reference=dokploy_deploy_artifact_reference(
+                        ship_request=target.ship_request, target_type="application"
+                    ),
+                    deployment_record_id=deployment_record_id,
+                )
+                if not belongs_to_attempt:
+                    started = parse_launchplane_mutation_timestamp(
+                        observation.started_at, field_name="started_at"
+                    )
+                    finished = parse_launchplane_mutation_timestamp(
+                        observation.finished_at, field_name="finished_at"
+                    )
+                    rollout_started = parse_launchplane_mutation_timestamp(
+                        runtime.rollout_started_at, field_name="started_at"
+                    )
+                    belongs_to_attempt = started <= rollout_started <= finished
+                if belongs_to_attempt:
+                    return observation.model_copy(
+                        update={
+                            "deployment_status": "unhealthy",
+                            "error_message": (
+                                "Application testing rollout failed or rolled back; "
+                                f"provider job status={observation.deployment_status}."
+                            ),
+                        }
+                    )
+        except (ValueError, RuntimeError, click.ClickException):
+            runtime = None
+        remaining = deadline - monotonic() if deadline is not None else 0
+        if not wait or remaining <= 0:
+            if (
+                runtime is not None
+                and (
+                    wait
+                    or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+                )
+                and application_runtime_settled_spec_matches(
+                    runtime,
+                    artifact_reference=target.ship_request.artifact_id,
+                    provider_reference=dokploy_deploy_artifact_reference(
+                        ship_request=target.ship_request, target_type="application"
+                    ),
+                    deployment_record_id=deployment_record_id,
+                )
+            ):
+                return observation.model_copy(
+                    update={
+                        "deployment_status": "unhealthy",
+                        "error_message": (
+                            "Application testing runtime did not qualify at the original "
+                            f"deployment deadline; provider job status={observation.deployment_status}."
+                        ),
+                    }
+                )
+            return GenericWebProviderDeploymentObservation(outcome="unknown")
+        sleep(min(1.0, remaining))
+
+
+@runtime_checkable
 class GenericWebDeployNoLiveEffectProvider(Protocol):
     def observe_testing_no_live_effect(
         self,
@@ -645,6 +764,15 @@ class DokployGenericWebDeployProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
 
+    def observe_testing_application_runtime(
+        self,
+        *,
+        control_plane_root: Path,
+        target_id: str,
+    ) -> ApplicationRuntimeObservation:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        return fetch_application_runtime(host=host, token=token, application_id=target_id)
+
     def application_lifecycle(
         self,
         *,
@@ -663,6 +791,32 @@ class DokployGenericWebDeployProvider:
             checkpoint=checkpoint,
             effect_started=effect_started,
         )
+
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        schedules = dokploy_api.list_dokploy_schedules(
+            host=host, token=token, target_id=application_id, schedule_type="application"
+        )
+        matching = tuple(
+            item for item in schedules if dokploy_api.schedule_key(item) == schedule_id
+        )
+        if len(matching) != 1 or matching[0].get("applicationId") != application_id:
+            raise click.ClickException(
+                "Original application execution schedule binding is unavailable."
+            )
+        history = tuple(
+            dokploy_api._read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
+        )
+        from control_plane.workflows.generic_web_execution import require_schedule_history_binding
+
+        require_schedule_history_binding(
+            history,
+            schedule_id=schedule_id,
+            application_id=application_id,
+        )
+        return history
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
         if self.provider_id != "dokploy":

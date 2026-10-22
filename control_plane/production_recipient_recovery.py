@@ -1,5 +1,7 @@
 """Original-key isolated cold-data recovery, preserving every serving authority."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +80,9 @@ class RecipientRecoveryAdapter:
     trace_id: str
     original_key: str = ""
 
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        return getattr(self, "_origin", None)
+
     def target_key(self) -> str:
         if self.request.purpose == "published":
             from control_plane.workflows.generic_web_deploy_provider import (
@@ -87,6 +92,14 @@ class RecipientRecoveryAdapter:
             record = custody(self.store, self.product, self.request.context)
             if record is None:
                 raise ValueError("Published recipient custody is required.")
+            self._origin = ProviderTargetOrigin(
+                product=record.product,
+                context=record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=record.target_id,
+            )
             return generic_web_provider_target_key(
                 provider_id="dokploy",
                 context=record.context,

@@ -54,6 +54,111 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_product_environment_health_history",
+        "path": "/v1/products/{product}/environments/{environment}/health-history",
+        "purpose": "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "29adc4075f38325d0f365026f8223fb1cd7a27fad6f9e112b8714fa39447f914",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_owner_review_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "list_discussion_topics",
+        "path": "/v1/products/{product}/discussion-topics",
+        "purpose": "Read a product's discussion topics within existing product-profile read access.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "2cc149a0f8aa3e692be39f9a8ff7275e808ad1e0da4ee6d5dbb426896392e6e6",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "PUT",
+        "modes": [
+          "add"
+        ],
+        "operation_id": "add_discussion_topic",
+        "path": "/v1/products/{product}/discussion-topics/{topic_id}",
+        "purpose": "Add neutral discussion metadata as an admin or Director agent; retries preserve the topic.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "ff5422cc4dade71342abd12c496dfa36c39a781c07ccb808cadf58a8d9bb14a7",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "close"
+        ],
+        "operation_id": "close_discussion_topic",
+        "path": "/v1/products/{product}/discussion-topics/{topic_id}/close",
+        "purpose": "Close discussion metadata without accepting a release or changing product configuration.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "aab7a05d0fdc2341e37a506b916322d3e5e8115f33a5fcc4a701e9a26ca24eb5",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "review_testing_retry",
         "path": "/v1/products/{product}/testing-retry",
         "purpose": "Review recovery of an exhausted Odoo testing artifact using read authority; queue no work.",
@@ -319,11 +424,14 @@
         "modes": [
           "dry-run",
           "apply",
-          "readback"
+          "readback",
+          "route-repair-dry-run",
+          "route-repair-apply",
+          "route-repair-readback"
         ],
         "operation_id": "prepare_fresh_testing_bootstrap",
         "path": "/v1/products/{product}/testing-replacement-bootstrap",
-        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
         "response_statuses": [
           "202",
           "400",
@@ -336,7 +444,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "c511c140ac67b2921121dc599c8a086983925b6e7edf23daf9c041b437521c6d",
+        "schema_fingerprint_sha256": "99f6733db65900e96c77e95c0754bb37dc678c7d0908dfcbb1a019d70a6a29c2",
         "supported_surfaces": [
           "service_api"
         ]
@@ -692,7 +800,7 @@
         ],
         "operation_id": "reconcile_legacy_generic_web_preview",
         "path": "/v1/previews/legacy-generic-web/reconciliation",
-        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         "response_statuses": [
           "202",
           "400",
@@ -886,8 +994,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "b6977ea1570cbe76f323a7e431a9243485eb2dd0"
+    "source_commit_sha": "af3845ab89faada94eabad2f00b7018d7907e7fe"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "4089385dbcfae5074aac56a439ee8ecfe9b1b3062ca9903f7ec938bbae9da722"
+  "semantic_digest_sha256": "553bcd5431c90399744a8bcb68502894443a82d53ce4e39f0bf3b65f3a9a9d0f"
 }

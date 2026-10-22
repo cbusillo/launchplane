@@ -135,6 +135,14 @@ class ActivationTests(unittest.TestCase):
     local_credential_fixture = False
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         self.preparation = preparation.SeparationResourceTests()
         self.preparation.database_url = self.database_url
         self.preparation.setUp()
@@ -471,6 +479,25 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_activation()
+            self.assertEqual(self.writes, [])
+            self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(self.capacity_read.call_args.kwargs["server_id"], "server")
 
     def test_unencodable_input_retains_allocation_fences_without_configure_checkpoint(self) -> None:
         from control_plane.dokploy import api
@@ -1280,6 +1307,51 @@ class ActivationTests(unittest.TestCase):
                         )
         self.assertEqual(self.writes, [])
 
+    def test_new_staff_use_correction_refuses_initial_custody(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        second = PostgresRecordStore(
+            database_url=self.store._engine.url.render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        write = self.store.write_testing_activation
+        observed: list[DisposableLaneSafety] = []
+
+        def correction(**kwargs: Any) -> None:
+            if kwargs["expected"] is None and not observed:
+                binding = resolve_disposable_observation_binding(
+                    second, product=self.product, context=self.context, instance="testing"
+                )
+                now = datetime.now(timezone.utc)
+                record = DisposableLaneSafety(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                    observed_by=self.actor,
+                    observer_kind="director_agent",
+                    binding_sha256=binding.binding_sha256,
+                    usage="in_use",
+                    usage_evidence="A fresh staff-use correction.",
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+                self.assertTrue(second.publish_collected_disposable_lane_safety(record))
+                observed.append(record)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correction):
+            result = self.run_activation()
+        self.assertTrue(observed)
+        self.assertEqual(result.response_status_code, 409)
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertFalse(self.writes)
+        self.assertEqual(
+            second.read_disposable_lane_safety(self.product, self.context, "testing"), observed[0]
+        )
+
     def test_hold_continuation_requires_exact_caller_and_preserves_later_staff_hold(self) -> None:
         from control_plane.testing_activation import require_activation_hold_lift
         from control_plane.testing_lane_hold import TestingHoldApplyRequest
@@ -1343,6 +1415,61 @@ class ActivationTests(unittest.TestCase):
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+
+    def test_provider_monitor_source_recheck_refuses_published_separation_drift(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import Mock
+        from control_plane.workflows.public_ingress_monitor import (
+            _deploy_fence_monitor_target,
+            check_public_ingress_target,
+        )
+
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=self.product,
+            context=self.context,
+            instance="testing",
+        )
+        self.assertEqual(snapshot.holds, ())
+        target = replace(
+            _deploy_fence_monitor_target(profile=profile, lane=lane, fence=None),
+            provider_hold_snapshot=snapshot,
+        )
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=self.preparation.fixture.now(),
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "pass")
+        current = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        current.env[self.request.port_keys[0]] = "3307"
+        self.store.write_dokploy_target_record(current)
+        self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+        result = self.store.write_public_ingress_transition_with_outbox(
+            observation=observation,
+            incidents=(),
+            expected_provider_hold_snapshot=snapshot,
+        )
+        self.assertEqual(result.status, "provider_source_changed")
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in self.store.read_provider_hold_snapshot(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                ).holds
+            ),
+            (self.preparation.original,),
+        )
 
     def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
         import asyncio
@@ -1438,9 +1565,13 @@ class ActivationTests(unittest.TestCase):
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
-        self.assertNotIn(
-            (self.context, "testing"), _held_generic_web_deploy_fences(self.store) or {}
+        snapshots = _held_generic_web_deploy_fences(
+            self.store,
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
         )
+        assert snapshots is not None
+        self.assertEqual(snapshots[(self.product, self.context, "testing")].holds, ())
         from control_plane.workflows.generic_web_deploy_provider import (
             build_generic_web_provider_reconciliation_key,
         )
@@ -1449,23 +1580,43 @@ class ActivationTests(unittest.TestCase):
         record = activation_record(self.store, self.product, self.context)
         assert record is not None
         target.resolved_target.target_id = record.target_id
-        current_fence = self.preparation.original.model_copy(
-            update={
-                "idempotency_key": "new-recipient-outcome-unknown",
-                "reconciliation_key": build_generic_web_provider_reconciliation_key(
-                    target, product=self.product
-                ),
-            }
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.workflows.generic_web_deploy_provider import (
+            build_generic_web_provider_target_key,
         )
-        with patch.object(
+
+        current_fence = self.store.reserve_mutation(
+            scope=self.preparation.original.scope,
+            route_path=self.preparation.original.route_path,
+            idempotency_key="new-recipient-outcome-unknown",
+            request_fingerprint="new-recipient",
+            lease_owner="new-recipient",
+            reconciliation_key=build_generic_web_provider_reconciliation_key(
+                target, product=self.product
+            ),
+            provider_target_key=build_generic_web_provider_target_key(target),
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                provider_id=target.ship_request.provider_id,
+                target_type=target.resolved_target.target_type,
+                target_id=target.resolved_target.target_id,
+            ),
+        ).record
+        snapshots = _held_generic_web_deploy_fences(
             self.store,
-            "list_held_provider_target_reservations",
-            return_value=(self.preparation.original, current_fence),
-        ):
-            self.assertEqual(
-                (_held_generic_web_deploy_fences(self.store) or {})[(self.context, "testing")],
-                current_fence,
-            )
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
+        )
+        assert snapshots is not None
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in snapshots[(self.product, self.context, "testing")].holds
+            ),
+            (current_fence,),
+        )
 
     def reconcile_target_key(self) -> str:
         from control_plane.contracts.product_reconcile import ProductReconcileTarget

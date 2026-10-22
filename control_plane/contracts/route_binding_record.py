@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.data_provenance import FreshnessStatus
+from control_plane.contracts.text_fields import require_text
 
 
 RouteBindingStatus = Literal["active", "disabled"]
@@ -38,14 +39,14 @@ class RouteBindingProviderTarget(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> "RouteBindingProviderTarget":
-        self.provider_id = _required_text(
+        self.provider_id = require_text(
             self.provider_id, "route binding provider target requires provider_id"
         ).lower()
-        self.target_category = _required_text(
+        self.target_category = require_text(
             self.target_category, "route binding provider target requires target_category"
         ).lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_name = _required_text(
+        self.target_name = require_text(
             self.target_name, "route binding provider target requires target_name"
         )
         self.provider_evidence = _normalized_provider_evidence(self.provider_evidence)
@@ -62,7 +63,7 @@ class RouteBindingIngress(BaseModel):
 
     @model_validator(mode="after")
     def _validate_ingress(self) -> "RouteBindingIngress":
-        self.provider = _required_text(
+        self.provider = require_text(
             self.provider, "route binding ingress requires provider"
         ).lower()
         self.endpoint_key = self.endpoint_key.strip()
@@ -149,10 +150,10 @@ class RouteBindingSource(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "RouteBindingSource":
-        self.source_label = _required_text(
+        self.source_label = require_text(
             self.source_label, "route binding source requires source_label"
         )
-        self.refreshed_at = _required_text(
+        self.refreshed_at = require_text(
             self.refreshed_at, "route binding source requires refreshed_at"
         )
         self.stale_after = self.stale_after.strip()
@@ -197,7 +198,7 @@ class EnvironmentRouteBindingRecord(BaseModel):
     @field_validator("product", "context", "instance", "updated_at", mode="after")
     @classmethod
     def _validate_required_text(cls, value: str) -> str:
-        return _required_text(value, "route binding record requires non-empty text fields")
+        return require_text(value, "route binding record requires non-empty text fields")
 
     @model_validator(mode="after")
     def _validate_record(self) -> "EnvironmentRouteBindingRecord":
@@ -250,9 +251,9 @@ class EnvironmentRouteBindingReadModel(BaseModel):
 def build_route_binding_key(*, product: str, context: str, instance: str) -> str:
     return json.dumps(
         [
-            _required_text(product, "route binding key requires product"),
-            _required_text(context, "route binding key requires context"),
-            _required_text(instance, "route binding key requires instance"),
+            require_text(product, "route binding key requires product"),
+            require_text(context, "route binding key requires context"),
+            require_text(instance, "route binding key requires instance"),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -297,13 +298,6 @@ def route_binding_record_sha256(record: EnvironmentRouteBindingRecord) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _normalized_domain(value: str) -> str:

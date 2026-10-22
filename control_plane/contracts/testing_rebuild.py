@@ -24,8 +24,6 @@ class TestingCopy(FrozenRecord):
 
 
 class UnavailableTestingPredecessor(FrozenRecord):
-    """An owned predecessor observed stopped or absent, never a healthy copy."""
-
     copy_id: str = Field(min_length=1)
     target_id: str = Field(min_length=1)
     availability: Literal["stopped", "absent"]
@@ -120,8 +118,6 @@ class TestingCopyReadiness(FrozenRecord):
 
 
 class TestingOriginalIngressReadback(FrozenRecord):
-    """The original file is preserved/restored; no claim about serving health."""
-
     route_id: str
     host: str
     slot_id: str
@@ -134,8 +130,6 @@ class TestingOriginalIngressReadback(FrozenRecord):
 
 
 class TestingStopExclusionReadback(FrozenRecord):
-    """An original stop is durably excluded, irrespective of current old health."""
-
     copy_id: str
     host: str
     observed_at: datetime

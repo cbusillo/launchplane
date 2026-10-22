@@ -462,6 +462,12 @@ the first migrated provider routes; both require an `Idempotency-Key` and a
 database store. Provider-specific observation and reconciliation stay behind
 the adapter boundary.
 
+An admission refusal inside the atomic effect checkpoint reaches the adapter as
+its original domain error, so it can settle a pre-effect refusal normally. The
+checkpoint refusal says only that this proposed dispatch did not start; any
+earlier effect marker and the exact reservation identity still govern release.
+Storage failures and lost leases retain their existing reconciliation behavior.
+
 The `launchplane_idempotency_active_reconciliation_idx` partial unique index
 fences each provider target while its reservation is `running` or
 `reconcile_required`, regardless of caller idempotency key, using the promoted
@@ -480,6 +486,47 @@ provider supplies the exact deployment id and start/finish timestamps. Fresh
 completion has the same evidence requirement as restart adoption; completed
 means the provider outcome is durable and replayable, not that the external
 deployment passed.
+
+Fresh reservations for shared physical-parent keys in the
+`generic-web-provider-target:*` namespace also require an original provider
+recipient captured from the same recipient used to compute the existing key.
+Suffixed child-effect keys keep their separate operation-fence semantics. The typed identity contains product, context, instance,
+provider, target type and target ID. Product is captured explicitly because the
+physical key does not include it. Storage verifies the existing key and retains
+that identity with a random operation nonce as the `provider_target_origin`
+sibling in the existing original-mutation-intent receipt, in the acquisition or
+supersession transaction. The family's `original_intent` dictionary and equality
+stay unchanged, including an empty dictionary for origin-only receipts.
+
+Retries, adoption and recovery never replace that capsule or infer it from
+current lane records. A safe release followed by fresh acquisition receives a
+new nonce even when the deterministic reservation ID and database timestamp are
+unchanged. Existing rows without custody remain readable and recoverable through
+their existing guards; they are never backfilled. Internal origin reads require
+the completed receipt, matching request fingerprint and reservation ID, a valid
+capsule and the same physical key. Missing or mismatched evidence is unavailable.
+The capsule is attention identity only: it grants no authorization, exclusion,
+effect-completion, retry, supersession or lane-separation proof.
+
+The common internal held-parent projection retains every operation and groups
+proved origins by captured product/context/instance. Legacy encoded origins
+must include product and rehash to the admitted physical key; they have no
+strong incarnation reference. Missing or corrupt custody remains unavailable.
+The current provider record is separate match metadata and cannot establish
+historical product ownership. Suffixed child effects and other namespaces stay
+outside this projection.
+
+Provider incidents store only opaque reservation-ID/nonce references inside
+`route_authority.target_keys`. Older material without these keys keeps its
+existing parser and canonical hash. Operation-set changes are material;
+ordering, summaries and heartbeats alone are not. Internal primary-key batch
+reads validate the same bound capsule and agreement between indexed row columns
+and the typed payload before accepting a completed reference. Contradictory
+parent projection is unavailable, as with malformed parent records; a corrupt
+receipt remains explicit unavailable custody without changing family-intent reads.
+Absence or a different nonce is never settlement. The projection and source
+witness contain private reservation/physical/configuration data; they are not
+public response models and their hashes must not be exposed.
 
 ## ORM Query Boundary
 
@@ -1278,6 +1325,67 @@ discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
 
+### Lane health and identity history
+
+`GET /v1/products/{product}/environments/{environment}/health-history` reads
+retained observations using the same lane-scoped `product_environment.read`
+authority as environment detail (or `preview.read` for a preview). It never runs
+a probe or changes an incident. Supply timezone-aware `since` and `until` for
+an increasing window of at most eight days, with `until` no later than now.
+The interval is `[since, until)`. Each page returns at most 500 observations;
+follow `next_cursor` with the same lane and window until it is null. The cursor
+orders equal-time observations by record id, so passing records without any
+incident and records sharing a timestamp remain reachable. URLs, image
+locations, provider details and free-text diagnostics are omitted. Artifact,
+deployment and source references accompany the expected and observed identity
+result. A stored `match` is rechecked against its own expected/observed payloads.
+
+The read includes up to two hours of lookback for evidence covering the start
+of the requested window. Save every response in cursor order and run:
+
+```bash
+uv run launchplane ingress health-history-summary --page first.json --page second.json \
+  --check public_http:health --identity-check public_http:health
+```
+
+The offline command rejects incomplete, mixed or skipped page chains. Its real
+denominator is the requested elapsed seconds for this lane and each of its
+check streams, never scheduler completions or a pooled fleet sample. Each observation
+covers time forward until the next observation or the existing freshness
+deadline, whichever comes first. Failure, missing/expired evidence and verified
+identity time are reported separately. Reconciliation is administrative evidence
+and stops the prior probe's coverage; it cannot contribute a pass. Conflicting
+equal-time records cannot select a pass by record-id spelling. Missing time
+remains in the denominator. No observations means no measured check streams,
+not a healthy lane.
+
+`health_pass_percent` and `health_and_identity_percent` are conservative
+percentages of retained verified time. They do not establish physical outage
+durations. Provider delivery/source-warning streams stay separate from actual
+HTTP health streams. Supply the complete reviewed required check set with
+repeated `--check KIND:NAME`, and the checks that must verify runtime identity
+with `--identity-check KIND:NAME`.
+The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
+outside the health set. Every observed stream must be required or explicitly
+excluded; an unaccounted-for stream refuses the calculation. Required and
+excluded sets cannot overlap. The report prints all three sets, every stream
+row, and required checks with zero measured pass/fail coverage. Provider
+`monitor-cadence:...` and monitor-source warning streams are event-only
+diagnostics for `--exclude-check`; their incident and cadence qualification
+remains separate. Lane totals intersect required streams in time, so disjoint
+failures cannot hide behind individually passing percentages. A required check
+with no records contributes unknown time, not a pass. TLS or dependency checks
+can belong to the health set without being runtime-identity witnesses. The
+`lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
+those intersections. These observations do not reconstruct past profile
+declarations,
+check applicability, incident-open intervals or the historical Live roster.
+Those qualifications and the no-open-warning closing condition remain separate;
+this read cannot certify the Q419 milestone, reset a clock or retroactively
+declare missing evidence healthy. Pagination is a read of retained rows, not a
+transactional snapshot across requests; use a settled historical cutoff and
+repeat collection if older observations can still be arriving.
+
 ### TLS observation reader compatibility
 
 TLS observation readers also accept `route_binding_status: missing` and
@@ -1919,6 +2027,36 @@ provider message or rollback health exception is embedded in the detail.
   records by themselves.
 
 ## Deployment Record
+
+In-place application testing retains a cumulative typed receipt in
+`post_deploy_update.evidence.generic_web_original_execution`. The original
+deployment and reservation identify its product, lane, artifact, source and
+provider target. The receipt records intent before dispatch, the complete
+pre-dispatch schedule-history identifiers, bounded acknowledgements and
+attributable terminal facts. It also binds the pre-attempt inventory by digest.
+An optional application lifecycle snapshot retains the original schedule
+baseline; executor-only testing does not manufacture a snapshot.
+
+Only the current original provider execution can create or advance these
+facts. Supported deployment-evidence corrections can preserve them exactly and
+correct other evidence, but cannot replace the captured lifecycle baseline or
+turn unknown work into completed work. Cleanup appends evidence; it never
+replaces earlier unresolved effects. Terminal execution and testing
+qualification remain separate: a healthy image with failed product assertions
+can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. Its lease, exact record/inventory CAS and
+current target binding protect that unqualified fact. Current profile and captured
+input qualification are checked again after its commit, before more work.
+That projection contains no previous qualification verdict. The executor receives
+the prior inventory captured before publication, so bounded qualification retries
+retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
 
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes
@@ -2976,8 +3114,8 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, work graph snapshot,
-  Every Code summary, and preview readiness projections, then reports each
+  context. It aggregates the existing repo-product mapping, Every Code summary,
+  preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
 - Agent-consumer authorization diagnostics use a compact subject model for

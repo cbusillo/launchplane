@@ -305,14 +305,16 @@ class UpdaterProviderTests(unittest.TestCase):
             encryption_algorithm=serialization.NoEncryption(),
         ).decode()
 
-    def invoke(self, api: FakeGitHub) -> Any:
+    def invoke(self, api: FakeGitHub, payload: dict[str, Any] | None = None) -> Any:
         with patch(
             "control_plane.updater_proposal.resolve_delivery_github_app_identity",
             return_value=GitHubAppIdentity(app_id=42, private_key=self.key),
         ):
             return open_updater_proposal(
                 identity=updater_identity(),
-                request=UpdaterProposalRequest.model_validate(proposal_payload()),
+                request=UpdaterProposalRequest.model_validate(
+                    proposal_payload() if payload is None else payload
+                ),
                 control_plane_root=Path("."),
                 api_request=api,
             )
@@ -359,6 +361,43 @@ class UpdaterProviderTests(unittest.TestCase):
         self.assertEqual(api.created_refs, {"refs/heads/" + first.branch})
         self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
         self.assertEqual(api.calls[-1]["method"], "DELETE")
+
+    def test_large_whole_file_and_exact_old_plus_new_budget(self) -> None:
+        content = "example==2\n" + "# unchanged public source\n" * 15_000
+        content_bytes = len(content.encode())
+        payload = {
+            **proposal_payload(),
+            "files": [{"path": "requirements.txt", "content": content}],
+        }
+        self.assertLess(
+            len(UpdaterProposalRequest.model_validate(payload).model_dump_json().encode()),
+            UPDATER_PROPOSAL_MAX_BODY_BYTES,
+        )
+        for base_size, accepted in (
+            (content_bytes, True),
+            (UPDATER_PROPOSAL_MAX_CHANGE_BYTES - content_bytes, True),
+            (UPDATER_PROPOSAL_MAX_CHANGE_BYTES - content_bytes + 1, False),
+        ):
+            api = FakeGitHub()
+            api.tree_sha = "d" * 40
+            api.base_file_size = base_size
+            with self.subTest(base_size=base_size, accepted=accepted):
+                if accepted:
+                    self.invoke(api, payload)
+                    tree_write = next(
+                        call for call in api.calls if call["path"].endswith("/git/trees")
+                    )
+                    self.assertEqual(tree_write["body"]["tree"][0]["content"], content)
+                else:
+                    with self.assertRaises(UpdaterProposalRefused):
+                        self.invoke(api, payload)
+                    self.assertFalse(
+                        any(
+                            call.get("method") == "POST" and call["path"].startswith("/repos/")
+                            for call in api.calls
+                        )
+                    )
+                self.assertEqual(api.calls[-1]["method"], "DELETE")
 
     def test_foreign_prefix_prs_are_ignored_and_closed_identical_proposals_are_not_reopened(
         self,

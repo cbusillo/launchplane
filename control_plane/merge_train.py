@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff, ready_handoff_refusal
 
@@ -152,14 +153,14 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     def _validate_snapshot(self) -> "MergeTrainPullRequestSnapshot":
         self.url = self.url.strip()
         self.title = self.title.strip()
-        self.created_at = _normalize_required_value(
+        self.created_at = require_text(
             self.created_at, "merge train pull request snapshot requires created_at"
         )
         self.labels = _normalize_unique_values(self.labels)
-        self.actor_role = _normalize_required_value(
+        self.actor_role = require_text(
             self.actor_role, "merge train pull request snapshot requires actor_role"
         )
-        self.head_sha = _normalize_required_value(
+        self.head_sha = require_text(
             self.head_sha, "merge train pull request snapshot requires head_sha"
         )
         self.head_ref = self.head_ref.strip()
@@ -180,10 +181,10 @@ class MergeTrainDryRunSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def _validate_snapshot(self) -> "MergeTrainDryRunSnapshot":
-        self.repository = _normalize_required_value(
+        self.repository = require_text(
             self.repository, "merge train dry-run snapshot requires repository"
         )
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train dry-run snapshot requires base_branch"
         )
         self.base_sha = self.base_sha.strip()
@@ -1062,12 +1063,12 @@ def _next_action_for_selected_pr(
             "block",
             f"Add {repository_policy.blocked_label}; pull request has merge conflicts.",
         )
+    diagnostic = (
+        f" Check evidence: {selected_pr.required_checks_observation_error}."
+        if selected_pr.required_checks_observation_error
+        else ""
+    )
     if selected_pr.required_checks_status == "fail":
-        diagnostic = (
-            f" Check history unavailable: {selected_pr.required_checks_observation_error}."
-            if selected_pr.required_checks_observation_error
-            else ""
-        )
         if selected_pr.owner_review_required:
             return (
                 "block",
@@ -1084,24 +1085,20 @@ def _next_action_for_selected_pr(
         return (
             "wait_for_checks",
             "Wait for current-head Client review and required checks on pull request "
-            f"#{selected_pr.number}.",
+            f"#{selected_pr.number}." + diagnostic,
         )
     if selected_pr.mergeable == "unknown" or selected_pr.required_checks_status in {
         "pending",
         "unknown",
     }:
-        return "wait_for_checks", "Wait for mergeability and required checks on the head SHA."
+        return (
+            "wait_for_checks",
+            "Wait for mergeability and required checks on the head SHA." + diagnostic,
+        )
     return (
         "merge",
         f"Merge with {repository_policy.merge_method} after confirming current head checks.",
     )
-
-
-def _normalize_required_value(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _normalize_unique_values(values: tuple[str, ...]) -> tuple[str, ...]:

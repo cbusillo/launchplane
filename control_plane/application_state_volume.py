@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from http.client import HTTPException
 import json
 import re
@@ -63,6 +63,8 @@ def require_no_held_state_volume(store: PostgresRecordStore, context: str) -> No
 
 
 def validate_volume_request(request: "DokployTargetSetupEnvelope") -> None:
+    from control_plane.contracts.application_state_path import require_application_state_path
+
     if request.retain_state_volume_allocation:
         if request.mode != "apply" or not re.fullmatch(
             r"[a-f0-9]{64}", request.expected_state_volume_custody_sha256
@@ -71,16 +73,10 @@ def validate_volume_request(request: "DokployTargetSetupEnvelope") -> None:
     elif request.expected_state_volume_custody_sha256:
         raise ValueError("Custody comparison is only used for explicit allocation retention.")
     path = request.state_volume_path
+    require_application_state_path(path)
     if (
         request.operation != "create-application"
         or request.instance != "testing"
-        or not re.fullmatch(r"/[A-Za-z0-9_./-]+", path)
-        or str(PurePosixPath(path)) != path
-        or ".." in PurePosixPath(path).parts
-        or path in {"/", "/proc", "/sys", "/dev", "/etc", "/run"}
-        or any(
-            path.startswith(prefix + "/") for prefix in ("/proc", "/sys", "/dev", "/etc", "/run")
-        )
         or request.app_name
         or request.target_id
         or request.project_id
