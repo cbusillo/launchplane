@@ -52,6 +52,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   including owned previews, disposable-lane eligibility, and resumable execution.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
+- [odoo-shopify-identity.md](odoo-shopify-identity.md) — hash-only held-testing Shopify identity and applied-production comparison.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
