@@ -1248,52 +1248,39 @@ unrelated optional workflows cannot change its classification:
   unproved required identities, and the same diagnostic appears in controller details.
   A rerun passing on the same base allows ordinary isolation to resume.
 - **Non-blaming base exploration.** A failed candidate on an unproved base can
-  test eligible roots individually in queue order, so a repair can land even
-  when another queued change still fails. Each probe uses current eligibility,
-  Ready and Client evidence, release/manual holds, stack discovery or the exact
-  recorded collapse proof, and the ordinary candidate and protected landing
-  gates. Ordinary conflict holds survive only while their recorded preceding-head
-  lineage still matches; changed lineage is probed again. Singleton exploration
-  releases pairwise conflict holds because the conflicting peers are absent from
-  that trial, while retaining base-conflict and dependency holds. Temporary
-  `failure_isolation` deferrals are reconsidered between failed probes. The
-  currently tested probe keeps the other roots deferred while it runs.
-  Policy-eligible engineering heads awaiting checks are deferred too, so they
-  cannot join or block a passing singleton's retry. Each trial still requires
-  its own current readiness. Ineligible and manually held heads stay excluded.
-  History on the exact base commit, source head and compatible policy avoids
-  repeating failed singleton inputs, including after a service restart. A
-  failed first singleton does not prevent the next eligible one from running.
-  Historical failure is scheduling evidence, never culprit proof. Fresh reads
-  can still observe an earlier singleton's passing same-SHA CI rerun; its closed
-  candidate uses the existing bounded replacement-ref recovery and retry budget.
-  Exploration does not dispatch a CI rerun itself. Unsupported stacks and stacks
-  awaiting preparation or other evidence defer to later eligible roots; their
-  failed parent is retired only after the replacement candidate or stack plan is
-  persisted. Fresh stack discovery uses the ordinary disposition preparation and
-  fenced plan persistence, without running unrelated block recovery or restoring
-  retired stack work inside exploration. When no
-  further singleton probe is currently plannable, `base_failure_exploration_exhausted`
-  reports a non-blaming wait without claiming that every root failed or launching
-  more unchanged probes. Existing unsupported-stack and disposition-preparation
-  causes remain in the result and exhausted message, so an admin sees the
-  prerequisite to resolve or recheck. A dry run still names missing label
-  preparation without creating the label. Historical reads that do not recover
-  a candidate do not replace the failed source in the stored diagnostics; an
-  actual passing-rerun replacement retains its historical source.
-  Deferred roots receive a waiting message while the base
-  is unproved; repeated exhausted polls retain the existing probe scope rather
-  than resending that message to every deferred root. A surviving conflict hold
-  still reports blocked and asks its author to resolve the conflict. A new
-  eligible head, added repair, changed base or incompatible policy supplies new inputs;
-  operational policy changes that retain the existing authority binding retain
-  their history. Fresh successful base evidence permits ordinary green-base
-  isolation. This finite sweep does not promise to find repairs that require an
-  arbitrary combination of queued changes, and it does not retest or clear an
-  existing unchanged `merge-blocked` head. Infrastructure retry budgets remain
-  unchanged. A passing repair lands through the same exact tested tree and
-  fresh admission checks as any other candidate; only then does the advanced
-  base permit subsequent culprit attribution.
+  test roots individually in queue order, so a repair can land while another
+  change still fails. Its stable queue comes from the ordinary policy projection
+  before contextual Client readiness, batch caps or area grouping. Each trial
+  defers every other policy-eligible root, including unready Client and engineering
+  heads, then applies current Ready, Client and readiness checks to its sole root.
+  Ineligible and manually held heads stay excluded. Full stack topology remains
+  available for discovery or the exact recorded collapse proof.
+  Base-conflict and dependency holds retain their current head/base lifetimes;
+  earlier contextual exclusion cannot discard their proof. Pairwise conflicts
+  are released because the conflicting peer is absent. Temporary
+  `failure_isolation` holds are reconsidered between probes. Ordinary conflict
+  planning retains its preceding-head lineage checks.
+  Exact base, source heads and compatible policy scope the failure history across
+  restarts, preventing repeated failed probes. Historical failure schedules work;
+  it never proves blame. Fresh same-SHA passing evidence can recover a singleton
+  using its existing bounded replacement-ref retry; exploration dispatches no rerun.
+  Unsupported stacks and preparation waits defer to later roots. Fresh discovery
+  uses ordinary disposition preparation and fenced plan persistence; the failed
+  parent retires only after its replacement or stack plan persists. Exploration
+  runs no unrelated block recovery or retired-stack restoration.
+  With no plannable probe, `base_failure_exploration_exhausted` reports a wait.
+  Deferred stack causes remain in the message and diagnostics; missing-label
+  preparation belongs to the controller, provider failure to the provider, and
+  structural or policy fixes to the repository agent. A dry run creates no label.
+  Skipped historical reads do not overwrite the failed source in diagnostics;
+  actual rerun recovery retains its own source. Deferred roots report waiting;
+  surviving conflict holds report blocked. Exhausted polls keep the existing
+  feedback scope. Changed heads, queue, base or incompatible policy supply new
+  inputs; operational changes preserving the authority binding retain history.
+  The sweep neither searches arbitrary PR combinations nor clears unchanged
+  `merge-blocked` heads. Infrastructure retry budgets stay unchanged. Every repair
+  still passes exact-tree candidate, protected landing and fresh admission gates.
+  Fresh green-base evidence permits ordinary culprit isolation afterward.
 - **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while

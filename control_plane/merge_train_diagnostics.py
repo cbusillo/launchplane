@@ -111,10 +111,17 @@ def controller_last_result(
         and isinstance(deferred_roots, list)
         and deferred_roots
     ):
-        actor = "repository_agent"
         root = _object(deferred_roots[0])
+        code = root.get("code")
+        actor = (
+            "controller"
+            if code == "stack_disposition_label_creation_required"
+            else "provider"
+            if code == "stack_disposition_preparation_failed"
+            else "repository_agent"
+        )
         observation = _text(
-            f"Resolve the deferred stack prerequisite {_text(root.get('code'), 128)}: "
+            f"Resolve or recheck the deferred stack prerequisite {_text(code, 128)}: "
             f"{_text(root.get('message'))}"
         )
     elif action in {"wait_for_checks", "observe_candidate", "wait_for_root_checks"} or reason in {

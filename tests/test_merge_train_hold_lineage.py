@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.merge_train import build_merge_train_queue_entries
 from control_plane.merge_train_controller_run_once import (
     _expose_persisted_conflict_holds,
     _surviving_held_out_entries,
@@ -38,6 +39,89 @@ from tests.http_app_test_support import _asgi_get, _post_merge_train_controller_
 
 
 class HoldLineageTests(unittest.TestCase):
+    def test_intrinsic_queue_keeps_only_current_base_conflict_holds(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        first, second = snapshot.pull_requests
+        pending = first.model_copy(
+            update={"owner_review_required": True, "required_checks_status": "pending"}
+        )
+        snapshot = snapshot.model_copy(
+            update={
+                "pull_requests": (
+                    pending,
+                    second.model_copy(update={"owner_review_required": True}),
+                )
+            }
+        )
+        policy = build_test_merge_train_policy()
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=pending.number,
+            head_sha=pending.head_sha,
+            probe_base_sha=snapshot.base_sha,
+        )
+        self.assertEqual(
+            _surviving_held_out_entries(
+                policy=policy, snapshot=snapshot, held_out=(hold,), batch_landing=True
+            ),
+            (),
+        )
+        for change in (
+            {},
+            {"head_sha": "new-head"},
+            {"is_draft": True},
+            {"labels": ()},
+            {"actor_role": "unknown"},
+            {"labels": (*pending.labels, policy.policies[0].blocked_label)},
+        ):
+            with self.subTest(change=change):
+                current = snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            pending.model_copy(update=change),
+                            snapshot.pull_requests[1],
+                        )
+                    }
+                )
+                self.assertEqual(
+                    _surviving_held_out_entries(
+                        policy=policy,
+                        snapshot=current,
+                        held_out=(hold,),
+                        batch_landing=True,
+                        queue=build_merge_train_queue_entries(
+                            policy=policy, snapshot=current, batch_landing=True
+                        ),
+                    ),
+                    () if change else (hold,),
+                )
+        changed_base = snapshot.model_copy(update={"base_sha": "new-base"})
+        self.assertEqual(
+            _surviving_held_out_entries(
+                policy=policy,
+                snapshot=changed_base,
+                held_out=(hold,),
+                batch_landing=True,
+                queue=build_merge_train_queue_entries(
+                    policy=policy, snapshot=changed_base, batch_landing=True
+                ),
+            ),
+            (),
+        )
+        self.assertEqual(
+            _surviving_held_out_entries(
+                policy=policy,
+                snapshot=snapshot,
+                held_out=(hold, hold.model_copy(update={"reason": "failure_isolation"})),
+                batch_landing=True,
+                queue=build_merge_train_queue_entries(
+                    policy=policy, snapshot=snapshot, batch_landing=True
+                ),
+            ),
+            (),
+        )
+
     def test_diagnostics_keep_old_holds_without_repeating_stopped_feedback(self) -> None:
         hold = MergeTrainBatchHeldOutEntry(pull_request_number=3, head_sha="held-head")
         for probe in (

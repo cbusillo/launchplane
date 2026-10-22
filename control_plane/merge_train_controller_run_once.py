@@ -63,6 +63,7 @@ from control_plane.merge_train import (
     MergeTrainQueueEntry,
     MergeTrainStackDiscoveryResult,
     build_merge_train_dry_run_result,
+    build_merge_train_queue_entries,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
     merge_train_snapshot_of,
@@ -5998,22 +5999,26 @@ def _explore_nonpassing_base_candidates(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
+    queue = build_merge_train_queue_entries(policy=policy, snapshot=snapshot, batch_landing=True)
     holds = tuple(
         hold
         for hold in _surviving_held_out_entries(
             policy=policy,
             snapshot=snapshot,
-            held_out=held_out,
+            held_out=(*failed.held_out, *held_out),
             batch_landing=True,
+            queue=queue,
         )
         if hold.reason != "entry_conflict" or not hold.conflicts_with
     )
     available_snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=holds)
-    available = build_merge_train_dry_run_result(
-        policy=policy, snapshot=available_snapshot, batch_landing=True
-    )
-    if len(failed.entries) == 1 and sum(entry.eligible for entry in available.queue) == 1:
+    held_heads = {(hold.pull_request_number, hold.head_sha) for hold in holds}
+    available = tuple(entry for entry in queue if (entry.number, entry.head_sha) not in held_heads)
+    if len(failed.entries) == 1 and sum(entry.eligible for entry in available) == 1:
         return None
+    repository_policy = policy.find_repository_policy(
+        repository=snapshot.repository, base_branch=snapshot.base_branch
+    )
     history = tuple(
         record
         for record in _candidate_history_on_base(
@@ -6023,7 +6028,7 @@ def _explore_nonpassing_base_candidates(
             base_sha=snapshot.base_sha,
         )
         if record.ordinary_job_binding is None
-        and record.candidate.policy_key == available.policy_key
+        and record.candidate.policy_key == repository_policy.policy_key
         and merge_train_policy_bindings_match(
             record_store=candidate_store,
             policy_key=record.candidate.policy_key,
@@ -6032,7 +6037,7 @@ def _explore_nonpassing_base_candidates(
         )
     )
     deferred_roots: list[dict[str, object]] = []
-    for entry in available.queue:
+    for entry in available:
         if not entry.eligible:
             continue
         trial_holds = (
@@ -6044,7 +6049,7 @@ def _explore_nonpassing_base_candidates(
                     reason="failure_isolation",
                     probe_base_sha=snapshot.base_sha,
                 )
-                for other in available.queue
+                for other in available
                 if other.eligible and other.number != entry.number
             ),
         )
@@ -7114,6 +7119,7 @@ def _surviving_held_out_entries(
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
     batch_landing: bool = False,
     isolating_entries: tuple[MergeTrainBatchEntry, ...] = (),
+    queue: tuple[MergeTrainQueueEntry, ...] | None = None,
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
     """Return the holds that still apply to the current queue.
 
@@ -7128,9 +7134,10 @@ def _surviving_held_out_entries(
     """
     if not held_out:
         return ()
-    queue = build_merge_train_dry_run_result(
-        policy=policy, snapshot=snapshot, batch_landing=batch_landing
-    ).queue
+    if queue is None:
+        queue = build_merge_train_dry_run_result(
+            policy=policy, snapshot=snapshot, batch_landing=batch_landing
+        ).queue
     eligible_heads = {(entry.number, entry.head_sha) for entry in queue if entry.eligible}
     isolation_active = bool(isolating_entries) and all(
         (entry.pull_request_number, entry.head_sha) in eligible_heads for entry in isolating_entries
