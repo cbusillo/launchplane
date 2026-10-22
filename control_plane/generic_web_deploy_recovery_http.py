@@ -454,7 +454,10 @@ def _apply_testing_abandonment(
     store: PostgresRecordStore,
     dependencies: GenericWebDeployRecoveryDependencies,
 ) -> GenericWebDeployRecoveryApplyResponse:
-    from control_plane.generic_web_testing_abandonment import inspect_testing_abandonment
+    from control_plane.generic_web_testing_abandonment import (
+        inspect_testing_abandonment,
+        testing_abandonment_authority,
+    )
     from control_plane.generic_web_testing_exclusion import bind_testing_recipient
     from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
     from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
@@ -479,14 +482,19 @@ def _apply_testing_abandonment(
                 message="The original testing worker still holds execution.",
             )
         try:
+            check()
+            current = inspect_testing_abandonment(
+                store, adapter, original, inspection.provider_operation_key
+            )
+            if current is None or current != inspection.abandonment_evidence:
+                raise ValueError("Testing abandonment evidence changed.")
             with store.serialize_disposable_testing_resources() as check_authority:
                 check()
                 check_authority()
-                current = inspect_testing_abandonment(
-                    store, adapter, original, inspection.provider_operation_key
-                )
-                if current is None or current != inspection.abandonment_evidence:
-                    raise ValueError("Testing abandonment evidence changed.")
+                if testing_abandonment_authority(store, adapter, original) != {
+                    name: current[name] for name in ("bindings", "protection")
+                }:
+                    raise ValueError("Testing abandonment authority changed.")
                 from control_plane.contracts.deployment_record import DeploymentRecord
 
                 record = DeploymentRecord.model_validate(current["deployment"])

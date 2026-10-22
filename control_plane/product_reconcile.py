@@ -936,27 +936,8 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
-        existing = record_store.read_idempotency_record(
-            scope=reconcile_reservation_scope(profile.product),
-            route_path=GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-        )
         from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
 
-        base_idempotency_key = idempotency_key
-        while existing is not None and testing_attempt_was_settled(existing):
-            # A settled operation is immutable. Returning to the same inputs
-            # starts one deterministic successor instead of replaying its failure.
-            predecessor = hashlib.sha256(existing.record_id.encode()).hexdigest()
-            idempotency_key = f"{base_idempotency_key}:after-{predecessor}"
-            existing = record_store.read_idempotency_record(
-                scope=reconcile_reservation_scope(profile.product),
-                route_path=GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key=idempotency_key,
-            )
-        plan["deploy_idempotency_key"] = idempotency_key
-        if existing is None and not _scan_deploy_artifact(profile, plan, desired):
-            return ReconcileOutcome(plan)
         provider = (
             default_generic_web_deploy_provider(
                 record_store=record_store, control_plane_root=control_plane_root
@@ -998,6 +979,25 @@ def _deploy_generic_web_testing(
                     hold_recorded_by=hold.recorded_by,
                     hold_recorded_at=hold.recorded_at,
                 )
+                return ReconcileOutcome(plan)
+            existing = record_store.read_idempotency_record(
+                scope=reconcile_reservation_scope(profile.product),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+            base_idempotency_key = idempotency_key
+            while existing is not None and testing_attempt_was_settled(existing):
+                # A settled operation is immutable. Returning to the same inputs
+                # starts one deterministic successor instead of replaying its failure.
+                predecessor = hashlib.sha256(existing.record_id.encode()).hexdigest()
+                idempotency_key = f"{base_idempotency_key}:after-{predecessor}"
+                existing = record_store.read_idempotency_record(
+                    scope=reconcile_reservation_scope(profile.product),
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                    idempotency_key=idempotency_key,
+                )
+            plan["deploy_idempotency_key"] = idempotency_key
+            if existing is None and not _scan_deploy_artifact(profile, plan, desired):
                 return ReconcileOutcome(plan)
             adapter.execution_check = check_execution_lock
             # The target execution lock excludes an old worker through provider effects. A new

@@ -11,6 +11,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_application_snapshot import recorded_application_lifecycle
 from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
+    decode_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_execution import execution_receipt
 from control_plane.workflows.generic_web_post_deploy import (
@@ -18,11 +19,10 @@ from control_plane.workflows.generic_web_post_deploy import (
 )
 
 
-def inspect_testing_abandonment(
+def testing_abandonment_authority(
     store: PostgresRecordStore,
     adapter: GenericWebDeployProviderMutationAdapter,
     original: LaunchplaneIdempotencyRecord,
-    operation_key: str,
 ) -> dict[str, Any] | None:
     from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
 
@@ -31,6 +31,10 @@ def inspect_testing_abandonment(
         profile.driver_id != "generic-web"
         or lane.instance != "testing"
         or lane.generic_web_cutover is not None
+        or decode_generic_web_provider_reconciliation_target(
+            original.reconciliation_key
+        ).original_event_deploy
+        is None
         or original.state != "reconcile_required"
         or original.scope != reconcile_reservation_scope(profile.product)
         or not original.idempotency_key.startswith(
@@ -68,6 +72,26 @@ def inspect_testing_abandonment(
             or protection.production_resources in {"shared", "separation_ready"}
         ):
             return None
+        return {
+            "bindings": [item.model_dump(mode="json") for item in bindings],
+            "protection": protection.model_dump(mode="json") if protection is not None else None,
+        }
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return None
+
+
+def inspect_testing_abandonment(
+    store: PostgresRecordStore,
+    adapter: GenericWebDeployProviderMutationAdapter,
+    original: LaunchplaneIdempotencyRecord,
+    operation_key: str,
+) -> dict[str, Any] | None:
+    authority = testing_abandonment_authority(store, adapter, original)
+    if authority is None:
+        return None
+    profile = adapter.profile
+    target_id = authority["bindings"][2]["target_id"]
+    try:
         inspected = adapter.inspect(
             provider_operation_key=operation_key,
             provider_effect_phase=original.provider_effect_phase,
@@ -89,7 +113,7 @@ def inspect_testing_abandonment(
         if (
             last.kind != "product_executor"
             or last.name != executor.__name__
-            or last.target_id != target_id.target_id
+            or last.target_id != target_id
             or last.acknowledgement != "none"
             or last.terminal
             or any(not entry.terminal for entry in receipt.entries[:-1])
@@ -124,8 +148,7 @@ def inspect_testing_abandonment(
         ):
             return None
         return {
-            "bindings": [item.model_dump(mode="json") for item in bindings],
-            "protection": protection.model_dump(mode="json") if protection is not None else None,
+            **authority,
             "deployment": record.model_dump(mode="json"),
             "image": image.observation.model_dump(mode="json"),
             "original_outcome": "unknown",

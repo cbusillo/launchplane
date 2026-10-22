@@ -1,5 +1,6 @@
 from typing import Any
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 import os
 import unittest
@@ -38,6 +39,7 @@ from typing import cast
 
 class GenericWebTestingAbandonmentTests(unittest.TestCase):
     database_url = ""
+    retain_event_request = True
 
     def setUp(self) -> None:
         self.enterContext(
@@ -91,7 +93,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
             )
         )
         adapter = fixture.normal_adapter()
-        adapter._retain_event_request = True
+        adapter._retain_event_request = self.retain_event_request
         outcome = run_durable_provider_operation(
             store=self.store,
             scope=reconcile_reservation_scope(fixture.profile.product),
@@ -204,7 +206,23 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                     "expected_recovery_digest": plan["recovery_digest"],
                 },
             )
-        self.assertEqual(status, 202, reference)
+            self.assertEqual(status, 202, reference)
+            status, readback = _invoke_app(
+                self.fixture.app,
+                method="POST",
+                path="/v1/admin/generic-web/deploy-recovery/dry-run",
+                authorization=f"Bearer {_OPERATOR_TOKEN}",
+                payload={
+                    "product": self.fixture.profile.product,
+                    "instance": "testing",
+                    "recovery_reference": coordinates.reference,
+                    "reason": "Abandon the unqualified testing fixture without claiming its outcome.",
+                },
+            )
+            self.assertEqual(status, 200, readback)
+            self.assertEqual(readback["reservation_state"], "completed")
+            self.assertEqual(readback["proposed_action"], "replay_completed")
+            self.assertEqual(readback["recovery_digest"], first["recovery_digest"])
         self.assertEqual(reference["recovery_digest"], first["recovery_digest"])
         self.assertEqual(replay["recovery_digest"], first["recovery_digest"])
         self.assertEqual(
@@ -224,6 +242,65 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                 self.store, adapter, self.original, self.fixture.provider.original_operation_key
             )
         )
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.original,))
+
+    def test_legacy_original_without_saved_request_remains_held(self) -> None:
+        legacy = GenericWebTestingAbandonmentTests()
+        legacy.retain_event_request = False
+        legacy.setUp()
+        self.addCleanup(legacy.doCleanups)
+        self.assertEqual(legacy.inspect()["proposed_action"], "hold_unknown")
+
+    def test_other_held_attempt_on_the_lane_refuses_abandonment(self) -> None:
+        other = self.original.model_copy(
+            update={"record_id": "other-held", "idempotency_key": self.key + ":other"}
+        )
+        with patch.object(
+            self.store,
+            "list_held_provider_target_reservations",
+            return_value=(self.original, other),
+        ):
+            self.assertEqual(self.inspect()["proposed_action"], "hold_unknown")
+
+    def test_provider_reads_do_not_hold_global_authority_lock(self) -> None:
+        plan = self.inspect()
+        guarded = False
+
+        @contextmanager
+        def authority_guard() -> Iterator[Callable[[], None]]:
+            nonlocal guarded
+            guarded = True
+            try:
+                yield lambda: None
+            finally:
+                guarded = False
+
+        observe = self.fixture.provider.observe_artifact_deploy
+
+        def read_provider(**kwargs: Any) -> Any:
+            self.assertFalse(guarded)
+            return observe(**kwargs)
+
+        with (
+            patch.object(self.store, "serialize_disposable_testing_resources", authority_guard),
+            patch.object(
+                self.fixture.provider, "observe_artifact_deploy", side_effect=read_provider
+            ),
+        ):
+            status, result = self.apply(plan["recovery_digest"])
+        self.assertEqual(status, 202, result)
+
+    def test_lost_authority_lock_does_not_complete_original(self) -> None:
+        plan = self.inspect()
+
+        def lost() -> None:
+            raise RuntimeError("Authority connection lost.")
+
+        with patch.object(
+            self.store, "serialize_disposable_testing_resources", return_value=nullcontext(lost)
+        ):
+            status, _ = self.apply(plan["recovery_digest"])
+        self.assertEqual(status, 409)
         self.assertEqual(self.store.list_held_provider_target_reservations(), (self.original,))
 
     def test_historical_production_alias_keeps_the_original_held(self) -> None:
@@ -364,6 +441,12 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
     def test_normal_reconcile_qualifies_a_successor_with_the_captured_schedule_baseline(
         self,
     ) -> None:
+        self.qualify_successor(abandon_during_reconcile=False)
+
+    def test_abandonment_after_initial_read_starts_successor_in_the_same_pass(self) -> None:
+        self.qualify_successor(abandon_during_reconcile=True)
+
+    def qualify_successor(self, *, abandon_during_reconcile: bool) -> None:
         scenario = reconciliation.ProductReconcileGenericWebTestingTests()
         scenario.setUp()
         self.addCleanup(scenario.doCleanups)
@@ -391,9 +474,14 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
                 raise ProviderMutationUnknownError("The original fixture response was lost.")
             return cast(PostDeployUpdateEvidence, scenario._testing_qualification_evidence(*args))
 
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            execute_verireel_testing_post_deploy,
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+                execute_verireel_testing_post_deploy,
+            ),
+            patch(
+                "control_plane.product_reconcile._current_testing_deployment_id", return_value=None
+            ),
         ):
             scenario.request()
             first = scenario.run_once()
@@ -444,19 +532,40 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 200, plan)
                 self.assertEqual(plan["proposed_action"], "abandon_testing_original")
-                status, applied = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/admin/generic-web/deploy-recovery/apply",
-                    authorization=f"Bearer {_OPERATOR_TOKEN}",
-                    payload={**body, "expected_recovery_digest": plan["recovery_digest"]},
-                    headers={"Idempotency-Key": original.idempotency_key},
-                )
-            self.assertEqual(status, 202, applied)
-            self.assertEqual(scenario.input_schedule, disabled)
-            self.assertEqual(scenario.store.read_deployment_record(before.record_id), before)
-            scenario.request()
-            successor = scenario.reconcile()
+
+                def abandon() -> None:
+                    status, applied = _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/admin/generic-web/deploy-recovery/apply",
+                        authorization=f"Bearer {_OPERATOR_TOKEN}",
+                        payload={**body, "expected_recovery_digest": plan["recovery_digest"]},
+                        headers={"Idempotency-Key": original.idempotency_key},
+                    )
+                    self.assertEqual(status, 202, applied)
+                    self.assertEqual(scenario.input_schedule, disabled)
+                    self.assertEqual(
+                        scenario.store.read_deployment_record(before.record_id), before
+                    )
+
+                lock = scenario.store.testing_replacement_execution_lock
+
+                @contextmanager
+                def abandon_before_lock(name: str) -> Iterator[Callable[[], None] | None]:
+                    with patch.object(scenario.store, "testing_replacement_execution_lock", lock):
+                        abandon()
+                        with lock(name) as check:
+                            yield check
+
+                if not abandon_during_reconcile:
+                    abandon()
+                scenario.request()
+                with patch.object(
+                    scenario.store,
+                    "testing_replacement_execution_lock",
+                    abandon_before_lock if abandon_during_reconcile else lock,
+                ):
+                    successor = scenario.reconcile()
         self.assertNotEqual(successor["deploy_idempotency_key"], original.idempotency_key)
         self.assertEqual(successor["post_deploy_status"], "pass")
         self.assertEqual(len(triggered), len(calls))

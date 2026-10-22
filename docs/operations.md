@@ -887,19 +887,19 @@ or promote production. Independent application allocation continues to use
 [testing separation and activation](testing-activation.md); its PostgreSQL
 prerequisite remains separate.
 
-Use `scripts/abandon-generic-web-testing.py` with the installed operator
-transport, an outside-checkout request containing `product`, `instance:
-testing`, the fresh service-owned `recovery_reference`, and `reason`, and a new
-private evidence path. Run `dry-run`, review its proposed action, then `apply
---reviewed-dry-run` and `readback` with the same request and evidence files.
-The script binds the review to the request and configured service. Apply
-automatically reads the completed original back; explicit readback calls only
-the dry-run endpoint and never applies. A lost apply response retains the
-request and review. Its retained reference reads only that immutable
-abandonment, even after another deployment starts; a missing held reference
-alone never proves completion. The installed generic recovery apply helper
-does not yet admit this new action, so use this repository client from the
-deployed source revision.
+Use the installed `launchplane-write-action.py` recovery commands with an
+outside-checkout request containing `product`, `instance: testing`, the fresh
+service-owned `recovery_reference`, and `reason`. Save
+`generic-web-deploy-recovery-dry-run --payload-file <request>` output privately.
+Review `abandon_testing_original`, `unknown`, and `retry_safe: false`, then use
+`generic-web-deploy-recovery-apply --payload-file <same-request>
+--reviewed-dry-run --expected-recovery-digest <digest>
+--dry-run-evidence-file <saved-output>`. Re-run the same reference dry-run for
+readback: require `completed`, `replay_completed`, and the saved recovery digest.
+A lost apply response retains the request and review for this readback.
+The retained reference reads only that immutable abandonment, even after another
+deployment starts; a missing held reference alone never proves completion.
+Legacy originals without a saved event request remain held.
 
 `settle_testing_failure` requires attributable terminal execution and runs only
 the original schedule hold before publishing truthful failure. Its HTTP 202
