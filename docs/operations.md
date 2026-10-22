@@ -1581,7 +1581,7 @@ and route `service:health-monitor-scheduler`; testing slot keys are namespaced
 separately. The v2 activation starts a new evidence epoch: older half-hour
 receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
-records show alert and recovery delivery.
+records show alert delivery, recovery and superseded resolved-incident deliveries.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
@@ -2068,9 +2068,9 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
-The outbox worker sends email and Discord as well as GitHub notifications, so a
-healthy probe after recovery does not need to manufacture another resolution
-for delivery to resume. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications for
+still-open incidents. Recovery does not manufacture another notification to
+resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
