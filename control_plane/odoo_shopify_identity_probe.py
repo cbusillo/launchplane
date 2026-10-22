@@ -1,7 +1,6 @@
 import hashlib
 import json
 import re
-import sys
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -70,16 +69,3 @@ def read_identity(spec: dict[str, object], *, require_domain_match: bool = True)
         )
     except (OSError, ValueError, TypeError, AttributeError):
         return unknown
-
-
-def main() -> None:
-    try:
-        spec = json.loads(sys.stdin.read(16385))
-        result = read_identity(spec)
-    except (OSError, ValueError, TypeError, AttributeError):
-        result = {"status": "unavailable", "reason": "request_invalid"}
-    print(json.dumps(result))
-
-
-if __name__ == "__main__":
-    main()
