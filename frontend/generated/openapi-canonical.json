@@ -50410,6 +50410,33 @@
             "title": "Production Shop Id Sha256",
             "type": "string"
           },
+          "reason": {
+            "default": "diagnostics_unavailable",
+            "enum": [
+              "",
+              "authority_unavailable",
+              "authority_changed",
+              "runtime_unavailable",
+              "runtime_changed",
+              "credential_unavailable",
+              "probe_unavailable",
+              "probe_failed",
+              "configuration_unavailable",
+              "database_identity_unavailable",
+              "database_driver_unavailable",
+              "database_unavailable",
+              "settings_unavailable",
+              "settings_changed",
+              "request_invalid",
+              "request_failed",
+              "response_invalid",
+              "token_rejected",
+              "domain_mismatch",
+              "diagnostics_unavailable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
           "separation": {
             "default": "unknown",
             "enum": [
@@ -50418,6 +50445,22 @@
               "unknown"
             ],
             "title": "Separation",
+            "type": "string"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "authority",
+              "production_runtime",
+              "testing_runtime",
+              "testing_credential",
+              "testing_probe",
+              "production_probe",
+              "evidence",
+              "complete",
+              "unknown"
+            ],
+            "title": "Stage",
             "type": "string"
           },
           "testing_domain_sha256": {

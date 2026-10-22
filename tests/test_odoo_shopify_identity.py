@@ -297,6 +297,43 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.observation = observation
                 self.assertNotEqual(self.run_comparison().separation, "separate")
 
+    def test_unavailable_prerequisites_identify_the_side_without_private_errors(self) -> None:
+        for instance in ("prod", "testing"):
+            with self.subTest(instance=instance):
+                connect = self.calls[0].side_effect
+
+                def unavailable(**kwargs: Any) -> Any:
+                    if kwargs["selection"].identity.instance == instance:
+                        raise reads.OdooRuntimeReadError(
+                            "container_unavailable", "fixture-secret private provider response"
+                        )
+                    return connect(**kwargs)
+
+                self.calls[0].side_effect = unavailable
+                result = self.run_comparison().model_dump()
+                self.assertEqual(
+                    result["stage"],
+                    f"{instance if instance == 'testing' else 'production'}_runtime",
+                )
+                self.assertEqual(result["reason"], "runtime_unavailable")
+                self.assertNotIn("fixture-secret", json.dumps(result))
+                self.calls[0].side_effect = connect
+
+    def test_production_probe_reason_and_token_rejection_survive_comparison(self) -> None:
+        for status, reason in (
+            ("unavailable", "database_driver_unavailable"),
+            ("token_rejected", "token_rejected"),
+        ):
+            with self.subTest(status=status):
+                self.calls[-1].side_effect = lambda connection, selected, *args: (
+                    self.observation if selected else {"status": status, "reason": reason}
+                )
+                result = self.run_comparison().model_dump()
+                self.assertEqual(result["stage"], "production_probe")
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(result["probe"], status)
+                self.assertEqual(result["separation"], "unknown")
+
     def test_same_shop_id_under_different_domains_never_proves_separation(self) -> None:
         self.observation["shop_id_sha256"] = self.comparison.digest("gid://shopify/Shop/456")
         self.assertNotEqual(self.run_comparison().separation, "separate")
@@ -313,7 +350,9 @@ class ShopifyComparisonTests(unittest.TestCase):
             return self.observation
 
         self.calls[-1].side_effect = observe
-        self.assertEqual(self.run_comparison().separation, "unknown")
+        result = self.run_comparison()
+        self.assertEqual(result.separation, "unknown")
+        self.assertEqual(result.reason, "authority_changed")
 
     def test_unsafe_recipient_or_credential_authority_never_decrypts_or_probes(self) -> None:
         original_bindings = dict(self.bindings)
@@ -534,7 +573,9 @@ class ShopifyComparisonTests(unittest.TestCase):
             ]
             self.assertEqual(len(testing_requests), 1)
             drift = True
-            self.assertEqual(self.run_comparison().separation, "unknown")
+            result = self.run_comparison()
+            self.assertEqual(result.separation, "unknown")
+            self.assertEqual(result.reason, "runtime_changed")
         self.assertTrue(
             all(command[:2] in (["docker", "inspect"], ["docker", "exec"]) for command in commands)
         )
@@ -577,8 +618,11 @@ class ShopifyHttpTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             comparison, "compare_identity", return_value=comparison.ShopifyIdentityResult()
         ) as execute:
-            response = await request(app, "GET", path)
+            with self.assertLogs("control_plane.http_routes.odoo_runtime", level="WARNING") as logs:
+                response = await request(app, "GET", path)
             self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn("fixture-trace", logs.output[0])
+            self.assertIn(response.json()["result"]["reason"], logs.output[0])
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(
                 {call.kwargs["target"].instances for call in allowed.call_args_list},
@@ -655,6 +699,11 @@ class ShopifyCallerTests(unittest.TestCase):
                 self.assertEqual(script["main"](), 1)
             self.assertNotIn("fixture-private", errors.getvalue())
             self.assertTrue(transport["request_launchplane_read"].side_effect.fp.closed)
+            transport["request_launchplane_read"].side_effect = TimeoutError("fixture-private")
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(script["main"](), 1)
+            self.assertEqual(json.loads(errors.getvalue())["reason"], "client_timeout")
+            self.assertNotIn("fixture-private", errors.getvalue())
             transport["request_launchplane_read"].side_effect = KeyError("fixture-private")
             with contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(script["main"](), 1)
@@ -662,6 +711,87 @@ class ShopifyCallerTests(unittest.TestCase):
 
 
 class ProductionIdentityTests(unittest.TestCase):
+    def test_unavailable_production_prerequisites_return_fixed_reasons(self) -> None:
+        from control_plane import odoo_shopify_production_probe as production
+        from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
+        from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS
+
+        spec = {
+            "config_path": ODOO_WEB_CONFIG_PATH,
+            "store_keys": ["shopify." + key for key in SHOPIFY_STORE_SETTINGS],
+        }
+        for failure, reason in (
+            ("configuration", "configuration_unavailable"),
+            ("identity", "database_identity_unavailable"),
+            ("missing_environment", "database_identity_unavailable"),
+            ("missing_user", "configuration_unavailable"),
+            ("malformed_request", "request_invalid"),
+            ("driver", "database_driver_unavailable"),
+            ("connection", "database_unavailable"),
+            ("settings", "settings_unavailable"),
+            ("drift", "settings_changed"),
+        ):
+            with self.subTest(failure=failure):
+                database = MagicMock()
+                cursor = database.connect.return_value.cursor.return_value.__enter__.return_value
+                rows = [
+                    ("shopify.shop_url_key", "fixture-production"),
+                    ("shopify.api_token", "fixture-private-token"),
+                    ("shopify.api_version", "2026-01"),
+                ]
+                cursor.fetchmany.side_effect = [
+                    [] if failure == "settings" else rows,
+                    rows[:-1] if failure == "drift" else rows,
+                ]
+                if failure == "connection":
+                    database.connect.side_effect = RuntimeError("fixture-private-token")
+                with (
+                    patch.object(
+                        sys,
+                        "stdin",
+                        io.StringIO(json.dumps({} if failure == "malformed_request" else spec)),
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    patch.object(
+                        configparser.ConfigParser,
+                        "read",
+                        return_value=[] if failure == "configuration" else [ODOO_WEB_CONFIG_PATH],
+                    ),
+                    patch.object(
+                        configparser.ConfigParser,
+                        "__getitem__",
+                        return_value={
+                            "db_name": "different-db" if failure == "identity" else "fixture-db",
+                            "db_host": "database",
+                            "db_user": "" if failure == "missing_user" else "fixture-user",
+                            "db_password": "fixture-private-token",
+                        },
+                    ),
+                    patch.dict(
+                        os.environ,
+                        {} if failure == "missing_environment" else {"ODOO_DB_NAME": "fixture-db"},
+                        clear=True,
+                    ),
+                    patch.object(
+                        importlib,
+                        "import_module",
+                        side_effect=ImportError("fixture-private-token")
+                        if failure == "driver"
+                        else None,
+                        return_value=database,
+                    ),
+                    patch.object(
+                        production,
+                        "read_shopify_identity",
+                        return_value={"status": "unavailable", "reason": "request_failed"},
+                    ),
+                ):
+                    production.main()
+                self.assertEqual(
+                    json.loads(output.getvalue()), {"status": "unavailable", "reason": reason}
+                )
+                self.assertNotIn("fixture-private-token", output.getvalue())
+
     def test_applied_production_identity_is_read_in_a_read_only_transaction_and_hashed(
         self,
     ) -> None:
