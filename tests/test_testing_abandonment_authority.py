@@ -12,6 +12,7 @@ from tests import test_generic_web_testing_abandonment as abandonment
 from tests.test_generic_web_deploy_recovery import _OPERATOR_TOKEN, _create_recovery_app
 from tests.test_generic_web_deploy_recovery import _recovery_bearer_config
 from tests.test_service import _invoke_app
+from tests.test_generic_web_cutover import plan as cutover_plan
 
 
 class TestingAbandonmentAuthorityTests(unittest.TestCase):
@@ -157,20 +158,15 @@ class TestingAbandonmentAuthorityTests(unittest.TestCase):
             self.store.list_held_provider_target_reservations(), (self.scenario.original,)
         )
 
-    def test_reference_cannot_name_production(self) -> None:
+    def test_testing_cutover_lane_does_not_inherit_abandonment(self) -> None:
         plan = self.inspect()
-        status, _ = _invoke_app(
-            self.app,
-            method="POST",
-            path="/v1/admin/generic-web/deploy-recovery/apply",
-            authorization=f"Bearer {_OPERATOR_TOKEN}",
-            payload={
-                **self.body,
-                "instance": "prod",
-                "expected_recovery_digest": plan["recovery_digest"],
-            },
+        profile = self.scenario.fixture.profile
+        lane = profile.lanes[0].model_copy(
+            update={"generic_web_cutover": cutover_plan("application").lane}
         )
-        self.assertTrue(400 <= status < 500)
+        self.store.write_product_profile_record(profile.model_copy(update={"lanes": (lane,)}))
+        status, result = self.apply(plan["recovery_digest"])
+        self.assertEqual(status, 403, result)
         self.assertEqual(
             self.store.list_held_provider_target_reservations(), (self.scenario.original,)
         )
