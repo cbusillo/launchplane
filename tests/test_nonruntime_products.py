@@ -87,7 +87,6 @@ def inert_manifest() -> dict[str, object]:
         "product": "desktop-tool",
         "display_name": "Desktop tool",
         "repository": "Example/Desktop-Tool",
-        "driver_id": "",
         "owner": {"github_login": "director", "github_id": "1234"},
         "release_on_acceptance": "director_standing",
     }
@@ -334,6 +333,11 @@ class NonruntimeProductTests(unittest.TestCase):
                         product_profiles=(profile,), absent_product_ids=(profile.product,)
                     )
                     store.write_product_authority_bundle(bundle)
+                    invalid = profile.model_copy(update={"runtime_port": 8080})
+                    with self.assertRaises(ValidationError):
+                        store.compare_and_write_product_profile_record(
+                            expected_record=profile, replacement_record=invalid
+                        )
                     with self.assertRaises(ProductProfileConflictError):
                         store.write_product_authority_bundle(bundle)
                     collision = profile.model_copy(
@@ -464,6 +468,86 @@ class NonruntimeProductTests(unittest.TestCase):
 
 
 class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        for name, value in (
+            ("resolve_launchplane_github_token", "fixture-token"),
+            ("github_api_request", {"type": "User", "login": "director", "id": 1234}),
+        ):
+            patcher = patch(f"control_plane.http_app.{name}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_expected_config_cannot_poison_nonruntime_profile_inventory(self) -> None:
+        with _database_app(LaunchplaneAuthzPolicy(), director_agent=True) as (store, _, app):
+            profile = inert_profile()
+            store.write_product_profile_record(profile)
+            for mode in ("dry-run", "apply"):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-profiles/expected-config/apply",
+                    headers={"Authorization": "Bearer reader-token", "Idempotency-Key": mode},
+                    payload={
+                        "product": profile.product,
+                        "mode": mode,
+                        "reason": "Declare requirements",
+                        "runtime_environment_keys": [{"key": "APP_MODE"}],
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(store.list_product_profile_records(), (profile,))
+
+    async def test_full_profile_cannot_move_standing_acceptance_between_repositories(self) -> None:
+        for managed_runtime in (False, True):
+            with (
+                self.subTest(managed_runtime=managed_runtime),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                profile = inert_profile()
+                if managed_runtime:
+                    profile = LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            **product_profile_payload(profile.product),
+                            "owner": profile.owner.model_dump(mode="json"),
+                            "release_on_acceptance": profile.release_on_acceptance,
+                            "preview": {},
+                        }
+                    )
+                app = create_launchplane_fastapi_app(
+                    verifier=StubVerifier(identity()),
+                    authz_policy=_product_config_policy(
+                        action="product_profile.write",
+                        product=profile.product,
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                for state in ("active", "retired"):
+                    profile = profile.model_copy(update={"lifecycle_state": state})
+                    store.write_product_profile_record(profile)
+                    for changes in (
+                        {"repository": "example/another"},
+                        {"repository_id": "42", "repository_owner_id": "7"},
+                    ):
+                        with self.subTest(state=state, changes=changes):
+                            response = await _asgi_request(
+                                app,
+                                "POST",
+                                "/v1/product-profiles",
+                                headers={"Authorization": "Bearer valid-token"},
+                                payload={**profile.model_dump(mode="json"), **changes},
+                            )
+                            self.assertEqual(response.status_code, 409, response.text)
+                            self.assertEqual(
+                                store.read_product_profile_record(profile.product), profile
+                            )
+
     async def test_registration_cannot_record_standing_from_machine_identity(self) -> None:
         with (
             TemporaryDirectory() as directory,
@@ -600,6 +684,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             machine_rule = _product_config_policy(
                 action="product_profile.write", product="launchplane", context="launchplane"
             ).model_dump(mode="json")["github_actions"][0]
+            machine_rule["actions"] = ["product_profile.write", "product_onboarding.apply"]
             app = create_launchplane_fastapi_app(
                 verifier=StubVerifier(identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate(
@@ -662,6 +747,22 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload=changed,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(store.list_product_profile_records(), ())
+            with patch(
+                "control_plane.http_app.github_api_request",
+                return_value={"type": "User", "login": "director", "id": 5678},
+            ):
+                mismatched = await _asgi_request(
+                    app,
+                    "POST",
+                    ROUTE,
+                    headers={
+                        **_browser_mutation_headers(sessions, session),
+                        "Idempotency-Key": "wrong-client",
+                    },
+                    payload=apply,
+                )
+            self.assertEqual(mismatched.status_code, 400, mismatched.text)
             self.assertEqual(store.list_product_profile_records(), ())
             accepted = await _asgi_request(
                 app,
@@ -742,12 +843,23 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                     "lanes": [{"context": "another", "instance": "testing"}],
                 },
             }
-            refused = await _asgi_request(
+            browser_runtime = await _asgi_request(
                 app,
                 "POST",
                 ROUTE,
                 headers={
                     **_browser_mutation_headers(sessions, session),
+                    "Idempotency-Key": "browser-runtime",
+                },
+                payload=runtime_onboarding,
+            )
+            self.assertEqual(browser_runtime.status_code, 403, browser_runtime.text)
+            refused = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers={
+                    "Authorization": "Bearer valid-token",
                     "Idempotency-Key": "runtime-collision",
                 },
                 payload=runtime_onboarding,
@@ -834,7 +946,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 "POST",
                 ROUTE,
                 headers={
-                    **_browser_mutation_headers(sessions, session),
+                    "Authorization": "Bearer valid-token",
                     "Idempotency-Key": "runtime-replacement",
                 },
                 payload=runtime_onboarding,

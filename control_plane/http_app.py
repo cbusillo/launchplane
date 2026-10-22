@@ -13728,7 +13728,12 @@ def create_launchplane_fastapi_app(
         ) or (
             existing_profile is not None
             and existing_profile.release_on_acceptance == "director_standing"
-            and profile.owner.github_id != existing_profile.owner.github_id
+            and (
+                profile.owner.github_id != existing_profile.owner.github_id
+                or profile.repository != existing_profile.repository
+                or profile.repository_id != existing_profile.repository_id
+                or profile.repository_owner_id != existing_profile.repository_owner_id
+            )
         ):
             raise _launchplane_http_error(
                 status_code=409,
@@ -13911,6 +13916,13 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
+        if not profile.is_managed_runtime:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="nonruntime_product",
+                message="Non-runtime products cannot declare runtime configuration.",
+            )
         if (
             expected_config_request.mode == "apply"
             and isinstance(identity, LocalOperatorIdentity)
@@ -14418,6 +14430,63 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def resolve_profile_owner(
+        profile: LaunchplaneProductProfileRecord, login: str, trace_id: str
+    ) -> control_plane_product_owner_setting.ProductOwnerIdentity:
+        try:
+            with launchplane_github_token(
+                token_resolver=resolve_launchplane_github_token,
+                api_request=github_api_request,
+                control_plane_root=resolved_control_plane_root,
+                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+                repository=profile.repository,
+                report_failure=True,
+            ) as github_token:
+                if not github_token:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="github_credentials_unavailable",
+                        message="Launchplane has no GitHub read credential to look up the Owner login.",
+                    )
+                return control_plane_product_owner_setting.resolve_github_user_owner(
+                    login=login,
+                    token=github_token,
+                    api_request=github_api_request,
+                )
+
+        except DeliveryGitHubCredentialsUnavailable as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_credentials_unavailable",
+                message=(
+                    f"Launchplane could not resolve the GitHub read credential at "
+                    f"{error.stage} to look up the Client login."
+                ),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="owner_login_not_found",
+                message=str(error),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="owner_login_not_user",
+                message=str(error),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_lookup_unavailable",
+                message=str(error),
+            ) from error
+
     async def apply_product_owner(
         product: str,
         request: Request,
@@ -14554,62 +14623,9 @@ def create_launchplane_fastapi_app(
             ) from error
         resolved_owner = control_plane_product_owner_setting.ProductOwnerIdentity()
         if not owner_request.clear:
-
-            def lookup_owner() -> control_plane_product_owner_setting.ProductOwnerIdentity:
-                with launchplane_github_token(
-                    token_resolver=resolve_launchplane_github_token,
-                    api_request=github_api_request,
-                    control_plane_root=resolved_control_plane_root,
-                    context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    repository=profile.repository,
-                    report_failure=True,
-                ) as github_token:
-                    if not github_token:
-                        raise _launchplane_http_error(
-                            status_code=503,
-                            trace_id=trace_id,
-                            code="github_credentials_unavailable",
-                            message="Launchplane has no GitHub read credential to look up the Owner login.",
-                        )
-                    return control_plane_product_owner_setting.resolve_github_user_owner(
-                        login=owner_request.github_login,
-                        token=github_token,
-                        api_request=github_api_request,
-                    )
-
-            try:
-                resolved_owner = await run_in_threadpool(lookup_owner)
-            except DeliveryGitHubCredentialsUnavailable as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_credentials_unavailable",
-                    message=(
-                        f"Launchplane could not resolve the GitHub read credential at "
-                        f"{error.stage} to look up the Client login."
-                    ),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_found",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_user",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_lookup_unavailable",
-                    message=str(error),
-                ) from error
+            resolved_owner = await run_in_threadpool(
+                resolve_profile_owner, profile, owner_request.github_login, trace_id
+            )
         try:
             plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
                 profile=profile,
@@ -18531,11 +18547,18 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        inert_dry_run = (
-            onboarding_request.mode == "dry_run"
-            and onboarding_request.manifest is not None
+        nonruntime_registration = (
+            onboarding_request.manifest is not None
             and onboarding_request.manifest.classification != "managed_runtime"
         )
+        if isinstance(identity, GitHubHumanIdentity) and not nonruntime_registration:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Runtime onboarding requires its existing bearer caller.",
+            )
+        inert_dry_run = onboarding_request.mode == "dry_run" and nonruntime_registration
         onboarding_action = (
             "generic_web_onboarding.plan"
             if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
@@ -18736,6 +18759,24 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_onboarding_manifest",
                 message=str(error),
             ) from error
+        if inert_plan_sha256:
+            resolved_owner = await run_in_threadpool(
+                resolve_profile_owner,
+                onboarding_result.product_profile,
+                onboarding_manifest.owner.github_login,
+                trace_id,
+            )
+            if (
+                resolved_owner.github_id != onboarding_manifest.owner.github_id
+                or resolved_owner.github_login.casefold()
+                != onboarding_manifest.owner.github_login.casefold()
+            ):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="client_identity_mismatch",
+                    message="The Client login and GitHub ID do not match; correct the registration and review it again.",
+                )
         result, driver_result = (
             control_plane_product_onboarding_service.build_product_onboarding_service_result(
                 onboarding_result

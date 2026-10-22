@@ -99,6 +99,7 @@ def require_product_profile_writes(
     if any(product in profiles for product in absent_product_ids):
         raise ProductProfileConflictError("Product was registered before commit.")
     for record in records:
+        record = LaunchplaneProductProfileRecord.model_validate(record.model_dump(mode="json"))
         current = profiles.get(record.product)
         validate_product_profile_classification_transition(
             existing_profile=current, replacement_profile=record

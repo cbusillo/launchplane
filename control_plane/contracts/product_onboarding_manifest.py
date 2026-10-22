@@ -191,10 +191,12 @@ class ProductOnboardingManifest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_provider_targets(cls, data: object) -> object:
+    def _normalize_manifest(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
         updated = dict(data)
+        if updated.get("classification", "managed_runtime") != "managed_runtime":
+            updated.setdefault("driver_id", "")
         if "dokploy_targets" in updated:
             raise ValueError(
                 "product onboarding manifest uses obsolete dokploy_targets; use provider_targets"

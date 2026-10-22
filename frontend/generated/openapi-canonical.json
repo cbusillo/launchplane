@@ -103479,6 +103479,7 @@
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
+    "/v1/product-onboarding/apply": "apply_product_onboarding",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",

@@ -939,7 +939,8 @@ a product without one reports "No Client set" instead of blocking.
 A product that Launchplane does not deploy can record its repository, the Director
 as its Client, standing acceptance and lifecycle metadata. Active non-runtime
 products with another Client or without standing acceptance are refused; they
-need a preview-independent Client review flow before registration is supported. Its explicit `classification` is
+need a preview-independent Client review flow before registration is supported.
+Its explicit `classification` is
 `active_awareness`, `support_dependency` or `out_of_scope`, from the existing
 repository-mapping vocabulary. Omitted classification means `managed_runtime`
 and keeps existing serialized profiles unchanged. A non-runtime profile has no
@@ -949,29 +950,33 @@ authority. Repository mappings retain its real product id and classification;
 ambiguous active repositories are named in `ambiguous_repositories` and omitted
 from the mapping, including its work-request fallback. Other entries stay available.
 
-Register a new non-runtime product through `POST /v1/product-onboarding/apply`
-using the existing `product_onboarding.plan` authorization for the dry run
-(existing apply-authorized callers may also plan), and `product_onboarding.apply`
-for apply. Send `product:
-"launchplane"`, `mode: "dry_run"` and a `manifest` containing the new product key,
-display name, one `owner/repository`, explicit classification, `driver_id: ""`,
-`owner` with the Director's `github_login` and numeric `github_id`, and
-`release_on_acceptance: "director_standing"`. The acceptance field is an explicit
-admin attestation that the recorded Client is the Director. Apply requires a
-signed-in admin with the existing onboarding authorization and the normal
-browser origin and CSRF checks; machine identities can plan but cannot record
-standing acceptance.
-Optional `repository_id` and `repository_owner_id` must be supplied together. Supply no
-runtime resources. The dry run writes nothing and returns `plan_sha256` and the
-planned profile. Apply the same manifest with `mode: "apply"`, that digest as
-`reviewed_plan_sha256`, and an `Idempotency-Key`; there is no provider target id.
-The commit rechecks product-key absence and repository ownership under the
-existing authority lock. It refuses an existing product or competing active
-repository owner, including a matching immutable repository id. A committed
-same-key replay returns the recorded result. Read the profile and repository
-mapping back to verify the Client and standing acceptance from that registration.
-Existing runtime products keep their bounded Client and production-use settings;
-onboarding cannot set those fields for a runtime product.
+In Product Ops, a signed-in admin opens **Register a Director product**, enters
+its key, name, repository and Client GitHub identity, and explicitly confirms
+that the Client is the Director. **Review registration** writes nothing;
+**Register product** applies that reviewed input and reads the saved profile
+back. Editing the draft invalidates its review. An interrupted apply preserves
+the original draft and operation key for an explicit same-request retry after
+reload. The service verifies the Client login and numeric ID on both planning
+and apply; admin access alone never identifies the Director.
+
+The existing `POST /v1/product-onboarding/apply` surface uses
+`product_onboarding.plan` for planning (existing apply callers may also plan)
+and `product_onboarding.apply` for apply. A non-runtime manifest carries its
+classification, identity, Client and explicit `director_standing`; its omitted
+driver defaults empty and it has no runtime resources. Apply additionally needs
+a CSRF-checked signed-in admin, the reviewed `plan_sha256` and an
+`Idempotency-Key`. It atomically rechecks product absence and repository
+ownership; committed same-key requests replay their original result. The
+browser form uses this same audited surface. Runtime onboarding retains its
+existing bearer route and bounded Client/acceptance settings.
+
+Full-profile writes cannot transfer standing acceptance to another repository
+or copied repository identity. Hold acceptance through the existing reviewed
+production-use setting before changing repository fields, then have a signed-in
+admin attest standing again for the new identity. For a non-runtime product,
+retire it first; restore standing before reactivating it. The same retired
+continuation permits changing the recorded Director identity. Other-Client
+non-runtime products cannot be activated.
 
 The ordinary full-profile write cannot create a non-runtime product. Neither
 onboarding nor another profile writer can change an existing profile's
