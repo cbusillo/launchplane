@@ -324,15 +324,14 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.discord_external_resources.request_public_http",
                     side_effect=self.provider_response,
-                ),
+                ) as provider,
             ):
                 report = await self.audit(inventory=inventory, external=True)
+            provider.assert_not_called()
             result = report.json()["external_resources"]
-            self.assertEqual(result["status"], "observed", result)
-            self.assertEqual(
-                {(row["instance"], row["binding_key"]) for row in result["entries"]},
-                {("testing", key), ("prod", key)},
-            )
+            self.assertEqual(result["status"], "unavailable", result)
+            self.assertEqual(result["failure_code"], "configuration_unavailable")
+            self.assertEqual(result["entries"], [])
             self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
 
         reverse = self.store.read_product_profile_record(self.profile.product)
@@ -376,9 +375,50 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "control_plane.discord_external_resources.request_public_http",
             side_effect=self.provider_response,
-        ):
+        ) as provider:
             report = await self.audit(external=True)
-        self.assertEqual(report.json()["external_resources"]["status"], "observed")
+        provider.assert_not_called()
+        self.assertEqual(report.json()["external_resources"]["status"], "unavailable")
+        testing_binding = next(
+            row
+            for row in self.store.list_secret_bindings(instance_name="testing")
+            if row.binding_key == key
+        )
+        self.assertFalse(
+            any(
+                event.event_type == "resolution_attempted"
+                for event in self.store.list_secret_audit_events(
+                    secret_id=testing_binding.secret_id
+                )
+            )
+        )
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "testing",
+                "secrets": [{"binding_key": key, "value": "synthetic-testing-bot-token"}],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        for inventory in (False, True):
+            with (
+                self.subTest(inventory=inventory, provenance="supplied"),
+                patch(
+                    "control_plane.discord_external_resources.request_public_http",
+                    side_effect=self.provider_response,
+                ),
+            ):
+                report = await self.audit(inventory=inventory, external=True)
+            result = report.json()["external_resources"]
+            self.assertEqual(result["status"], "observed", result)
+            self.assertEqual(
+                {(row["instance"], row["binding_key"]) for row in result["entries"]},
+                {("testing", key), ("prod", key)},
+            )
         self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
 
     async def test_external_use_requires_persisted_redacted_attempt_before_provider_call(

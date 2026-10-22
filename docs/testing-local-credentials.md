@@ -146,6 +146,9 @@ Add `--external-resources` to the existing `prepare-testing-credentials.py audit
 command to request `include_external_resources=true` on either audit GET. Without
 that option, the existing response and outbound behavior stay unchanged. With the
 option, only purpose-declared, delivered bindings are used for external reads.
+An existing service-generated value is never used as an external credential.
+Reclassification does not change that provenance: the external audit remains
+unavailable until a provider credential is supplied through managed custody.
 All participating products and production/testing lanes must first be authorized.
 The service alone decrypts the captured managed version and sends it to Discord's
 fixed HTTPS API using bot authentication. Responses contain identifiers and bounded
