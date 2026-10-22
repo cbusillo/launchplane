@@ -112,11 +112,10 @@ actual application state.
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
-lane with one stable HTTPS address and a separate candidate copy. It is a source
-component: the existing resource/bootstrap endpoints below do not yet call it.
-It exposes no new HTTP operation, UI control or permission. Its tests qualify the
-controller and checkpoint storage, not a real provider, restored data or a live
-lane.
+lane with one stable HTTPS address and a separate candidate copy. The existing
+testing replacement action and durable worker call it without a separate queue
+or permission. Source and fixture tests qualify that behavior; they do not prove
+a particular live lane or restored business data.
 
 The immutable plan binds the existing route/address, old and new target/resource
 identities, the candidate build and a managed source reference. Empty rebuilds,
@@ -134,8 +133,9 @@ at the original address precede metadata adoption and old-copy retirement.
 Retirement drains/stops the old runtime and preserves its storage and custody;
 physical deletion is outside this operation. Public probe URLs must use the
 stable lane origin. Missing, stale, unverified or skipped evidence preserves the
-intent for observation; only a fresh verified failure or identity mismatch
-starts automatic rollback.
+intent for observation. A fresh verified failure or identity mismatch starts
+automatic rollback. An unavailable-origin attempt also reverses its own cutover
+if positively observed predecessor or ingress changes invalidate its admission.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -146,6 +146,83 @@ the original operation and authority-writer lock. An unavailable publication
 outcome cannot be replaced with an assertion that the old metadata still wins.
 The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
+
+A predecessor verified stopped or absent uses an explicit unavailable record.
+It needs the existing lane's address ownership, provider target and registered
+server placement. Complete container IDs, ownership fields, states and mount
+inventory must agree; an incomplete inspection never proves absence. Stopped
+copies keep their actual storage/configuration witness without requiring an old
+runtime identity or starting a process. Fully absent containers leave any old
+storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
+production isolation and unresolved provider effects keep their existing gates.
+
+An unavailable predecessor has no invented private endpoint, runtime identity or
+healthy public observation. The candidate route comes from the original recorded
+template or the provider's converted web-router declaration, checked against the
+current proxy listeners, TLS resolver and applied conflicts. Missing placement or
+ingress declaration is a record/capability prerequisite; repairing or starting
+the old application is not an admission step. Forward checkpoints retain the
+normalized web-ingress declaration and listener witnesses. Unrelated application
+environment, image or Compose formatting changes do not change that declaration
+witness. Listener witnesses cover the entrypoints and certificate resolvers used
+by this lane; unrelated proxy logging and other listeners do not change them.
+Candidate serving readback verifies these dependencies and external redirect
+behavior after the file is selected, as well as before its forward write.
+Candidate preparation, generated
+local credentials, sanitation, immutable build, private identity and public
+health checks use the ordinary lifecycle.
+Transient provider-inventory reads keep the original operation pending; provider
+authorization denials keep their denial boundary. Incomplete inventory never
+proves that placement changed or that an old copy is absent.
+
+Failure restores the captured route file's exact bytes or original absence and
+reverses metadata this publication actually adopted. A planned publication proves
+no adoption and preserves later administrative edits when it is marked reversed.
+The same physical writer lock, generation, CAS and durable
+receipt cover restoration, including removal of only that lane's newly created
+file; a lost response is settled through its original writer. An unavailable
+route preimage covers its public listeners and middleware dependencies, excluding
+unrelated proxy management routes and canonical certificate challenges. Inverse
+restoration uses the current proxy/file CAS; unrelated static configuration edits
+do not require keeping a failed candidate selected. An unavailable
+original is not started or advertised as healthy by rollback. Inverse readback
+waits for exact original bytes or absence and the captured lane-owned applied
+routing before reversing metadata. It reports current stopped, absent or present
+process state separately; a reappeared process has unverified health.
+After successful publication, automatic
+deployment of the old target is disabled and its stop is recorded as undispatched
+because it was already unavailable. That success receipt does not itself request
+rollback after a checkpoint interruption. Forward publication and retirement
+require complete, quiescent old-target deployment and data-workflow observations,
+including before disabling automatic deploys and after that disable. Those jobs
+cannot trap the inverse of our route artifact. Its data is never deleted here.
+
+Stopped custody binds member identities, ownership labels and storage, separately
+from current stopped/absent state. Incidental Docker lifecycle timestamps do not
+invalidate an unchanged stopped copy. The exact admission witness gates the
+original forward writer. Once the candidate is selected, complete current stopped
+or absent evidence is sufficient; pruning stopped containers does not undo a
+verified independent candidate. A bound normal retirement-success receipt and
+its completed disable receipt resume without requalifying later old-side work,
+while the candidate's current ingress and public health are still verified.
+Removing or dead members have an uncertain lifecycle and keep forward work
+pending until complete current evidence proves stopped or absent. Original-file
+readback may report those positively inventoried members as present, without
+claiming health or allowing an incomplete inventory to count as absence.
+Undispatched retirement exclusions retain the actual latched admission or health
+failure cause.
+A changed predecessor before cutover can
+end admission once original artifact custody, no metadata adoption and terminal
+candidate custody are proved. After possible cutover and current recovery-custody
+checks, the worker persists the original admission refusal and
+settles or excludes the original physical writer. That settlement never allocates
+another initializer or sends another forward write, including after a busy call.
+Unknown or busy execution stays pending with the decision latched. Reappeared
+Docker routers are not adopted or modified: the existing inverse may restore
+only the exact original file or the exact candidate document this attempt wrote.
+Foreign file bytes, changed physical custody and metadata CAS conflicts remain
+fenced. The admission-change result retains its actual reason and does not
+invent a health failure.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
@@ -170,7 +247,9 @@ never dispatched and is safe to run. After an interrupted stop, preserve the
 retirement intent: the old copy may already be stopped, so it cannot be
 advertised as a healthy rollback target.
 The supported exception requires an original stop proven terminal and never
-dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+dispatched, plus fresh private readiness for a previously healthy old copy. An
+unavailable-origin rollback instead keeps the exact durable stop-exclusion
+receipt, without asserting the old runtime remains unavailable. The checkpoint keeps
 that recovery proof before moving back; its contract refuses rollback without
 that proof once a stop intent exists. Pending, dispatched and unknown stops
 cannot use this path. A refusal propagates before any inverse action.
@@ -214,9 +293,8 @@ provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
 receipt even after a later rebuild moves the lane. They do not reacquire a
 mutation lease or claim current live health; the service caller still authorizes
-the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
-must supply cancellation/abandonment for failed preparation with retained
-candidate custody before this component is activated as a rebuild control.
+the read. Failed preparation retains its candidate custody through the existing
+worker's cancellation/abandonment and original-operation recovery paths.
 
 ## Repair usage rule
 
@@ -904,8 +982,10 @@ A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
 publication or old-copy retirement. The old physical copy must still be qualified
-before switch-back; an already stopped predecessor does not prevent observing the
-current candidate, but cannot authorize an inverse switch.
+before switch-back. A predecessor that was serving at admission still needs its
+fresh private readiness before an excluded-stop inverse. An explicitly unavailable
+predecessor instead restores its captured route preimage and unavailable truth;
+it never supplies healthy rollback evidence.
 
 The supported host capability requires Dokploy's directory-mounted dynamic file
 provider, its private applied API and the existing managed terminal/Docker

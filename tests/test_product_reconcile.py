@@ -5976,6 +5976,25 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        refusal = PreviewMemoryCapacityRefused("private provider detail", floor=5000, headroom=4999)
+        with patch.object(self.provider, "execute_apply", side_effect=refusal):
+            for _attempt in range(2):
+                self.request("preview", 5)
+                failed = self.run_once()
+                self.assertEqual(failed.last_plan["last_failed_error_code"], refusal.code)
+                self.assertIn("5000", failed.last_error)
+                self.assertIn("4999", failed.last_error)
+                self.assertNotIn("private provider detail", failed.model_dump_json())
+                self.assertEqual(self.provider.applied, [])
+                self.assertFalse(self.store.list_preview_records())
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(len(self.provider.applied), 1)
+
     def test_preview_provider_read_denial_keeps_its_classification(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
@@ -6802,6 +6821,28 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        refusal = PreviewMemoryCapacityRefused("private provider detail", floor=5000, headroom=4999)
+        with patch(
+            "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
+            side_effect=refusal,
+        ):
+            for _attempt in range(2):
+                self.request("preview", 5)
+                failed = self.run_once()
+                self.assertEqual(failed.last_plan["last_failed_error_code"], refusal.code)
+                self.assertIn("5000", failed.last_error)
+                self.assertIn("4999", failed.last_error)
+                self.assertNotIn("private provider detail", failed.model_dump_json())
+                self.assertFalse(self.driver.changes)
+                self.assertFalse(self.store.list_preview_records())
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(self.driver.changes, [("refresh", 5)])
+
     def test_shared_application_refusal_holds_without_spending_destroy_retries(self) -> None:
         from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 

@@ -26,6 +26,9 @@ ProductionUseAuthority = Literal["explicit", "director_agent"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 BumpLevel = Literal["patch", "minor", "major"]
+FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
+    {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
+)
 
 
 class ProductProfileChangedError(ValueError):
@@ -595,6 +598,11 @@ class ProductSecretConfigRequirement(BaseModel):
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
+    external_provider: Literal["discord_bot"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     testing_local_credential: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
@@ -615,8 +623,14 @@ class ProductSecretConfigRequirement(BaseModel):
         self.integration = self.integration.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
+        if self.external_provider is not None and (
+            self.integration != "runtime_environment" or not self.context
+        ):
+            raise ValueError("External provider declarations require one runtime context.")
         if self.testing_local_credential and (
-            self.integration != "runtime_environment" or self.owner_input is not None
+            self.integration != "runtime_environment"
+            or self.owner_input is not None
+            or self.external_provider is not None
         ):
             raise ValueError(
                 "Testing local credentials require runtime storage and no external input"
@@ -798,6 +812,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 or self.odoo_business_hours is not None
             ):
                 raise ValueError("Non-runtime products cannot declare runtime configuration.")
+        if self.driver_id == "odoo" and any(
+            requirement.external_provider is not None
+            and requirement.binding_key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+            for requirement in self.expected_config.managed_secret_bindings
+        ):
+            raise ValueError("Odoo local password requirements cannot name an external provider.")
         if (
             any(lane.generic_web_cutover is not None for lane in self.lanes)
             and self.driver_id != "generic-web"

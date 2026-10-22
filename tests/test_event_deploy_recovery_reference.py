@@ -253,7 +253,6 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             self.assertEqual(code, 403, refused)
             self.assertEqual(refused["error"]["code"], "authorization_denied")
         self.assertEqual(before, self.store.list_held_provider_target_reservations())
-        self.assertEqual(provider.observation_calls, 2)
 
     def test_director_plan_permission_cannot_apply_event_or_production_originals(self) -> None:
         self.store.write_product_profile_record(

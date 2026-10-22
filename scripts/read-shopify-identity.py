@@ -34,7 +34,7 @@ def main() -> int:
             path=ROUTE.format(product=quote(args.product, safe=""), environment="testing"),
             settings=settings,
             query={},
-            timeout=60,
+            timeout=180,
         )
         response = ShopifyIdentityResponse.model_validate(raw)
         print(response.model_dump_json())
@@ -42,6 +42,8 @@ def main() -> int:
     except urllib.error.HTTPError as error:
         error.close()
         print(json.dumps({"status": "unavailable", "http_status": error.code}), file=sys.stderr)
+    except TimeoutError:
+        print('{"status":"unavailable","reason":"client_timeout"}', file=sys.stderr)
     except Exception:
         print('{"status":"unavailable"}', file=sys.stderr)
     return 1

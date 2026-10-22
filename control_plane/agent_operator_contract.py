@@ -16,6 +16,10 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
+from control_plane.generic_web_deploy_recovery_http import (
+    GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+    GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+)
 
 import hashlib
 import json
@@ -99,6 +103,24 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+        "Inspect an exact generic-web original without mutation, including completed testing abandonment readback by its retained reference.",
+        ("service_api",),
+        ("dry-run", "readback"),
+        "original",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+        "Recover a reviewed original or abandon only a fenced testing verifier, preserving unknown history without provider mutation.",
+        ("service_api",),
+        ("apply",),
+        "original",
+        ("expected_recovery_digest",),
+    ),
     OperationSpec(
         "GET",
         "/v1/products/{product}/environments/{environment}/shopify-identity",

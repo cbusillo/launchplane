@@ -173,7 +173,9 @@ jobs:
                 echo "Pull-request comment comparison requires the event base SHA." >&2
                 exit 1
               fi
-              BASE_SHA="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+              git rev-parse --verify "${HEAD_SHA}^2" >/dev/null
+              git merge-base --is-ancestor "$BASE_SHA" "${HEAD_SHA}^1"
+              BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
               ;;
             schedule)
               BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"

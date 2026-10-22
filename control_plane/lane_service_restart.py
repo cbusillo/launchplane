@@ -16,9 +16,16 @@ from control_plane.contracts.lane_service_restart import (
     RestartContainerIdentity,
 )
 from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.contracts.odoo_target_replacement_failures import (
+    DEPLOY_BLOCKED_DESCRIPTIONS,
+    DEPLOY_BLOCKED_PREFIX,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
-from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    require_disposable_lane,
+)
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -41,6 +48,23 @@ from control_plane.workflows.generic_web_preview import serialize_generic_web_pr
 
 class ServiceRestartRefused(ValueError):
     """A fixed, credential-free diagnosis; no provider write has occurred."""
+
+
+def _deployment_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ServiceRestartRefused("Deployment history has an unavailable timestamp.") from error
+    if parsed.tzinfo is None or parsed.year < 1970:
+        raise ServiceRestartRefused("Deployment history has an ambiguous timestamp.")
+    return parsed
+
+
+def _latest_attempt_timestamp(started_at: str, finished_at: str) -> datetime:
+    timestamps = tuple(_deployment_timestamp(value) for value in (started_at, finished_at) if value)
+    if not timestamps:
+        raise ServiceRestartRefused("Deployment history has no timestamp to establish its order.")
+    return max(timestamps)
 
 
 def plan_service_restart(
@@ -67,6 +91,10 @@ def plan_service_restart(
         raise ServiceRestartRefused(
             "This driver does not support service restart with release exclusion."
         )
+    if request.service == "database" and (
+        profile.driver_id != "odoo" or request.instance != "testing"
+    ):
+        raise ServiceRestartRefused("Database dependency recovery is limited to Odoo testing.")
     target = store.read_provider_target_record(
         context_name=request.context, instance_name=request.instance
     )
@@ -84,15 +112,44 @@ def plan_service_restart(
         and target.display_name == legacy.target_name
     ):
         raise ServiceRestartRefused("The recorded provider target is ambiguous or unsupported.")
-    deployments = store.list_deployment_records(
-        context_name=request.context, instance_name=request.instance, limit=1
+    inventory = store.read_environment_inventory(
+        context_name=request.context, instance_name=request.instance
     )
-    if not deployments or not deployment_record_passed(deployments[0]):
+    deployment = store.read_deployment_record(inventory.deployment_record_id)
+    if not deployment_record_passed(deployment):
         raise ServiceRestartRefused("The lane has no settled current deployment.")
-    deployment = deployments[0]
+    current_started_at = _deployment_timestamp(deployment.deploy.started_at)
+    for attempt in store.list_deployment_records(
+        context_name=request.context, instance_name=request.instance
+    ):
+        if attempt.record_id == deployment.record_id:
+            continue
+        if (
+            _latest_attempt_timestamp(attempt.deploy.started_at, attempt.deploy.finished_at)
+            < current_started_at
+        ):
+            continue
+        if not (
+            attempt.deploy.status == "fail"
+            and attempt.deploy.finished_at
+            and not attempt.post_deploy_update.attempted
+            and attempt.failure is not None
+            and attempt.failure.code.startswith(DEPLOY_BLOCKED_PREFIX)
+            and attempt.failure.code.removeprefix(DEPLOY_BLOCKED_PREFIX)
+            in DEPLOY_BLOCKED_DESCRIPTIONS
+            and attempt.runtime_source.get("provider_outcome", "") != "uncertain"
+        ):
+            raise ServiceRestartRefused(
+                f"A newer deployment may have changed the provider: {attempt.record_id}."
+            )
     expected = deployment.runtime_identity
     if (
         expected is None
+        or inventory.runtime_identity != expected
+        or inventory.artifact_identity != deployment.artifact_identity
+        or inventory.source_git_ref != deployment.source_git_ref
+        or deployment.context != request.context
+        or deployment.instance != request.instance
         or expected.product != request.product
         or expected.context != request.context
         or expected.instance != request.instance
@@ -108,6 +165,8 @@ def plan_service_restart(
         raise ServiceRestartRefused("Current artifact image identity is ambiguous.")
     if expected.source_git_ref != manifest.source_commit:
         raise ServiceRestartRefused("Current artifact source identity is ambiguous.")
+    if request.service == "database" and not deployment.deploy.finished_at:
+        raise ServiceRestartRefused("The database deployment completion time is unavailable.")
     acceptance_id = ""
     if request.instance == "prod":
         decisions = store.list_release_review_decision_records(product=request.product)
@@ -142,9 +201,14 @@ def plan_service_restart(
         server_id=server_id,
         service=request.service,
         expected=expected,
+        database_deployment_finished_at=deployment.deploy.finished_at
+        if request.service == "database"
+        else "",
     )
     if before.health == "unavailable":
         raise ServiceRestartRefused("The service has no supported container health check.")
+    if request.service == "database" and request.mode == "dry-run" and before.running:
+        raise ServiceRestartRefused("Database dependency recovery requires a stopped container.")
     return (
         LaneServiceRestartPlan(
             product=request.product,
@@ -350,7 +414,7 @@ class ServiceRestartAdapter:
                     ServiceRestartRefused("A release operation holds this lane.")
                 )
             try:
-                fresh, *_ = plan_service_restart(
+                fresh, expected, host, token, _ = plan_service_restart(
                     store=self.store, root=self.root, request=self.request, actor=self.plan.actor
                 )
                 if fresh.digest() != self.request.reviewed_plan_sha256:
@@ -358,13 +422,27 @@ class ServiceRestartAdapter:
                         "Restart identity changed; inspect and review again."
                     )
                 if self.require_disposable:
+                    runtime_stopped = fresh.service == "web" and not fresh.before.running
+                    if fresh.service == "database":
+                        runtime_stopped = not inspect_service(
+                            host=host,
+                            token=token,
+                            app_name=fresh.app_name,
+                            server_id=fresh.server_id,
+                            service="web",
+                            expected=expected,
+                        ).running
                     require_disposable_lane(
                         self.store,
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
+                        same_artifact_restart=not fresh.before.running,
+                        runtime_stopped=runtime_stopped,
                     )
             except DisposableLaneSafetyUnknown as error:
+                raise ProviderMutationRejectedError(error) from error
+            except ServiceRestartRefused as error:
                 raise ProviderMutationRejectedError(error) from error
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationRejectedError(
@@ -423,6 +501,11 @@ class ServiceRestartAdapter:
                             server_id=self.plan.server_id,
                             service=self.plan.service,
                             expected=self.expected,
+                            database_deployment_finished_at=self.store.read_deployment_record(
+                                self.plan.deployment_record_id
+                            ).deploy.finished_at
+                            if self.plan.service == "database"
+                            else "",
                         )
                     except ServiceInspectionUnavailable:
                         time.sleep(1)

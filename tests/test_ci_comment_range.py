@@ -204,12 +204,12 @@ class CiCommentRangeTests(unittest.TestCase):
                 self.assertEqual(self._assert_range(history, history.base), set())
 
     def test_pr_and_multi_commit_push_cover_the_whole_contribution(self) -> None:
-        for event in ("pull_request", "push"):
+        for event in ("pull_request", "stale_pull_request", "push"):
             with self.subTest(event=event), TemporaryDirectory() as directory:
                 history = self._history(Path(directory))
-                if event == "pull_request":
+                if event != "push":
                     _git(history.root, "checkout", "trunk")
-                    (history.root / "base-only.py").write_text("VALUE = 5\n")
+                    (history.root / "base-only.py").write_text("# Protected prose\nVALUE = 5\n")
                     _git(history.root, "add", ".")
                     _git(history.root, "commit", "-m", "advance PR base")
                     base = _git(history.root, "rev-parse", "HEAD")
@@ -219,11 +219,11 @@ class CiCommentRangeTests(unittest.TestCase):
                     )
                 result = self._exercise(
                     history,
-                    EVENT_NAME=event,
-                    EVENT_REF="refs/pull/1/merge"
-                    if event == "pull_request"
-                    else "refs/heads/trunk",
-                    BASE_SHA=history.base,
+                    EVENT_NAME="push" if event == "push" else "pull_request",
+                    EVENT_REF="refs/pull/1/merge" if event != "push" else "refs/heads/trunk",
+                    BASE_SHA=_git(history.root, "rev-parse", f"{history.base}^1")
+                    if event == "stale_pull_request"
+                    else history.base,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
@@ -237,6 +237,23 @@ class CiCommentRangeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 17, result.stderr)
             parent = _git(history.root, "rev-parse", "HEAD^1")
             self.assertEqual(self._assert_range(history, parent), {"second.py"})
+
+    def test_pr_requires_a_synthetic_merge_and_base_side_event_ancestry(self) -> None:
+        for source_checkout in (False, True):
+            with self.subTest(source_checkout=source_checkout), TemporaryDirectory() as directory:
+                history = self._history(Path(directory), batch=False)
+                source = _git(history.root, "rev-parse", "HEAD^2")
+                if source_checkout:
+                    _git(history.root, "checkout", "--detach", source)
+                    history = replace(history, head=source)
+                result = self._exercise(
+                    history,
+                    EVENT_NAME="pull_request",
+                    EVENT_REF="refs/pull/1/merge",
+                    BASE_SHA=history.base if source_checkout else source,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(history.capture.exists())
 
     def test_missing_or_unsupported_history_refuses_before_scanning(self) -> None:
         for movement in ("deleted", "unrelated", "shallow"):

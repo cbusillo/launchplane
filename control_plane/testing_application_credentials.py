@@ -56,7 +56,11 @@ def credential_binding_names(
     if (
         not local_keys.issubset({item.binding_key for item in requirements})
         or not local_keys.issubset(delivered)
-        or any(item.owner_input is not None for item in requirements if item.binding_key in keys)
+        or any(
+            item.owner_input is not None or item.external_provider is not None
+            for item in requirements
+            if item.binding_key in keys
+        )
     ):
         raise ValueError(
             "Local generation requires declared delivered binding names without external owner input."

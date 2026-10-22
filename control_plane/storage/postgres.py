@@ -8579,6 +8579,31 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def read_abandoned_testing_original(
+        self, product: str, recovery_reference: str
+    ) -> LaunchplaneIdempotencyRecord | None:
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        records = self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
+                LaunchplaneIdempotencyRow.route_path == GENERIC_WEB_DEPLOY_ROUTE,
+                LaunchplaneIdempotencyRow.state == "completed",
+                LaunchplaneIdempotencyRow.payload["response_payload"]["abandonment"][
+                    "recovery_reference"
+                ].as_string()
+                == recovery_reference,
+            ),
+            order_by=(LaunchplaneIdempotencyRow.record_id,),
+            limit=2,
+        )
+        if len(records) > 1:
+            raise ValueError("Abandoned testing reference is ambiguous.")
+        return records[0] if records else None
+
     def read_generic_web_source_snapshot(
         self, *, product: str, context_name: str, instance_name: str
     ) -> GenericWebSourceSnapshot:

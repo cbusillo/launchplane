@@ -5946,6 +5946,110 @@
         "title": "DetachedApplicationRetirementRequest",
         "type": "object"
       },
+      "DiscordBotResourceObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "default": "",
+            "title": "Application Id",
+            "type": "string"
+          },
+          "bot_id": {
+            "default": "",
+            "title": "Bot Id",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "guild_enumeration_complete": {
+            "default": false,
+            "title": "Guild Enumeration Complete",
+            "type": "boolean"
+          },
+          "guild_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Guild Ids",
+            "type": "array"
+          },
+          "guild_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Guild Status",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "identity_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Identity Status",
+            "type": "string"
+          },
+          "provider": {
+            "const": "discord_bot",
+            "default": "discord_bot",
+            "title": "Provider",
+            "type": "string"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at"
+        ],
+        "title": "DiscordBotResourceObservation",
+        "type": "object"
+      },
       "DiscussionTopicInput": {
         "additionalProperties": false,
         "properties": {
@@ -10812,6 +10916,7 @@
               "retry_original_operation",
               "close_out_observed",
               "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Recovery Action",
@@ -10939,6 +11044,7 @@
               "retry_original_operation",
               "close_out_observed",
               "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Proposed Action",
@@ -22173,6 +22279,13 @@
       "MergeTrainStallObservation": {
         "additionalProperties": false,
         "properties": {
+          "blocked_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Blocked Since",
+            "type": "object"
+          },
           "progress_key": {
             "default": "",
             "title": "Progress Key",
@@ -27058,6 +27171,70 @@
           "truncated"
         ],
         "title": "OriginalReviewHistoryResponse",
+        "type": "object"
+      },
+      "OutboxInspection": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Deliveries",
+            "type": "array"
+          },
+          "notification_policies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Notification Policies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "complete",
+          "counts",
+          "deliveries",
+          "notification_policies"
+        ],
+        "title": "OutboxInspection",
+        "type": "object"
+      },
+      "OutboxInspectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/OutboxInspection"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "inspection"
+        ],
+        "title": "OutboxInspectionResponse",
         "type": "object"
       },
       "OutgoingEmailQuery": {
@@ -39933,6 +40110,19 @@
             "title": "Context",
             "type": "string"
           },
+          "external_provider": {
+            "anyOf": [
+              {
+                "const": "discord_bot",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Provider",
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "default": "",
             "title": "Instance",
@@ -50308,6 +50498,33 @@
             "title": "Production Shop Id Sha256",
             "type": "string"
           },
+          "reason": {
+            "default": "diagnostics_unavailable",
+            "enum": [
+              "",
+              "authority_unavailable",
+              "authority_changed",
+              "runtime_unavailable",
+              "runtime_changed",
+              "credential_unavailable",
+              "probe_unavailable",
+              "probe_failed",
+              "configuration_unavailable",
+              "database_identity_unavailable",
+              "database_driver_unavailable",
+              "database_unavailable",
+              "settings_unavailable",
+              "settings_changed",
+              "request_invalid",
+              "request_failed",
+              "response_invalid",
+              "token_rejected",
+              "domain_mismatch",
+              "diagnostics_unavailable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
           "separation": {
             "default": "unknown",
             "enum": [
@@ -50316,6 +50533,22 @@
               "unknown"
             ],
             "title": "Separation",
+            "type": "string"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "authority",
+              "production_runtime",
+              "testing_runtime",
+              "testing_credential",
+              "testing_probe",
+              "production_probe",
+              "evidence",
+              "complete",
+              "unknown"
+            ],
+            "title": "Stage",
             "type": "string"
           },
           "testing_domain_sha256": {
@@ -52450,6 +52683,17 @@
       "TestingCredentialAuditResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52483,6 +52727,17 @@
       "TestingCredentialInventoryResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52568,6 +52823,102 @@
           }
         },
         "title": "TestingExclusionFacet",
+        "type": "object"
+      },
+      "TestingExternalResourceAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingExternalResourceEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "unavailable",
+              "not_configured"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "TestingExternalResourceAudit",
+        "type": "object"
+      },
+      "TestingExternalResourceEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "enum": [
+              "testing",
+              "prod"
+            ],
+            "title": "Instance",
+            "type": "string"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/DiscordBotResourceObservation"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "binding_key",
+          "version_id",
+          "observation"
+        ],
+        "title": "TestingExternalResourceEntry",
         "type": "object"
       },
       "TestingGenerationRetirementRequest": {
@@ -79635,6 +79986,98 @@
         "summary": "Read a bounded page of retained service operation attention"
       }
     },
+    "/v1/outbox/inspection": {
+      "get": {
+        "operationId": "read_outbox_inspection",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboxInspectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect pending outbox delivery kinds and destination references without sending"
+      }
+    },
     "/v1/owner-secret-inputs": {
       "get": {
         "operationId": "read_owner_secret_inputs",
@@ -85366,6 +85809,19 @@
                         "title": "Context",
                         "type": "string"
                       },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
+                      },
                       "instance": {
                         "default": "",
                         "title": "Instance",
@@ -85891,6 +86347,19 @@
                         "default": "",
                         "title": "Context",
                         "type": "string"
+                      },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
                       },
                       "instance": {
                         "default": "",
@@ -95877,6 +96346,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -101203,6 +101682,16 @@
       "get": {
         "operationId": "audit_testing_credentials",
         "parameters": [
+          {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
+            }
+          },
           {
             "in": "header",
             "name": "Authorization",

@@ -36,6 +36,7 @@ def main() -> int:
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product")
     parser.add_argument("--context")
+    parser.add_argument("--external-resources", action="store_true")
     parser.add_argument("--reason", default="")
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
@@ -44,6 +45,8 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    if args.external_resources and args.mode != "audit":
+        parser.error("External resource observation is an audit option.")
     if args.mode != "audit" and (not args.product or not args.context):
         parser.error("Select one product and testing context.")
     if args.mode in {"dry-run", "apply"} and (not args.reason.strip() or not args.evidence_file):
@@ -81,7 +84,7 @@ def main() -> int:
                 service_url=settings["service_url"],
                 path=path,
                 settings=settings,
-                query={},
+                query={"include_external_resources": True} if args.external_resources else {},
                 timeout=120,
             )
             model = (
@@ -96,7 +99,16 @@ def main() -> int:
         if args.mode == "audit":
             print(report.model_dump_json())
             return (
-                1 if any(lane.status in {"unavailable", "overlap"} for lane in report.lanes) else 0
+                1
+                if any(lane.status in {"unavailable", "overlap"} for lane in report.lanes)
+                or (
+                    args.external_resources
+                    and (
+                        report.external_resources is None
+                        or report.external_resources.status != "observed"
+                    )
+                )
+                else 0
             )
         lane = next(lane for lane in report.lanes if lane.context == args.context)
         if args.mode == "readback":
