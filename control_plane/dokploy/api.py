@@ -62,10 +62,8 @@ _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
     rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
-_COOKIE_LOG_VALUE_PATTERN = re.compile(
-    r"""(?i)((?<![\w-])["']?(?:set-)?cookie["']?\s*[=:]\s*)"""
-    r"""(?:(?P<quote>["'])(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)|[^\r\n]+)"""
-)
+_COOKIE_LOG_KEY_PATTERN = re.compile(r"""(?i)(?<![\w-])["']?(?:set-)?cookie["']?\s*[=:]\s*""")
+_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(r"""\s*(?:\+\s*|(?=["']))""")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
 )
@@ -531,13 +529,57 @@ def normalize_dokploy_compose_service_name(raw_service_name: str) -> str:
     return service_name
 
 
-def _redact_cookie_value(match: re.Match[str]) -> str:
-    quote = match["quote"] or ""
-    return f"{match[1]}{quote}[redacted]{quote}"
+def _cookie_value_end(text: str, start: int) -> int:
+    closing = {"[": "]", "{": "}", '"': '"', "'": "'"}
+    if start >= len(text):
+        return start
+    if text[start] not in closing:
+        newline = re.search(r"[\r\n]", text[start:])
+        return start + newline.start() if newline else len(text)
+    stack = [closing[text[start]]]
+    index = start + 1
+    while index < len(text):
+        character = text[index]
+        if stack[-1] in {'"', "'"}:
+            if character == "\\":
+                index += 2
+                continue
+            if character == stack[-1]:
+                stack.pop()
+        elif character in closing:
+            stack.append(closing[character])
+        elif character == stack[-1]:
+            stack.pop()
+        elif character in "]}":
+            return len(text)
+        index += 1
+        if not stack:
+            return index
+    return len(text)
+
+
+def _redact_cookie_values(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in _COOKIE_LOG_KEY_PATTERN.finditer(text):
+        if match.start() < cursor:
+            continue
+        start = match.end()
+        end = _cookie_value_end(text, start)
+        if text[start : start + 1] in {'"', "'"}:
+            while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
+                end = _cookie_value_end(text, continuation.end())
+        quote = text[start : start + 1]
+        if quote not in {'"', "'"} or text[end - 1 : end] != quote:
+            quote = ""
+        parts.extend((text[cursor:start], f"{quote}[redacted]{quote}"))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:
-    redacted_line = _COOKIE_LOG_VALUE_PATTERN.sub(_redact_cookie_value, raw_line)
+    redacted_line = _redact_cookie_values(raw_line)
     redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', redacted_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
     redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
@@ -546,6 +588,10 @@ def redact_dokploy_log_line(raw_line: str) -> str:
 
 
 def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
+    return tuple(redact_dokploy_log_line("\n".join(_raw_dokploy_log_lines(payload))).splitlines())
+
+
+def _raw_dokploy_log_lines(payload: JsonValue) -> list[str]:
     raw_lines: list[str] = []
     if isinstance(payload, str):
         raw_lines.extend(payload.splitlines())
@@ -569,11 +615,9 @@ def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
                 raw_lines.extend(value.splitlines())
                 break
             if isinstance(value, list):
-                raw_lines.extend(
-                    line for item in value for line in normalize_dokploy_log_payload(item)
-                )
+                raw_lines.extend(line for item in value for line in _raw_dokploy_log_lines(item))
                 break
-    return tuple(redact_dokploy_log_line(line) for line in raw_lines)
+    return raw_lines
 
 
 def fetch_dokploy_application_logs(
@@ -1662,11 +1706,10 @@ def _schedule_execution_failure(
 def _bounded_redacted_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
     remaining_length = _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH
     redacted_lines: list[str] = []
-    for line in lines:
+    for line in normalize_dokploy_log_payload(list(lines)):
         if remaining_length <= 0:
             break
-        redacted_line = redact_dokploy_log_line(line)
-        redacted_lines.append(redacted_line[:remaining_length])
+        redacted_lines.append(line[:remaining_length])
         remaining_length -= len(redacted_lines[-1])
     return tuple(redacted_lines)
 

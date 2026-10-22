@@ -2823,6 +2823,12 @@ Conventional onboarding creates new products only.
 - Runtime log searches filter the bounded redacted tail locally, preserving
   Dokploy's literal, case-insensitive behavior while returning an empty list
   when no lines match. Real provider errors still fail the read.
+- Cookie and Set-Cookie values are redacted across each complete returned batch
+  or provider-error body before local tailing, filtering, or error truncation.
+  Quoted values, nested containers and string concatenations retain context
+  across lines; incomplete values suppress the rest of the available value.
+  Adjacent diagnostics survive completed values. Continuations whose opener
+  the provider already omitted cannot be identified as cookie values.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
   /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
   status with exact `subject` and `recipient` filters plus a timezone-qualified

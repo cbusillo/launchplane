@@ -158,7 +158,8 @@ class DokployConfigTests(unittest.TestCase):
                 b'{"message":"Remote command failed with exit code 1",'
                 b'"DATABASE_URL":"postgresql://user:password@database/example",'
                 b'"SERVICE_TOKEN":"secret-token",'
-                b'"headers":{"Set-Cookie":"session_id=cookie-secret; HttpOnly"}}'
+                b'"headers":{"Set-Cookie":[\n"session_id=cookie-secret; HttpOnly",\n'
+                b'"other=made-up-cookie"]},"status":502}'
             ),
         )
         self.addCleanup(error.close)
@@ -177,6 +178,8 @@ class DokployConfigTests(unittest.TestCase):
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("secret-token", raised.exception.format_message())
         self.assertNotIn("cookie-secret", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
+        self.assertIn('"status":502', raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
 
     def test_dokploy_request_closes_http_error_when_its_body_times_out(self) -> None:
@@ -487,6 +490,9 @@ class DokployConfigTests(unittest.TestCase):
                     "sh: 1: npx: not found",
                     "DATABASE_URL=postgresql://user:password@database/example",
                     "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                    "'Cookie': [",
+                    "'session_id=made-up-cookie'",
+                    "]",
                 ),
             ),
         ):
@@ -504,6 +510,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIn("npx: not found", raised.exception.format_message())
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("opaque-secret-payload", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
         self.assertIn("DATABASE_URL=[redacted]", raised.exception.format_message())
         self.assertIn("PREVIEW_DB_ARGS_BASE64=[redacted]", raised.exception.format_message())
 
@@ -683,7 +690,7 @@ class DokployConfigTests(unittest.TestCase):
             control_plane_dokploy.redact_dokploy_log_line(
                 '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
             ),
-            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]',
+            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]}',
         )
         self.assertEqual(
             control_plane_dokploy.redact_dokploy_log_line(
@@ -1253,7 +1260,13 @@ target_name = "syo-testing-app"
                 ),
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("started", "SMTP_PASSWORD=[redacted]"),
+                    return_value=(
+                        "started",
+                        "Cookie: [",
+                        "'session_id=made-up-cookie'",
+                        "]",
+                        "SMTP_PASSWORD=[redacted]",
+                    ),
                 ),
             ):
                 result = runner.invoke(
@@ -1268,7 +1281,7 @@ target_name = "syo-testing-app"
                         "--instance",
                         " Testing ",
                         "--lines",
-                        "2",
+                        "3",
                     ],
                 )
 
@@ -1279,7 +1292,8 @@ target_name = "syo-testing-app"
         self.assertEqual(payload["target"]["target_id"], "app-123")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
-        self.assertEqual(payload["logs"]["lines"], ["started", "SMTP_PASSWORD=[redacted]"])
+        self.assertNotIn("made-up-cookie", result.output)
+        self.assertIn("SMTP_PASSWORD=[redacted]", payload["logs"]["lines"])
         self.assertNotIn("secret-token", result.output)
 
     def test_environments_logs_reports_missing_records_without_traceback(self) -> None:
