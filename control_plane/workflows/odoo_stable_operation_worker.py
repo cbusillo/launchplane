@@ -1037,7 +1037,9 @@ def run_odoo_stable_operation_worker_loop(
                 last_sweep_at = monotonic()
                 try:
                     request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                        cast(ProductReconcileStore, record_store),
+                        _utc_now_timestamp(),
+                        control_plane_root=control_plane_root_path,
                     )
                 except Exception:
                     logging.exception("Product reconcile sweep failed.")

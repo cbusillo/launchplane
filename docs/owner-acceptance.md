@@ -66,7 +66,22 @@ The preview reconciler refreshes the Client-review check independently of
 preview planning and delivery, including a deferred operation, an unknown
 provider outcome, or a failure to recover the original preview proof. The
 publisher rereads the PR and saved decisions, even when there is no new preview
-comment to post. Valid engineering-only notes
+comment to post, or when an open PR's preview is being destroyed. The open-PR
+sweep also refreshes reviews for products without previews or testing lanes;
+failed publication retries through the same reconcile row on a later sweep.
+When its fresh PR read observes a closed change, the publisher can still deliver
+already-requested saved Client feedback. It skips current review projection,
+decision-base binding, acceptance carry and retired-check maintenance, even if
+cleanup replaced its original reason with a retry limit, busy operation or
+recovery failure. **Retry delivery** remains available after closure or merge;
+closed cleanup may also retry saved feedback when it invokes the publisher.
+An unavailable read is not evidence of closure; normal best-effort retry behavior
+remains.
+When a product has no Client and the PR has no review label, only an existing
+Advisory App review check bound to that repository, PR and current head is
+completed neutrally. A PR with no earlier matching check stays silent. A review
+label without a Client still leaves the review pending. These updates create no
+decision or acceptance. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
