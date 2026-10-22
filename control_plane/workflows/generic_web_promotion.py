@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import click
 from control_plane.generic_web_source_qualification import (
+    GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     GenericWebPromotionSourceRefused,
     qualified_generic_web_source_inventory,
@@ -80,7 +81,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS = 60
 
 
-class GenericWebPromotionStore(GenericWebDeployStore, Protocol):
+class GenericWebPromotionStore(GenericWebDeployStore, GenericWebSourceQualificationStore, Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...

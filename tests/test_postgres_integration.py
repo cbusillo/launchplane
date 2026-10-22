@@ -9646,6 +9646,177 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_testing_reservation_insert_and_first_effect_serialize_in_both_orders(self) -> None:
+        from control_plane.generic_web_source_qualification import generic_web_source_target_key
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.storage.postgres import MutationEffectAdmissionRefusedError
+        from control_plane.workflows.generic_web_promotion import (
+            GenericWebProdPromotionRequest,
+            resolve_generic_web_promotion_inputs,
+        )
+        from tests.test_generic_web_client_release import GenericWebClientReleaseTests
+
+        for effect_first in (True, False):
+            with self.subTest(effect_first=effect_first), _head_postgres_database() as database_url:
+                fixture = GenericWebClientReleaseTests()
+                with patch(
+                    "tests.test_generic_web_client_release.PostgresRecordStore",
+                    side_effect=lambda **_: PostgresRecordStore(database_url=database_url),
+                ):
+                    fixture.setUp()
+                try:
+                    store = fixture.store
+                    target = store.read_provider_target_record(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    inventory = store.read_environment_inventory(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    deployment = store.read_deployment_record(inventory.deployment_record_id)
+                    target_key = generic_web_source_target_key(
+                        target, deployment.deploy.target_type
+                    )
+                    self.assertEqual(
+                        store.list_held_provider_target_reservations(
+                            provider_target_key=target_key
+                        ),
+                        (),
+                    )
+                    reserved = store.reserve_mutation(
+                        scope="production-source-admission",
+                        route_path="/fixture/promotion",
+                        idempotency_key="first-effect",
+                        request_fingerprint="f" * 64,
+                        lease_owner="production-worker",
+                        provider_target_key="production-race",
+                        reconciliation_key="production-race",
+                    ).record
+                    assert reserved is not None
+                    url = make_url(database_url)
+                    second = PostgresRecordStore(
+                        database_url=url.set(
+                            query={**url.query, "application_name": "source-admission-contender"}
+                        ).render_as_string(hide_password=False)
+                    )
+                    try:
+                        entered, proceed = threading.Event(), threading.Event()
+                        original_lock = store._lock_product_authority_bundle_write
+
+                        def held_lock(session: Any) -> None:
+                            original_lock(session)
+                            entered.set()
+                            if not proceed.wait(10):
+                                raise RuntimeError("Source admission barrier timed out")
+
+                        def qualify(active: PostgresRecordStore) -> None:
+                            resolve_generic_web_promotion_inputs(
+                                record_store=active,
+                                request=GenericWebProdPromotionRequest(
+                                    product=fixture.profile.product
+                                ),
+                            )
+
+                        def checkpoint(active: PostgresRecordStore) -> Any:
+                            with active.provider_evidence_guard(
+                                lambda: reserved,
+                                effect_admission_checkpoint=lambda: qualify(active),
+                            ):
+                                return active.checkpoint_mutation_provider_effect(
+                                    reservation=reserved, effect_phase="first_production_effect"
+                                )
+
+                        def insert_source(active: PostgresRecordStore) -> Any:
+                            return active.reserve_mutation(
+                                scope="testing-source",
+                                route_path="/v1/drivers/generic-web/deploy",
+                                idempotency_key="unresolved-original",
+                                request_fingerprint="a" * 64,
+                                lease_owner="testing-worker",
+                                reconciliation_key="testing-original",
+                                provider_target_key=target_key,
+                                provider_target_origin=ProviderTargetOrigin(
+                                    product=fixture.profile.product,
+                                    context=target.context,
+                                    instance=target.instance,
+                                    provider_id=target.provider_id,
+                                    target_type=deployment.deploy.target_type,
+                                    target_id=target.target_id,
+                                ),
+                            )
+
+                        qualify(store)
+                        with (
+                            patch.object(
+                                store, "_lock_product_authority_bundle_write", side_effect=held_lock
+                            ),
+                            ThreadPoolExecutor(max_workers=2) as executor,
+                        ):
+                            first = executor.submit(
+                                checkpoint if effect_first else insert_source, store
+                            )
+                            self.assertTrue(entered.wait(5))
+                            contender = executor.submit(
+                                insert_source if effect_first else checkpoint, second
+                            )
+                            try:
+                                waiting = 0
+                                deadline = time.monotonic() + 5
+                                with store._engine.connect().execution_options(
+                                    isolation_level="AUTOCOMMIT"
+                                ) as connection:
+                                    while time.monotonic() < deadline:
+                                        waiting = int(
+                                            connection.scalar(
+                                                text(
+                                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='source-admission-contender' AND wait_event_type='Lock'"
+                                                )
+                                            )
+                                            or 0
+                                        )
+                                        if waiting:
+                                            break
+                                        time.sleep(0.01)
+                                self.assertGreater(waiting, 0)
+                            finally:
+                                proceed.set()
+                            first_result = first.result(timeout=10)
+                            self.assertEqual(
+                                first_result.status, "updated" if effect_first else "acquired"
+                            )
+                            if effect_first:
+                                self.assertEqual(contender.result(timeout=10).status, "acquired")
+                            else:
+                                with self.assertRaises(
+                                    MutationEffectAdmissionRefusedError
+                                ) as refused:
+                                    contender.result(timeout=10)
+                                self.assertIsInstance(
+                                    refused.exception.cause, GenericWebPromotionSourceRefused
+                                )
+                        current = store.read_idempotency_record(
+                            scope=reserved.scope,
+                            route_path=reserved.route_path,
+                            idempotency_key=reserved.idempotency_key,
+                        )
+                        assert current is not None
+                        self.assertEqual(bool(current.provider_effect_started_at), effect_first)
+                        with self.assertRaises(GenericWebPromotionSourceRefused):
+                            qualify(store)
+                        self.assertEqual(
+                            store.read_environment_inventory(
+                                context_name=target.context, instance_name="testing"
+                            ),
+                            inventory,
+                        )
+                        self.assertEqual(
+                            store.read_deployment_record(deployment.record_id), deployment
+                        )
+                    finally:
+                        second.close()
+                finally:
+                    fixture.doCleanups()
+
 
 def _attempt_stale_owner_completion(
     database_url: str,
