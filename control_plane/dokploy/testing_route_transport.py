@@ -425,7 +425,7 @@ def main(spec):
     if len(response)>MAX_API_BYTES:
         raise RuntimeError('Managed proxy API response exceeds its bound')
     raw=json.loads(response)
-    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'))
+    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'),discover_external_redirects=spec.get('unavailable_predecessor') is not None and 'external_middlewares' not in spec)
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
     presence, separator, content=file_read.partition('\n')

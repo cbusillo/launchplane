@@ -22,6 +22,7 @@ def select_testing_route_raw(
     host: str,
     points: tuple[str, ...],
     external_middlewares: tuple[str, ...] | None = None,
+    discover_external_redirects: bool = False,
 ) -> dict[str, Any]:
     routers = raw.get("routers")
     if not isinstance(routers, dict):
@@ -46,7 +47,8 @@ def select_testing_route_raw(
             }
             continue
         if (
-            (external_middlewares is None or name in external_middlewares)
+            discover_external_redirects
+            and external_middlewares is None
             and name.endswith("@file")
             and isinstance(item, dict)
             and item.get("redirectScheme", {}).get("scheme") == "https"
@@ -996,6 +998,20 @@ def declared_testing_ingress(configured_compose: str) -> dict[str, str]:
     return {key: value for key, value in labels.items() if key.startswith("traefik.")}
 
 
+def require_original_testing_route_applied(plan: TestingLaneRoute, raw: dict[str, Any]) -> None:
+    preimage = plan.unavailable_preimage
+    if preimage is None:
+        raise ValueError("Original unavailable ingress requires its admitted preimage.")
+    current = select_testing_route_raw(
+        raw, plan.host, plan.public_entrypoints, testing_route_external_middlewares(plan.template)
+    )
+    for section in ("routers", "services", "middlewares"):
+        for name in plan.template["http"].get(section, {}):
+            key = name + "@file"
+            if current[section].get(key) != preimage.raw[section].get(key):
+                raise TestingRoutePending("The original testing ingress has not been applied.")
+
+
 def observe_testing_route(
     plan: TestingLaneRoute, raw: dict[str, Any], owned_document: dict[str, Any] | None
 ) -> str | None:
@@ -1029,7 +1045,7 @@ def observe_testing_route(
             expected = {**expected, "service": plan.route_id + "@file"}
             observed["service"] = str(observed.get("service") or "").removesuffix("@file") + "@file"
             if router.get("status") != "enabled" or observed != expected:
-                if router.get("status") == "enabled":
+                if preimage is None or router.get("status") == "enabled":
                     raise TestingRouteAuthorityChanged(
                         "Owned testing router differs from the admitted lane route."
                     )
@@ -1043,7 +1059,7 @@ def observe_testing_route(
             )
             != (plan.legacy_backend or plan.old_backend)
         ):
-            if router.get("status") == "enabled":
+            if preimage is None or router.get("status") == "enabled":
                 raise TestingRouteAuthorityChanged("Foreign or changed testing router appeared.")
             raise TestingRoutePending("The current testing router is not enabled.")
     present = names & set(matches)

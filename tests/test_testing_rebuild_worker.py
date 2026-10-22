@@ -1077,6 +1077,30 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertIsNone(self.owned)
         self.assert_failed_checkpoint(result)
 
+    def test_unavailable_inverse_waits_for_applied_router_restoration(self) -> None:
+        self.admit_unavailable("absent")
+        original_raw = deepcopy(self.raw)
+        self.fail_public = True
+        switch = self.switch
+
+        def lagging(plan: Any, backend: str | None, **kwargs: Any) -> str:
+            applied = deepcopy(self.raw)
+            result = switch(plan, backend, **kwargs)
+            if backend is None:
+                self.raw = applied
+            return result
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=lagging):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertIsNone(self.owned)
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.raw = original_raw
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+
     def test_lost_unavailable_switch_reply_reconciles_original_writer_once(self) -> None:
         self.admit_unavailable("absent")
         switch = self.switch

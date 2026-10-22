@@ -80,6 +80,7 @@ from control_plane.dokploy.testing_route import (
     route_document_digest,
     testing_route_static_sha256,
     testing_route_external_middlewares,
+    require_original_testing_route_applied,
 )
 from control_plane.dokploy.testing_route_transport import (
     DokployTestingRouteTransport,
@@ -807,6 +808,7 @@ class NativeTestingRebuildExecution:
         if self.route.unavailable_preimage is not None:
             if frame["owned_file"] != self.route.unavailable_preimage.file_content:
                 raise NativeTestingRebuildPending(str(error)) from error
+            require_original_testing_route_applied(self.route, frame["raw"])
         elif (
             observe_testing_route(
                 self.route,
@@ -1655,6 +1657,7 @@ class NativeTestingRebuildExecution:
         preimage = self.route.unavailable_preimage
         if preimage is None or frame["owned_file"] != preimage.file_content:
             raise NativeTestingRebuildPending("The original testing ingress file is not restored.")
+        require_original_testing_route_applied(self.route, frame["raw"])
         state = frame.get("old_availability")
         if state not in {"stopped", "absent", "available", "unknown"}:
             raise NativeTestingRebuildPending("The current predecessor state is unavailable.")
@@ -1811,6 +1814,7 @@ class NativeTestingRebuildExecution:
         frame = self.transport.read()
         if self.route.unavailable_preimage is not None:
             if frame["owned_file"] == self.route.unavailable_preimage.file_content:
+                require_original_testing_route_applied(self.route, frame["raw"])
                 return None
             if frame["owned_file"] == route_document_content(self.route, self.route.new_backend):
                 return self.route.new_backend
