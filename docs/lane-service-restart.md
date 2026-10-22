@@ -12,10 +12,23 @@ or hotfix authority.
 ## Supported lane and identity
 
 `POST /v1/drivers/odoo/service-restart` accepts product, context, instance, service,
-reason and mode (`dry-run`, `apply` or read-only `reconcile`). Only an authenticated admin session or
-scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) may call it. It uses existing
+reason and mode (`dry-run`, `apply` or read-only `reconcile`). An authenticated admin session or
+scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) may call it with existing
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
+
+The service-authenticated Director `local_operator` can also restart an eligible
+testing service under standing direction without a write grant. Immediately
+before the restart checkpoint, under the release lane reservation, it must pass
+the existing [disposable-lane qualification](disposable-lanes.md): current bound
+reproducible and production-isolated evidence, protected-use checks, no staff-testing hold,
+and no target alias. This qualification applies even with an explicit grant.
+Inspect or collect current evidence through `/v1/disposable-lanes/observations`
+before a fresh apply; missing or expired resource/custody evidence returns
+`disposable_lane_safety_unknown`. Completed replay and
+original-request reconciliation remain observational when that eligibility
+changes. Production and other scoped callers keep their policy checks;
+terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
 settled current deployment with a runtime identity and immutable artifact
@@ -38,7 +51,7 @@ one POST. It verifies a later start time, unchanged container/image/configuratio
 runtime identity, and health. A failed verification remains a failed receipt.
 Verification retries unavailable inventory and transient provider reads within
 its bounded window; identity changes fail verification and never cause another
-restart. Authorization uses the current policy, including live revocations.
+restart. Policy-authorized callers use the current policy, including live revocations.
 
 ## Product Ops
 
