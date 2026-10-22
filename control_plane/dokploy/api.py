@@ -560,7 +560,7 @@ def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
     if newline := _LOG_NEWLINE_PATTERN.match(text, start):
         start, indent = _line_body(text, newline.end())
         if (
-            text[start : start + 1] not in {'"', "'", "[", "{"}
+            text[start : start + 1] not in {'"', "'", "[", "{", "("}
             and indent <= key_indent
             and not _COOKIE_PAIR_PATTERN.match(text, start)
             and not text.startswith("- ", start)
@@ -570,7 +570,7 @@ def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
 
 
 def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
-    closing = {"[": "]", "{": "}", '"': '"', "'": "'"}
+    closing = {"[": "]", "{": "}", "(": ")", '"': '"', "'": "'"}
     if start >= len(text):
         return start
     if text[start] not in closing:
@@ -600,7 +600,7 @@ def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
             stack.append(closing[character])
         elif character == stack[-1]:
             stack.pop()
-        elif character in "]}":
+        elif character in "]})":
             return len(text)
         index += 1
         if not stack:

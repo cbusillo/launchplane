@@ -113,13 +113,15 @@ class DokployCookieLogTests(unittest.TestCase):
                 self.assertIn("status=502", redacted)
 
     def test_python_pretty_printed_cookie_strings_redact_implicit_continuations(self) -> None:
-        text = pformat(
-            {"Cookie": "sid=made-up-one; " + "other=made-up-two; " * 4, "status": 502},
-            width=45,
-        )
-        redacted = api.redact_dokploy_log_line(text)
-        self.assertNotIn("made-up-", redacted)
-        self.assertIn("'status': 502", redacted)
+        for value in (
+            "sid=made-up-one; " + "other=made-up-two; " * 4,
+            ("sid=made-up-one", "other=made-up-two"),
+        ):
+            with self.subTest(value=value):
+                text = pformat({"Cookie": value, "status": 502}, width=45)
+                redacted = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", redacted)
+                self.assertIn("'status': 502", redacted)
 
     def test_batch_normalization_shares_cookie_context_across_payload_shapes(self) -> None:
         raw_lines = [

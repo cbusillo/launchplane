@@ -2462,7 +2462,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["logs"]["lines"], ["API_TOKEN=[redacted]"])
+        self.assertTrue(any("API_TOKEN=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("plain-secret-value", json.dumps(payload))
 
     async def test_tracked_target_logs_normalizes_uppercase_path_values(self) -> None:

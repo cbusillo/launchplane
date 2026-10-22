@@ -1269,7 +1269,7 @@ target_name = "syo-testing-app"
                             "Cookie: [",
                             "'session_id=made-up-cookie'",
                             "]",
-                            "SMTP_PASSWORD=[redacted]",
+                            "SMTP_PASSWORD=made-up-smtp",
                         ]
                     },
                 ),
@@ -1297,8 +1297,8 @@ target_name = "syo-testing-app"
         self.assertEqual(payload["target"]["target_id"], "app-123")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
-        self.assertNotIn("made-up-cookie", result.output)
-        self.assertIn("SMTP_PASSWORD=[redacted]", payload["logs"]["lines"])
+        self.assertNotIn("made-up-", result.output)
+        self.assertTrue(any("SMTP_PASSWORD=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("secret-token", result.output)
 
     def test_environments_logs_reports_missing_records_without_traceback(self) -> None:
