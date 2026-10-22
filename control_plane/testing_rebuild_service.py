@@ -1453,17 +1453,18 @@ class NativeTestingRebuildExecution:
             )
             return proof.get("availability") == "absent"
 
+        def remove() -> None:
+            retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload={**self.retained_payload("remove"), "container_ids": identifiers},
+            )
+
         self.run_effect(
             "remove-old-containers",
             absent,
-            lambda dispatch: dispatch(
-                lambda: retained_copy_operation(
-                    host=self.host,
-                    token=self.token,
-                    server_id=self.intent.server_id,
-                    payload={**self.retained_payload("remove"), "container_ids": identifiers},
-                )
-            ),
+            lambda dispatch: dispatch(remove),
             recovery=True,
         )
         self.removed_old_containers = True
