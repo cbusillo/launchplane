@@ -1747,6 +1747,122 @@ class RehearsalScenario(unittest.TestCase):
             adapter=adapter,
         )
 
+    def test_credential_only_prepare_recovers_original_after_store_reopen(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.dokploy.sandbox_placement import IsolatedPlacementObservationRequired
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        before = self.authority()
+        adapter = self.adapter("prepare")
+        allocations: list[str] = []
+
+        def create(root: Path, **kwargs: Any) -> None:
+            kwargs["checkpoint"]()
+            for field in ("project_id", "environment_id", "compose_id"):
+                kwargs["before_create"](field)
+                allocations.append(field)
+                kwargs["record_identity"](field, "own-" + field)
+
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ) as placement,
+            patch(
+                "control_plane.dokploy.sandbox_placement.create_isolated_placement",
+                side_effect=SystemExit,
+            ) as create_placement,
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            patch.object(OdooRehearsalAdapter, "host") as host,
+        ):
+            with self.assertRaises(SystemExit):
+                self.run_operation(adapter, "credential-only")
+            database_url = self.store.database_url
+            self.store.close()
+            self.store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(self.store.close)
+            partial = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert partial is not None
+            self.assertTrue(partial.credential_bindings_sha256)
+            self.assertFalse(any((partial.project_id, partial.environment_id, partial.compose_id)))
+            credentials = self.store.list_secret_records(context_name=self.identifier, limit=None)
+            bindings = self.store.list_secret_bindings(context_name=self.identifier, limit=None)
+            adapter = OdooRehearsalAdapter(
+                self.root, self.store, self.product, adapter.request, self.principal, "restart"
+            )
+            journals = self.store.list_held_provider_target_reservations()
+            readback = adapter.prepare_readback(partial, "credential-only")
+            self.assertEqual(readback["recovery_disposition"], "continue_original_prepare")
+            self.assertFalse(readback["provider_effect_phase"])
+            self.assertFalse(readback["completed"])
+            self.assertEqual(self.store.list_held_provider_target_reservations(), journals)
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), partial)
+            with self.assertRaises(RehearsalRefused):
+                adapter.prepare_readback(partial, "replacement-key")
+            self.assertEqual(self.run_operation(adapter, "replacement-key").status, "target_busy")
+            create_placement.reset_mock()
+            for observation in (
+                ("unexpected-project", "", ""),
+                IsolatedPlacementObservationRequired("ambiguous inventory"),
+                api.DokployRequestFailed(
+                    method="GET", path="/api/project.all", detail="unavailable", status_code=503
+                ),
+            ):
+                with self.subTest(observation=type(observation).__name__):
+                    placement.side_effect = (
+                        observation if isinstance(observation, Exception) else None
+                    )
+                    placement.return_value = observation
+                    self.assertEqual(
+                        adapter.prepare_readback(partial, "credential-only")[
+                            "recovery_disposition"
+                        ],
+                        "hold_unknown",
+                    )
+                    self.assertEqual(
+                        self.run_operation(adapter, "credential-only").status, "reconcile_required"
+                    )
+            placement.side_effect = None
+            placement.return_value = ("", "", "")
+            with patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_credential_bindings",
+                return_value="f" * 64,
+            ):
+                self.assertEqual(
+                    adapter.prepare_readback(partial, "credential-only")["recovery_disposition"],
+                    "hold_unknown",
+                )
+                self.assertEqual(
+                    self.run_operation(adapter, "credential-only").status, "reconcile_required"
+                )
+            create_placement.assert_not_called()
+            host.assert_not_called()
+            create_placement.side_effect = create
+            host.return_value = {"state": "prepared", "copies": [], "elapsed_seconds": {}}
+            with patch.object(
+                OdooRehearsalAdapter,
+                "run_script",
+                side_effect=lambda record, *_: {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+                },
+            ):
+                result = self.run_operation(adapter, "credential-only")
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(self.run_operation(adapter, "credential-only").status, "replayed")
+            self.assertEqual(allocations, ["project_id", "environment_id", "compose_id"])
+            self.assertEqual(
+                self.store.list_secret_records(context_name=self.identifier, limit=None),
+                credentials,
+            )
+            self.assertEqual(
+                self.store.list_secret_bindings(context_name=self.identifier, limit=None), bindings
+            )
+            self.assertEqual(self.authority(), before)
+            prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert prepared is not None
+            self.assertEqual(prepared.state, "prepared")
+
     def test_prepare_partial_project_continues_only_original_effect_without_duplicate_create(
         self,
     ) -> None:

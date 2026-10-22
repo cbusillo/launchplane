@@ -3061,7 +3061,9 @@ not identify its root cause; compare provider event logs before diagnosing it.
 The disabled server probe schedule and its deployment logs remain as operational
 evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
 original key can retry only after observing an empty placement and an idle
-probe, with the unchanged reviewed record and no credential binding. Unknown
+probe, with the unchanged original reviewed inputs. If credentials were already
+bound before the first placement checkpoint, their retained binding must match
+the current purpose-local bundle; continuation reuses that bundle. Unknown
 observations keep that key held. Partial prepare and host continuation
 keep their existing recovery path; they do not repeat this fresh preflight.
 
@@ -3334,8 +3336,8 @@ Its fixed `recovery_reason` distinguishes unavailable observation from
 unqualified placement or source/credential prerequisites; provider authorization
 denials retain their HTTP refusal and trace rather than becoming a hold.
 
-`continue_original_prepare` is limited to an interrupted `project_id` effect:
-the original reviewed intent, unchanged source/artifact/placement and existing
+For an interrupted `project_id` effect, the original reviewed intent,
+unchanged source/artifact/placement and existing
 purpose-local credential bindings must agree, and complete provider inventory
 must prove exactly one service-named project with its original description and
 only its empty default environment. Under the original journal and reacquired
