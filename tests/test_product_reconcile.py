@@ -6288,16 +6288,29 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["reason"], "already_serving")
 
     def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
-        self.write_preview()
+        from tests.test_product_review_status import _GitHub, _publisher
+
+        self.write_preview(number=42)
         self.github.pull_request["state"] = "closed"
-        with patch(
-            "control_plane.product_reconcile.run_odoo_preview_apply_operation",
-        ) as operation:
+        review = _GitHub(repository=REPOSITORY)
+        review.state = "closed"
+        publisher = _publisher(review)
+
+        def refresh(
+            current: LaunchplaneProductProfileRecord, number: int
+        ) -> OwnerReviewStatus | None:
+            return publisher.publish(store=self.store, profile=current, pull_request_number=number)
+
+        with (
+            patch.object(self, "write_owner_review_status", side_effect=refresh),
+            patch("control_plane.product_reconcile.run_odoo_preview_apply_operation") as operation,
+        ):
             operation.return_value.status = "target_busy"
-            self.request("preview", 5)
+            self.request("preview", 42)
             busy = self.run_once()
         self.assertEqual(busy.state, "pending")
         self.assertEqual(busy.last_plan["destroy_failed_attempts"], 0)
+        self.assertEqual(review.writes, [])
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
 
     def test_transport_failure_during_destroy_does_not_consume_attempts(self) -> None:
@@ -6545,6 +6558,41 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_closed_cleanup_retry_limit_does_not_republish_review(self) -> None:
+        from tests.test_product_review_status import _GitHub, _publisher
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 42)
+        self.reconcile()
+        review = _GitHub(repository=REPOSITORY)
+        publisher = _publisher(review)
+        profile = self.store.read_product_profile_record("site")
+        publisher.publish(store=self.store, profile=profile, pull_request_number=42)
+        writes = list(review.writes)
+        review.state = "closed"
+        review.labels = ()
+        review.body = "## Client test notes\nNothing for the Client to test: CI only."
+        self.github.pull_request["state"] = "closed"
+
+        def refresh(
+            current: LaunchplaneProductProfileRecord, number: int
+        ) -> OwnerReviewStatus | None:
+            return publisher.publish(store=self.store, profile=current, pull_request_number=number)
+
+        with (
+            patch.object(self, "write_owner_review_status", side_effect=refresh),
+            patch(
+                "control_plane.product_reconcile.resolve_generic_web_preview_slug",
+                side_effect=click.ClickException("preview slug unavailable"),
+            ),
+        ):
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                self.request("preview", 42)
+                result = self.run_once()
+        self.assertEqual(result.last_plan["reason"], "preview_destroy_retry_limit")
+        self.assertEqual(review.writes, writes)
+        self.assertEqual(review.check_runs[0]["status"], "in_progress")
+
     def test_pr_closed_during_scan_never_reaches_preview_provider(self) -> None:
         from control_plane.artifact_scan import ArtifactScanResult
 
@@ -8457,6 +8505,31 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
     def test_delivery_discovery_revokes_its_token_and_retries_unavailable_reads(self) -> None:
         from control_plane.launchplane_github_delivery import DeliveryGitHubCredentialsUnavailable
 
+        attempts: list[str] = []
+        minted: list[str] = []
+        revoked: list[str] = []
+
+        def resolve(**request: object) -> str:
+            self.assertEqual(request["control_plane_root"], self.root)
+            self.assertEqual(request["repository"], REPOSITORY)
+            self.assertEqual(request["purpose"], "repository_read")
+            attempts.append(REPOSITORY)
+            if len(attempts) == 1:
+                raise DeliveryGitHubCredentialsUnavailable("repository_inventory")
+            minted.append("read-token")
+            return minted[-1]
+
+        def api_request(**request: object) -> None:
+            if request.get("method") != "DELETE":
+                raise AssertionError("Discovery must not write with the Delivery token")
+            token = request["token"]
+            assert isinstance(token, str)
+            revoked.append(token)
+
+        def transport(*, token: str) -> FakeGitHub:
+            self.assertIn(token, minted)
+            return self.github
+
         with (
             patch(
                 "control_plane.product_reconcile._repository_read_transport",
@@ -8464,17 +8537,14 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
             ),
             patch(
                 "control_plane.workflows.launchplane.resolve_launchplane_github_token",
-                side_effect=[
-                    DeliveryGitHubCredentialsUnavailable("repository_inventory"),
-                    "read-token",
-                ],
-            ) as token,
+                side_effect=resolve,
+            ),
             patch(
-                "control_plane.workflows.launchplane.github_api_request", return_value=None
-            ) as revoke,
+                "control_plane.workflows.launchplane.github_api_request", side_effect=api_request
+            ),
             patch(
                 "control_plane.product_reconcile.GitHubBuildProvenanceTransport",
-                return_value=self.github,
+                side_effect=transport,
             ),
             patch(
                 "control_plane.product_reconcile.resolve_build_provenance_transport",
@@ -8491,16 +8561,8 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
             )
         self.assertNotIn("site:preview:8", first)
         self.assertIn("site:preview:8", second)
-        token.assert_called_with(
-            control_plane_root=self.root,
-            context_name="",
-            repository=REPOSITORY,
-            purpose="repository_read",
-            report_failure=True,
-        )
-        revoke.assert_called_once_with(
-            path="/installation/token", token="read-token", method="DELETE"
-        )
+        self.assertTrue(minted)
+        self.assertEqual(revoked, minted)
 
     def test_failed_review_write_completes_on_the_next_sweep_without_runtime_work(self) -> None:
         from tests.test_product_review_status import _GitHub, _publisher

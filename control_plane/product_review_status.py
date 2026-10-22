@@ -72,6 +72,7 @@ class _PullRequestFacts:
     head_sha: str
     labels: frozenset[str]
     repository_id: str
+    state: str = ""
     base_branch: str = ""
     body: str = ""
     head_ref: str = ""
@@ -180,6 +181,8 @@ class OwnerReviewStatusPublisher:
                     exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
+                return None
+            if facts.state == "closed":
                 return None
             written: OwnerReviewStatus | None = None
             try:
@@ -332,6 +335,7 @@ class OwnerReviewStatusPublisher:
             payload, read=lambda path: self.api_request(path=path, token=token)
         )
         return _PullRequestFacts(
+            state=str(payload.get("state") or ""),
             pure_dependency_update=dependency_only,
             head_sha=head_sha.strip().lower(),
             labels=labels,

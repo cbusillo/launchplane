@@ -74,6 +74,7 @@ class _GitHub:
         self.head_sha = head_sha
         self.head_ref = "pr-42"
         self.base_ref = ""
+        self.state: str | None = "open"
         self.statuses: list[dict[str, object]] = []
         self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
@@ -108,6 +109,7 @@ class _GitHub:
             self.writes.append((method, path, body))
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
+                "state": self.state,
                 "body": self.body,
                 "head": {
                     "sha": self.head_sha,
@@ -277,6 +279,57 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
         self.assertEqual(github.revoked_app_tokens, 1)
         self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
+
+    def test_closed_pr_leaves_check_and_pending_decision_feedback_untouched(self) -> None:
+        github = _GitHub()
+        self._publish(github)
+        decision = _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        github.state = "closed"
+        writes = list(github.writes)
+        with (
+            patch("control_plane.product_review_status.record_decision_base") as base,
+            patch("control_plane.product_review_status.carry_owner_acceptance") as carry,
+            patch(
+                "control_plane.product_review_status.OwnerReviewStatusPublisher._advisory_token",
+                autospec=True,
+                side_effect=lambda _publisher, repository, repository_id: _app_token(
+                    repository, repository_id
+                ),
+            ) as advisory,
+        ):
+            self._publish(github, retire_leftovers=True)
+        self.assertEqual(github.writes, writes)
+        self.assertEqual(github.check_runs[0]["status"], "in_progress")
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (decision,),
+        )
+        base.assert_not_called()
+        carry.assert_not_called()
+        advisory.assert_not_called()
+
+    def test_unknown_pr_state_does_not_suppress_review_refresh(self) -> None:
+        github = _GitHub()
+        github.state = None
+        self._publish(github)
+        self.assertEqual(github.check_runs[0]["status"], "in_progress")
+
+    def test_failed_pr_read_can_refresh_on_the_next_attempt(self) -> None:
+        github = _GitHub()
+        with (
+            patch(
+                "control_plane.product_review_status.OwnerReviewStatusPublisher._pull_request_facts",
+                side_effect=click.ClickException("Read unavailable"),
+            ),
+            self.assertLogs("control_plane.product_review_status", "WARNING"),
+        ):
+            self._publish(github)
+        self.assertEqual(github.writes, [])
+        self._publish(github)
+        self.assertEqual(github.check_runs[0]["status"], "in_progress")
 
     def test_removed_review_label_or_client_completes_only_the_bound_existing_check(self) -> None:
         for remove_client in (False, True):
