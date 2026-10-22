@@ -80,6 +80,7 @@
     "policies": [
       "docs/policies/coding-standards.md"
     ],
+    "odooShopifyIdentity": "docs/odoo-shopify-identity.md",
     "odooWebsiteSettings": "docs/odoo-website-settings.md",
     "launchplaneMergeTrain": "https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/merge-train.md"
   },

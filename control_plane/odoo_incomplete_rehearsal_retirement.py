@@ -56,10 +56,75 @@ def later_phase_copies(record: OdooUpgradeRehearsalRecord, state: str) -> bool:
     ]
 
 
+def original_validation_attempt(original: LaunchplaneIdempotencyRecord) -> str:
+    from control_plane.provider_operations import build_provider_operation_key
+
+    return canonical_json_sha256(
+        {
+            "operation_key": build_provider_operation_key(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+                request_fingerprint=original.request_fingerprint,
+                reconciliation_key=original.reconciliation_key,
+            )
+        }
+    )
+
+
+def require_abandonable_validation(
+    record: OdooUpgradeRehearsalRecord,
+    original: LaunchplaneIdempotencyRecord | None,
+    observed_at: str,
+) -> None:
+    if (
+        record.state != "switched"
+        or not later_phase_copies(record, "switched")
+        or original is None
+        or original.state not in {"running", "reconcile_required"}
+        or original.provider_target_key != record.rehearsal_id
+        or original.reconciliation_key
+        != canonical_json_sha256({"rehearsal": record.rehearsal_id, "action": "validate-business"})
+        or original.provider_effect_phase != "validate-business"
+        or not original.provider_effect_started_at
+        or (
+            original.state == "running"
+            and parse_launchplane_mutation_timestamp(
+                original.lease_expires_at, field_name="lease_expires_at"
+            )
+            > parse_launchplane_mutation_timestamp(observed_at, field_name="observed_at")
+        )
+    ):
+        raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+
+
 @dataclass
 class IncompleteRehearsalRetirement:
     adapter: OdooRehearsalAdapter
     original_key: str
+
+    @property
+    def abandoning(self) -> bool:
+        return self.adapter.request.action == "abandon-validation"
+
+    def abandoned_original(
+        self, record: OdooUpgradeRehearsalRecord
+    ) -> LaunchplaneIdempotencyRecord:
+        original = self.adapter.store.read_idempotency_record(
+            scope=record.principal,
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
+            idempotency_key=self.original_key,
+        )
+        require_abandonable_validation(
+            record, original, self.adapter.store.mutation_observation_timestamp()
+        )
+        assert original is not None
+        if any(
+            held.record_id != original.record_id and held.provider_target_key == record.rehearsal_id
+            for held in self.adapter.store.list_held_provider_target_reservations()
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+        return original
 
     def reservation_scope(self) -> str:
         return self.adapter.principal + "|incomplete-retirement"
@@ -70,7 +135,7 @@ class IncompleteRehearsalRetirement:
         return canonical_json_sha256(
             {
                 "product": self.adapter.product,
-                "action": "retire-incomplete",
+                "action": self.adapter.request.action,
                 "intent": self.adapter.request.intent(),
                 "rehearsal_id": self.adapter.request.rehearsal_id,
                 "original_key": self.original_key,
@@ -114,6 +179,8 @@ class IncompleteRehearsalRetirement:
         return original
 
     def original(self, record: OdooUpgradeRehearsalRecord) -> LaunchplaneIdempotencyRecord:
+        if self.abandoning:
+            return self.abandoned_original(record)
         if record.copies:
             # An unsettled operation on this rehearsal may still be writing.
             if any(
@@ -179,7 +246,12 @@ class IncompleteRehearsalRetirement:
 
     def host(self, mode: str, check: Callable[[], None]) -> dict[str, object]:
         record = self.record()
-        script = self.adapter.host_script(record, mode, operation_key=self.original_key)
+        original_attempt = (
+            original_validation_attempt(self.original(record)) if self.abandoning else ""
+        )
+        script = self.adapter.host_script(
+            record, mode, operation_key=self.original_key, abandoned_attempt_sha256=original_attempt
+        )
         try:
             self.adapter.validate_apply_script(record, script)
         except ProviderMutationRejectedError as refusal:
@@ -197,6 +269,7 @@ class IncompleteRehearsalRetirement:
             not result.qualified
             or result.intent_sha256 != record.intent_sha256
             or result.attempt_sha256 != canonical_json_sha256({"operation_key": self.original_key})
+            or result.recovery_snapshots_preserved != self.abandoning
             or result.public_route
             or result.business_host_frozen
             or result.recovery_snapshots != record.copies
@@ -390,12 +463,12 @@ class IncompleteRehearsalRetirement:
             public.pop("resources_preserved", None)
             return {
                 **public,
-                "action": "retire-incomplete",
+                "action": self.adapter.request.action,
                 "applied": False,
                 "plan_sha256": digest,
                 "original_key_required": True,
-                "disposes_raw_capture": True,
-                "disposes_recovery_snapshots": bool(record.copies),
+                "disposes_raw_capture": not self.abandoning,
+                "disposes_recovery_snapshots": bool(record.copies) and not self.abandoning,
                 "recovery_tuples_produced": False,
                 "host_disposal": native,
                 "remaining_work": "placement-publication"
@@ -418,6 +491,38 @@ class IncompleteRehearsalRetirement:
             or record.principal != adapter.principal
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if self.abandoning:
+            archived = next(
+                (
+                    item
+                    for item in record.abandoned_validations
+                    if item.original.idempotency_key == self.original_key
+                ),
+                None,
+            )
+            saved = adapter.store.read_idempotency_record(
+                scope=record.principal,
+                route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
+                idempotency_key=self.original_key,
+            )
+            result = saved.response_payload.get("result") if saved else None
+            if (
+                archived is None
+                or saved is None
+                or saved.state != "completed"
+                or saved.request_fingerprint != archived.original.request_fingerprint
+                or record.intent_sha256 != canonical_json_sha256(adapter.request.intent())
+                or not isinstance(result, dict)
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            receipt = IncompleteRehearsalRetirementReceipt.model_validate(result)
+            if (
+                receipt.action != "abandon-validation"
+                or receipt.rehearsal_id != record.rehearsal_id
+                or receipt.host_disposal != archived.host_disposal
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            return receipt.model_dump(mode="json")
         if record.copies:
             return self.later_readback(record)
         original = adapter.store.read_idempotency_record(
@@ -481,7 +586,7 @@ class IncompleteRehearsalRetirement:
     ) -> dict[str, object]:
         result = {
             **self.adapter.public(record),
-            "action": "retire-incomplete",
+            "action": self.adapter.request.action,
             "completed": True,
             "disposed": True,
             "resources_preserved": False,
@@ -489,6 +594,7 @@ class IncompleteRehearsalRetirement:
             "original_operation_released": True,
             "recovery_tuples_produced": False,
             "host_disposal": native,
+            **({"original_outcome": "unknown"} if self.abandoning else {}),
         }
         return IncompleteRehearsalRetirementReceipt.model_validate(result).model_dump(mode="json")
 
@@ -561,8 +667,24 @@ class IncompleteRehearsalRetirement:
             if not self.placement(True, checkpoint):
                 raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
             checkpoint()
+            from control_plane.contracts.odoo_upgrade_rehearsal import AbandonedRehearsalValidation
+
+            archived = record.abandoned_validations
+            if self.abandoning:
+                archived += (
+                    AbandonedRehearsalValidation(
+                        original=original,
+                        validation_count=len(record.business_validations),
+                        attempt_sha256=original_validation_attempt(original),
+                        host_disposal=progress.host_disposal,
+                    ),
+                )
             updated = record.model_copy(
-                update={"state": "retired", "updated_at": datetime.now(timezone.utc)}
+                update={
+                    "state": "retired",
+                    "updated_at": datetime.now(timezone.utc),
+                    "abandoned_validations": archived,
+                }
             )
             result = self.receipt(updated, native)
             adapter.store.complete_incomplete_rehearsal_retirement(

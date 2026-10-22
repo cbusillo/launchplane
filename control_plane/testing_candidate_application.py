@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import re
 
+from control_plane.copy_readback_diagnostics import readback_marker_is_safe
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
@@ -583,7 +584,23 @@ def candidate_restore_terminal(
         raise CandidateObservationUnavailable("Candidate restore is still running or unknown.")
     if require_success and status not in api._DEPLOYMENT_SUCCESS_STATUSES:
         raise ValueError("Candidate restore failed; keep the old copy serving.")
-    return app.restore_schedule_id + ":" + api.deployment_key(new[0]) + ":" + status
+    evidence = app.restore_schedule_id + ":" + api.deployment_key(new[0])
+    if status in api._DEPLOYMENT_FAILURE_STATUSES:
+        markers = post_deploy._read_odoo_post_deploy_log_markers(
+            host=host,
+            token=token,
+            schedule_id=app.restore_schedule_id,
+            schedule_deployment_key=api.deployment_key(new[0]),
+            deployment_id=api.deployment_key(new[0]),
+            deployment=new[0],
+        )
+        predicate = markers.get("readback_failed_predicate", "")
+        kind = markers.get("readback_failure_kind", "")
+        if readback_marker_is_safe(
+            "readback_failed_predicate", predicate
+        ) and readback_marker_is_safe("readback_failure_kind", kind):
+            evidence += f":{predicate}_{kind}"
+    return evidence + ":" + status
 
 
 def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateAllocation) -> str:

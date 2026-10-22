@@ -193,7 +193,8 @@ Fresh ordinary Compose lanes and Odoo previews use the same admission check
 before their first provider create, including the project's and environment's
 creation. Ordinary lane creation admits its private default bridge; repository
 Compose source is not yet available, so this is not a guarantee for additional
-networks a later deployment might declare. Generic-web testing activation and independent production recipients
+networks a later deployment might declare. Generic-web testing activation and
+independent production recipients
 check before recording fresh placement custody or dispatching resource work.
 Their known Compose source reserves the default bridge and all declared private
 networks. Explicit partial-placement recovery and an existing preview continue
@@ -444,24 +445,18 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. For an exact owned preview it
-records the Director agent's observed usage, data custody and isolation facts
-as cleanup-only observations. They cannot qualify runtime sync, deploy or other
-ordinary preview mutations. Preview refresh and retirement still read protective
-reports under their existing rules. Recording wakes normal preview reconciliation.
-The existing client supports `record` with `--preview-id`, `--usage`, `--data`,
-`--production-resources` and the `--usage-evidence`, `--data-evidence`,
-`--isolation-evidence` references. Each observation remains bound
-with required evidence references, the current binding and the existing expiry.
-Use `--lifetime-seconds` for a slower queue, within the service's existing
-fifteen-minute cap; expiry still requires fresh facts before another effect.
-Unknown facts stay unknown. Existing protected reports cannot be overwritten by
-an unverified safe assertion. This supplies scheduled preview cleanup's facts
-through the existing service API, without direct record edits.
-Scheduled preview cleanup requires current unused/reproducible facts and a
-confirmed closed PR. It does not require `production_resources: isolated`:
-credentials the preview reads are outside its destroy set. Production lanes,
-inexact preview identities and targets shared with another lane still refuse.
+authenticated actor and current time itself. Preview `record` assertions are refused.
+For testing, caller-supplied usage, custody and isolation values are stored as
+unknown. Observations retain their actor as provenance;
+historical observer names confer no permission. Preview refresh and retirement
+keep their existing protective-report rules.
+
+Scheduled preview cleanup tears down a preview when its PR is confirmed closed
+or merged, without usage, custody, data-origin or isolation observations. An
+open PR keeps its preview. Unknown PR state remains held until the source can be
+read. Cleanup needs no assertion, waiver or preview fact collector.
+Production lanes, inexact preview identities and targets shared with another
+lane still refuse.
 The destroy path remains limited to the preview's own target and storage;
 production-shared targets, volumes or databases are not disposable. Runtime
 sync, rebuild and refresh retain their existing isolation rules. Credential
@@ -1987,7 +1982,10 @@ and identity. Both source and recipient must use registered remote servers;
 preflight refuses local or missing recipients before testing writes. It refuses
 the provider's local key-generating terminal. Fixed
 commands read `pg_dump` output inside the recorded database container and stream
-the recorded web container's filestore; they create no production dump/archive,
+the recorded web container's filestore. Only the filestore tar may return status
+1, and only when its complete, nonempty C-locale diagnostics contain exclusively
+`file changed as we read it` warnings. Truncated or mixed diagnostics, other
+nonzero statuses and database-dump errors remain failures. The commands create no production dump/archive,
 schedule, attachment pin, password or other persistent source file. A read-only
 probe and source identity checks precede the first testing provider write.
 The source web container's injected runtime identity must match the registered
@@ -2061,9 +2059,23 @@ The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
 the testing filestore. The custom database dump goes through the existing
 SQL-only credential and connection sanitization boundary before a registry
-process runs. Whole-artifact hashes verify copy fidelity. The copy preserves
-pre-existing attachment data and missing-file references as the source export
-contains them; it does not introduce an attachment-repair or completeness policy.
+process runs. Whole-artifact hashes verify copy fidelity. Before recording the
+restored-copy witness or running a registry, the container-export receiver uses
+the rehearsal capture's full attachment validator against the restored database.
+Every file-backed reference must have a safe content-addressed path, its recorded
+size and its SHA-1. Both metadata and content passes share a read-only database
+snapshot and stream the attachment rows. Missing or corrupt references refuse the
+copy; no repair is attempted. Resume rechecks the same integrity gate before
+registry work and preserves an existing copy on refusal. SSH copies retain their
+existing attachment contract. An attachment refusal reports the value-free
+`copy_attachments_verified` predicate with kind `refused` in schedule readback.
+The modern rebuild retains safe schedule diagnostics in its candidate and failure
+evidence when the original provider logs are available; paths, checksums and raw
+logs stay private. Retry reuses the original capture. After original-operation
+readback observes the failed restore as terminal and retains its candidate,
+fix the source and start a fresh rebuild. Legacy generations follow their
+[retirement prerequisites](#retire-an-incomplete-legacy-generation-into-custody).
+Unknown effects remain fenced and never authorize recapture.
 Module, integration and website readback still precede the web gate. Successful
 readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the
@@ -2740,6 +2752,10 @@ rotated. It creates no credential that reaches a live system and grants nobody
 access. No workflow or alternate identity substitutes for a denied service call.
 The source and target copies use the same SQL boundary independently, with a
 sanitized source-version snapshot preserved before the target registry runs.
+Filestore working copies use `cp --reflink=auto` with full-copy fallback where
+reflinks are unsupported; PostgreSQL `CREATE DATABASE ... TEMPLATE` remains a
+full copy, recovery archives and their restoration are unchanged, and capacity
+budgets still cover full copies.
 
 The necessary new boundary is one additive rehearsal record, not another lane or
 release controller. Its compose is reserved under the new context in the existing
@@ -2906,6 +2922,75 @@ Apply is restricted to the authenticated Director agent and PostgreSQL-backed
 execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
+
+### Abandon an unknown validation on a disposable rehearsal
+
+`action: abandon-validation` explicitly abandons only an original
+`validate-business` attempt whose outcome is unknown on a standalone `switched`
+rehearsal. It uses the existing incomplete-retirement executor and reviewed
+inventory, with the unchanged rehearsal intent and original validation key.
+An active reservation lease, host execution lock, container exec, production
+alias, missing or changed INITIAL/FINAL sanitized source tuple, other unsettled
+effect, or a normal or pending validation outcome refuses the action. A person
+using the rehearsal remains a reason to stop under overall direction.
+
+The dry-run verifies both recorded sanitized source tuples against their actual
+bytes, witnesses and capture lineage. Apply stops and removes only the owned
+working runtime, labeled volumes, private network and provider placement. It
+retains the custody directory, both snapshot byte sets, all original markers,
+receipts and diagnostics. The original journal is archived verbatim on the
+rehearsal record, with its keys and provider-attempt identity. Only after native
+resource absence and placement absence are proven does the transaction release
+the old reservation with an abandonment receipt. The old validation key now
+replays that abandonment receipt; its original journal remains verbatim in the
+archive. Completion of the reservation describes abandonment, not a successful
+validation. Historical abandonment readback remains available after rebuilding
+and returns the preserved receipt without inspecting the replacement. Its `original_outcome` remains
+`unknown`; completion of abandonment proves no commit or rollback result for
+the old validation. This route has no production-lane equivalent.
+
+After deployment, use `scripts/odoo-upgrade-rehearsal.py` from that deployed
+revision. Derive private intent files by changing only `action` on the saved
+original intent. For each step run `dry-run`, review the saved evidence, run
+`apply --reviewed-dry-run` with the same payload/key/evidence file, then
+`readback` with that same payload and key:
+
+1. `abandon-validation`, using the original held validation key.
+2. `rebuild-final`, using a new key. This recreates isolated resources from the
+   retained source snapshots, upgrades a fresh working copy of the recorded
+   FINAL tuple, and starts private web only after the existing isolation and
+   health checks. It uses recorded artifact and upgrade settings; it neither
+   recaptures the business host nor replays the initial upgrade. Both source
+   tuples and the abandonment archive remain unchanged. Admission requires the
+   current preserving retirement receipt to match the latest abandonment.
+   Historical abandonment alone cannot authorize rebuilding after a later
+   disposal deleted those tuples.
+3. `validate-business`, using another new key and its own saved review. This
+   validates the newly built working copy. Validation readback needs that
+   attempt's saved evidence file.
+4. `verify`, with its own key and review, to preserve the post-write Odoo tuple
+   for the rollback rehearsal.
+
+Do not reuse an old validation review for the rebuilt copy. The record says
+`rebuilding` while the new placement and working copy are being produced, so
+normal provider ownership checks remain active. Rebuild readback requires that
+attempt's saved review file. If the host has saved its
+completed rebuild receipt but the service response was lost, original-key
+readback and reconciliation adopt that result without replay. A genuinely
+unknown bootstrap or FINAL restoration with no completed receipt stays held
+with both tuples and evidence preserved; this validation-abandonment route does
+not settle it. Before FINAL restoration starts, a capacity refusal retains a
+bound, completed preparation receipt and stopped runtime. Requalify capacity,
+then review a new `rebuild-final` key to reuse that proven preparation. The same
+key replays its refusal. Changed custody, active execution, mismatched placement,
+or an unsettled restoration marker prevents reuse. Read-only precheck failures
+before any new bootstrap or FINAL effect return
+`rehearsal_rebuild_precheck_refused`; requalify the prerequisite before reviewing
+a new key. A started, uncertain bootstrap or FINAL effect stays held. Verify requires a passing
+validation recorded after the latest abandonment; older validation history
+remains evidence. Ordinary
+retirement and every production hold retain their existing contracts.
+
 
 For a held initial execute that never published its recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and

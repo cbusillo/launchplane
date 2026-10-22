@@ -555,18 +555,6 @@ class ProductReconcileTestCase(unittest.TestCase):
         return self.store.request_product_reconcile(target, "2026-09-29T12:00:00Z").target_key
 
     def run_once(self) -> ProductReconcileRequestRecord:
-        # The fake provider's previews are unused, reproducible and isolated.
-        from tests.support.disposable_lanes import record_safety
-
-        profile = self.store.read_product_profile_record("site")
-        for preview in self.store.list_preview_records():
-            record_safety(
-                self.store,
-                profile.product,
-                preview.context,
-                profile.preview.slug_template.format(number=preview.anchor_pr_number),
-                preview=preview,
-            )
         if getattr(self, "advance_preview_recovery_grace", False):
             from control_plane.storage.postgres import LaunchplaneIdempotencyRow
             from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -6076,6 +6064,8 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             **_kwargs: object,
         ) -> dict[str, object]:
             return execute_odoo_preview_dokploy_apply(
+                record_store=self.store,
+                preview_context=self.store.read_product_profile_record("site").preview.context,
                 control_plane_root=self.root,
                 request=request.apply,
                 provider_effect_checkpoint=provider_effect_checkpoint,
@@ -6812,6 +6802,35 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_shared_application_refusal_holds_without_spending_destroy_retries(self) -> None:
+        from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        original = self.driver.destroy
+
+        def refused(**kwargs: Any) -> GenericWebPreviewDestroyResult:
+            return original(**kwargs).model_copy(
+                update={
+                    "destroy_status": "fail",
+                    "error_message": f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: shared target",
+                }
+            )
+
+        with patch(
+            "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
+            side_effect=refused,
+        ):
+            result = self.reconcile()
+        self.assertTrue(result["held"], result)
+        self.assertFalse(result["destroy_failed_attempts"])
+        self.assertNotIn("last_failed_error_code", result)
+        self.assertNotIn("last_failed_error_summary", result)
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
     def test_closed_cleanup_retry_limit_does_not_republish_review(self) -> None:
         from tests.test_product_review_status import _GitHub, _publisher
 

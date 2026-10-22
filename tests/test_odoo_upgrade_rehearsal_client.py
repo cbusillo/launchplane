@@ -193,6 +193,8 @@ class RehearsalClientTests(unittest.TestCase):
         *,
         lost: bool = False,
         changed: bool = False,
+        saved_review: bool = False,
+        reviewed_binding: str = "a" * 64,
         failure: tuple[int, dict[str, Any]] | None = None,
         failure_headers: dict[str, str] | None = None,
         action: str = "prepare",
@@ -234,7 +236,7 @@ class RehearsalClientTests(unittest.TestCase):
             "state": "planned" if mode == "dry-run" else "prepared",
             "applied": mode == "apply",
             "action": draft.action,
-            "plan_sha256": "a" * 64,
+            "plan_sha256": reviewed_binding,
             "public_route": False,
             "business_host_frozen": False,
             "resources_preserved": True,
@@ -283,7 +285,7 @@ class RehearsalClientTests(unittest.TestCase):
             payload = root / "intent.json"
             payload.write_text(draft.model_dump_json())
             evidence = root / "review.json"
-            if mode == "apply":
+            if mode == "apply" or saved_review:
                 reviewed_request = draft.model_dump(
                     mode="json", exclude={"mode", "reviewed_plan_sha256"}
                 )
@@ -295,7 +297,7 @@ class RehearsalClientTests(unittest.TestCase):
                                 "request": reviewed_request,
                                 "key": "fixture-key",
                             },
-                            "plan": {**result, "plan_sha256": "a" * 64, "applied": False},
+                            "plan": {**result, "plan_sha256": reviewed_binding, "applied": False},
                         }
                     )
                 )
@@ -513,6 +515,27 @@ class RehearsalClientTests(unittest.TestCase):
                     "reconciliation_required" if mode == "apply" else "unavailable",
                 )
                 post.assert_called_once()
+
+    def test_rebuild_readback_sends_the_original_saved_review_binding(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        binding = canonical_json_sha256({"fixture": "retired-rebuild-review"})
+        code, _, post = self.call(
+            "readback",
+            action="rebuild-final",
+            saved_review=True,
+            reviewed_binding=binding,
+            response_result={
+                "completed": True,
+                "state": "switched",
+                "public_route": False,
+                "business_host_frozen": False,
+                "resources_preserved": True,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], binding)
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "fixture-key")
 
     def test_readback_preserves_each_original_key_for_an_uncertain_effect(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite

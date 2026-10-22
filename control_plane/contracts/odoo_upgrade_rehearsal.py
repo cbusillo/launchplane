@@ -13,6 +13,7 @@ from control_plane._odoo_rehearsal_diagnostics import (
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_rehearsal_business_validation import (
     BusinessValidationReceipt,
@@ -25,6 +26,8 @@ REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": 
 INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
+    "rehearsal_rebuild_precheck_refused": "FINAL restoration has not started. Rebuild resources and evidence are retained. Requalify the prerequisite and review a new rebuild operation key.",
+    "rehearsal_rebuild_capacity_insufficient": "FINAL restoration has not started. Prepared rebuild resources are retained. Requalify storage capacity and review a new rebuild operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
 RehearsalAction = Literal[
@@ -35,8 +38,12 @@ RehearsalAction = Literal[
     "verify",
     "retire",
     "retire-incomplete",
+    "abandon-validation",
+    "rebuild-final",
 ]
-RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
+RehearsalState = Literal[
+    "planned", "prepared", "upgraded", "rebuilding", "switched", "verified", "retired"
+]
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
 ]
@@ -159,6 +166,7 @@ class IncompleteRehearsalHostResult(BaseModel):
     # A completed later phase disposes the bytes of its recorded recovery
     # snapshots; their receipts stay on the rehearsal record.
     recovery_snapshots: tuple[RehearsalCopyReceipt, ...] = ()
+    recovery_snapshots_preserved: bool = False
     public_route: Literal[False]
     business_host_frozen: Literal[False]
 
@@ -215,7 +223,10 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     resources_preserved: Literal[False]
     public_route: Literal[False]
     business_host_frozen: Literal[False]
-    action: Literal["retire-incomplete"]
+    action: Literal["retire-incomplete", "abandon-validation"]
+    original_outcome: Literal["unknown"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     completed: Literal[True]
     disposed: Literal[True]
     raw_source_retained: Literal[False]
@@ -227,9 +238,27 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     def native_disposal(self) -> "IncompleteRehearsalRetirementReceipt":
         if not self.host_disposal.disposed:
             raise ValueError("Retirement requires completed native disposal.")
+        if (
+            self.action == "abandon-validation"
+        ) != self.host_disposal.recovery_snapshots_preserved or (
+            self.action == "abandon-validation"
+        ) != (self.original_outcome == "unknown"):
+            raise ValueError(
+                "Abandonment retains recovery custody and an unknown original outcome."
+            )
         if self.copies != self.host_disposal.recovery_snapshots:
             raise ValueError("Retained copy receipts must be exactly the disposed snapshots.")
         return self
+
+
+class AbandonedRehearsalValidation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    original: LaunchplaneIdempotencyRecord
+    validation_count: int = Field(ge=0)
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_disposal: IncompleteRehearsalHostResult
+    outcome: Literal["unknown"] = "unknown"
 
 
 class OdooUpgradeRehearsalRecord(BaseModel):
@@ -257,6 +286,9 @@ class OdooUpgradeRehearsalRecord(BaseModel):
         default=(), exclude_if=lambda value: not value
     )
     incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
+    abandoned_validations: tuple[AbandonedRehearsalValidation, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
@@ -427,6 +459,8 @@ class RehearsalHostResult(BaseModel):
     refusal_code: Literal[
         "",
         "rehearsal_storage_capacity_insufficient",
+        "rehearsal_rebuild_capacity_insufficient",
+        "rehearsal_rebuild_precheck_refused",
         "rehearsal_precheck_refused",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
