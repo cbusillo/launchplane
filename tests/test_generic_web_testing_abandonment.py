@@ -255,12 +255,60 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         other = self.original.model_copy(
             update={"record_id": "other-held", "idempotency_key": self.key + ":other"}
         )
-        with patch.object(
-            self.store,
-            "list_held_provider_target_reservations",
-            return_value=(self.original, other),
-        ):
-            self.assertEqual(self.inspect()["proposed_action"], "hold_unknown")
+        for target in (self.original.provider_target_key, "another-target"):
+            with (
+                self.subTest(target=target),
+                patch.object(
+                    self.store,
+                    "list_held_provider_target_reservations",
+                    return_value=(
+                        self.original,
+                        other.model_copy(update={"provider_target_key": target}),
+                    ),
+                ),
+            ):
+                self.assertEqual(self.inspect()["proposed_action"], "hold_unknown")
+
+    def test_tampered_archive_cannot_prove_reference_readback(self) -> None:
+        coordinates = resolve_event_deploy_recovery_coordinates(
+            store=self.store,
+            product=self.fixture.profile.product,
+            context=self.deployment.context,
+            fingerprint=idempotency_request_fingerprint,
+        )
+        plan = self.inspect()
+        status, _ = self.apply(plan["recovery_digest"])
+        self.assertEqual(status, 202)
+        saved = self.store.read_abandoned_testing_original(
+            self.fixture.profile.product, coordinates.reference
+        )
+        assert saved is not None
+        archive = saved.response_payload["abandonment"]
+        altered = saved.model_copy(
+            update={
+                "response_payload": {
+                    **saved.response_payload,
+                    "abandonment": {
+                        **archive,
+                        "original": {**archive["original"], "attempt": self.original.attempt + 1},
+                    },
+                }
+            }
+        )
+        with patch.object(self.store, "read_abandoned_testing_original", return_value=altered):
+            status, result = _invoke_app(
+                self.fixture.app,
+                method="POST",
+                path="/v1/admin/generic-web/deploy-recovery/dry-run",
+                authorization=f"Bearer {_OPERATOR_TOKEN}",
+                payload={
+                    "product": self.fixture.profile.product,
+                    "instance": "testing",
+                    "recovery_reference": coordinates.reference,
+                    "reason": "Read the original disposition.",
+                },
+            )
+        self.assertEqual(status, 409, result)
 
     def test_provider_reads_do_not_hold_global_authority_lock(self) -> None:
         plan = self.inspect()
@@ -438,6 +486,28 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
 
 
 class TestingAbandonmentReconcileTests(unittest.TestCase):
+    def test_refused_artifact_is_checked_before_provider_resolution(self) -> None:
+        scenario = reconciliation.ProductReconcileGenericWebTestingTests()
+        scenario.setUp()
+        self.addCleanup(scenario.doCleanups)
+        scenario.prepare_application_runtime_test()
+        scenario.request()
+
+        def refuse(_profile: object, plan: dict[str, object], _desired: object) -> bool:
+            plan.update(action="wait", held=True, reason="artifact_scan_refused")
+            return False
+
+        with (
+            patch("control_plane.product_reconcile._scan_deploy_artifact", side_effect=refuse),
+            patch.object(
+                scenario.application_inputs_provider,
+                "resolve_deploy_target",
+                side_effect=AssertionError("A refused image must not need the provider."),
+            ),
+        ):
+            result = scenario.reconcile()
+        self.assertEqual(result["reason"], "artifact_scan_refused")
+
     def test_normal_reconcile_qualifies_a_successor_with_the_captured_schedule_baseline(
         self,
     ) -> None:

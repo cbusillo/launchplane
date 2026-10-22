@@ -899,7 +899,10 @@ readback: require `completed`, `replay_completed`, and the saved recovery digest
 A lost apply response retains the request and review for this readback.
 The retained reference reads only that immutable abandonment, even after another
 deployment starts; a missing held reference alone never proves completion.
-Legacy originals without a saved event request remain held.
+Legacy originals without a saved event request remain held. A changed safety
+observation or binding makes the reviewed digest stale; repeat dry-run and review
+before applying. Explicit original-request service calls retain their existing
+deploy authorization; the installed helper uses the safer opaque reference flow.
 
 `settle_testing_failure` requires attributable terminal execution and runs only
 the original schedule hold before publishing truthful failure. Its HTTP 202
