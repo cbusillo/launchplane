@@ -4119,12 +4119,13 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
+            da72490fce13_join_topics_retirement as topics_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), EXPECTED_ALEMBIC_HEAD_REVISION)
-            self.assertEqual(migrate_schema(database_url=url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
+            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
@@ -4634,13 +4635,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     first_future = executor.submit(
                         migrate_schema,
                         database_url=database_url,
-                        target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
                     )
                     self.assertTrue(first_migration_entered.wait(timeout=5))
                     second_future = executor.submit(
                         migrate_schema,
                         database_url=database_url,
-                        target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
                     )
                     time.sleep(0.1)
                     self.assertFalse(second_future.done())
@@ -4652,8 +4651,8 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-        self.assertEqual(revisions, (EXPECTED_ALEMBIC_HEAD_REVISION,) * 2)
-        self.assertEqual(observed_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
+        self.assertEqual(revisions, (SCHEMA_MIGRATION_TARGET_REVISION,) * 2)
+        self.assertEqual(observed_revision, SCHEMA_MIGRATION_TARGET_REVISION)
 
     def test_artifact_dependency_provenance_round_trips_jsonb(self) -> None:
         with _store_for_fresh_head_database() as store:
