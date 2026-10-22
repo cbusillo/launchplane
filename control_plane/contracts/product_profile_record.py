@@ -26,6 +26,9 @@ ProductionUseAuthority = Literal["explicit", "director_agent"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 BumpLevel = Literal["patch", "minor", "major"]
+FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
+    {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
+)
 
 
 class ProductProfileChangedError(ValueError):
@@ -759,6 +762,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.driver_id == "odoo" and any(
+            requirement.external_provider is not None
+            and requirement.binding_key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+            for requirement in self.expected_config.managed_secret_bindings
+        ):
+            raise ValueError("Odoo local password requirements cannot name an external provider.")
         if (
             any(lane.generic_web_cutover is not None for lane in self.lanes)
             and self.driver_id != "generic-web"

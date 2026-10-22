@@ -127,8 +127,12 @@ uv run python scripts/declare-external-resource.py dry-run \
 ```
 
 Review the names-only declaration and repeat the same arguments with `apply`,
-`--reviewed-dry-run` and `--idempotency-key <stable-key>`. Classification explicitly
-retires local generation for that requirement and preserves its other metadata.
+`--reviewed-dry-run` and `--idempotency-key <stable-key>`. Initial classification of
+an already nonlocal binding is additive. Clearing its purpose, changing generation
+intent or shadowing a local declaration uses the existing expected-config action
+and a live product's admin boundary. A denial stays stopped; it is not permission
+to switch identity. The client preserves other requirement metadata. Odoo's
+driver-owned local password keys reject external declarations at profile validation.
 It creates no account, credential, grant, provider resource or runtime change.
 The client checks the saved intent and requirement, then independently reads the
 classification back. An uncertain apply retains its original key and intent;
@@ -142,6 +146,9 @@ All participating products and production/testing lanes must first be authorized
 The service alone decrypts the captured managed version and sends it to Discord's
 fixed HTTPS API using bot authentication. Responses contain identifiers and bounded
 status codes, never tokens, raw provider bodies or value fingerprints.
+Before external-use decryption, the service persists a redacted
+`resolution_attempted` audit event with caller type, request trace, binding/version
+and destination class. Audit persistence failure prevents that external use.
 
 The read observes bot/application identity and guild memberships across every
 reported guild partition, following each partition through an empty terminal page.
@@ -155,7 +162,8 @@ and a shared 90-second network budget. HTTP calls each have at most 10 seconds.
 The service captures authorized profiles, delivered bindings and the managed
 record/version read set used by the local overlap audit before either audit. It
 rechecks those inputs before every provider request and after collection. A change
-discards all external entries with `inputs_changed`; no database lock spans network
+discards all external entries with `inputs_changed` and marks the accompanying
+local lane results unavailable; no database lock spans network
 I/O. Missing declarations report `not_configured`, not a successful external audit.
 
 Every external result says `qualification: "not_evaluated"`. Different bot IDs or

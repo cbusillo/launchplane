@@ -12,6 +12,7 @@ from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRA
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 from control_plane.contracts.product_profile_record import (
+    FRESH_TESTING_LOCAL_CREDENTIAL_KEYS as FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
@@ -1335,9 +1336,6 @@ def read_current_testing_generation(
     return generation
 
 
-FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
-    {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
-)
 FRESH_TESTING_OMITTED_SETTINGS = frozenset(
     {
         "ODOO_WEB_COMMAND",

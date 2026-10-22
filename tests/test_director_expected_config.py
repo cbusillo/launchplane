@@ -2,6 +2,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from pydantic import ValidationError
+
 from httpx2 import Response
 
 from control_plane.contracts.product_profile_record import (
@@ -68,14 +70,16 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-    async def post(self, payload: dict[str, object], key: str = "") -> Response:
+    async def post(
+        self, payload: dict[str, object], key: str = "", token: str = "local-operator-token"
+    ) -> Response:
         return await request(
             self.app,
             "POST",
             "/v1/product-profiles/expected-config/apply",
             payload=payload,
             headers={
-                "Authorization": "Bearer local-operator-token",
+                "Authorization": "Bearer " + token,
                 **({"Idempotency-Key": key} if key else {}),
             },
         )
@@ -112,10 +116,26 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay.json()["replayed"])
 
     async def test_scoped_agent_does_not_inherit_director_declaration_authority(self) -> None:
-        with scoped_agent_transport():
-            response = await self.post(self.payload, "scoped")
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+        for payload in (
+            self.payload,
+            {
+                **self.payload,
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": "API_TOKEN",
+                        "context": self.profile.product,
+                        "instance": "testing",
+                        "external_provider": "discord_bot",
+                    }
+                ],
+            },
+        ):
+            with scoped_agent_transport():
+                response = await self.post(payload, "scoped")
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(
+                self.store.read_product_profile_record(self.profile.product), self.profile
+            )
 
     async def test_external_purpose_updates_existing_requirement_without_clearing_other_metadata(
         self,
@@ -194,7 +214,33 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.status_code, 400, refused.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
         payload["managed_secret_bindings"] = [{**declaration, "testing_local_credential": False}]
-        applied = await self.post(payload, "retire-local-intent")
+        denied = await self.post(payload, "director-cannot-retire-local")
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "local_admins": [
+                        {
+                            "subjects": ["metadata-admin"],
+                            "token_labels": ["metadata-admin"],
+                            "products": [self.profile.product],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.expected_config.apply"],
+                        }
+                    ]
+                }
+            ),
+            bearer_identity_config=_local_operator_bearer_config().model_copy(
+                update={
+                    "local_admin_token": "metadata-admin-token",
+                    "local_admin_subject": "metadata-admin",
+                    "local_admin_token_label": "metadata-admin",
+                }
+            ),
+            record_store_factory=lambda: self.store,
+        )
+        applied = await self.post(payload, "retire-local-intent", token="metadata-admin-token")
         self.assertEqual(applied.status_code, 202, applied.text)
         requirement_after = self.store.read_product_profile_record(
             self.profile.product
@@ -202,6 +248,150 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requirement_after.external_provider, "discord_bot")
         self.assertFalse(requirement_after.testing_local_credential)
         self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_completed_additive_purpose_replay_precedes_changed_generation_state(
+        self,
+    ) -> None:
+        requirement = ProductSecretConfigRequirement(
+            binding_key="API_TOKEN", context=self.profile.product, instance="testing"
+        )
+        self.profile.expected_config.managed_secret_bindings = (requirement,)
+        self.store.write_product_profile_record(self.profile)
+        declaration = {
+            "binding_key": requirement.binding_key,
+            "context": requirement.context,
+            "instance": requirement.instance,
+            "external_provider": "discord_bot",
+        }
+        payload: dict[str, object] = {
+            "product": self.profile.product,
+            "mode": "apply",
+            "reason": "Declare a known external purpose.",
+            "managed_secret_bindings": [declaration],
+        }
+        first = await self.post(payload, "completed-purpose")
+        self.assertEqual(first.status_code, 202, first.text)
+        changed = self.store.read_product_profile_record(self.profile.product)
+        changed.expected_config.managed_secret_bindings = (
+            requirement.model_copy(update={"testing_local_credential": True}),
+        )
+        self.store.write_product_profile_record(changed)
+        replay = await self.post(payload, "completed-purpose")
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+        fresh = await self.post(
+            {
+                **payload,
+                "managed_secret_bindings": [{**declaration, "testing_local_credential": False}],
+            },
+            "new-retirement",
+        )
+        self.assertEqual(fresh.status_code, 403, fresh.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+
+    async def test_external_metadata_retirements_do_not_inherit_additive_authority(self) -> None:
+        for granted in (False, True):
+            self.app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=local_operator_policy(
+                    actions=("product_profile.expected_config.apply",) if granted else (),
+                    contexts=("launchplane",),
+                    token_label="local-owner-read",
+                ),
+                bearer_identity_config=_local_operator_bearer_config(),
+                record_store_factory=lambda: self.store,
+            )
+            for before, update in (
+                ({"external_provider": "discord_bot"}, {"external_provider": None}),
+                ({}, {"external_provider": None, "testing_local_credential": True}),
+                (
+                    {"testing_local_credential": True},
+                    {"external_provider": "discord_bot", "testing_local_credential": False},
+                ),
+                (
+                    {"instance": "", "testing_local_credential": True},
+                    {"external_provider": "discord_bot"},
+                ),
+                (
+                    {"testing_local_credential": True},
+                    {"instance": "", "external_provider": "discord_bot"},
+                ),
+                (
+                    {"instance": "prod", "testing_local_credential": True},
+                    {
+                        "instance": "prod",
+                        "external_provider": "discord_bot",
+                        "testing_local_credential": False,
+                    },
+                ),
+            ):
+                with self.subTest(granted=granted, before=before, update=update):
+                    requirement = ProductSecretConfigRequirement.model_validate(
+                        {
+                            "binding_key": "API_TOKEN",
+                            "context": self.profile.product,
+                            "instance": "testing",
+                            **before,
+                        }
+                    )
+                    self.profile.expected_config.managed_secret_bindings = (requirement,)
+                    self.store.write_product_profile_record(self.profile)
+                    response = await self.post(
+                        {
+                            "product": self.profile.product,
+                            "mode": "apply",
+                            "reason": "Change an existing purpose or generation intent.",
+                            "managed_secret_bindings": [
+                                {
+                                    "binding_key": "API_TOKEN",
+                                    "context": self.profile.product,
+                                    "instance": "testing",
+                                    **update,
+                                }
+                            ],
+                        }
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        self.store.read_product_profile_record(self.profile.product), self.profile
+                    )
+
+    async def test_odoo_builtin_external_declaration_refuses_in_profile_and_http(self) -> None:
+        from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+
+        self.profile = LaunchplaneProductProfileRecord.model_validate(
+            {**self.profile.model_dump(mode="json"), "driver_id": "odoo"}
+        )
+        self.store.write_product_profile_record(self.profile)
+        for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS:
+            declaration = {
+                "binding_key": key,
+                "context": self.profile.product,
+                "instance": "testing",
+                "external_provider": "discord_bot",
+            }
+            with self.subTest(key=key):
+                with self.assertRaises(ValidationError):
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            **self.profile.model_dump(mode="json"),
+                            "driver_id": "odoo",
+                            "expected_config": {"managed_secret_bindings": [declaration]},
+                        }
+                    )
+                response = await self.post(
+                    {
+                        "product": self.profile.product,
+                        "mode": "apply",
+                        "reason": "Cannot reinterpret a driver-owned local password.",
+                        "managed_secret_bindings": [declaration],
+                    }
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.profile.product), self.profile
+                )
 
     async def test_duplicate_external_purpose_updates_cannot_hide_an_intermediate_mutation(
         self,

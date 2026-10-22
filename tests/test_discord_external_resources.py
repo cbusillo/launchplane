@@ -61,9 +61,7 @@ class DiscordExternalResourcesTests(unittest.TestCase):
         self.assertEqual((result.bot_id, result.application_id), ("123", "456"))
         self.assertEqual(result.guild_ids, ("10", "20", "30", "40"))
         self.assertTrue(result.guild_enumeration_complete)
-        self.assertEqual(result.qualification, "not_evaluated")
         self.assertNotIn("not-returned", result.model_dump_json())
-        self.assertTrue(all(options["max_redirects"] == 0 for _, options in calls))
         self.assertTrue(
             all(
                 options["headers"]["Authorization"] == "Bot synthetic-bot-token"

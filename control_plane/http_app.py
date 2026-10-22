@@ -2369,6 +2369,9 @@ def _merge_product_expected_config(
                 "source": request.source_label,
             }
         )
+        merged_profile = LaunchplaneProductProfileRecord.model_validate(
+            merged_profile.model_dump(mode="json")
+        )
 
     runtime_result: dict[str, object] = {
         "added": [
@@ -13867,18 +13870,24 @@ def create_launchplane_fastapi_app(
             and not expected_config_request.requests_removal
             and not any(
                 requirement.owner_input is not None
+                or (
+                    "external_provider" in requirement.model_fields_set
+                    and (
+                        requirement.external_provider is None
+                        or requirement.testing_local_credential
+                    )
+                )
                 for requirement in expected_config_request.managed_secret_bindings
             )
         )
-        if (
-            not director_declaration
-            and not resolved_authz_policy_runtime.allows(
+
+        def policy_authorized() -> bool:
+            return resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.expected_config.apply",
                 product=expected_config_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            )
-            and not (
+            ) or (
                 expected_config_request.mode != "apply"
                 and resolved_authz_policy_runtime.allows(
                     identity=identity,
@@ -13887,7 +13896,8 @@ def create_launchplane_fastapi_app(
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 )
             )
-        ):
+
+        if not director_declaration and not policy_authorized():
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -13928,21 +13938,6 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        if (
-            expected_config_request.mode == "apply"
-            and isinstance(identity, LocalOperatorIdentity)
-            and profile.production_use == "live"
-            and not director_declaration
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="live_product_requires_operator",
-                message=(
-                    "A live product's expected configuration requires an admin for "
-                    "scoped agents, removals, or Client credential requests."
-                ),
-            )
         secret_bindings: tuple[SecretBinding, ...] = ()
         if expected_config_request.remove_managed_secret_bindings:
             list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
@@ -13980,6 +13975,47 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="The declaration conflicts with existing requirement metadata.",
             ) from error
+        if director_declaration and any(
+            "external_provider" in requirement.model_fields_set
+            for requirement in expected_config_request.managed_secret_bindings
+        ):
+            from control_plane.testing_local_credentials import local_credential_keys
+
+            director_declaration = not any(
+                existing.testing_local_credential
+                and not replacement.testing_local_credential
+                and _secret_config_requirement_key(existing)
+                == _secret_config_requirement_key(replacement)
+                for existing in profile.expected_config.managed_secret_bindings
+                for replacement in merged_profile.expected_config.managed_secret_bindings
+            ) and all(
+                local_credential_keys(profile, lane.context)
+                <= local_credential_keys(merged_profile, lane.context)
+                for lane in profile.lanes
+                if lane.instance == "testing"
+            )
+        if not director_declaration and not policy_authorized():
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot retire product expected config metadata.",
+            )
+        if (
+            expected_config_request.mode == "apply"
+            and isinstance(identity, LocalOperatorIdentity)
+            and profile.production_use == "live"
+            and not director_declaration
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message=(
+                    "A live product's expected configuration requires an admin for "
+                    "scoped agents, removals, or Client credential requests."
+                ),
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},

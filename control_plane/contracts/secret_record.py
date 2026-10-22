@@ -8,7 +8,9 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
-SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
+SecretEventType = Literal[
+    "created", "rotated", "imported", "validated", "disabled", "relabelled", "resolution_attempted"
+]
 SecretSharingKind = IntegrationAllowanceKind | Literal["site_shared"]
 SecretValueSource = Literal["supplied", "copy", "provider", "generated"]
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Literal
 
@@ -7,7 +8,12 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretVersion,
+)
 from control_plane.contracts.testing_external_resources import (
     TestingExternalResourceAudit,
     TestingExternalResourceEntry,
@@ -168,6 +174,8 @@ def audit_external_resources(
     profiles: tuple[LaunchplaneProductProfileRecord, ...],
     *,
     captured: ExternalResourceInputSnapshot | None,
+    trace_id: str,
+    actor: str,
     inventory: bool = False,
 ) -> TestingExternalResourceAudit:
     deadline = monotonic() + EXTERNAL_RESOURCE_READ_SECONDS
@@ -186,6 +194,24 @@ def audit_external_resources(
         results = []
         for entry in captured.entries:
             check_current()
+            store.write_secret_audit_event(
+                SecretAuditEvent(
+                    event_id=secrets._audit_event_id(
+                        secret_id=entry.record.secret_id, event_type="resolution_attempted"
+                    ),
+                    secret_id=entry.record.secret_id,
+                    event_type="resolution_attempted",
+                    recorded_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    actor=actor,
+                    detail="External provider observation resolution attempt.",
+                    metadata={
+                        "trace_id": trace_id,
+                        "version_id": entry.version.version_id,
+                        "binding_id": entry.binding.binding_id,
+                        "destination_class": "discord_bot",
+                    },
+                )
+            )
             value = secrets._decrypt_secret_value(entry.version.ciphertext, entry.version.key_id)
             if not value.strip():
                 raise ValueError("The external resource binding is unavailable.")
