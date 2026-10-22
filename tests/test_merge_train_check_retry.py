@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -6,7 +7,10 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
-from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
+from control_plane.merge_train_controller_run_once import (
+    CANDIDATE_CHECK_RETRY_WAIT_SECONDS,
+    try_reflow_failed_merge_train_candidate,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainBaseCheckObservation,
@@ -80,6 +84,14 @@ class CandidateCheckRetryTests(TestCase):
             )
         assert result is not None
         return result
+
+    def retry_deadline(self) -> str:
+        requested_at = self.record.candidate.check_rerun_requested_at
+        assert requested_at is not None
+        return (
+            datetime.fromisoformat(requested_at.replace("Z", "+00:00"))
+            + timedelta(seconds=CANDIDATE_CHECK_RETRY_WAIT_SECONDS)
+        ).isoformat()
 
     def test_retry_is_persisted_before_dispatch_and_survives_restart(self) -> None:
         def dispatch(**kwargs: object) -> None:
@@ -213,7 +225,7 @@ class CandidateCheckRetryTests(TestCase):
             for record in self.store.list_merge_train_batch_candidate_records(status="active")
             if record.candidate.check_rerun_attempts
         )
-        result = self.recover(recorded_at="2026-10-10T13:00:00Z")
+        result = self.recover(recorded_at=self.retry_deadline())
         self.assertEqual(result["reason_code"], "candidate_check_retry_unavailable")
         self.client.add_pull_request_label.assert_not_called()
         self.assertEqual(
@@ -261,7 +273,7 @@ class CandidateCheckRetryTests(TestCase):
         self.assertEqual(result["reason_code"], "candidate_checks_retry_pending")
         self.client.add_pull_request_label.assert_not_called()
 
-        result = self.recover(recorded_at="2026-10-10T12:12:00Z")
+        result = self.recover(recorded_at=self.retry_deadline())
         self.assertEqual(result["reason_code"], "candidate_check_retry_unavailable")
         self.client.add_pull_request_label.assert_not_called()
 
@@ -300,7 +312,7 @@ class CandidateCheckRetryTests(TestCase):
                 self.client.candidate_check_retry_finished.side_effect = MergeTrainGitHubError(
                     "history unavailable", status_code=503
                 )
-                self.recover(recorded_at="2026-10-10T13:00:00Z")
+                self.recover(recorded_at=self.retry_deadline())
                 self.assertEqual(ref["sha"], self.record.candidate.candidate_sha)
         self.client.add_pull_request_label.assert_not_called()
 
