@@ -901,6 +901,8 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
 
 
 def restore_main():
+    global inspection_predicate
+    inspection_predicate = 'copy_inspection_input_valid'
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     gen = spec["generation"]
     namespace = gen["namespace"]
@@ -915,6 +917,7 @@ def restore_main():
     modules = [name.strip() for name in str(spec.get("workflow_environment", {}).get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
     if not (spec.get('storage_maintenance') or spec.get('usage_only') or spec.get('verification_only')) and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
         raise RuntimeError("Testing restore has no exact declared module update intent")
+    inspection_predicate = 'resources_qualified'
     containers = inspect_copy_runtime(spec, expected_instance="testing")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
@@ -922,33 +925,39 @@ def restore_main():
         storage_maintenance(spec, containers)
         return
     if spec.get('inspection_only'):
+        if containers['script-runner'][1].get('State', {}).get('Status') != 'running':
+            raise CopyReadbackRefused('runner_running')
         # Read-only qualification uses this exact same container/storage/network
         # guard as execution. It cannot stop a container, alter a gate or restore.
+        inspection_predicate = 'runner_capabilities_available'
         docker("exec",runner,"python3","-c","import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
+        inspection_predicate = 'copy_database_readable'
         present=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres','_',database,stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
         if present not in {'0','1'}:
-            raise RuntimeError('Ambiguous testing database')
+            raise CopyReadbackRefused('copy_database_readable')
         if present=='1':
+            inspection_predicate = 'copy_generation_witness_matches'
             marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
             if marker!=spec['copy_binding_sha256']:
-                raise RuntimeError('Existing testing database lacks its generation witness')
+                raise CopyReadbackRefused('copy_generation_witness_matches')
         prefix=sys.argv[2]
         if spec.get('verification_only'):
             if present != '1' or any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
-                raise RuntimeError('The installed testing copy is not running')
+                raise CopyReadbackRefused('copy_runtime_running')
             if containers['web'][1]['Image'] != containers['script-runner'][1]['Image']:
-                raise RuntimeError('Testing runner and web images differ')
+                raise CopyReadbackRefused('copy_image_matches')
             image=json.loads(docker('image','inspect',containers['web'][1]['Image']))[0]
             if spec['image_reference'] not in image.get('RepoDigests',[]):
-                raise RuntimeError('The actual installed image digest differs')
+                raise CopyReadbackRefused('copy_image_digest_matches')
             for service in ('web','script-runner'):
                 environment=dict(item.split('=',1) for item in containers[service][1]['Config']['Env'] if '=' in item)
                 identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
                 if not isinstance(identity,dict):
-                    raise RuntimeError('The installed runtime identity is unavailable')
+                    raise CopyReadbackRefused('copy_runtime_identity_matches')
                 identity.pop('deployed_at',None)
                 if identity != spec['runtime_identity']:
-                    raise RuntimeError('The installed deployment identity differs')
+                    raise CopyReadbackRefused('copy_runtime_identity_matches')
+            inspection_predicate = 'copy_web_gate_matches'
             docker('exec',runner,'python3','-c',
                 "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",
                 database,spec['web_gate_path'])
@@ -1160,6 +1169,7 @@ def main():
 
 __LP_STORAGE_MAINTENANCE_LIBRARY__
 
+inspection_predicate = 'native_inspection_complete'
 try:
     main()
 except TestingProviderDenied:
@@ -1169,9 +1179,9 @@ except TestingProviderDenied:
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')
     sys.exit(1)
-except Exception:
+except Exception as error:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+        print(sys.argv[2]+json.dumps({'type':'failed','predicate':error.predicate if isinstance(error, CopyReadbackRefused) else inspection_predicate,'kind':'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}),flush=True)
         sys.exit(1)
     print("odoo_restore_completed=false")
     print("testing_copy_sanitized=false")

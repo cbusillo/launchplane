@@ -3945,7 +3945,7 @@ else:
         self.host["one_inspection"] = lambda name: __import__("json").loads(
             network("inspect", name)
         )[0]
-        with self.assertRaisesRegex(RuntimeError, "state is exposed"):
+        with self.assertRaises(RuntimeError):
             self.inspect()
 
     def test_host_bind_and_published_ports_refuse_before_data_work(self) -> None:

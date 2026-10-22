@@ -29,6 +29,7 @@ from control_plane.connection_isolation_qualification import (
     RESOURCE_QUALIFICATION_PROGRAM,
     resource_inventory_script,
 )
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 
 CONNECTION_ISOLATION_SCHEDULE_NAME = "platform-odoo-connection-isolation"
@@ -70,12 +71,23 @@ context={shlex.quote(context)}
 runtime_identity={shlex.quote(runtime_identity)}
 reviewed_resources={shlex.quote(reviewed_resource_sha256)}
 operation_digest={shlex.quote(operation_digest)}
+readback_predicate={ReadbackPredicate.RUNNER_SELECTED}
+readback_failure_kind=unavailable
+readback_exit() {{
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'readback_failed_predicate=%s\\nreadback_failure_kind=%s\\n' "$readback_predicate" "$readback_failure_kind" >&2
+    fi
+}}
+trap readback_exit EXIT
 if [ -n "$operation_digest" ]; then
     printf 'connection_isolation_operation_sha256=%s\n' "$operation_digest"
 fi
 if [ "$mode" = apply ]; then
+    readback_predicate={ReadbackPredicate.REVIEW_BINDING}
     [[ "$reviewed_resources" =~ ^[a-f0-9]{{64}}$ ]] || exit 1
 fi
+readback_predicate={ReadbackPredicate.EXECUTION_LOCK}
 {post_deploy.odoo_testing_schedule_lock_script(compose_app_name)}
 resolve() {{
     local ids
@@ -85,9 +97,19 @@ resolve() {{
     [ -n "$ids" ] && [ "$(printf '%s\\n' "$ids" | wc -l | tr -d ' ')" = 1 ] || exit 1
     printf '%s' "$ids"
 }}
+readback_predicate={ReadbackPredicate.RUNNER_SELECTED}
 runner=$(resolve script-runner)
+readback_predicate={ReadbackPredicate.WEB_SELECTED}
 web=$(resolve web)
+readback_predicate={ReadbackPredicate.RUNNER_RUNNING}
+runner_running=$(docker inspect -f '{{{{.State.Running}}}}' "$runner")
+if [ "$runner_running" != true ]; then
+    readback_failure_kind=refused
+    exit 1
+fi
+readback_predicate={ReadbackPredicate.RUNNER_IDLE}
 {post_deploy.odoo_testing_idle_runner_script("runner")}
+readback_predicate={ReadbackPredicate.RESOURCES}
 {resource_inventory_script(program=RESOURCE_QUALIFICATION_PROGRAM)}
 if [ "$mode" = apply ]; then
     [ "$(docker inspect -f '{{{{.Image}}}}' "$web")" = "$(docker inspect -f '{{{{.Image}}}}' "$runner")" ] || exit 1
@@ -95,13 +117,20 @@ if [ "$mode" = apply ]; then
     docker exec -u root "$runner" rm -f {shlex.quote(INTEGRATION_READBACK_PASSED_PATH)}
 fi
 isolation_status=0
+readback_predicate={ReadbackPredicate.ISOLATION}
 docker exec -e ODOO_DB_HOST="$database_address" -i "$runner" python3 - "$database" {shlex.quote(instance)} "$mode" <<'PY' || isolation_status=$?
 {CONNECTION_ISOLATION_PROGRAM}PY
 readback_status=0
+readback_predicate={ReadbackPredicate.INTEGRATIONS}
 docker exec -e ODOO_DB_HOST="$database_address" -i "$runner" python3 - "$database" {shlex.quote(readback_spec)} "$mode" <<'PY' || readback_status=$?
 {INTEGRATION_READBACK_PROGRAM}PY
-[ "$isolation_status" -eq 0 ] && [ "$readback_status" -eq 0 ] || exit 1
+if [ "$isolation_status" -ne 0 ]; then
+    readback_predicate={ReadbackPredicate.ISOLATION}
+    exit 1
+fi
+[ "$readback_status" -eq 0 ] || exit 1
 if [ "$mode" = apply ]; then
+    readback_predicate={ReadbackPredicate.WEB_RESTORED}
     # Release only the actual current database and payload after full readback.
     payload=$(docker exec "$runner" sh -c 'printf %s "${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64-}}"')
     digest=$(printf '%s\\n%s' "$database" "$payload" | sha256sum | cut -d ' ' -f 1)
@@ -236,6 +265,15 @@ def run_connection_isolation(
     if evidence.get("connection_isolation_resources_ok") != "true":
         raise post_deploy.OdooPostDeployReadbackFailure(
             "Testing resources were not qualified.", evidence=evidence
+        )
+    if evidence.get("integration_readback_ok") not in {"true", "false"}:
+        raise post_deploy.OdooPostDeployReadbackFailure(
+            "Integration readback returned no observation.",
+            evidence={
+                **evidence,
+                "readback_failed_predicate": ReadbackPredicate.INTEGRATIONS,
+                "readback_failure_kind": "unavailable",
+            },
         )
     if mode != "dry-run":
         if evidence.get("connection_isolation_ok") != "true":

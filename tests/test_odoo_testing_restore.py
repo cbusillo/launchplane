@@ -18,6 +18,7 @@ from control_plane.dokploy.compose import (
     _odoo_web_command,
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -261,6 +262,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             suffixes = ("db",) if service == "database" else ("data", "logs")
             self.containers[service] = {
                 "Id": service,
+                "State": {"Status": "running"},
                 "Config": {
                     "Image": self.spec["image_reference"],
                     "Labels": {
@@ -482,6 +484,28 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 for call in self.calls
             )
         )
+
+    def test_stopped_runner_inspection_identifies_predicate_without_exec_or_private_text(
+        self,
+    ) -> None:
+        self.spec.update(inspection_only=True, usage_only=True)
+        self.containers["script-runner"]["State"] = {"Status": "exited"}
+        command = self.command
+
+        def stopped(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[:3] == ["docker", "exec", "script-runner"]:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=b"", stderr=b"private-provider-value"
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=stopped):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frames = [json.loads(line.removeprefix("fixture:")) for line in output.splitlines()]
+        self.assertEqual(frames[0].get("predicate"), ReadbackPredicate.RUNNER_RUNNING)
+        self.assertNotIn("private-provider-value", output)
+        self.assertFalse(any(call[:2] == ["docker", "exec"] for call in self.calls))
 
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,
@@ -714,7 +738,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertEqual(frames, [{"type": "failed"}])
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "failed")
+        self.assertEqual(frames[0]["kind"], "unavailable")
 
     def test_host_lock_permission_error_is_failed_not_provider_denied(self) -> None:
         self.spec.update(inspection_only=True, verification_only=True)
@@ -726,7 +752,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertEqual(frames, [{"type": "failed"}])
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "failed")
+        self.assertEqual(frames[0]["kind"], "unavailable")
 
     def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
         from control_plane.odoo_testing_drill_usage import parse_drill_usage_result

@@ -55,6 +55,11 @@ from control_plane.integration_readback import (
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
+from control_plane.copy_readback_diagnostics import (
+    READBACK_FAILURE_MARKERS,
+    readback_failure_evidence,
+    readback_marker_is_safe,
+)
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     FreshRestoreScriptArguments,
@@ -205,6 +210,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         ODOO_PREVIEW_RESOURCES_OK_MARKER,
         TESTING_RESOURCES_INCOMPLETE_MARKER,
         "connection_isolation_resources_ok",
+        "log_available",
         "testing_copy_runtime_isolated",
         "testing_copy_pre_registry_sanitized",
         "testing_copy_sanitized",
@@ -225,6 +231,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {"website_settings_sha256"}
+    | READBACK_FAILURE_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -376,6 +383,7 @@ class OdooPostDeployReadbackFailure(click.ClickException):
             for key, value in evidence.items()
             if _safe_odoo_post_deploy_marker(key, value)
         }
+        self.evidence = readback_failure_evidence(self.evidence)
         for key in ("schedule_id", "schedule_deployment_key", "schedule_deployment_id"):
             value = _bounded_dokploy_evidence_id(evidence.get(key, ""))
             if value:
@@ -383,6 +391,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if readback_marker_is_safe(key, value):
+        return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
         return bool(
             re.fullmatch(

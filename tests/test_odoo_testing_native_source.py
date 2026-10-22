@@ -30,6 +30,7 @@ from control_plane.contracts.odoo_testing_source import (
 )
 from control_plane.dokploy import native_copy_stream as transport
 from control_plane.dokploy import api
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.odoo_testing_native_source import (
     capture_native_testing_source,
     prepare_native_testing_delivery,
@@ -89,6 +90,27 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_failed_frame_keeps_only_registered_predicates_and_closed_observations(self) -> None:
+        for predicate, kind in (
+            (ReadbackPredicate.RUNNER_RUNNING, "refused"),
+            (ReadbackPredicate.DATABASE_READ, "unavailable"),
+            ("private-password", "private-provider-value"),
+        ):
+            with self.subTest(predicate=predicate):
+                connection = Connection({"type": "failed", "predicate": predicate, "kind": kind})
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        connection,
+                        program="fixture",
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertIn(error.predicate, ReadbackPredicate)
+                self.assertEqual(error.unavailable, kind != "refused")
+                self.assertNotIn("private-", json.dumps(error.evidence))
+
     def test_failed_frame_is_distinct_from_missing_transport_evidence(self) -> None:
         connection = Connection()
         connection.frame = {"type": "failed"}

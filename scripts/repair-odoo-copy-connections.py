@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import sys
@@ -10,6 +11,12 @@ import urllib.error
 
 from control_plane.odoo_post_deploy_http import ODOO_POST_DEPLOY_ROUTE, OdooPostDeployEnvelope
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest
+from control_plane.copy_readback_diagnostics import (
+    READBACK_FAILURE_MARKERS,
+    ReadbackPredicate,
+    readback_failure_evidence,
+    readback_marker_is_safe,
+)
 
 
 def main() -> int:
@@ -88,7 +95,13 @@ def main() -> int:
                 "integration_readback_ok",
                 "integration_readback_refused",
                 "integration_readback_allowed",
+                "log_available",
+                "schedule_id",
+                "schedule_deployment_key",
+                "schedule_deployment_id",
             }
+            | READBACK_FAILURE_MARKERS
+            and (key not in READBACK_FAILURE_MARKERS or readback_marker_is_safe(key, value))
         }
         receipt = {
             "mode": args.mode,
@@ -96,14 +109,42 @@ def main() -> int:
             "evidence": safe,
             "trace_id": transport["public_trace_id"](response["trace_id"]),
         }
-        if result["post_deploy_status"] == "fail":
+        failed = (
+            result["post_deploy_status"] != "pass"
+            or safe.get("connection_isolation_ok")
+            not in {
+                "true",
+                "false",
+            }
+            or safe.get("connection_isolation_resources_ok") != "true"
+            or safe.get("integration_readback_ok") not in {"true", "false"}
+            or "readback_failed_predicate" in safe
+            or args.mode != "dry-run"
+            and (
+                safe.get("connection_isolation_ok") != "true"
+                or safe.get("integration_readback_ok") != "true"
+            )
+        )
+        if (
+            not failed
+            and args.mode == "dry-run"
+            and not all(
+                re.fullmatch(r"[a-f0-9]{64}", safe.get(key, ""))
+                for key in (
+                    "connection_isolation_plan_sha256",
+                    "connection_isolation_resource_sha256",
+                )
+            )
+        ):
+            safe.update(
+                readback_failed_predicate=ReadbackPredicate.REVIEW_BINDING,
+                readback_failure_kind="unavailable",
+            )
+            failed = True
+        if failed:
+            receipt["evidence"] = readback_failure_evidence(safe)
             print(json.dumps({"status": "fail", **receipt}))
             return 1
-        if safe.get("connection_isolation_ok") not in {
-            "true",
-            "false",
-        }:
-            raise ValueError("Incomplete operation evidence")
         if args.mode == "dry-run":
             descriptor = os.open(args.evidence_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w") as output:
@@ -120,6 +161,7 @@ def main() -> int:
                 {
                     "status": "unverified",
                     "mode": args.mode,
+                    "evidence": readback_failure_evidence({}),
                     "message": "Inspect the original operation; retain its evidence and idempotency key.",
                 }
             )
