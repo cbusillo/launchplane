@@ -38,6 +38,7 @@ from control_plane.dokploy.testing_route import (
     select_testing_route_raw,
 )
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+from control_plane.dokploy.testing_retained_copy import retained_inventory_sha256
 from control_plane.dokploy import post_deploy, api, source, compose
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
@@ -518,6 +519,23 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(len(removals), 1)
         self.assertEqual(self.effects, ["switch-new"])
+
+    def test_new_staff_hold_blocks_container_removal_before_dispatch(self) -> None:
+        self.admit_unavailable("stopped")
+        effect = service.NativeTestingRebuildExecution.run_effect
+
+        def held(executor: Any, phase: str, *args: Any, **kwargs: Any) -> Any:
+            if phase == "remove-old-containers":
+                self.apply_staff_hold(True, "Fixture holds the old testing data")
+            return effect(executor, phase, *args, **kwargs)
+
+        with patch.object(service.NativeTestingRebuildExecution, "run_effect", new=held):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.assertEqual(self.effects, [])
+        self.apply_staff_hold(False, "Fixture ends the hold")
+        self.assertEqual(self.execute().deploy_status, "pass")
 
     def start_original(self) -> None:
         self.retained.update(availability="available", stopped=False, web_stopped=False)
