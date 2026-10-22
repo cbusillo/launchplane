@@ -2233,6 +2233,12 @@ absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
   replacement.
 - The current repo workflow for that posture is
   `.github/workflows/deploy-launchplane.yml`.
+- Its GHCR image and buildcache uploads authenticate with the workflow's own
+  `GITHUB_TOKEN` and existing `packages: write` permission. The package must give
+  this repository Write access under Manage Actions access. The publisher no
+  longer reads `GHCR_USERNAME` or `GHCR_TOKEN`; Chris removes obsolete stored
+  copies and revokes the PAT after checking other consumers. Provider-side
+  registry pulls use their existing separate credential.
 - Launchplane image builds use Docker Hub public mirror-qualified base images
   and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
@@ -4956,9 +4962,15 @@ identified the exact independently running schedule job. While draining, the
 observer stops its lease and atomically records that job, the reviewed rehearsal
 and original journal identity. The HTTP request returns accepted with
 `result.state: checkpointed` and `original_key_required: true`. The remote job
-continues under its existing host lock and custody. No capture, upgrade or
-provider trigger is repeated, and no remote process is cancelled. The drain
-checks executor exclusion and can dispatch replacement without waiting for that
+continues under its existing host lock and custody. The supported
+`scripts/odoo-upgrade-rehearsal.py` client reports `status: checkpointed`, the
+bounded `trace_id`, opaque `operation_id`, and `original_key_required: true`.
+It exits 1 because the rehearsal is pending, without claiming completion or
+sending another request. Preserve the original intent, saved review and execute
+key; use supported original-key readback to observe the same operation. Do not
+start another capture or upgrade or substitute a new key.
+No capture, upgrade or provider trigger is repeated, and no remote process is
+cancelled. The drain checks executor exclusion and can dispatch replacement without waiting for that
 job to finish or for new traffic to become idle.
 If checkpoint admission loses its lease or cannot store the continuation, the
 request instead retains the original journal with the existing typed

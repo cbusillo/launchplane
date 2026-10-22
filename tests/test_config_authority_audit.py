@@ -2263,7 +2263,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
 
         service_env_payload = (
-            ("GHCR_USERNAME", "${{ secrets.GHCR_USERNAME }}"),
             ("LAUNCHPLANE_GITHUB_CLIENT_ID", "$github_client_id,"),
             ("LAUNCHPLANE_GITHUB_CLIENT_SECRET", "$github_client_secret,"),
             ("LAUNCHPLANE_PUBLIC_URL", "$public_url,"),
@@ -2293,6 +2292,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
+            ("GHCR_USERNAME", "${{ secrets.GHCR_USERNAME }}"),
+            ("GHCR_TOKEN", "${{ secrets.GHCR_TOKEN }}"),
             ("GH_TOKEN", "$work_graph_gh_token"),
             ("LAUNCHPLANE_WORK_GRAPH_GH_TOKEN", "${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}"),
         ):
