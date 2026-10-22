@@ -8439,8 +8439,12 @@ class PostgresRecordStore(HumanSessionStore):
         if not normalized_lease_owner:
             raise ValueError("Outbox delivery update requires lease_owner.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            observed_at = self._database_mutation_timestamp(session)
+            if require_terminal:
+                self._begin_serialized_write(session)
+            else:
+                from control_plane.service_deploy_drain import lock
+
+                lock(self, session)
             statement = (
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(LaunchplaneOutboxDeliveryRow.delivery_id == record.delivery_id)
@@ -8451,6 +8455,7 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.scalar(statement)
             if row is None:
                 return OutboxDeliveryCompletionResult(status="missing")
+            observed_at = self._database_mutation_timestamp(session)
             current_record = self._read_payload(
                 model_type=OutboxDeliveryRecord,
                 payload=row.payload,

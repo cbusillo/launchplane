@@ -18,7 +18,6 @@ import time
 from typing import Any
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
-from tests import test_outbox_deploy_drain as outbox_deploy_tests
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
@@ -1500,9 +1499,80 @@ class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldR
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
-class RealPostgresOutboxDeployDrainTests(outbox_deploy_tests.OutboxDeployDrainTests):
-    def database_url(self) -> str:
-        return self.enterContext(_head_postgres_database())
+class RealPostgresOutboxDeployDrainTests(unittest.TestCase):
+    def test_marker_and_replacement_cannot_both_pass_across_lease_expiry(self) -> None:
+        from control_plane import service_deploy_drain
+        from tests.test_outbox_worker import _workflow_delivery
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_IMAGE_REFERENCE": "example.invalid/old-image",
+                    "LAUNCHPLANE_DEPLOYMENT_MARKER": "old-marker",
+                },
+            ),
+            _store_for_fresh_head_database() as store,
+        ):
+            delivery = _workflow_delivery()
+            store.write_outbox_delivery_record(delivery)
+            claimed = store.claim_next_outbox_delivery_record(
+                lease_owner="marker-worker", lease_seconds=10, now=delivery.created_at
+            )
+            assert claimed.record is not None
+            moment = datetime.fromisoformat(delivery.created_at.replace("Z", "+00:00")) + timedelta(
+                seconds=1
+            )
+            marker_clock_read = threading.Event()
+            resume_marker = threading.Event()
+            main_thread = threading.get_ident()
+            original_lock = service_deploy_drain.lock
+
+            def clock(_session: Any) -> str:
+                observed = moment.isoformat().replace("+00:00", "Z")
+                if threading.get_ident() != main_thread:
+                    marker_clock_read.set()
+                    if not resume_marker.wait(10):
+                        raise AssertionError("Marker clock barrier never released")
+                return observed
+
+            def bounded_lock(record_store: Any, session: Any) -> None:
+                if threading.get_ident() == main_thread:
+                    session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                original_lock(record_store, session)
+
+            with (
+                patch.object(store, "_database_mutation_timestamp", side_effect=clock),
+                patch.object(service_deploy_drain, "lock", side_effect=bounded_lock),
+                ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                future = executor.submit(
+                    store.mark_outbox_delivery_provider_started,
+                    record=claimed.record,
+                    lease_owner="marker-worker",
+                    provider_operation_key="dispatch-started",
+                )
+                dispatch = False
+                try:
+                    self.assertTrue(marker_clock_read.wait(10))
+                    moment = datetime.fromisoformat(
+                        claimed.record.lease_expires_at.replace("Z", "+00:00")
+                    ) + timedelta(seconds=1)
+                    try:
+                        _, _, dispatch = service_deploy_drain.prepare(
+                            store,
+                            request_fingerprint="marker-race",
+                            target_type="compose",
+                            target_id="fixture-control-plane",
+                            image_reference="example.invalid/replacement",
+                            deployment_marker="marker-race",
+                        )
+                    except OperationalError as error:
+                        self.assertEqual(getattr(error.orig, "sqlstate", ""), "55P03")
+                finally:
+                    resume_marker.set()
+                marker = future.result(timeout=10)
+            self.assertFalse(dispatch and marker.status == "updated")
 
 
 @unittest.skipUnless(

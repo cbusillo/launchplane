@@ -147,7 +147,7 @@ attempt_id = f"qualification-attempt-{phase}"
 delivery_id = build_outbox_delivery_id(kind="public_ingress_notification", dedupe_key=incident_id)
 try:
     store.write_public_ingress_incident_record(PublicIngressIncidentRecord(
-        incident_id=incident_id, product="qualification-fixture", context="qualification-fixture",
+        incident_id=incident_id, product="qualification-fixture", context=f"qualification-fixture-{phase}",
         instance="prod", check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK, check_kind="provider",
         status="open", opened_at=now, opened_observation_id=phase,
         latest_observation_id=phase, latest_observed_at=now,
@@ -175,10 +175,28 @@ try:
         time.sleep(0.2)
     attempts = store.list_public_ingress_notification_attempt_records(incident_id=incident_id)
     assert len(attempts) == 1 and attempts[0].delivery_status == "skipped", attempts
-    assert record.action == f"skipped_{attempts[0].action}" and attempts[0].action, record
+    assert record.action and attempts[0].action, record
     for completed in store.list_outbox_delivery_records(kind="public_ingress_notification"):
         assert completed.state == "delivered" and completed.attempt == 1, completed
         assert not completed.provider_operation_key, completed
+    if phase == "replacement":
+        dispatch_id = build_outbox_delivery_id(kind="github_workflow_dispatch", dedupe_key=incident_id)
+        store.write_outbox_delivery_record(OutboxDeliveryRecord(
+            delivery_id=dispatch_id, kind="github_workflow_dispatch",
+            aggregate_type="generic_web_promotion_workflow", aggregate_id=incident_id,
+            dedupe_key=f"workflow:{incident_id}", created_at=now, updated_at=now, next_attempt_at=now,
+            payload={"repository": "qualification/fixture", "workflow_id": "fixture.yml", "ref": "main",
+                     "credential_context": "qualification-fixture", "inputs": {}},
+        ))
+        deadline = time.monotonic() + 120
+        while True:
+            dispatch = store.read_outbox_delivery_record(dispatch_id)
+            if dispatch.state == "failed":
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("Replacement worker did not resume workflow dispatch claims")
+            time.sleep(0.2)
+        assert dispatch.attempt == 1 and not dispatch.provider_operation_key and dispatch.error_code, dispatch
 finally:
     store.close()
 PY

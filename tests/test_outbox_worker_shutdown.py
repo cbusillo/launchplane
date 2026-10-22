@@ -33,7 +33,14 @@ class OutboxWorkerShutdownTests(unittest.TestCase):
             direct_outbox.DirectNotificationOutboxTests._probe(store, 503, "2026-05-29T12:00:00Z")
             queued = store.list_outbox_delivery_records(states=("pending",))[0]
             sends: list[object] = []
+            unhandled_signals: list[int] = []
             steps = 0
+
+            def fallback(signum: int, _frame: object) -> None:
+                unhandled_signals.append(signum)
+
+            previous_sigterm = signal.signal(signal.SIGTERM, fallback)
+            self.addCleanup(signal.signal, signal.SIGTERM, previous_sigterm)
 
             def send(_url: str, payload: dict[str, object]) -> None:
                 sends.append(payload)
@@ -72,6 +79,7 @@ class OutboxWorkerShutdownTests(unittest.TestCase):
                     ],
                 )
             self.assertEqual(result.exit_code, 0, result.output)
+            self.assertFalse(unhandled_signals)
             self.assertEqual(len(sends), 1)
             self.assertEqual(steps, 1)
             self.assertEqual(

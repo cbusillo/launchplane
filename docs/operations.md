@@ -436,8 +436,8 @@ reconciles before resending. Attempts are bounded by the row's `max_attempts`;
 invalid payloads and exhausted retries become terminal failures. Do not update
 outbox rows manually or clear provider markers to force a retry.
 
-Release-affecting workflow-dispatch claims share the existing service-deploy
-admission fence. Replacement waits for an admitted dispatch to finish. New
+Release-affecting workflow-dispatch claims and provider-start markers share
+the existing service-deploy admission lock. Replacement waits for an admitted dispatch to finish. New
 unstarted dispatches stay queued until the matching replacement image and
 deployment marker confirm startup; an old image cannot resume them. Marked
 deliveries can still reconcile, and notifications can still progress. An expired

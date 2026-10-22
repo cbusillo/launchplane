@@ -133,3 +133,34 @@ class OutboxDeployDrainTests(unittest.TestCase):
         claimed = self.store.claim_next_outbox_delivery_record(lease_owner="reconciler")
         assert claimed.record is not None
         self.assertEqual(claimed.record.provider_operation_key, workflow.provider_operation_key)
+
+    def test_expired_marked_dispatch_holds_replacement_until_reconciliation_finishes(self) -> None:
+        workflow = _workflow_delivery()
+        self.store.write_outbox_delivery_record(workflow)
+        claimed = self.store.claim_next_outbox_delivery_record(
+            lease_owner="worker", lease_seconds=10
+        )
+        assert claimed.record is not None
+        self.store.mark_outbox_delivery_provider_started(
+            record=claimed.record,
+            lease_owner="worker",
+            provider_operation_key="already-started",
+        )
+        after_expiry = datetime.fromisoformat(
+            claimed.record.lease_expires_at.replace("Z", "+00:00")
+        ) + timedelta(seconds=1)
+        self.clock.return_value = after_expiry.isoformat().replace("+00:00", "Z")
+        _, blockers, dispatch = self.prepare()
+        self.assertFalse(dispatch)
+        self.assertIn(workflow.delivery_id, blockers)
+        reconciled = self.store.claim_next_outbox_delivery_record(lease_owner="reconciler")
+        assert reconciled.record is not None
+        self.store.complete_outbox_delivery_record(
+            record=reconciled.record.model_copy(
+                update={"state": "delivered", "action": "reconciled"}
+            ),
+            lease_owner="reconciler",
+        )
+        _, blockers, dispatch = self.prepare()
+        self.assertTrue(dispatch)
+        self.assertFalse(blockers)
