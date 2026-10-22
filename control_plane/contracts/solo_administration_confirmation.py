@@ -8,6 +8,7 @@ import re
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 SOLO_ADMINISTRATION_CONFIRMATION_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -19,7 +20,6 @@ SoloAdministrationConfirmationLifecycleEventType = Literal[
     "issued", "consumed", "revoked", "expired"
 ]
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CONFIRMATION_ID_PATTERN = re.compile(
     r"^solo-administration-confirmation-[a-z0-9][a-z0-9_-]{7,127}$"
 )
@@ -38,7 +38,7 @@ def _normalize_token(value: str, field_name: str) -> str:
 
 def _normalize_sha256(value: str, field_name: str) -> str:
     normalized = _normalize_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return normalized
 

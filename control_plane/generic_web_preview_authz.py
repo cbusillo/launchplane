@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.authz_grant_service import AuthzManagedPolicyReconcileEnvelope
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthzPolicy
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 GENERIC_WEB_PREVIEW_MANAGED_SET_ID = "operator.generic-web-preview"
@@ -25,7 +26,6 @@ _INGRESS_APPLY_WORKFLOW_REF = (
 )
 _PRODUCT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DEFAULT_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
 GenericWebPreviewAuthzOperation = Literal["onboard", "expand", "contract", "retire"]
 GenericWebPreviewRetirementAuthoritySource = Literal["current_product_rules", "product_profile"]
@@ -91,7 +91,7 @@ class GenericWebPreviewAuthzPlanRequest(BaseModel):
             raise ValueError("generic-web preview authz default_branch is invalid")
         if not self.preview_context:
             raise ValueError("generic-web preview authz requires preview_context")
-        if _COMMIT_SHA_PATTERN.fullmatch(self.launchplane_sha) is None:
+        if GIT_SHA1_PATTERN.fullmatch(self.launchplane_sha) is None:
             raise ValueError("generic-web preview authz requires a full Launchplane commit SHA")
         if not self.reason:
             raise ValueError("generic-web preview authz planning requires reason")

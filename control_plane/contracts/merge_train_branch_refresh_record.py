@@ -1,10 +1,8 @@
 from datetime import datetime, timezone
-import re
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 class MergeTrainBranchRefreshRecord(BaseModel):
@@ -51,7 +49,7 @@ class MergeTrainBranchRefreshRecord(BaseModel):
         if "/" not in self.repository:
             raise ValueError("merge train branch refresh repository must be owner/name")
         for name in ("expected_head_sha", "result_head_sha", "merged_base_sha"):
-            if not _COMMIT_SHA.fullmatch(getattr(self, name)):
+            if not GIT_SHA1_PATTERN.fullmatch(getattr(self, name)):
                 raise ValueError(f"merge train branch refresh requires a full {name}")
         if self.result_head_sha == self.expected_head_sha:
             raise ValueError("merge train branch refresh result must be a new head")

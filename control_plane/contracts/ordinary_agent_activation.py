@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 OrdinaryAgentDeliveryActivationDesiredState = Literal["guarded", "revoked"]
@@ -36,7 +37,6 @@ OrdinaryAgentDeliveryActivationPlanBlocker = Literal[
 
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _MANAGED_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ACTIVATION_ID_PATTERN = re.compile(r"^ordinary-agent-delivery-activation-[0-9a-f]{32}$")
 _EVENT_ID_PATTERN = re.compile(r"^ordinary-agent-delivery-activation-event-[0-9a-f]{32}$")
 
@@ -61,7 +61,7 @@ def _managed_id(value: str, field_name: str) -> str:
 
 def _sha256(value: str, field_name: str) -> str:
     normalized = value.strip().lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return normalized
 
