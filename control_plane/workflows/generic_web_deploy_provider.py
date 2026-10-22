@@ -451,14 +451,6 @@ class GenericWebApplicationRuntimeArtifactProof(BaseModel):
 
 
 class GenericWebRuntimeArtifactObservation(BaseModel):
-    """Read-only runtime facts for one exact provider target.
-
-    ``target_artifact_reference`` is the image the provider target is configured
-    to run. ``running_container_images`` lists one image reference for every
-    running container that belongs to the target. Application references are
-    independently inspected immutable RepoDigests.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     target_artifact_reference: str
