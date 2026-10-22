@@ -272,6 +272,65 @@ class RetiredOdooPublishRouteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_memory_refusal_preserves_details_and_retries_the_same_key(self) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._reservation_store(root)
+            self.addCleanup(store.close)
+            identity = self._identity()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=self._policy(actions=("odoo_preview_apply.execute",)),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            payload = _ready_odoo_preview_apply_payload()
+            plan_id = self._store_issued_preview_plan(
+                store=store, identity=identity, payload=payload
+            )
+            refusal = PreviewMemoryCapacityRefused(
+                "private-host-marker Floor 5000 bytes; current headroom 4999 bytes",
+                floor=5000,
+                headroom=4999,
+            )
+            with patch(
+                "control_plane.http_app.execute_odoo_preview_apply_result",
+                side_effect=[
+                    refusal,
+                    {
+                        "status": "pass",
+                        "operation": "refresh",
+                        "product": "odoo-tenant-cm",
+                        "repository": "cbusillo/odoo-tenant-cm",
+                        "preview_slug": "pr-42",
+                        "preview_url": "https://pr-42.cm-preview.example.test",
+                        "domain_host": "pr-42.cm-preview.example.test",
+                        "compose_name": "cm-odoo-preview-pr-42",
+                    },
+                ],
+            ) as execute:
+                refused = await _post_odoo_preview_apply(app, payload, idempotency_key=plan_id)
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path="/v1/drivers/odoo/preview-apply",
+                        idempotency_key=plan_id,
+                    )
+                )
+                retried = await _post_odoo_preview_apply(app, payload, idempotency_key=plan_id)
+
+            self.assertEqual(refused.status_code, 409)
+            self.assertEqual(refused.json()["error"]["code"], refusal.code)
+            message = refused.json()["error"]["message"]
+            self.assertNotIn("private-host-marker", message)
+            self.assertIn("5000", message)
+            self.assertIn("4999", message)
+            self.assertEqual(retried.status_code, 202)
+            self.assertEqual(retried.json()["result"]["status"], "pass")
+            self.assertEqual(execute.call_count, 2)
+
     def _policy(
         self,
         *,
