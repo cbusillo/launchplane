@@ -1224,7 +1224,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                                 b"x" * len(content) if native_attachment == "hash" else content
                             ),
                         )
-                staging = Path(directory).resolve() / "tmp"
+                staging = Path(directory).absolute() / "tmp"
                 staging.mkdir()
                 identity = "f" * 32
                 artifacts = {"database": b"fixture verified dump", "filestore": archive.getvalue()}
@@ -1241,6 +1241,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
                 def receiver_path(*segments: str) -> Path:
                     path = Path(*segments)
+                    if path.is_relative_to(staging):
+                        return path
                     if path == Path("/tmp") or path.is_relative_to("/tmp"):
                         return staging / path.relative_to("/tmp")
                     if path.is_relative_to("/volumes/data/filestore"):
