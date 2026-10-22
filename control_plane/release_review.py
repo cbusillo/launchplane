@@ -290,7 +290,10 @@ def recorded_generic_web_testing_version(
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ReleaseEvidenceUnavailable("testing_lane_missing")
-    inventory = recorded_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    try:
+        inventory = recorded_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    except GenericWebSourceUnqualified as error:
+        raise _identity_missing("testing") from error
     return _generic_web_inventory_release_version(
         inventory=inventory, profile=profile, instance="testing", context=lane.context
     )

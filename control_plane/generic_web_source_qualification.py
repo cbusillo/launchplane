@@ -15,6 +15,12 @@ from control_plane.contracts.product_profile_record import (
 )
 
 
+_SOURCE_RECORDS_UNAVAILABLE = (
+    "Testing requires current source inventory and its referenced deployment record, "
+    "bound to a current product lane."
+)
+
+
 @dataclass(frozen=True)
 class GenericWebSourceSnapshot:
     profile: LaunchplaneProductProfileRecord
@@ -78,10 +84,7 @@ def qualified_generic_web_source_inventory(
         inventory = snapshot.inventory
         record = snapshot.deployment
     except (FileNotFoundError, ValueError) as error:
-        raise GenericWebSourceUnqualified(
-            "Testing requires current source inventory and its referenced deployment record, "
-            "bound to a current product lane."
-        ) from error
+        raise GenericWebSourceUnqualified(_SOURCE_RECORDS_UNAVAILABLE) from error
     _qualified_generic_web_source_pair(
         profile=profile,
         lane=lane,
@@ -121,11 +124,14 @@ def recorded_generic_web_source_inventory(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> EnvironmentInventory:
-    current_profile = store.read_product_profile_record(profile.product)
-    inventory = store.read_environment_inventory(
-        context_name=lane.context, instance_name=lane.instance
-    )
-    record = store.read_deployment_record(inventory.deployment_record_id)
+    try:
+        current_profile = store.read_product_profile_record(profile.product)
+        inventory = store.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        )
+        record = store.read_deployment_record(inventory.deployment_record_id)
+    except (FileNotFoundError, ValueError) as error:
+        raise GenericWebSourceUnqualified(_SOURCE_RECORDS_UNAVAILABLE) from error
     return _qualified_generic_web_source_pair(
         profile=profile,
         lane=lane,

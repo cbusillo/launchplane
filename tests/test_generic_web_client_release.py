@@ -355,8 +355,23 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 }
             )
         )
-        with self.assertRaises(ReleaseEvidenceUnavailable):
+        from control_plane.release_review import recorded_generic_web_testing_version
+
+        with self.assertRaises(ReleaseEvidenceUnavailable) as fresh:
             self.review()
+        with self.assertRaises(ReleaseEvidenceUnavailable) as recorded:
+            recorded_generic_web_testing_version(store=self.store, profile=self.profile)
+        self.assertEqual(recorded.exception.code, fresh.exception.code)
+        for read_error in (FileNotFoundError(), ValueError()):
+            with (
+                self.subTest(read_error=type(read_error).__name__),
+                patch.object(self.store, "read_deployment_record", side_effect=read_error),
+            ):
+                with self.assertRaises(ReleaseEvidenceUnavailable) as fresh_read:
+                    self.review()
+                with self.assertRaises(ReleaseEvidenceUnavailable) as recorded_read:
+                    recorded_generic_web_testing_version(store=self.store, profile=self.profile)
+                self.assertEqual(recorded_read.exception.code, fresh_read.exception.code)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
         self.assertEqual(
