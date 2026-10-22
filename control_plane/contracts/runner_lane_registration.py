@@ -6,6 +6,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerLaneRegistrationPlanStatus = Literal["ready", "blocked"]
@@ -77,10 +78,10 @@ class RunnerLaneRegistrationRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneRegistrationRequest":
         self.repository = _normalized_repository(self.repository)
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane registration requires host_name"
         ).lower()
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane registration requires lane_name"
         ).lower()
         _validate_slug(
@@ -92,7 +93,7 @@ class RunnerLaneRegistrationRequest(BaseModel):
             "runner lane registration lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
         self.registration_root = _normalized_path(
-            _required_text(
+            require_text(
                 self.registration_root,
                 "runner lane registration requires registration_root",
             )
@@ -130,7 +131,7 @@ class RunnerLaneRegistrationBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerLaneRegistrationBlocker":
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner lane registration blocker requires message"
         )
         return self
@@ -157,17 +158,17 @@ class RunnerLaneRegistrationPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerLaneRegistrationPlan":
-        self.repository = _required_text(
+        self.repository = require_text(
             self.repository, "runner lane registration plan requires repository"
         )
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane registration plan requires host_name"
         )
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane registration plan requires lane_name"
         )
         self.registration_root = _normalized_path(
-            _required_text(
+            require_text(
                 self.registration_root,
                 "runner lane registration plan requires registration_root",
             )
@@ -177,9 +178,7 @@ class RunnerLaneRegistrationPlan(BaseModel):
         self.audit_record_key = self.audit_record_key.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(
-            self.summary, "runner lane registration plan requires summary"
-        )
+        self.summary = require_text(self.summary, "runner lane registration plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready runner lane registration plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -201,7 +200,7 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerLaneRegistrationAuditRecord":
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner lane registration audit record requires key",
         )
@@ -228,10 +227,24 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
             raise ValueError(
                 "runner lane registration post-inventory must match request repository"
             )
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner lane registration audit record requires message"
         )
         return self
+
+
+class RunnerLaneRegistrationAuditIdentityConflict(ValueError):
+    pass
+
+
+def validate_runner_lane_registration_audit_identity(
+    existing: RunnerLaneRegistrationAuditRecord,
+    incoming: RunnerLaneRegistrationAuditRecord,
+) -> None:
+    if existing.request != incoming.request:
+        raise RunnerLaneRegistrationAuditIdentityConflict(
+            "Runner lifecycle audit key is already bound to a different request."
+        )
 
 
 class RunnerLaneRegistrationTokenRecord(BaseModel):
@@ -245,10 +258,10 @@ class RunnerLaneRegistrationTokenRecord(BaseModel):
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerLaneRegistrationTokenRecord":
         self.repository = _normalized_repository(self.repository)
-        self.expires_at = _required_text(
+        self.expires_at = require_text(
             self.expires_at, "runner lane registration token record requires expires_at"
         )
-        self.fetched_at = _required_text(
+        self.fetched_at = require_text(
             self.fetched_at, "runner lane registration token record requires fetched_at"
         )
         return self
@@ -568,10 +581,3 @@ def _normalized_path(value: str) -> str:
 def _validate_slug(value: str, message: str) -> None:
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", value):
         raise ValueError(message)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

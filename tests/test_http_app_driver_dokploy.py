@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 from click import ClickException
 
+from control_plane import dokploy as control_plane_dokploy
+
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -32,6 +34,11 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    fetch_application_runtime,
+)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -677,6 +684,121 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                         fetch_target.assert_not_called()
 
     @scoped_agent_test
+    async def test_application_runtime_read_keeps_lane_scope_and_unavailable_boundary(self) -> None:
+        image = "ghcr.io/example/app@sha256:" + "a" * 64
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_url = _sqlite_database_url(root / "db.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            target = store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="prod"
+            ).model_copy(update={"target_type": "application"})
+            target_id = store.read_dokploy_target_id_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            store.write_dokploy_target_record(target)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=target, target_id_record=target_id
+                )
+            )
+            observed = ApplicationRuntimeObservation(
+                application_id=target_id.target_id,
+                app_name="fixture-app",
+                service_id="service-1",
+                service_image=image,
+                service_deployment_record_id="",
+                desired_replicas=1,
+                rollout_state="updating",
+                rollout_started_at="2026-10-21T12:00:00Z",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                pending_task_count=1,
+                server_id="server-1",
+            )
+            for allowed_instance, runtime_failure, expected_status in (
+                ("prod", False, 200),
+                ("testing", False, 403),
+                ("prod", True, 503),
+            ):
+                with (
+                    self.subTest(
+                        allowed_instance=allowed_instance, runtime_failure=runtime_failure
+                    ),
+                    patch(
+                        "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "private-provider-token"),
+                    ) as read_config,
+                    patch(
+                        "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "applicationId": target_id.target_id,
+                            "appName": "fixture-app",
+                            "serverId": "server-1",
+                        },
+                    ) as fetch_target,
+                    patch(
+                        "control_plane.dokploy_target_inspect.fetch_application_runtime",
+                        return_value=observed,
+                    ) as fetch_runtime,
+                ):
+                    if runtime_failure:
+                        # Use the real reader so arbitrary provider prose goes through its fixed error boundary.
+                        fetch_runtime.side_effect = fetch_application_runtime
+                    app = create_launchplane_fastapi_app(
+                        verifier=_RejectingVerifier(),
+                        authz_policy=LaunchplaneAuthzPolicy(
+                            schema_version=2,
+                            local_operators=(
+                                LocalOperatorPolicyRule(
+                                    actions=("driver.read",),
+                                    products=("launchplane",),
+                                    contexts=("cm_website",),
+                                    instances=(allowed_instance,),
+                                    subjects=("local-owner-agent",),
+                                    token_labels=("local-owner-read",),
+                                ),
+                            ),
+                        ),
+                        bearer_identity_config=_local_operator_bearer_config(),
+                        database_url=database_url,
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                    )
+                    with patch(
+                        "control_plane.dokploy.api.dokploy_request",
+                        side_effect=ClickException("TOKEN=private-provider-error"),
+                    ):
+                        response = await _get_dokploy_target_inspect(
+                            app,
+                            context="cm_website",
+                            instance="prod",
+                            expected_image=image,
+                            authorization="Bearer local-operator-token",
+                        )
+                    self.assertEqual(response.status_code, expected_status)
+                    payload = response.json()
+                    self.assertNotIn("private-provider", str(payload))
+                    if expected_status == 200:
+                        runtime = payload["inspect"]["runtime_evidence"]
+                        self.assertEqual(runtime["application_id"], target_id.target_id)
+                        self.assertIsNone(runtime["image_matches_expected"])
+                        self.assertFalse(runtime["process_ready"])
+                        fetch_runtime.assert_called_once()
+                    elif expected_status == 403:
+                        self.assertEqual(payload["error"]["code"], "authorization_denied")
+                        read_config.assert_not_called()
+                        fetch_target.assert_not_called()
+                        fetch_runtime.assert_not_called()
+                    else:
+                        self.assertEqual(
+                            payload["error"]["code"], "dokploy_target_inspect_unavailable"
+                        )
+
+    @scoped_agent_test
     async def test_operator_driver_read_does_not_authorize_explicit_target(self) -> None:
         with patch(
             "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config"
@@ -1234,6 +1356,13 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                             response.json()["error"]["code"], "self_deploy_drain_timeout"
                         )
                         self.assertIn(reservation.record_id, response.text)
+                        details = cast(
+                            tuple[dict[str, object], ...], read_status(store)["operation_details"]
+                        )
+                        self.assertEqual(
+                            json.loads(response.json()["records"]["blocking_operation_refs"]),
+                            [details[0]["operation_ref"]],
+                        )
                 update.assert_not_called()
                 deploy.assert_not_called()
 
@@ -2143,7 +2272,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                         "deploymentId": "deployment-123",
                         "applicationId": "app-123",
                         "status": "done",
-                        "errorMessage": "",
+                        "errorMessage": "Cookie: [\n'session_id=made-up-cookie'\n]\nstatus=502",
                         "createdAt": "2026-07-11T17:33:15Z",
                         "startedAt": "2026-07-11T17:33:15Z",
                         "finishedAt": "2026-07-11T17:33:18Z",
@@ -2152,11 +2281,17 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 ) as latest_deployment_mock,
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
-                    return_value=(
-                        "starting deployment",
-                        "SMTP_PASSWORD=smtp-secret deployment complete",
-                    ),
+                    wraps=control_plane_dokploy.fetch_dokploy_deployment_logs,
                 ) as deployment_logs_mock,
+                patch(
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "starting deployment",
+                            "SMTP_PASSWORD=smtp-secret deployment complete",
+                        ]
+                    },
+                ),
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs"
                 ) as runtime_logs_mock,
@@ -2196,12 +2331,13 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         runtime_logs_mock.assert_not_called()
         payload = response.json()
         self.assertEqual(payload["request"]["source"], "deployment")
+        deployment = dict(payload["deployment"])
+        self.assertIn("status=502", deployment.pop("error_message"))
         self.assertEqual(
-            payload["deployment"],
+            deployment,
             {
                 "deployment_id": "deployment-123",
                 "status": "done",
-                "error_message": "",
                 "created_at": "2026-07-11T17:33:15Z",
                 "started_at": "2026-07-11T17:33:15Z",
                 "finished_at": "2026-07-11T17:33:18Z",
@@ -2211,6 +2347,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["logs"]["lines"][0], "starting deployment")
         self.assertIn("SMTP_PASSWORD=[redacted]", payload["logs"]["lines"][1])
         self.assertNotIn("smtp-secret", json.dumps(payload))
+        self.assertNotIn("made-up-cookie", json.dumps(payload))
         self.assertNotIn("secret-token", json.dumps(payload))
 
     async def test_tracked_target_logs_rejects_deployment_not_bound_to_target(self) -> None:
@@ -2302,8 +2439,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("API_TOKEN=plain-secret-value",),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={"logs": ["API_TOKEN=plain-secret-value"]},
                 ),
             ):
                 app = create_launchplane_fastapi_app(
@@ -2325,7 +2462,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["logs"]["lines"], ["API_TOKEN=[redacted]"])
+        self.assertTrue(any("API_TOKEN=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("plain-secret-value", json.dumps(payload))
 
     async def test_tracked_target_logs_normalizes_uppercase_path_values(self) -> None:
@@ -2785,7 +2922,9 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
                     side_effect=ClickException(
                         "Dokploy API GET /api/deployment.readLogs failed (500): "
-                        "DATABASE_URL=postgresql://user:provider-secret@example/db"
+                        "DATABASE_URL=postgresql://user:provider-secret@example/db\n"
+                        "Cookie: 'session_id=made-up-cookie' +\n 'other=made-up-other'\n"
+                        "status=502"
                     ),
                 ),
             ):
@@ -2813,6 +2952,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("deployment-log-read", payload["error"]["message"])
         self.assertIn("DATABASE_URL=[redacted]", payload["error"]["message"])
         self.assertNotIn("provider-secret", json.dumps(payload))
+        self.assertNotIn("made-up-", json.dumps(payload))
+        self.assertIn("status=502", payload["error"]["message"])
 
     async def test_tracked_target_logs_validates_query_values(self) -> None:
         app = create_launchplane_fastapi_app(

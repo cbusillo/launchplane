@@ -5,44 +5,27 @@ from __future__ import annotations
 import re
 from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import (
+    normalize_decimal_id,
+    normalize_git_sha,
+    required_token,
+)
 
 RepositoryChangeKind = Literal["added", "modified", "removed", "renamed", "unknown"]
 RepositoryAuthorshipResolution = Literal["resolved", "unresolved", "conflicting"]
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
 _GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,254}$")
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
-def _normalize_decimal_id(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
-    if not normalized.isdecimal() or int(normalized) < 1:
-        raise ValueError(f"{field_name} must be a positive decimal identity")
-    return str(int(normalized))
-
-
 def _normalize_repository(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
+    normalized = required_token(value, field_name).lower()
     if _REPOSITORY_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be owner/name")
     return normalized
 
 
-def _normalize_git_sha(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA")
-    return normalized
-
-
 def _normalize_path(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lstrip("/")
+    normalized = required_token(value, field_name).lstrip("/")
     if ".." in normalized.split("/"):
         raise ValueError(f"{field_name} cannot contain '..'")
     return normalized
@@ -66,20 +49,20 @@ class RepositoryTarget(BaseModel):
         object.__setattr__(
             self,
             "repository_id",
-            _normalize_decimal_id(self.repository_id, "repository_id"),
+            normalize_decimal_id(self.repository_id, "repository_id"),
         )
         object.__setattr__(
             self,
             "repository_owner_id",
-            _normalize_decimal_id(self.repository_owner_id, "repository_owner_id"),
+            normalize_decimal_id(self.repository_owner_id, "repository_owner_id"),
         )
         object.__setattr__(
             self,
             "repository",
             _normalize_repository(self.repository, "repository"),
         )
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
-        object.__setattr__(self, "tree_sha", _normalize_git_sha(self.tree_sha, "tree_sha"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "tree_sha", normalize_git_sha(self.tree_sha, "tree_sha"))
         return self
 
 
@@ -137,11 +120,11 @@ class RepositoryBaseEvidence(BaseModel):
     def _validate_base(self) -> "RepositoryBaseEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported repository base evidence schema version.")
-        normalized_ref = _required_token(self.base_ref, "base_ref")
+        normalized_ref = required_token(self.base_ref, "base_ref")
         if _GIT_REF_PATTERN.fullmatch(normalized_ref) is None:
             raise ValueError("base_ref must be a canonical Git ref name")
         object.__setattr__(self, "base_ref", normalized_ref)
-        object.__setattr__(self, "base_sha", _normalize_git_sha(self.base_sha, "base_sha"))
+        object.__setattr__(self, "base_sha", normalize_git_sha(self.base_sha, "base_sha"))
         return self
 
 
@@ -200,7 +183,7 @@ class RepositoryEvidence(BaseModel):
             object.__setattr__(
                 self,
                 "merge_commit_sha",
-                _normalize_git_sha(self.merge_commit_sha, "merge_commit_sha"),
+                normalize_git_sha(self.merge_commit_sha, "merge_commit_sha"),
             )
         if not self.changed_files:
             raise ValueError("repository evidence requires changed files")

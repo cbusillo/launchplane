@@ -17,7 +17,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { productReviewLookupFromSearch } from "./route-model";
-import { useAppSearchParams } from "./router";
+import { AppLink, productTopicsPath, useAppSearchParams } from "./router";
 import { safeExternalUrl } from "./url";
 import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
 
@@ -119,7 +119,10 @@ export function OwnerProductReviewRoute({
 }) {
   const searchParams = useAppSearchParams();
   const product = searchParams.get("product");
-  return product ? <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} /> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
+  return product ? <>
+    <p><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
+    <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} />
+  </> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
 }
 
 function OwnerPreviewReviewRoute({
@@ -205,6 +208,8 @@ function OwnerPreviewReviewRoute({
           <button className="button" type="button" onClick={() => void loadReview()}>Refresh review</button>
         </>
       ) : review ? (
+        <>
+        <p><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
         <ProductReviewCard
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
@@ -212,6 +217,7 @@ function OwnerPreviewReviewRoute({
           onDecided={setReview}
           onRefresh={() => loadReview()}
         />
+        </>
       ) : null}
     </section>
   );
@@ -364,7 +370,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       </p>
       <p>
         {!decision.head_sha ? "The reviewed version was not recorded." : <>
-          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Applies to preview version" : "Reviewed preview version"}{" "}
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Recorded carried version" : "Reviewed preview version"}{" "}
           {decision.head_sha.slice(0, 7)}
           {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
         </>}
@@ -372,8 +378,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       {decision.carried_from ? (
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
-            ? "later commits were marked as having no Client-visible changes. Your acceptance still applies."
-            : "the base was updated, and the change itself is identical."}
+            ? "later commits were marked as having no Client-visible changes."
+            : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}

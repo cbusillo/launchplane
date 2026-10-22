@@ -1,5 +1,7 @@
 """Coordinate a recorded testing peer through its existing deploy authority."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from dataclasses import dataclass
 from collections.abc import Callable
 from pathlib import Path
@@ -249,8 +251,19 @@ class RecipientWriterAdapter:
             ),
         )
 
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        return getattr(self, "_origin", None)
+
     def target_key(self) -> str:
         _, target, _ = self.current()
+        self._origin = ProviderTargetOrigin(
+            product=self.product,
+            context=target.context,
+            instance=target.instance,
+            provider_id=target.provider_id,
+            target_type="compose",
+            target_id=target.target_id,
+        )
         return generic_web_provider_target_key(
             provider_id=target.provider_id,
             context=target.context,

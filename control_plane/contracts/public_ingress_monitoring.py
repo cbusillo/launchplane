@@ -19,6 +19,8 @@ from control_plane.contracts.route_binding_record import RouteBindingTermination
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthEvidence
+from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
+from control_plane.contracts.text_fields import require_text
 
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
@@ -192,42 +194,42 @@ class PublicIngressTlsRecordedEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _validate_recorded_evidence(self) -> "PublicIngressTlsRecordedEvidence":
-        self.domain_name = _required_text(
+        self.domain_name = require_text(
             self.domain_name, "public ingress TLS evidence requires domain_name"
         ).lower()
         self.ingress_provider = self.ingress_provider.strip().lower()
-        self.source_label = _required_text(
+        self.source_label = require_text(
             self.source_label, "public ingress TLS evidence requires source_label"
         )
-        self.refreshed_at = _required_text(
+        self.refreshed_at = require_text(
             self.refreshed_at, "public ingress TLS evidence requires refreshed_at"
         )
-        self.recorded_at = _required_text(
+        self.recorded_at = require_text(
             self.recorded_at, "public ingress TLS evidence requires recorded_at"
         )
         self.stale_after = self.stale_after.strip()
         self.source_record_ids = tuple(
-            _required_text(
+            require_text(
                 source_record_id,
                 "public ingress TLS evidence source_record_ids must be non-empty",
             )
             for source_record_id in self.source_record_ids
         )
         self.source_versions = {
-            _required_text(
+            require_text(
                 source_record_id,
                 "public ingress TLS evidence source version ids must be non-empty",
-            ): _required_text(
+            ): require_text(
                 source_version,
                 "public ingress TLS evidence source versions must be non-empty",
             )
             for source_record_id, source_version in self.source_versions.items()
         }
         self.provider_evidence = {
-            _required_text(
+            require_text(
                 evidence_key,
                 "public ingress TLS evidence provider evidence keys must be non-empty",
-            ): _required_text(
+            ): require_text(
                 evidence_value,
                 "public ingress TLS evidence provider evidence values must be non-empty",
             )
@@ -248,10 +250,10 @@ class PublicIngressTlsProbeEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _validate_probe_evidence(self) -> "PublicIngressTlsProbeEvidence":
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at, "public ingress TLS probe evidence requires observed_at"
         )
-        self.sni_hostname = _required_text(
+        self.sni_hostname = require_text(
             self.sni_hostname, "public ingress TLS probe evidence requires sni_hostname"
         ).lower()
         self.stale_after = self.stale_after.strip()
@@ -278,7 +280,7 @@ class PublicIngressTlsObservation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_tls_observation(self) -> "PublicIngressTlsObservation":
-        self.public_name = _required_text(
+        self.public_name = require_text(
             self.public_name, "public ingress TLS observation requires public_name"
         ).lower()
         self.incident_id = self.incident_id.strip()
@@ -287,7 +289,7 @@ class PublicIngressTlsObservation(BaseModel):
         self.not_before = self.not_before.strip()
         self.not_after = self.not_after.strip()
         self.presented_name_evidence = tuple(
-            _required_text(
+            require_text(
                 presented_name,
                 "public ingress TLS presented_name_evidence must be non-empty",
             ).lower()
@@ -333,14 +335,19 @@ class PublicIngressTargetObservation(BaseModel):
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    sync: SyncCycleHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "PublicIngressTargetObservation":
-        self.url = _required_text(self.url, "public ingress target observation requires url")
+        self.url = require_text(self.url, "public ingress target observation requires url")
         self.final_url = self.final_url.strip()
         if self.dns is not None and self.target not in {"base_url", "health_url"}:
             raise ValueError("DNS diagnostics require a public HTTP target")
-        self.summary = _required_text(
+        self.summary = require_text(
             self.summary, "public ingress target observation requires summary"
         )
         if self.status == "pass" and self.failure_code is not None:
@@ -393,20 +400,18 @@ class PublicIngressObservationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PublicIngressObservationRecord":
-        self.record_id = _required_text(
+        self.record_id = require_text(
             self.record_id, "public ingress observation requires record_id"
         )
-        self.product = _required_text(self.product, "public ingress observation requires product")
-        self.context = _required_text(self.context, "public ingress observation requires context")
-        self.instance = _required_text(
-            self.instance, "public ingress observation requires instance"
-        )
-        self.observed_at = _required_text(
+        self.product = require_text(self.product, "public ingress observation requires product")
+        self.context = require_text(self.context, "public ingress observation requires context")
+        self.instance = require_text(self.instance, "public ingress observation requires instance")
+        self.observed_at = require_text(
             self.observed_at, "public ingress observation requires observed_at"
         )
         self.repository = self.repository.strip()
         self.driver_id = self.driver_id.strip()
-        self.check_name = _required_text(
+        self.check_name = require_text(
             self.check_name, "public ingress observation requires check_name"
         )
         self.base_url = self.base_url.strip()
@@ -415,7 +420,7 @@ class PublicIngressObservationRecord(BaseModel):
         self.incident_event_id = self.incident_event_id.strip()
         self.material_fingerprint_sha256 = self.material_fingerprint_sha256.strip().lower()
         self.notification_key = self.notification_key.strip()
-        self.summary = _required_text(self.summary, "public ingress observation requires summary")
+        self.summary = require_text(self.summary, "public ingress observation requires summary")
         if self.status == "pass" and self.failure_code is not None:
             raise ValueError("passing public ingress observation cannot include failure_code")
         if self.status == "fail" and self.failure_code is None:
@@ -475,7 +480,7 @@ class PublicIngressIncidentRouteAuthority(BaseModel):
         self.target_keys = tuple(
             sorted(
                 {
-                    _required_text(
+                    require_text(
                         value,
                         "public ingress material route authority target keys must be non-empty",
                     )
@@ -525,7 +530,7 @@ class PublicIngressIncidentRuntimeMismatch(BaseModel):
         self.mismatched_fields = tuple(
             sorted(
                 {
-                    _required_text(
+                    require_text(
                         value,
                         "public ingress runtime mismatch fields must be non-empty",
                     )
@@ -605,30 +610,28 @@ class PublicIngressIncidentRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_incident(self) -> "PublicIngressIncidentRecord":
-        self.incident_id = _required_text(
+        self.incident_id = require_text(
             self.incident_id, "public ingress incident requires incident_id"
         )
-        self.product = _required_text(self.product, "public ingress incident requires product")
-        self.context = _required_text(self.context, "public ingress incident requires context")
-        self.instance = _required_text(self.instance, "public ingress incident requires instance")
-        self.opened_at = _required_text(
-            self.opened_at, "public ingress incident requires opened_at"
-        )
-        self.opened_observation_id = _required_text(
+        self.product = require_text(self.product, "public ingress incident requires product")
+        self.context = require_text(self.context, "public ingress incident requires context")
+        self.instance = require_text(self.instance, "public ingress incident requires instance")
+        self.opened_at = require_text(self.opened_at, "public ingress incident requires opened_at")
+        self.opened_observation_id = require_text(
             self.opened_observation_id,
             "public ingress incident requires opened_observation_id",
         )
-        self.latest_observation_id = _required_text(
+        self.latest_observation_id = require_text(
             self.latest_observation_id,
             "public ingress incident requires latest_observation_id",
         )
-        self.latest_observed_at = _required_text(
+        self.latest_observed_at = require_text(
             self.latest_observed_at,
             "public ingress incident requires latest_observed_at",
         )
         self.repository = self.repository.strip()
         self.driver_id = self.driver_id.strip()
-        self.check_name = _required_text(
+        self.check_name = require_text(
             self.check_name, "public ingress incident requires check_name"
         )
         self.resolved_at = self.resolved_at.strip()
@@ -640,7 +643,7 @@ class PublicIngressIncidentRecord(BaseModel):
         self.notification_state_reason = self.notification_state_reason.strip()
         self.silenced_until = self.silenced_until.strip()
         self.latest_recovery_observation_id = self.latest_recovery_observation_id.strip()
-        self.summary = _required_text(self.summary, "public ingress incident requires summary")
+        self.summary = require_text(self.summary, "public ingress incident requires summary")
         if self.schema_version >= 2:
             if self.state_version < 1:
                 raise ValueError("public ingress incident schema v2 requires state_version")
@@ -703,19 +706,19 @@ class PublicIngressIncidentEventRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_event(self) -> "PublicIngressIncidentEventRecord":
-        self.event_id = _required_text(
+        self.event_id = require_text(
             self.event_id, "public ingress incident event requires event_id"
         )
-        self.incident_id = _required_text(
+        self.incident_id = require_text(
             self.incident_id, "public ingress incident event requires incident_id"
         )
-        self.occurred_at = _required_text(
+        self.occurred_at = require_text(
             self.occurred_at, "public ingress incident event requires occurred_at"
         )
-        self.observation_id = _required_text(
+        self.observation_id = require_text(
             self.observation_id, "public ingress incident event requires observation_id"
         )
-        self.material_fingerprint_sha256 = _required_text(
+        self.material_fingerprint_sha256 = require_text(
             self.material_fingerprint_sha256,
             "public ingress incident event requires material_fingerprint_sha256",
         ).lower()
@@ -725,9 +728,7 @@ class PublicIngressIncidentEventRecord(BaseModel):
         self.policy_id = self.policy_id.strip()
         self.reminder_window_started_at = self.reminder_window_started_at.strip()
         self.reminder_window_ended_at = self.reminder_window_ended_at.strip()
-        self.summary = _required_text(
-            self.summary, "public ingress incident event requires summary"
-        )
+        self.summary = require_text(self.summary, "public ingress incident event requires summary")
         if self.event == "reminder":
             if not self.policy_id or self.reminder_window_index is None:
                 raise ValueError("public ingress reminder event requires policy window identity")
@@ -766,25 +767,25 @@ class PublicIngressIncidentReminderStateRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reminder_state(self) -> "PublicIngressIncidentReminderStateRecord":
-        self.reminder_state_id = _required_text(
+        self.reminder_state_id = require_text(
             self.reminder_state_id, "public ingress reminder state requires reminder_state_id"
         )
-        self.incident_id = _required_text(
+        self.incident_id = require_text(
             self.incident_id, "public ingress reminder state requires incident_id"
         )
-        self.policy_id = _required_text(
+        self.policy_id = require_text(
             self.policy_id, "public ingress reminder state requires policy_id"
         )
-        self.material_event_id = _required_text(
+        self.material_event_id = require_text(
             self.material_event_id, "public ingress reminder state requires material_event_id"
         )
-        self.window_anchor_at = _required_text(
+        self.window_anchor_at = require_text(
             self.window_anchor_at, "public ingress reminder state requires window_anchor_at"
         )
         self.last_reminder_event_id = self.last_reminder_event_id.strip()
         self.last_reminded_at = self.last_reminded_at.strip()
         self.next_reminder_at = self.next_reminder_at.strip()
-        self.updated_at = _required_text(
+        self.updated_at = require_text(
             self.updated_at, "public ingress reminder state requires updated_at"
         )
         if self.status == "active" and not self.next_reminder_at:
@@ -813,7 +814,7 @@ class PublicIngressNotificationDestination(BaseModel):
 
     @model_validator(mode="after")
     def _validate_destination(self) -> "PublicIngressNotificationDestination":
-        self.destination_id = _required_text(
+        self.destination_id = require_text(
             self.destination_id, "public ingress notification destination requires destination_id"
         )
         self.github_repository = self.github_repository.strip()
@@ -892,17 +893,17 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "PublicIngressNotificationPolicyRecord":
-        self.policy_id = _required_text(
+        self.policy_id = require_text(
             self.policy_id, "public ingress notification policy requires policy_id"
         )
         self.product = self.product.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
         self.check_name = self.check_name.strip()
-        self.created_at = _required_text(
+        self.created_at = require_text(
             self.created_at, "public ingress notification policy requires created_at"
         )
-        self.updated_at = _required_text(
+        self.updated_at = require_text(
             self.updated_at, "public ingress notification policy requires updated_at"
         )
         self.source = self.source.strip()
@@ -974,22 +975,22 @@ class PublicIngressNotificationAttemptRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_attempt(self) -> "PublicIngressNotificationAttemptRecord":
-        self.attempt_id = _required_text(
+        self.attempt_id = require_text(
             self.attempt_id, "public ingress notification attempt requires attempt_id"
         )
-        self.incident_id = _required_text(
+        self.incident_id = require_text(
             self.incident_id, "public ingress notification attempt requires incident_id"
         )
-        self.policy_id = _required_text(
+        self.policy_id = require_text(
             self.policy_id, "public ingress notification attempt requires policy_id"
         )
-        self.destination_id = _required_text(
+        self.destination_id = require_text(
             self.destination_id, "public ingress notification attempt requires destination_id"
         )
-        self.attempted_at = _required_text(
+        self.attempted_at = require_text(
             self.attempted_at, "public ingress notification attempt requires attempted_at"
         )
-        self.observation_id = _required_text(
+        self.observation_id = require_text(
             self.observation_id,
             "public ingress notification attempt requires observation_id",
         )
@@ -1384,7 +1385,7 @@ def _provider_target_parts(
 
 def build_public_ingress_tls_check_name(domain_name: str) -> str:
     normalized_domain = (
-        _required_text(domain_name, "public ingress TLS check name requires domain_name")
+        require_text(domain_name, "public ingress TLS check name requires domain_name")
         .lower()
         .rstrip(".")
     )
@@ -1400,13 +1401,6 @@ def _check_record_token(check_name: str) -> str:
     # Preserve legacy public-ingress observation and incident ids for the default
     # public HTTP check while still separating every explicitly named non-default check.
     return canonical_health_check_record_token(check_name)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _normalize_optional_text(value: str) -> str:

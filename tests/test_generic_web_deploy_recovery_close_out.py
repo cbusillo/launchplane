@@ -21,7 +21,6 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import (
-    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
     GenericWebRuntimeArtifactObservation,
     evaluate_generic_web_runtime_close_out,
@@ -31,7 +30,6 @@ from tests.support.stores import sqlite_database_url as _sqlite_database_url
 from tests.test_generic_web_deploy_recovery import (
     _create_recovery_app,
     _generic_web_recovery_reservation,
-    _generic_web_recovery_target,
     _invoke_recovery,
     _invoke_recovery_apply,
     _RecoveryObservationProvider,
@@ -203,7 +201,19 @@ class GenericWebDeployRecoveryCloseOutTests(unittest.TestCase):
             )
             stored = harness.stored(reservation)
             deployments = harness.store.list_deployment_records()
+            from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+            from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+
+            target = _generic_web_recovery_target()
             next_deploy = harness.store.reserve_mutation(
+                provider_target_origin=ProviderTargetOrigin(
+                    product=str(original_deploy["product"]),
+                    context=target.ship_request.context,
+                    instance=target.ship_request.instance,
+                    provider_id=target.ship_request.provider_id,
+                    target_type=target.resolved_target.target_type,
+                    target_id=target.resolved_target.target_id,
+                ),
                 scope=reservation.scope,
                 route_path=reservation.route_path,
                 idempotency_key="next-deploy-after-close-out",
@@ -568,13 +578,6 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
         ):
             dokploy_runtime_evidence.fetch_compose_running_container_images(
                 host="https://dokploy.example", token="token", app_name="app-x1"
-            )
-
-    def test_provider_reads_compose_targets_only(self) -> None:
-        with self.assertRaises(ValueError):
-            DokployGenericWebDeployProvider().observe_runtime_artifact(
-                control_plane_root=Path("."),
-                resolved_deploy_target=_generic_web_recovery_target(),
             )
 
 

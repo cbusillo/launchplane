@@ -326,7 +326,6 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "authz_diagnostic.evaluate": "read",
             "owner_acceptance.read": "read",
             "product_environment.read": "read",
-            "work_graph.rank": "read",
             "preview_pr_feedback_notification_attempt.read": "read",
             "preview_pr_feedback.write": "safe_write",
             "owner_acceptance_event.write": "safe_write",
@@ -352,7 +351,6 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
     def test_limited_remote_user_action_allowlist_excludes_privileged_families(self) -> None:
         allowed_actions = (
             "product_environment.read",
-            "work_graph.rank",
             "owner_acceptance_event.write",
             "preview_pr_feedback.write",
         )

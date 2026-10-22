@@ -29,6 +29,7 @@ from control_plane.workflows.provider_target_dual_write import (
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy.api import JsonObject
+from control_plane.dokploy.network_capacity import require_bridge_network_capacity
 
 
 PROJECT_CREATE_PATH = "/api/project.create"
@@ -726,6 +727,7 @@ def create_dokploy_compose_target(
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
+    resuming_create: bool = False,
 ) -> DokployComposeTargetCreateResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -854,6 +856,14 @@ def create_dokploy_compose_target(
             warnings=("dry run only; provider was not mutated and records were not written",),
         )
 
+    # A Compose lane needs its private default bridge. Check the selected host
+    # before even creating its parent placement; a refusal leaves no partial lane.
+    if resuming_create and not (normalized_project_id or normalized_environment_id):
+        raise ValueError("Resuming creation requires recorded original placement.")
+    if not resuming_create:
+        require_bridge_network_capacity(
+            host=host, token=token, server_id=normalized_server_id, required_networks=1
+        )
     created_project_id = normalized_project_id
     if not created_project_id and not normalized_environment_id:
         project_payload: JsonObject = {"name": normalized_project_name}

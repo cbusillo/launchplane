@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 class RunnerLaneRecord(BaseModel):
@@ -17,12 +18,12 @@ class RunnerLaneRecord(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerLaneRecord":
-        self.name = _required_text(self.name, "runner lane requires name")
-        self.repository = _required_text(self.repository, "runner lane requires repository")
-        self.status = _required_text(self.status, "runner lane requires status").lower()
+        self.name = require_text(self.name, "runner lane requires name")
+        self.repository = require_text(self.repository, "runner lane requires repository")
+        self.status = require_text(self.status, "runner lane requires status").lower()
         self.labels = tuple(sorted({label.strip() for label in self.labels if label.strip()}))
         self.host_hint = self.host_hint.strip()
-        self.observed_at = _required_text(self.observed_at, "runner lane requires observed_at")
+        self.observed_at = require_text(self.observed_at, "runner lane requires observed_at")
         return self
 
 
@@ -43,10 +44,8 @@ class RunnerLaneInventory(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_inventory(self) -> "RunnerLaneInventory":
-        self.repository = _required_text(
-            self.repository, "runner lane inventory requires repository"
-        )
-        self.observed_at = _required_text(
+        self.repository = require_text(self.repository, "runner lane inventory requires repository")
+        self.observed_at = require_text(
             self.observed_at, "runner lane inventory requires observed_at"
         )
         self.lanes = tuple(sorted(self.lanes, key=lambda lane: (lane.name, lane.github_id)))
@@ -81,10 +80,3 @@ def build_runner_lane_inventory(
         capacity_constrained=capacity_constrained,
         capacity_reason=capacity_reason,
     )
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

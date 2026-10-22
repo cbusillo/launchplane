@@ -1,10 +1,14 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
+from httpx2 import Response
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_app import _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -12,25 +16,63 @@ from control_plane.service_human_auth import (
 )
 from tests.http_app_test_support import (
     _asgi_get,
+    _asgi_request,
     _browser_mutation_headers,
     _github_human_identity,
-    _github_human_work_graph_rank_policy,
+    _github_human_product_config_policy,
     _github_oauth_config,
-    _MissingProductReadStore,
-    _post_work_graph_rank,
+    _product_profile_write_policy,
     _RejectingVerifier,
-    _work_graph_read_policy,
 )
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import StubVerifier, identity
-from tests.support.work_graph import work_graph_snapshot_payload
+from tests.support.profiles import product_profile_payload
+from tests.support.stores import sqlite_database_url
+
+_PRODUCT = "browser-fixture"
+_MUTATION_ROUTE = f"/v1/product-profiles/{_PRODUCT}/owner"
+
+
+async def _clear_product_client(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> Response:
+    request_headers = {**(headers or {}), "Idempotency-Key": "clear-browser-fixture-client"}
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_request(
+        app,
+        "POST",
+        _MUTATION_ROUTE,
+        headers=request_headers,
+        payload={"mode": "apply", "clear": True, "reason": "Clear synthetic fixture Client."},
+    )
 
 
 class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def _store(self) -> PostgresRecordStore:
+        temporary_directory = TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        store = PostgresRecordStore(
+            database_url=sqlite_database_url(Path(temporary_directory.name) / "launchplane.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        profile = product_profile_payload(_PRODUCT)
+        profile["owner"] = {"github_login": "synthetic-client", "github_id": "4242"}
+        store.write_product_profile_record(LaunchplaneProductProfileRecord.model_validate(profile))
+        return store
+
     def test_cookie_mutation_routes_do_not_use_plain_read_identity(self) -> None:
+        store = self._store()
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=_github_human_work_graph_rank_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
+            authz_policy=_github_human_product_config_policy(
+                action="product_profile.write", product=_PRODUCT, context="launchplane"
+            ),
+            record_store_factory=lambda: store,
         )
         unguarded = set()
         for route in app.routes:
@@ -41,14 +83,14 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 for dependency in route.dependant.dependencies
                 if dependency.call is not None
             }
-            if dependency_names & {"read_identity", "read_work_graph_rank_identity"}:
+            if "read_identity" in dependency_names:
                 unguarded.add(route.path)
         # This mode-aware handler consumes browser mutation authority only in
         # its apply arm; all other cookie-capable mutations use guarded dependencies.
         self.assertEqual(unguarded, {_AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE})
 
-    @staticmethod
-    def _human_app() -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+    def _human_app(self) -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+        store = self._store()
         session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -56,8 +98,10 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         human_session = session_manager.issue(_github_human_identity())
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=_github_human_work_graph_rank_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
+            authz_policy=_github_human_product_config_policy(
+                action="product_profile.write", product=_PRODUCT, context="launchplane"
+            ),
+            record_store_factory=lambda: store,
             human_session_manager=session_manager,
         )
         return app, session_manager, human_session
@@ -85,9 +129,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     headers["Origin"] = origin
 
-                response = await _post_work_graph_rank(
+                response = await _clear_product_client(
                     app,
-                    payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
                     authorization="",
                     headers=headers,
                 )
@@ -110,9 +153,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     headers[header_name] = header_value
 
-                response = await _post_work_graph_rank(
+                response = await _clear_product_client(
                     app,
-                    payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
                     authorization="",
                     headers=headers,
                 )
@@ -126,44 +168,42 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         stale_headers = _browser_mutation_headers(session_manager, human_session)
         stale_headers["X-CSRF-Token"] = session_manager.csrf_token(stale_session)
 
-        stale_response = await _post_work_graph_rank(
+        stale_response = await _clear_product_client(
             app,
-            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=stale_headers,
         )
         valid_headers = _browser_mutation_headers(session_manager, human_session)
-        accepted_response = await _post_work_graph_rank(
+        accepted_response = await _clear_product_client(
             app,
-            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=valid_headers,
         )
-        replay_response = await _post_work_graph_rank(
+        replay_response = await _clear_product_client(
             app,
-            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=valid_headers,
         )
 
         self.assertEqual(stale_response.status_code, 403)
         self.assertEqual(accepted_response.status_code, 202)
+        self.assertTrue(accepted_response.json()["result"]["changed"])
         self.assertEqual(replay_response.status_code, 403)
         self.assertEqual(replay_response.json()["error"]["code"], "browser_mutation_denied")
 
     async def test_github_actions_bearer_mutation_does_not_require_browser_headers(self) -> None:
+        store = self._store()
         app = create_launchplane_fastapi_app(
             verifier=StubVerifier(identity()),
-            authz_policy=_work_graph_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
+            authz_policy=_product_profile_write_policy(product=_PRODUCT),
+            record_store_factory=lambda: store,
         )
 
-        response = await _post_work_graph_rank(
-            app,
-            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
-        )
+        response = await _clear_product_client(app)
 
         self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["result"]["changed"])
+        self.assertFalse(store.read_product_profile_record(_PRODUCT).owner.is_set)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from control_plane.odoo_testing_restore import (
     require_distinct_testing_credentials,
 )
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite, read_walkthrough_prerequisites
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.product_path_check import ActionAllowed, PathCheckStep
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
@@ -46,7 +47,12 @@ _WALKTHROUGH_DESCRIPTIONS = {
     WalkthroughPrerequisite.RUNTIME: "Verify the running testing target matches the generation.",
     WalkthroughPrerequisite.ORIGIN: "Verify the testing HTTPS origin belongs to this target.",
     WalkthroughPrerequisite.DATABASE: "Verify the recorded testing database matches the running copy.",
-    WalkthroughPrerequisite.ISOLATION_OR_USAGE: "Verify connection isolation and the absence of protected staff sessions.",
+    WalkthroughPrerequisite.ISOLATION_OR_USAGE: "The native isolation and protected sign-in read was unavailable; repeat the read-only check.",
+    WalkthroughPrerequisite.RUNNER_UNSELECTED: "The testing target did not have exactly one script runner; verify the running testing target.",
+    WalkthroughPrerequisite.RUNNER_CHANGED: "The testing runner identity, image or database differs from the selected runtime.",
+    WalkthroughPrerequisite.COPY_WITNESS_CHANGED: "The running database does not carry this generation's copy witness; preserve the copy.",
+    WalkthroughPrerequisite.ISOLATION_REFUSED: "Connection isolation readback refused; use the supported isolation repair and readback.",
+    WalkthroughPrerequisite.PROTECTED_SIGNIN: "A protected sign-in was observed since preparation; preserve that use.",
     WalkthroughPrerequisite.CREDENTIAL: "Supply the task id to verify its account access and custody.",
 }
 
@@ -156,7 +162,18 @@ def read_testing_prerequisites(
                         description=(
                             "This prerequisite passed."
                             if state == "clear"
-                            else _WALKTHROUGH_DESCRIPTIONS[code]
+                            else (
+                                "Physical-copy predicate "
+                                + code.value
+                                + (
+                                    " was not satisfied."
+                                    if state == "blocked"
+                                    else " could not be observed."
+                                )
+                                + " Preserve the original copy and inspect the selected runtime."
+                                if isinstance(code, ReadbackPredicate)
+                                else _WALKTHROUGH_DESCRIPTIONS[code]
+                            )
                         ),
                         fix="none"
                         if state == "clear"

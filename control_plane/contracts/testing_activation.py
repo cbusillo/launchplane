@@ -9,6 +9,43 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.testing_application import TestingApplicationSpecification
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.dokploy.testing_route import TestingLaneRoute
+from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+
+
+class TestingApplicationPredecessor(BaseModel):
+    """The original service contract captured before candidate effects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_identity: RuntimeIdentity
+    service_id: str = Field(min_length=1)
+    task_template_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class TestingApplicationReadiness(BaseModel):
+    """Evidence attached to the original activation, never a product verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_identity: RuntimeIdentity
+    private_health: HealthcheckEvidence | None = None
+    service_id: str = ""
+    task_id: str = ""
+    container_id: str = ""
+    backend: str = ""
+    old_runtime_identity: RuntimeIdentity | None = None
+    route: TestingLaneRoute | None = None
+    route_execution: TestingRouteExecutionIntent | None = None
+    predecessor_health: HealthcheckEvidence | None = None
+    public_health: HealthcheckEvidence | None = None
+    observed_at: str = ""
 
 
 class TestingActivationRefusalCode(StrEnum):
@@ -62,6 +99,23 @@ class TestingActivationRequest(BaseModel):
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    application: TestingApplicationSpecification | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class TestingActivationFailure(BaseModel):
+    """Original-operation refusal evidence, without a process-cessation claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[
+        "authority_refused_before_recipient", "candidate_deployment_failed", "publication_refused"
+    ]
+    target_type: Literal["", "application", "compose"] = ""
+    target_id: str = ""
+    deployment_id: str = ""
+    deployment_status: str = ""
 
 
 class TestingActivationRecord(BaseModel):
@@ -94,6 +148,33 @@ class TestingActivationRecord(BaseModel):
     published: bool = False
     qualified_at: str = ""
     published_target: DokployTargetRecord | None = None
+    state_recipient: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    retained_inventory: EnvironmentInventory | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    retained_deployment: DeploymentRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    application_readiness: TestingApplicationReadiness | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    predecessor: TestingApplicationPredecessor | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    retained_private_ingress: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    retained_route_binding: EnvironmentRouteBindingRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    published_route_binding: EnvironmentRouteBindingRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    failure: TestingActivationFailure | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class TestingActivationPlan(BaseModel):
@@ -111,7 +192,7 @@ class TestingActivationPlan(BaseModel):
     hold_preserved: Literal[True] = True
     historical_settlement: Literal["not_evaluated"] = "not_evaluated"
     production_modified: Literal[False] = False
-    deployment_requested: Literal[False] = False
+    deployment_requested: bool = False
     applied: bool = False
     separation_verified: bool = False
 
@@ -120,3 +201,13 @@ class TestingActivationResult(TestingActivationPlan):
     applied: Literal[True] = True
     separation_verified: Literal[True] = True
     qualified_at: str
+
+
+class TestingActivationRefusedResult(TestingActivationPlan):
+    outcome: Literal["refused"] = "refused"
+    applied: Literal[False] = False
+    separation_verified: Literal[False] = False
+    reason: Literal[
+        "authority_refused_before_recipient", "candidate_deployment_failed", "publication_refused"
+    ]
+    resources_retained: Literal[True] = True

@@ -9,10 +9,13 @@ another backup, and promotes the same artifact again. Rolling back restores the
 checklist's production version, so the checklist recompiles to the digest the
 Client accepted, and that acceptance covers the second promotion and nothing else.
 
-Every step runs under a Client release grant naming the decision. Before a step is
-queued, and before each provider effect, the decision must still be the product's
-newest one, accepted by its recorded Client, with releases not held. The promotion
-still checks release approval for the exact candidate and the verified backup.
+Every step runs under a Client release grant naming the decision. Fresh work
+checks the product's newest decision, its recorded Client, and any release hold.
+Generic rollback checks that authority until its own first marked effect. A
+recipient inverse checks until its own replacement-writer pause dispatch, including
+any earlier peer parking. After the relevant boundary, protective restoration
+finishes under the original lease and target/publication fences.
+The promotion checks release approval for the exact candidate and verified backup.
 Each step's operation id derives from the decision, so the run needs no record of
 its own and a second worker replica finds the same operations.
 
@@ -79,6 +82,7 @@ from control_plane.contracts.odoo_prod_rollback_operation import (
     odoo_prod_rollback_request_fingerprint,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
@@ -97,8 +101,10 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
+    ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
+    recorded_generic_web_testing_version,
     checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
@@ -108,6 +114,7 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -502,30 +509,30 @@ def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRec
     )
 
 
-def client_release_grant_allows(
-    store: object, authorization: DurableOperationAuthorization
-) -> bool:
-    """The worker's re-check of a release decision grant before each provider effect."""
+def _client_release_authority(
+    store: object,
+    authorization: DurableOperationAuthorization,
+) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
+    """Read the covering authority and its production boundary independently of testing."""
 
     if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
-        return False
+        return None
     covered = _covering_decision(
         store,
         authorization.product,
         decision_record_id=authorization.release_decision_record_id,
     )
     if covered is None:
-        return False
+        return None
     profile, decision = covered
     context = _prod_context(profile)
     checklist = decision.checklist
     expected = _decision_caller(decision)
     try:
         record_store = cast(PostgresRecordStore, store)
-        testing = release_version(store=record_store, profile=profile, instance="testing")
         production = release_version(store=record_store, profile=profile, instance="prod")
     except (FileNotFoundError, ValueError):
-        return False
+        return None
     if (
         authorization.context != context
         or authorization.grant
@@ -533,21 +540,63 @@ def client_release_grant_allows(
         or authorization.caller.github_id != expected.github_id
         or authorization.caller.role != expected.role
     ):
-        return False
+        return None
     if decision.release_start == "rollback":
         # The rejected hotfix's candidate is live until the rollback restores the
         # Client's last accepted release; testing may already carry newer work.
         target = rejection_rollback_target(record_store, profile)
-        return target is not None and production.artifact_id in (
-            checklist.candidate.artifact_id,
-            target.artifact_identity.artifact_id if target.artifact_identity else "",
+        return (
+            covered
+            if target is not None
+            and production.artifact_id
+            in (
+                checklist.candidate.artifact_id,
+                target.artifact_identity.artifact_id if target.artifact_identity else "",
+            )
+            else None
         )
-    # Every step happens while testing carries the accepted candidate, and production
-    # runs either the checklist's production version or that candidate.
-    return testing == checklist.candidate and production in (
-        checklist.production,
-        checklist.candidate,
+    return (
+        covered
+        if production
+        in (
+            checklist.production,
+            checklist.candidate,
+        )
+        else None
     )
+
+
+def client_release_grant_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Validate external/queued release work against its authority and current source."""
+    covered = _client_release_authority(store, authorization)
+    if covered is None:
+        return False
+    profile, decision = covered
+    if decision.release_start == "rollback" and profile.driver_id == "generic-web":
+        return True
+    try:
+        testing = (
+            recorded_generic_web_testing_version(
+                store=cast(PostgresRecordStore, store), profile=profile
+            )
+            if profile.driver_id == "generic-web"
+            else release_version(
+                store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+            )
+        )
+    except (FileNotFoundError, ValueError):
+        return False
+    return decision.release_start == "rollback" or testing == decision.checklist.candidate
+
+
+def _generic_web_release_authority_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Ongoing authority for an admitted web attempt or its accepted baseline inverse."""
+    covered = _client_release_authority(store, authorization)
+    return covered is not None and covered[0].driver_id == "generic-web"
 
 
 def _step_status(
@@ -707,6 +756,34 @@ def read_client_release_step_views(
     return tuple(views)
 
 
+_TESTING_RELEASE_CHANGED_MESSAGE = "Testing has moved to a different version. Qualify this accepted artifact and revision again, or accept the new candidate for its own release."
+
+
+def _release_needs_testing(
+    profile: LaunchplaneProductProfileRecord, views: tuple[ClientReleaseStepView, ...]
+) -> bool:
+    next_step = next(view for view in views if view.status != "pass")
+    return not (
+        profile.driver_id == "generic-web"
+        and (
+            next_step.kind == "rollback"
+            or next_step.kind == "promote"
+            and next_step.status in {"pending", "running"}
+        )
+    )
+
+
+def _testing_release_evidence_blocked_reason(error: ValueError | FileNotFoundError) -> str:
+    if (
+        isinstance(error, ReleaseEvidenceUnavailable)
+        and error.code == "candidate_operation_unresolved"
+    ):
+        return str(error)
+    if isinstance(error, ReleaseEvidenceUnavailable) and error.code == "candidate_identity_missing":
+        return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
+    return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
@@ -728,11 +805,22 @@ def _release_run_blocked_reason(
         # A rejected hotfix rolls back even if testing has moved on.
         if decision.release_start == "rollback":
             return ""
-        candidate = release_version(store=store, profile=profile, instance="testing")
     except (FileNotFoundError, ValueError):
         return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
-    if candidate != decision.checklist.candidate:
-        return "The testing version has changed since this release was accepted. The Client must review the current candidate before it can go live."
+    try:
+        candidate = (
+            (
+                recorded_generic_web_testing_version(store=store, profile=profile)
+                if profile.driver_id == "generic-web"
+                else release_version(store=store, profile=profile, instance="testing")
+            )
+            if _release_needs_testing(profile, views)
+            else None
+        )
+    except (FileNotFoundError, ValueError) as error:
+        return _testing_release_evidence_blocked_reason(error)
+    if candidate is not None and candidate != decision.checklist.candidate:
+        return _TESTING_RELEASE_CHANGED_MESSAGE
     next_step = next(view for view in views if view.status != "pass")
     expected_production = (
         decision.checklist.candidate
@@ -750,6 +838,37 @@ def _release_run_blocked_reason(
 
 
 def read_client_release_run(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    control_plane_root: Path | None = None,
+) -> ClientReleaseRunView | None:
+    run = _read_client_release_continuation(
+        store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
+    )
+    if (
+        run is None
+        or run.blocked_reason
+        or run.state not in {"waiting", "running"}
+        or profile.driver_id != "generic-web"
+        or not _release_needs_testing(profile, run.steps)
+    ):
+        return run
+    try:
+        candidate = release_version(
+            store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+        )
+    except (FileNotFoundError, ValueError) as error:
+        return run.model_copy(
+            update={"blocked_reason": _testing_release_evidence_blocked_reason(error)}
+        )
+    if candidate != decision.checklist.candidate:
+        return run.model_copy(update={"blocked_reason": _TESTING_RELEASE_CHANGED_MESSAGE})
+    return run
+
+
+def _read_client_release_continuation(
     *,
     store: object,
     profile: LaunchplaneProductProfileRecord,
@@ -790,8 +909,21 @@ def read_client_release_run(
         and read_status(store).get("admission_paused")
     ):
         blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
+    next_step = next((view for view in views if view.status != "pass"), None)
+    native_inverse = None
+    if (
+        not blocked_reason
+        and profile.driver_id == "generic-web"
+        and state == "waiting"
+        and next_step is not None
+        and next_step.kind == "rollback"
+    ):
+        try:
+            native_inverse = _native_recipient_inverse(store, profile, decision)
+        except ClientReleaseNotReady:
+            blocked_reason = "The retained recipient inverse's saved baseline or owned publication rows changed. Reconcile its existing release before restoring production."
     if not blocked_reason and decision.release_start == "rollback" and state == "waiting":
-        if rejection_rollback_target(store, profile) is None:
+        if native_inverse is None and rejection_rollback_target(store, profile) is None:
             blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
     elif not blocked_reason and profile.driver_id == "odoo" and state == "waiting":
         try:
@@ -803,6 +935,7 @@ def read_client_release_run(
         and profile.driver_id == "generic-web"
         and decision.release_start == "promote_with_rollback_drill"
         and state == "waiting"
+        and native_inverse is None
     ):
         try:
             _generic_web_drill_target(store, profile, decision)
@@ -821,6 +954,44 @@ def read_client_release_run(
 
 class ClientReleaseNotReady(Exception):
     """The next step cannot be queued now; nothing was queued."""
+
+
+def _require_standing_release_available(store: PostgresRecordStore, product: str) -> None:
+    """Automatic acceptance cannot supersede an outstanding admitted production attempt."""
+    covered = _covering_decision(store, product)
+    if covered is None:
+        return
+    profile, decision = covered
+    if profile.driver_id != "generic-web":
+        return
+    steps = client_release_steps(decision.release_start)
+    statuses: dict[str, ClientReleaseStepStatus] = {}
+    for step in steps:
+        status, operation = _step_status(store, profile, decision, step)
+        statuses[step.name] = status
+        if step.kind in {"promote", "rollback"} and (
+            status == "reconciliation_required"
+            or status == "running"
+            and bool(getattr(operation, "provider_effect_started_at", ""))
+        ):
+            raise ClientReleaseNotReady("standing_release_effects_outstanding")
+    if (
+        decision.release_start == "promote_with_rollback_drill"
+        and statuses.get(ClientReleaseStep("promote", 1).name) == "pass"
+        and statuses.get(ClientReleaseStep("rollback", 1).name)
+        in {"not_started", "pending", "running", "reconciliation_required"}
+    ):
+        production = release_version(store=store, profile=profile, instance="prod")
+        if production != decision.checklist.candidate:
+            return
+        try:
+            if _native_recipient_inverse(store, profile, decision) is None:
+                _generic_web_drill_target(store, profile, decision)
+        except ClientReleaseNotReady:
+            # No original inverse was dispatched. A new candidate must qualify
+            # its own reviewed production baseline and drill before any effect.
+            return
+        raise ClientReleaseNotReady("standing_release_inverse_outstanding")
 
 
 def _record_standing_acceptance(
@@ -843,6 +1014,7 @@ def _record_standing_acceptance(
         or profile.production_use == "prelaunch"
     ):
         return
+    _require_standing_release_available(store, profile.product)
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
@@ -918,7 +1090,10 @@ def _record_standing_acceptance(
             release_start=release_start_for_acceptance(store=store, profile=profile),
             acceptance_source="director_standing",
         )
-    decision = store.create_release_review_decision_record_if_absent(decision)
+    decision = store.create_release_review_decision_record_if_absent(
+        decision,
+        validate_before_insert=lambda: _require_standing_release_available(store, profile.product),
+    )
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
     issue_url = decision.release_issue_url or publish_release_decision(
@@ -963,7 +1138,7 @@ def _run_generic_web_promotion(
     )
 
     def validate_checkpoint() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The release is no longer accepted.")
 
     def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
@@ -1015,6 +1190,11 @@ def _run_generic_web_promotion(
             if covered is None:
                 raise click.ClickException("The release is no longer accepted.")
 
+        def validate_recipient_source() -> None:
+            # The adapter admits the source before this attempt starts production;
+            # its later acceptance and recovery checks do not chase testing.
+            _require_qualified_generic_web_release_source(store, profile, decision)
+
         if recipient.phase != "published" and not recipient.execution:
             _require_current_release(store, control_plane_root, profile, decision)
 
@@ -1025,6 +1205,7 @@ def _run_generic_web_promotion(
             f"client-release-{decision.record_id}",
             backup_record_id,
             validate_recipient_release,
+            validate_source=validate_recipient_source,
         )
         recipient_result = run_durable_provider_operation(
             store=store,
@@ -1104,15 +1285,18 @@ def advance_client_releases(
             continue
         try:
             _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
-        except (FileNotFoundError, ValueError, click.ClickException):
+        except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
-            continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue
         try:
             operation_id = _advance(store, control_plane_root, *covered)
-        except (ClientReleaseNotReady, BusinessHoursHeld) as reason:
+        except (
+            ClientReleaseNotReady,
+            BusinessHoursHeld,
+            GenericWebPromotionSourceRefused,
+        ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason
             )
@@ -1209,6 +1393,23 @@ def _advance(
     return ""
 
 
+def _require_qualified_generic_web_release_source(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> None:
+    try:
+        candidate = release_version(store=store, profile=profile, instance="testing")
+    except ReleaseEvidenceUnavailable as error:
+        raise GenericWebPromotionSourceRefused(str(error)) from error
+    except (FileNotFoundError, ValueError) as error:
+        raise GenericWebPromotionSourceRefused(
+            "Testing is no longer qualified for release."
+        ) from error
+    if candidate != decision.checklist.candidate:
+        raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
+
+
 def _require_current_release(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -1221,14 +1422,40 @@ def _require_current_release(
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        candidate = release_version(store=store, profile=profile, instance="testing")
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production, candidate) != (checklist.production, checklist.candidate):
+    if production != checklist.production:
         raise ClientReleaseNotReady("release_changed")
+    if profile.driver_id == "generic-web":
+        _require_qualified_generic_web_release_source(store, profile, decision)
+    else:
+        try:
+            candidate = release_version(store=store, profile=profile, instance="testing")
+        except (FileNotFoundError, ValueError) as error:
+            raise ClientReleaseNotReady("release_record_missing") from error
+        if candidate != checklist.candidate:
+            raise ClientReleaseNotReady("release_changed")
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
+    if profile.driver_id == "generic-web":
+        if (
+            review.latest_decision is not None
+            and review.latest_decision.record_id != decision.record_id
+        ):
+            raise ClientReleaseNotReady("release_not_accepted")
+        if review.unavailable_reason in {
+            "candidate_identity_missing",
+            "candidate_operation_unresolved",
+        }:
+            raise GenericWebPromotionSourceRefused(
+                str(ReleaseEvidenceUnavailable(review.unavailable_reason))
+            )
+        if review.checklist is not None:
+            if review.checklist.production != checklist.production:
+                raise ClientReleaseNotReady("release_changed")
+            if review.checklist.candidate != checklist.candidate:
+                raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
     if (
         not review.approved
         or review.checklist_digest != decision.checklist_digest
@@ -1357,12 +1584,15 @@ def _queue_rollback(
     checklist = decision.checklist
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        testing = release_version(store=store, profile=profile, instance="testing")
+        testing = (
+            release_version(store=store, profile=profile, instance="testing")
+            if profile.driver_id != "generic-web"
+            else None
+        )
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production.artifact_id, testing.artifact_id) != (
-        checklist.candidate.artifact_id,
-        checklist.candidate.artifact_id,
+    if production.artifact_id != checklist.candidate.artifact_id or (
+        testing is not None and testing.artifact_id != checklist.candidate.artifact_id
     ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
@@ -1399,7 +1629,7 @@ def _queue_rollback(
         )
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The release is no longer accepted.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1551,7 +1781,7 @@ def _queue_rejection_rollback(
             raise ClientReleaseNotReady("rollback_not_ready")
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The Client's request for changes no longer applies.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1600,19 +1830,16 @@ def _queue_rejection_rollback(
     return persisted.operation_id if persisted.operation_id == operation.operation_id else ""
 
 
-def _queue_recipient_inverse(
+def _native_recipient_inverse(
     store: PostgresRecordStore,
-    root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
-    step: ClientReleaseStep,
-    context: str,
-    authorized_at: str,
-) -> str | None:
-    from control_plane.production_recipient import custody
-    from control_plane.production_recipient_inverse import run_recipient_inverse
+) -> ProductionRecipientRecord | None:
+    """Read native inverse applicability without provider I/O or fresh drill gates."""
+    from control_plane.production_recipient import custody, RecipientAuthorityChanged
+    from control_plane.production_recipient_publication import require_owned_publication_rows
 
-    record = custody(store, profile.product, context)
+    record = custody(store, profile.product, _prod_context(profile))
     if (
         record is None
         or not record.publication
@@ -1628,6 +1855,28 @@ def _queue_recipient_inverse(
         != decision.checklist.production.artifact_id
     ):
         raise ClientReleaseNotReady("recipient_inverse_target_changed")
+    if record.phase in {"published", "reverting"}:
+        try:
+            require_owned_publication_rows(store, record)
+        except (RecipientAuthorityChanged, FileNotFoundError) as error:
+            raise ClientReleaseNotReady("recipient_inverse_publication_changed") from error
+    return record
+
+
+def _queue_recipient_inverse(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    context: str,
+    authorized_at: str,
+) -> str | None:
+    from control_plane.production_recipient_inverse import run_recipient_inverse
+
+    record = _native_recipient_inverse(store, profile, decision)
+    if record is None:
+        return None
     grant = client_release_grant(
         decision=decision,
         action="generic_web_rollback.execute",
@@ -1636,7 +1885,7 @@ def _queue_recipient_inverse(
     )
 
     def validate() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The Client release no longer authorizes this inverse.")
 
     actual = run_recipient_inverse(

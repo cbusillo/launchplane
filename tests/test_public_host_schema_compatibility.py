@@ -1,5 +1,3 @@
-"""Native PostgreSQL compatibility-image startup and schema-transition fences."""
-
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import os
@@ -22,6 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.discussion_topic import DiscussionTopicInput, DiscussionTopicRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.product_profile_record import ProductLaneProfile
@@ -29,8 +28,12 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as previous_release,
     e9e3a7b1c5d8_join_retirement_paths as previous_join,
+    b81ca763d924_add_discussion_topics as topics,
+    da72490fce13_join_topics_retirement as topics_join,
     f0a4c8e2b6d9_canonical_public_host_fences as hostnames,
     f1b5d9a3c7e0_join_public_host_fences as hostname_join,
+    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
+    f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
 )
 from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
     PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
@@ -62,14 +65,18 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
         self,
     ) -> None:
         for revision, expected in (
-            ("", previous_release.revision),
-            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, previous_release.revision),
-            (PRE_RETIREMENT_ALEMBIC_REVISION, previous_release.revision),
-            (previous_release.revision, previous_release.revision),
-            (held.revision, previous_join.revision),
-            (previous_join.revision, previous_join.revision),
-            (hostnames.revision, hostnames.revision),
-            (hostname_join.revision, hostname_join.revision),
+            ("", topics.revision),
+            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, topics.revision),
+            (PRE_RETIREMENT_ALEMBIC_REVISION, topics.revision),
+            (previous_release.revision, topics.revision),
+            (topics.revision, topics.revision),
+            (held.revision, topics_join.revision),
+            (previous_join.revision, topics_join.revision),
+            (topics_join.revision, topics_join.revision),
+            (hostnames.revision, topics_hostnames.revision),
+            (hostname_join.revision, compatibility_join.revision),
+            (topics_hostnames.revision, topics_hostnames.revision),
+            (compatibility_join.revision, compatibility_join.revision),
         ):
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 if revision:
@@ -78,13 +85,15 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                 self.addCleanup(engine.dispose)
                 before_tables = set(inspect(engine).get_table_names())
                 retains_history = set(held.RETIRED_TABLES).issubset(before_tables)
-                # The earlier floor does not yet have every historical table.
                 retained_history = ""
                 if retains_history:
                     seed_retired_history(engine)
                     retained_history = history_snapshot(engine, held.RETIRED_TABLES)
                 store = PostgresRecordStore(database_url=url)
                 self.addCleanup(store.close)
+                retained_topics: tuple[DiscussionTopicRecord, ...] = ()
+                if "launchplane_discussion_topics" in before_tables:
+                    retained_topics = (self._seed_topic(store),)
                 target_payload = None
                 if revision not in ("", AUTHZ_COMPATIBILITY_FLOOR_REVISION):
                     self._seed_public_target(store)
@@ -95,6 +104,12 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
 
                 self.assertEqual(migrate_schema(database_url=url), expected)
                 store.verify_schema()
+                self.assertEqual(
+                    store.list_discussion_topics("public-site", include_closed=True),
+                    retained_topics,
+                )
+                if not retained_topics:
+                    retained_topics = (self._seed_topic(store),)
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
@@ -112,6 +127,8 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     PRE_RETIREMENT_ALEMBIC_REVISION,
                     previous_release.revision,
                     hostnames.revision,
+                    topics.revision,
+                    topics_hostnames.revision,
                 ):
                     self.assertTrue(set(held.RETIRED_TABLES).issubset(after_tables))
                 if retains_history:
@@ -119,13 +136,52 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     self.assertEqual(
                         history_snapshot(engine, held.RETIRED_TABLES), retained_history
                     )
-                if revision in (held.revision, previous_join.revision, hostname_join.revision):
+                if revision in (
+                    held.revision,
+                    previous_join.revision,
+                    topics_join.revision,
+                    hostname_join.revision,
+                    compatibility_join.revision,
+                ):
                     self.assertTrue(set(held.RETIRED_TABLES).isdisjoint(after_tables))
 
-                # Future graph knowledge never authorizes joining the held drop.
-                if revision in (hostnames.revision, hostname_join.revision):
-                    for target in (held.revision, previous_join.revision):
-                        if revision == hostnames.revision:
+                before_rollback = history_snapshot(engine, tuple(sorted(after_tables)))
+                ddl: list[str] = []
+
+                def record_ddl(
+                    _connection: object,
+                    _cursor: object,
+                    statement: str,
+                    _parameters: object,
+                    _context: object,
+                    _executemany: bool,
+                ) -> None:
+                    if statement.lstrip().split()[0].upper() in {"CREATE", "ALTER", "DROP"}:
+                        ddl.append(statement)
+
+                event.listen(Engine, "before_cursor_execute", record_ddl)
+                try:
+                    self.assertEqual(migrate_schema(database_url=url), expected)
+                finally:
+                    event.remove(Engine, "before_cursor_execute", record_ddl)
+                self.assertFalse(ddl)
+                self.assertEqual(
+                    history_snapshot(engine, tuple(sorted(after_tables))), before_rollback
+                )
+                self.assertEqual(set(inspect(engine).get_table_names()), after_tables)
+                self.assertEqual(
+                    store.list_discussion_topics("public-site", include_closed=True),
+                    retained_topics,
+                )
+
+                if revision in (
+                    hostnames.revision,
+                    hostname_join.revision,
+                    topics_hostnames.revision,
+                    compatibility_join.revision,
+                ):
+                    for target in (held.revision, previous_join.revision, topics_join.revision):
+                        if revision in (hostnames.revision, topics_hostnames.revision):
                             with self.assertRaises(ValueError):
                                 migrate_schema(database_url=url, target_revision=target)
                             self.assertEqual(
@@ -133,24 +189,79 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                             )
                         else:
                             self.assertEqual(
-                                migrate_schema(database_url=url, target_revision=target), revision
+                                migrate_schema(database_url=url, target_revision=target), expected
                             )
                         with engine.connect() as connection:
                             self.assertEqual(
                                 connection.scalar(text("SELECT version_num FROM alembic_version")),
-                                revision,
+                                expected,
                             )
+
+    @staticmethod
+    def _seed_topic(store: PostgresRecordStore) -> DiscussionTopicRecord:
+        topic = store.add_discussion_topic(
+            "public-site",
+            "release",
+            DiscussionTopicInput(title="Release review", issue_url="https://git.example/issues/7"),
+        )
+        return store.close_discussion_topic(topic.product, topic.topic_id)
 
     def test_explicit_delivery_request_keeps_its_historical_join(self) -> None:
         with _isolated_postgres_database() as url:
             migrate_schema(database_url=url)
             self.assertEqual(
                 migrate_schema(database_url=url, target_revision=held.revision),
-                previous_join.revision,
+                topics_join.revision,
             )
             store = PostgresRecordStore(database_url=url)
             self.addCleanup(store.close)
             store.verify_schema()
+
+    def test_explicit_approved_targets_preserve_historical_and_future_boundaries(self) -> None:
+        for current, target, expected in (
+            (previous_release.revision, held.revision, topics_join.revision),
+            (held.revision, previous_release.revision, topics_join.revision),
+            (previous_release.revision, previous_join.revision, previous_join.revision),
+            (topics.revision, previous_join.revision, topics_join.revision),
+            (previous_release.revision, topics_join.revision, topics_join.revision),
+            (hostname_join.revision, held.revision, hostname_join.revision),
+            (hostname_join.revision, previous_join.revision, hostname_join.revision),
+            (hostname_join.revision, topics_join.revision, compatibility_join.revision),
+            (hostnames.revision, previous_release.revision, hostnames.revision),
+        ):
+            with self.subTest(current=current, target=target), _isolated_postgres_database() as url:
+                command.upgrade(alembic_config(url), current)
+                engine = create_engine(url)
+                self.addCleanup(engine.dispose)
+                before_tables = set(inspect(engine).get_table_names())
+                self.assertEqual(migrate_schema(database_url=url, target_revision=target), expected)
+                with engine.connect() as connection:
+                    self.assertEqual(
+                        connection.execute(text("SELECT version_num FROM alembic_version"))
+                        .scalars()
+                        .all(),
+                        [expected],
+                    )
+                after_tables = set(inspect(engine).get_table_names())
+                if current in (previous_release.revision, held.revision, topics.revision):
+                    with engine.connect() as connection:
+                        old_keys = connection.scalar(
+                            text(
+                                "SELECT launchplane_public_host_authority_keys("
+                                "'launchplane_dokploy_targets', CAST(:record AS jsonb))"
+                            ),
+                            {"record": '{"domains":[" PUBLIC.example. "]}'},
+                        )
+                        canonical_keys = connection.scalar(
+                            text(
+                                "SELECT launchplane_public_host_authority_keys("
+                                "'launchplane_dokploy_targets', CAST(:record AS jsonb))"
+                            ),
+                            {"record": '{"domains":["public.example"]}'},
+                        )
+                    self.assertNotEqual(old_keys, canonical_keys)
+                if expected == current:
+                    self.assertEqual(after_tables, before_tables)
 
     def _seed_public_target(
         self, store: PostgresRecordStore, *, context: str = "public-site"
@@ -223,9 +334,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     ) -> None:
                         if phase != "before_key" or entered.is_set():
                             return
-                        # Observe the real backend lock before its next statement;
-                        # a separate DBAPI cursor preserves the pending cursor and
-                        # avoids recursively invoking SQLAlchemy's event hooks.
                         driver = connection.connection.driver_connection
                         assert driver is not None
                         probe = driver.cursor()
@@ -326,7 +434,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     with self.assertRaises(DBAPIError) as refusal:
                         migrate()
                     self.assertEqual(getattr(refusal.exception.orig, "sqlstate", None), "55P03")
-                # A refused migration leaves no transition mutex or partial DDL.
                 migrate()
                 with engine.connect() as connection:
                     self.assertEqual(

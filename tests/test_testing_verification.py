@@ -37,16 +37,13 @@ from tests.support.auth import scoped_agent_transport
 
 
 class TestingVerificationScenario(TestingPublicIngressScenario):
+    installed_operation_running = False
+
     def setUp(self) -> None:
         super().setUp()
         moment = datetime.now(timezone.utc) - timedelta(minutes=10)
         self.started = moment.isoformat()
         self.finished = (moment + timedelta(minutes=1)).isoformat()
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            self.fixture.operation.model_copy(
-                update={"status": "fail", "phase": "failed", "finished_at": self.finished}
-            )
-        )
         self.artifact = _artifact_manifest(
             artifact_id="restored-build",
             source_commit="a" * 40,
@@ -128,6 +125,21 @@ class TestingVerificationScenario(TestingPublicIngressScenario):
                 ),
             }
         )
+        if self.installed_operation_running:
+            operation = operation.model_copy(
+                update={
+                    "status": "running",
+                    "phase": "running",
+                    "finished_at": "",
+                    "lease_owner": "fixture-running",
+                    "lease_expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                    "error_code": "",
+                    "error_message": "",
+                }
+            )
+        operation = type(operation).model_validate(operation.model_dump(mode="json"))
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
         self.terminal = operation
         self.verification_request = TestingVerificationRequest(
@@ -296,11 +308,27 @@ class TestingVerificationTests(TestingVerificationScenario):
                         )
                     )
                 else:
-                    self.store.write_odoo_stable_target_replacement_operation_record(
-                        self.terminal.model_copy(
-                            update={"status": "running", "phase": "running", "finished_at": ""}
-                        )
-                    )
+                    for running in (False, True):
+                        scenario = TestingVerificationScenario()
+                        scenario.installed_operation_running = running
+                        try:
+                            scenario.setUp()
+                            matching = [
+                                row
+                                for row in scenario.store.list_odoo_stable_target_replacement_operation_records()
+                                if row.deployment_record_id == scenario.deployment.record_id
+                            ]
+                            self.assertEqual(len(matching), 1)
+                            self.assertEqual(matching[0].status, "running" if running else "fail")
+                            if running:
+                                with self.assertRaises(ValueError):
+                                    scenario.verification().plan()
+                            else:
+                                scenario.verification().plan()
+                            scenario.receiver.assert_not_called()
+                        finally:
+                            scenario.doCleanups()
+                    continue
                 with self.assertRaises(ValueError):
                     self.verification().plan()
                 self.store.write_deployment_record(self.deployment)
@@ -396,6 +424,35 @@ class TestingVerificationTests(TestingVerificationScenario):
 
 
 class TestingVerificationHttpTests(TestingVerificationScenario, unittest.IsolatedAsyncioTestCase):
+    async def test_native_copy_predicate_is_returned_without_publishing_or_private_text(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        for kind in ("refused", "unavailable"):
+            with self.subTest(kind=kind):
+                cause = NativeProgramFailed(
+                    "private-provider-value", predicate=ReadbackPredicate.RUNNER_RUNNING, kind=kind
+                )
+                with patch(
+                    "control_plane.testing_verification.inspect_native_testing_receiver",
+                    side_effect=cause,
+                ):
+                    result = await request(
+                        self.fixture.app,
+                        "POST",
+                        ROUTE.format(product=self.profile.product),
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload=self.verification_request.model_dump(mode="json"),
+                    )
+                self.assertEqual(result.status_code, 409)
+                self.assertEqual(result.json()["error"]["code"], cause.code)
+                self.assertNotIn("private-provider-value", result.text)
+                self.assertEqual(
+                    self.store.read_deployment_record(self.deployment.record_id), self.deployment
+                )
+
     async def test_lost_executor_connection_keeps_bounded_refusal_code(self) -> None:
         from sqlalchemy.exc import SQLAlchemyError
 

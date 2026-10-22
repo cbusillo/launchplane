@@ -33,6 +33,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     fresh_testing_override_record,
@@ -502,6 +503,16 @@ def execute_odoo_post_deploy(
                         spec=spec,
                         before_mutation=before_provider_effect,
                     )
+                except NativeProgramFailed as error:
+                    if not error.has_diagnostic:
+                        raise click.ClickException(
+                            "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
+                        ) from None
+                    raise click.ClickException(
+                        "Native testing copy predicate "
+                        + error.code
+                        + "; integrity or recovery is unverified; retain the original generation and capture receipt."
+                    ) from None
                 except ValueError:
                     raise click.ClickException(
                         "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
@@ -555,6 +566,8 @@ def execute_odoo_post_deploy(
 
             remove_completed_native_capture_cache(native_capture)
     except (click.ClickException, OSError) as error:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
         determinate_failure = isinstance(
             error,
             (
@@ -588,7 +601,12 @@ def execute_odoo_post_deploy(
                 else None,
             )
         if isinstance(
-            error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
+            error,
+            (
+                OdooProviderSafetyRefusedError,
+                DurableOperationAuthorizationDeniedError,
+                ScheduleMaterializationTooLarge,
+            ),
         ):
             raise
         if uncertain:

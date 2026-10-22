@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control_plane.contracts.text_fields import require_text
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
 
 from pathlib import Path
@@ -42,19 +43,19 @@ class GenericWebRollbackApplyResult(BaseModel):
 
     @model_validator(mode="after")
     def _validate_result(self) -> "GenericWebRollbackApplyResult":
-        self.plan_id = _required_text(
+        self.plan_id = require_text(
             self.plan_id, "generic web rollback apply result requires plan_id"
         )
-        self.product = _required_text(
+        self.product = require_text(
             self.product, "generic web rollback apply result requires product"
         )
-        self.context = _required_text(
+        self.context = require_text(
             self.context, "generic web rollback apply result requires context"
         )
-        self.instance = _required_text(
+        self.instance = require_text(
             self.instance, "generic web rollback apply result requires instance"
         )
-        self.rollback_deployment_record_id = _required_text(
+        self.rollback_deployment_record_id = require_text(
             self.rollback_deployment_record_id,
             "generic web rollback apply result requires rollback_deployment_record_id",
         )
@@ -127,10 +128,3 @@ def execute_generic_web_rollback(
         rollback_deployment_record_id=plan.rollback_deployment_record_id,
         error_message=deploy_result.error_message,
     )
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

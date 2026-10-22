@@ -20,6 +20,7 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
     route_binding_record_sha256,
 )
+from control_plane.contracts.text_fields import require_text
 from control_plane.route_binding_reconcile import (
     RouteBindingExpectedCurrent,
     RouteBindingReconcileFinding,
@@ -64,19 +65,19 @@ class ExternalRouteBindingReconcileRequest(BaseModel):
     def _validate_request(self) -> "ExternalRouteBindingReconcileRequest":
         if self.schema_version != 1:
             raise ValueError("Unsupported external route binding reconcile schema version")
-        self.product = _required_text(
+        self.product = require_text(
             self.product, "external route binding reconcile requires product"
         )
-        self.context = _required_text(
+        self.context = require_text(
             self.context, "external route binding reconcile requires context"
         )
-        self.instance = _required_text(
+        self.instance = require_text(
             self.instance, "external route binding reconcile requires instance"
         )
-        self.source_label = _required_text(
+        self.source_label = require_text(
             self.source_label, "external route binding reconcile requires source_label"
         )
-        self.evaluated_at = _required_text(
+        self.evaluated_at = require_text(
             self.evaluated_at, "external route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
@@ -685,13 +686,6 @@ def _conflict_plan(
         candidate_record_sha256=candidate_record_sha256,
         current_record=current_record,
     )
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _parse_utc_timestamp(value: str) -> datetime:

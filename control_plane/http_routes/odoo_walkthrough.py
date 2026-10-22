@@ -128,19 +128,30 @@ def register_walkthrough_route(
                         )
                     if original.state == "completed":
                         return OdooWalkthroughResponse.model_validate(original.response_payload)
-                    recovery = run_durable_provider_operation(
-                        store=record_store,
-                        scope=scope,
-                        route_path=WALKTHROUGH_ROUTE,
-                        idempotency_key=key,
-                        request_fingerprint=fingerprint,
-                        lease_owner=trace,
-                        response_trace_id=trace,
-                        adapter=InterruptedWalkthroughAdapter(
-                            original, payload, trace, record_store, dependencies.control_plane_root
-                        ),
-                        allow_mutation=False,
-                    )
+                    try:
+                        recovery = run_durable_provider_operation(
+                            store=record_store,
+                            scope=scope,
+                            route_path=WALKTHROUGH_ROUTE,
+                            idempotency_key=key,
+                            request_fingerprint=fingerprint,
+                            lease_owner=trace,
+                            response_trace_id=trace,
+                            adapter=InterruptedWalkthroughAdapter(
+                                original,
+                                payload,
+                                trace,
+                                record_store,
+                                dependencies.control_plane_root,
+                            ),
+                            allow_mutation=False,
+                        )
+                    except ValueError:
+                        refuse(
+                            WALKTHROUGH_RECONCILIATION_REQUIRED,
+                            "The original dispatch evidence is unavailable; preserve its key and task account.",
+                        )
+                        raise AssertionError
                     if recovery.status in {"completed", "replayed", "adopted"}:
                         return OdooWalkthroughResponse.model_validate(recovery.response_payload)
                     refuse(
@@ -159,7 +170,7 @@ def register_walkthrough_route(
                         record_store, dependencies.control_plane_root, payload, actor
                     )
                 except WalkthroughPrerequisiteError as error:
-                    refuse(error.code.value, "The testing task prerequisite did not pass.")
+                    refuse(error.diagnostic_code, "The testing task prerequisite did not pass.")
                     raise AssertionError
                 except Exception:
                     refuse(

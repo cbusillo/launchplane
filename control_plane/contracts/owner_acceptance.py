@@ -28,6 +28,12 @@ from control_plane.contracts.product_owner import (
     ProductOwnerReviewChangeClass,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.record_fields import (
+    normalize_decimal_id,
+    normalize_git_sha,
+    normalize_sha256,
+    required_token,
+)
 
 OWNER_ACCEPTANCE_READ_ACTION = "owner_acceptance.read"
 OWNER_ACCEPTANCE_EVENT_WRITE_ACTION = "owner_acceptance_event.write"
@@ -112,8 +118,6 @@ OWNER_ACCEPTANCE_STATUS_PRECEDENCE: tuple[OwnerAcceptanceDecisionStatus, ...] = 
     "not_required",
 )
 
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
 _SOURCE_EVENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HUMAN_ACTIONS = frozenset({"accepted", "changes_requested", "revoked"})
@@ -124,43 +128,15 @@ class OwnerAcceptanceTransitionError(ValueError):
     """Raised when an Owner acceptance append violates the human transition table."""
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
-def _normalize_decimal_id(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
-    if not normalized.isdecimal() or int(normalized) < 1:
-        raise ValueError(f"{field_name} must be a positive decimal identity")
-    return str(int(normalized))
-
-
 def _normalize_repository(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
+    normalized = required_token(value, field_name).lower()
     if _REPOSITORY_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be owner/name")
     return normalized
 
 
-def _normalize_git_sha(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA")
-    return normalized
-
-
-def _normalize_sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return normalized
-
-
 def _normalize_timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -171,7 +147,7 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
 
 
 def _normalize_http_url(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     parsed = urlsplit(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"{field_name} must be an absolute HTTP(S) URL")
@@ -222,22 +198,22 @@ class OwnerAcceptanceRuntimeIdentityBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self,
             "source_git_ref",
-            _normalize_git_sha(self.source_git_ref, "source_git_ref"),
+            normalize_git_sha(self.source_git_ref, "source_git_ref"),
         )
         object.__setattr__(
             self,
             "image_reference",
-            _required_token(self.image_reference, "image_reference"),
+            required_token(self.image_reference, "image_reference"),
         )
         object.__setattr__(self, "release_tuple_id", self.release_tuple_id.strip())
         computed_digest = owner_acceptance_runtime_identity_sha256(self)
         if self.runtime_identity_sha256:
-            normalized_digest = _normalize_sha256(
+            normalized_digest = normalize_sha256(
                 self.runtime_identity_sha256,
                 "runtime_identity_sha256",
             )
@@ -276,12 +252,12 @@ class OwnerAcceptancePreviewBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self,
             "artifact_image_digest",
-            _required_token(self.artifact_image_digest, "artifact_image_digest").lower(),
+            required_token(self.artifact_image_digest, "artifact_image_digest").lower(),
         )
         object.__setattr__(
             self,
@@ -393,7 +369,7 @@ class OwnerAcceptancePolicyFingerprintBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_sha256(str(getattr(self, field_name)), field_name),
+                normalize_sha256(str(getattr(self, field_name)), field_name),
             )
         return self
 
@@ -464,8 +440,8 @@ class OwnerAcceptanceReviewContext(BaseModel):
     def _validate_review_context(self) -> "OwnerAcceptanceReviewContext":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance review context schema version.")
-        object.__setattr__(self, "base_ref", _required_token(self.base_ref, "base_ref"))
-        object.__setattr__(self, "base_sha", _normalize_git_sha(self.base_sha, "base_sha"))
+        object.__setattr__(self, "base_ref", required_token(self.base_ref, "base_ref"))
+        object.__setattr__(self, "base_sha", normalize_git_sha(self.base_sha, "base_sha"))
         return self
 
 
@@ -506,11 +482,11 @@ class OwnerAcceptanceBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_decimal_id(str(getattr(self, field_name)), field_name),
+                normalize_decimal_id(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(self, "repository", _normalize_repository(self.repository, "repository"))
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
-        object.__setattr__(self, "tree_sha", _normalize_git_sha(self.tree_sha, "tree_sha"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "tree_sha", normalize_git_sha(self.tree_sha, "tree_sha"))
         for field_name in (
             "change_impact_policy_record_id",
             "product",
@@ -523,7 +499,7 @@ class OwnerAcceptanceBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         for field_name in (
             "change_impact_policy_digest",
@@ -533,7 +509,7 @@ class OwnerAcceptanceBinding(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_sha256(str(getattr(self, field_name)), field_name),
+                normalize_sha256(str(getattr(self, field_name)), field_name),
             )
         if self.preview is not None:
             mismatches = []
@@ -560,7 +536,7 @@ class OwnerAcceptanceBinding(BaseModel):
         )
         computed_binding = owner_acceptance_binding_sha256(self)
         if self.binding_sha256:
-            normalized_binding = _normalize_sha256(self.binding_sha256, "binding_sha256")
+            normalized_binding = normalize_sha256(self.binding_sha256, "binding_sha256")
             if normalized_binding != computed_binding:
                 raise ValueError("Owner acceptance binding_sha256 does not match payload")
             object.__setattr__(self, "binding_sha256", normalized_binding)
@@ -603,13 +579,13 @@ class OwnerAcceptanceAuthorization(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         for field_name in ("owner_policy_digest", "owner_requirement_digest"):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_sha256(str(getattr(self, field_name)), field_name),
+                normalize_sha256(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self,
@@ -630,9 +606,9 @@ class OwnerAcceptanceResolutionEvidence(BaseModel):
     def _validate_resolution(self) -> "OwnerAcceptanceResolutionEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance resolution schema version.")
-        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        object.__setattr__(self, "summary", required_token(self.summary, "summary"))
         references = tuple(
-            _required_token(reference, "resolved_evidence_references")
+            required_token(reference, "resolved_evidence_references")
             for reference in self.resolved_evidence_references
         )
         if any(len(reference) > 512 for reference in references):
@@ -673,12 +649,12 @@ class OwnerAcceptanceEventRecord(BaseModel):
         object.__setattr__(
             self,
             "source_event_kind",
-            _required_token(self.source_event_kind, "source_event_kind"),
+            required_token(self.source_event_kind, "source_event_kind"),
         )
         object.__setattr__(
             self,
             "source_event_id",
-            _required_token(self.source_event_id, "source_event_id"),
+            required_token(self.source_event_id, "source_event_id"),
         )
         if _SOURCE_EVENT_ID_PATTERN.fullmatch(self.source_event_id) is None:
             raise ValueError("Owner acceptance source_event_id is not canonical")
@@ -737,7 +713,7 @@ class OwnerAcceptanceEventRecord(BaseModel):
                 raise ValueError(f"Owner acceptance action {self.action!r} must be system-authored")
         acceptance_id = build_owner_acceptance_id(binding_sha256=self.binding.binding_sha256)
         if self.acceptance_id:
-            normalized_acceptance_id = _required_token(self.acceptance_id, "acceptance_id")
+            normalized_acceptance_id = required_token(self.acceptance_id, "acceptance_id")
             if normalized_acceptance_id != acceptance_id:
                 raise ValueError("Owner acceptance acceptance_id does not match binding")
             object.__setattr__(self, "acceptance_id", normalized_acceptance_id)
@@ -750,7 +726,7 @@ class OwnerAcceptanceEventRecord(BaseModel):
             source_event_id=self.source_event_id,
         )
         if self.event_id:
-            normalized_event_id = _required_token(self.event_id, "event_id")
+            normalized_event_id = required_token(self.event_id, "event_id")
             if normalized_event_id != event_id:
                 raise ValueError("Owner acceptance event_id does not match event payload")
             object.__setattr__(self, "event_id", normalized_event_id)
@@ -818,7 +794,7 @@ class OwnerAcceptanceProductDecision(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if self.binding is not None:
             for field_name in ("product", "system", "action", "environment"):
@@ -861,13 +837,13 @@ class OwnerAcceptanceViewerBindingEligibility(BaseModel):
         object.__setattr__(
             self,
             "binding_sha256",
-            _normalize_sha256(self.binding_sha256, "binding_sha256"),
+            normalize_sha256(self.binding_sha256, "binding_sha256"),
         )
         for field_name in ("product", "system", "action", "environment"):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if self.can_submit_event != any(
             (self.can_accept, self.can_request_changes, self.can_revoke)
@@ -977,7 +953,7 @@ def owner_acceptance_runtime_identity_binding(
 
 
 def build_owner_acceptance_id(*, binding_sha256: str) -> str:
-    return f"owner-acceptance-{_normalize_sha256(binding_sha256, 'binding_sha256')[:32]}"
+    return f"owner-acceptance-{normalize_sha256(binding_sha256, 'binding_sha256')[:32]}"
 
 
 def build_owner_acceptance_event_id(
@@ -988,10 +964,10 @@ def build_owner_acceptance_event_id(
     source_event_id: str,
 ) -> str:
     payload = {
-        "binding_sha256": _normalize_sha256(binding_sha256, "binding_sha256"),
-        "action": _required_token(action, "action"),
-        "source_event_kind": _required_token(source_event_kind, "source_event_kind"),
-        "source_event_id": _required_token(source_event_id, "source_event_id"),
+        "binding_sha256": normalize_sha256(binding_sha256, "binding_sha256"),
+        "action": required_token(action, "action"),
+        "source_event_kind": required_token(source_event_kind, "source_event_kind"),
+        "source_event_id": required_token(source_event_id, "source_event_id"),
     }
     return f"owner-acceptance-event-{_canonical_sha256(payload)[:32]}"
 

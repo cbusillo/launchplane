@@ -156,8 +156,8 @@ original idempotency key.
 
 ## Command Groups
 
-Use `uv run launchplane --help` for the complete CLI surface. Frequently used
-top-level groups include:
+Use `uv run launchplane --help` and each group's `--help` for the current CLI
+commands, options, and defaults.
 
 Today this CLI is the local Launchplane admin/client surface around the
 service API. Shared or production mutations must prefer the deployed service API
@@ -167,36 +167,6 @@ paths. If a live mutation still exists only as a local CLI command, stop and add
 or use a service API path instead of running the local command from an arbitrary
 checkout.
 
-- `artifacts`: rehearse artifact manifest writes, inspect artifact manifests,
-  and emit protected artifact inventories for registry cleanup deny sets.
-- `backup-gates`: rehearse and inspect backup-gate records.
-- `deployments`: rehearse and inspect deployment records.
-- `environments`: write, list, and resolve DB-backed runtime environment
-  contracts.
-- `launchplane-previews`: inspect, mutate, render, ingest, and replay
-  Launchplane preview state.
-- `inventory`: inspect current environment inventory.
-- `promote`: record, resolve, and execute artifact-backed promotions.
-- `promotions`: rehearse and inspect promotion records.
-- `product-config`: dry-run and apply trusted product runtime/secret config
-  bundles from a live Launchplane context.
-- `release-tuples`: inspect state-backed tuple records and explicitly export a
-  TOML catalog from minted state.
-- `service`: run the first local Launchplane HTTP ingress slice.
-  `service outbox-workers run-once` and `service outbox-workers run` operate
-  PostgreSQL transactional outbox deliveries for external workflow dispatch and
-  notification effects.
-  `service merge-train-workers run-once` and `service merge-train-workers run`
-  run the scheduled merge-train pass for every scheduler-enabled policy target;
-  the `launchplane-merge-train-workers` compose service runs it every five
-  minutes.
-- `ship`: plan, resolve, and execute artifact-backed deploy requests.
-- `storage provider-target-audit`: run the read-only provider-target parity
-  preflight before backfill or provider-target authority cutover.
-- `storage provider-target-backfill`: dry-run explicit provider-target row
-  projections from complete Dokploy target/id pairs; shared/live apply uses the
-  service-backed Provider Target Operations workflow.
-
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
 are local rehearsal commands. Shared-service evidence ingress uses
@@ -204,10 +174,9 @@ authenticated Launchplane service routes so Launchplane can accept externally
 produced deployment and promotion facts without claiming it executed that
 product's runtime action itself.
 
-Those commands are current implementation scaffolding. The Launchplane boundary
-is a long-running service with authenticated HTTP ingress. The CLI should remain
-a client of Launchplane's stable API contract or an explicit DB-backed admin
-tool, not a separate live-state authority.
+The Launchplane boundary is a long-running service with authenticated HTTP
+ingress. The CLI should remain a client of Launchplane's stable API contract or
+an explicit DB-backed admin tool, not a separate live-state authority.
 
 Provider-target data changes for shared or production lanes must use the
 deployed Launchplane service. The manual `Provider Target Operations` workflow
@@ -673,8 +642,11 @@ Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
 `Idempotency-Key`, the product and instance, and a non-empty reason. The service
-authorizes `generic_web_deploy.execute` for the current product/context/instance
-before looking up any reservation. After lookup, it derives the original
+authorizes `generic_web_deploy_recovery.plan` for the current product/context/instance,
+with `generic_web_deploy.execute` retained as a compatibility alternative,
+before looking up any reservation. The plan action is inert and instance-scoped;
+the authenticated Director agent inherits it without a write grant. Other agents
+retain their exact policy scope. After lookup, it derives the original
 operation target from the stored reconciliation snapshot, or from an exact
 typed completed response, and authorizes the stored product/context/instance
 again before returning evidence.
@@ -695,7 +667,7 @@ release, supersede, retry, adopt, or write deployment, inventory, idempotency,
 or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
-`retry_original_operation`, `close_out_observed`, or `hold_unknown`, and a
+`retry_original_operation`, `settle_testing_failure`, `close_out_observed`, or `hold_unknown`, and a
 canonical recovery digest.
 Recovery apply recomputes that evidence and rejects a stale digest. After a
 Launchplane deployment changes provider observation or reconciliation behavior,
@@ -845,8 +817,15 @@ identity.
 Stage 2 apply is explicit and digest-gated. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
-inspection and requires an exact digest match before it writes anything. The
-digest intentionally excludes `observed_at`, so routine database observation
+inspection and requires an exact digest match before it writes anything.
+`generic_web_deploy.execute` remains the explicit authority for production,
+foreign originals and other identities. The authenticated Director
+`local_operator` identity's bounded own-testing-original alternative and forward-retry safety
+requirements are defined in [authorization](authorization-authority.md).
+After `testing_deploy_safety_unknown`, inspect and collect
+`/v1/disposable-lanes/observations`, resolve protections, then refresh the review.
+
+The digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
 provider classification, action, request, and bounded provider observation
 inputs remain part of the digest. Non-legacy digest inputs are unchanged. Only a
@@ -859,8 +838,77 @@ Apply never creates a new reservation, releases a reservation, or supersedes a
 provider target. If the reviewed reservation is an expired `running` mutation,
 apply first CAS-transitions that exact reservation to `reconcile_required` via
 the durable mutation store, then uses the existing exact-match adoption or retry
-methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
-inspection without re-observing the provider. `retry_original_operation` resumes
+methods. For in-place application testing, `adopt_observed` reacquires the
+original lease and rechecks the reviewed execution, captured authority, image
+and exact inventory before publication. It runs no deploy, maintenance,
+canary or activation. For receipt-bearing attempts, a provider observation never
+supplies a missing passing application-testing result. A saved final result
+completes as recorded unless exact original terminal image-failure evidence
+invalidates a saved pass. That contradiction uses failure settlement without
+repeating product work. Terminal work without a durable aggregate result also
+uses failure settlement, including an image-only attempt interrupted before its
+final write. A normal attempt's unobserved image marker is unfinished evidence:
+exact original terminal image proof permits failed settlement and an ordinary
+successor, while a conflicting real saved image ID remains fenced. Receiptless
+legacy image-only attempts retain guarded image adoption only
+when the inspected configuration, lifecycle and phase declare no post-deploy
+obligation; missing proof for required work remains unknown.
+Missing current-lane publication can complete only against missing inventory or
+the exact pre-attempt inventory bound before dispatch.
+Already final deployment evidence and independently corrected inventory are
+preserved. If another inventory is now current, recovery can complete the
+truthful historical original result while leaving that inventory unchanged.
+Automatic observation is read-only and can adopt only an already saved qualified
+result with matching durable inventory; adoption compares both again in the
+reservation transaction. Other scopes retain direct reviewed-evidence adoption.
+`settle_testing_failure` requires attributable terminal execution and runs only
+the original schedule hold before publishing truthful failure. Its HTTP 202
+recovery envelope preserves the original failed HTTP 502 result and replays
+without effects. An unqualified healthy image retains its separate image fact;
+settlement never creates a successful lane projection. Missing execution proof
+stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+`records_commit` alone does not prove image-only work: a current configuration
+without an executor does not establish what the original required. Such originals
+need attributable terminal proof. Where the provider cannot supply it,
+application-side isolation or verified cessation of the original work is a
+prerequisite for a safe continuation; deploying another image does not provide
+that proof.
+A schedule inspection failure before any write can be reviewed again on the
+same original operation. An acknowledged schedule write remains terminal even
+if its later readback fails; review the original again to finish its failed
+settlement. A lost write reply remains unknown even when a later read shows the
+schedule disabled or absent. Foreign schedule evidence triggers the captured
+schedule hold but never supplies terminal proof for the disputed run.
+When current inventory already points at that original, restarted settlement
+preserves it exactly and writes the truthful failed deployment it references.
+Its copied fields can remain pending until an ordinary successor replaces it;
+the joined source qualifier rejects the failed referenced deployment. A final
+saved pass with corrected inventory is preserved without rebuilding either.
+An answered failed qualification after successful image execution updates the
+unchanged original inventory baseline to failed qualification, through the same
+locked publisher used by ordinary completion. A failed image creates no fresh
+inventory. Durable terminal execution facts are not re-derived from later cron
+history; only unresolved original entries require provider observation.
+When post-image maintenance, an executor or schedule activation is required, the
+ordinary application-testing producer first publishes image success with
+qualification pending under its original lease, exact deployment/inventory CAS
+and current target binding. Input or profile metadata drift does not suppress
+that unqualified projection while the binding remains current. After committing
+it, the producer rechecks the full current profile and captured input authority
+before any further work. A refusal retains the fence and dispatches no
+post-image maintenance, executor or activation. Terminal work can use reviewed
+original recovery above, never another guessed provider call.
+A completed native post-image failure settlement ends the original reservation.
+When ordinary planning selects a deploy, a return to the settled predecessor's
+exact inputs receives a deterministic event successor, including on a fresh lane.
+Repeated sweeps reuse that successor. If it becomes unknown, it needs its own
+native settlement before another successor can start. Settlement does not itself
+select a same-artifact deploy when inventory already points at the desired image;
+existing already-deployed and failed-qualification decisions still apply. A newer
+build, changed lane or deliberate new-key deploy can supply the next attempt.
+An ordinary recorded failure retains the existing newer-build or changed-lane
+retry policy.
+`retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
 `close_out_observed` settles the exact reservation from the reinspected runtime
@@ -1063,7 +1111,7 @@ logs, issue comments, or published evidence merely to use this route.
 The caller needs the separate `authz_repository_scope.read` action and must be
 an authenticated GitHub human, `local_operator`, or local administrator. The
 route performs runtime-policy preflight, reloads the single active DB policy,
-and reauthorizes before reading product, repository, and work-graph records.
+and reauthorizes before reading product, repository, and retained work-request records.
 GitHub Actions and terminal agents cannot use the route; do not borrow a
 workflow identity or dispatch a protected workflow as a workaround.
 
@@ -1564,18 +1612,120 @@ Prelaunch failures therefore stay visible as readiness evidence without being
 reported as public outages. Moving to `public` deterministically activates
 incident eligibility on the next monitor cycle.
 
-The monitor also watches every generic-web lane's deploy fence, with no lane
-configuration. A lane whose provider target is held by an unresolved deploy
-gets a Launchplane-owned `provider` check named `launchplane-deploy-fence`:
-it fails with `deploy_fence_held`, at warning severity, once a `running`
-reservation's lease has expired or a `reconcile_required` reservation has
-stood for 15 minutes. The incident names the held deploy's idempotency key,
-start time, and last provider-effect phase, notifies through the lane's
-notification policies, and resolves on the first cycle after recovery clears
-the fence. The monitor never clears a fence itself. Lanes with no fence and no
-open fence incident get no probe. A later deploy refused by that fence gets
-409 `mutation_reconciliation_required` naming when the held request started,
-instead of `mutation_in_progress`.
+The monitor also watches all shared generic-web provider-parent holds captured
+for a product lane, without lane configuration and independently of today's
+provider target or driver. Its Launchplane-owned `provider` check is named
+`launchplane-deploy-fence`. It counts every held operation and fails with
+`deploy_fence_held`, at warning severity, once any `running` reservation's lease
+has expired or a `reconcile_required` reservation has stood for 15 minutes. A
+live replacement never hides a stuck old hold. The incident reports safe
+reservation IDs, times and phases; caller scopes, request keys, fingerprints
+and physical-key hashes stay private.
+
+New incident material retains opaque reservation-ID/operation-nonce references
+in the existing route authority. A matching completed row establishes only
+that this incarnation no longer holds a key, even if its terminal result was a
+failure. A missing row, mismatched nonce or invalid receipt remains unverified.
+Nonce-less participants also retain typed attention markers: one records current
+held membership, and one records unverified history. Neither marker establishes
+an incarnation or proves settlement. Adding or removing a held legacy row changes
+incident material, while its unverified component remains, including in mixed
+nonce-backed/legacy warnings. This missing-incarnation limit applies even when a
+warning is newly opened for an old operation. Recovery never backfills a nonce.
+Historical reference-less warnings cannot acquire strong incarnation proof
+from present-day absence, and generic monitoring retirement does not resolve
+them. This conservative limit also covers indistinguishable historical Odoo
+replacement warnings. New service-testing replacement participants retain a
+separate typed reference to their captured operation ID, lane and creation time.
+The exact canonical typed row and indexed projection must still agree. Missing,
+corrupt or changed identity remains unavailable. Pending/running operations do
+not open a new stuck warning; a previously captured participant stays unresolved
+until its terminal record is proved. Genuine cancellation, supersession or
+terminal failure settles only that typed hold, never deployment verification.
+The shared typed writer preserves original request identity across updates and
+imports and refuses every terminal status change/reinitialization. Initial,
+identical and valid same-terminal metadata imports remain supported; source
+revalidation still fences changed terminal evidence during observation. Completion
+by the execution lease holder rejects changed original identity.
+Preview reservation probes keep their own existing path. The monitor never clears a provider fence.
+
+Original custody comes from the immutable receipt, or a legacy encoded snapshot
+whose product is present and physical key recomputes exactly. Current target
+matches remain separate metadata. Unattributed rows remain in service attention rather than being assigned to
+every product sharing a context. The bounded service read and Product Ops
+attention panel below expose them without inventing original ownership. If product A's old physical key
+becomes product B's current lane, A keeps its original attention and B is only
+current-match metadata. There is no separate inherited product-B warning.
+Deleted/inactive A rows remain service attention. Exact qualified testing separation
+still uses its existing activation/execution-exclusion proof; origin alone
+cannot detach an opaque hold.
+
+`GET /v1/operations/provider-hold-attention` requires existing `operations.read`
+on product/context `launchplane`, checked before any held-record read. A lane
+reader cannot observe unknown service rows or counts. Responses, including
+errors, are `no-store`. Unsupported storage or contradictory held-row payload
+and indexed columns makes the evidence unavailable, never an empty all-clear.
+The route performs a storage keyset read ordered by unique reservation ID with
+`limit + 1` rows (default 50, maximum 100), followed by one bounded receipt batch.
+It uses the same parent membership and strict origin projection as monitoring;
+unrelated namespaces and suffixed child effects do not consume a page.
+
+The closed response contains only nonce-backed opaque operation references when
+proved, original product/context/instance when proved, explicit retained/legacy/
+unavailable/corrupt attribution, held state, coarse recorded-effect phase, and
+times. Free-form phase text, physical provider identities, caller scopes, request
+keys/fingerprints, private intent and internal source hashes are omitted. The
+coarse phase says only whether a checkpoint was recorded; it cannot establish
+provider effects or their absence. Legacy custody without a nonce has no strong
+operation reference. Deleted/inactive original scopes remain visible without
+consulting today's product inventory. Current-target associations do not supply
+ownership and are not included in this public page.
+
+`has_more` and `next_cursor` support bounded continuation. `completeness` is
+`single_page` only on an untruncated first read, otherwise `partial`, including
+an empty last page. Pages are independent observations of changing records, not
+a snapshot assembled across requests or proof of safe recovery. Refresh starts
+at the first page. The fresh-read deadline bounds attention claims; neither an
+empty page nor completion of one operation settles another operation or grants
+replay, retry, release, or clear authority.
+
+Provider observations are accepted only after a short same-session source
+recheck under the existing membership advisory lock. Fresh insertion, unbound
+reclaim and supersession join that lock before row locks and lease timestamps.
+For typed membership the monitor first tries the existing Odoo lane admission
+lock without waiting; contention leaves the provider observation unaccepted.
+It then locks reservation/reference rows and only the expected lane's typed
+candidates plus exact referenced IDs before checking separation and incident
+authority. Typed row changes and new admission are therefore fenced through
+acceptance; there is no provider I/O under these locks. Lease renewal alone does not invalidate the semantic source
+witness. The same stuck/grace predicate classifies the original observation and
+the locked current rows at database acceptance time; a classification change,
+including elapsed grace without a row write, rejects the observation. All other
+source identity, membership, incarnation and authority checks remain exact.
+Application separation reads its captured activation history and real original
+parent completion in that same transaction, only for scopes demanded by a
+testing hold. Unused or unrelated application history is not validated by a
+lane projection. Unreadable requested proof retains the hold and contributes an
+unavailable outcome to its source witness. Both readable inputs contribute to the source
+witness and scheduler change detection; progress alone never proves separation.
+Bulk discovery may load completed history for several incidents. Each lane's
+source includes only active membership and its own requested history, so another
+lane's unresolved incident cannot change its locked source comparison. Requested
+but mismatched incarnation or lane proof stays unavailable and cannot settle a hold.
+A nonblocking shared product-authority lock avoids waiting
+behind a publisher that holds authority and needs a reservation. A changed or
+busy source leaves the observation unaccepted/skipped, with no persisted pass,
+recovery event or notification outbox. Normal scheduler change detection or
+cadence retries it. No provider or notification call runs under these locks.
+Lanes with no hold and no open warning receive no provider probe. Malformed
+reservation or provider-authority evidence makes the provider source explicitly
+unavailable: its observation remains unaccepted/skipped and cannot clear an
+incident. Each failed discovery writes one fixed, value-free warning to service
+logs. This diagnostic warning does not create a persisted incident, notification
+or UI alert. HTTP, TLS and private checks and scheduler authority detection continue;
+no invalid held row is treated as absent or assigned invented custody. The
+strict service attention read still returns unavailable for contradictory held
+records rather than an empty page.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6
@@ -2088,12 +2238,18 @@ absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
   replacement.
 - The current repo workflow for that posture is
   `.github/workflows/deploy-launchplane.yml`.
+- Its GHCR image and buildcache uploads authenticate with the workflow's own
+  `GITHUB_TOKEN` and existing `packages: write` permission. The package must give
+  this repository Write access under Manage Actions access. The publisher no
+  longer reads `GHCR_USERNAME` or `GHCR_TOKEN`; Chris removes obsolete stored
+  copies and revokes the PAT after checking other consumers. Provider-side
+  registry pulls use their existing separate credential.
 - Launchplane image builds use Docker Hub public mirror-qualified base images
   and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
   built or scanned.
 - Before adding or controlling self-hosted runner lanes, use
-  `uv run launchplane work-graph runner-inventory --repository owner/name` to
+  `uv run launchplane runner-inventory --repository owner/name` to
   read GitHub's current repository runner list. The command is read-only and
   reports lane count, online/busy/idle/offline counts, labels, host hints, and a
   capacity-constrained heuristic from the observation timestamp.
@@ -2368,6 +2524,34 @@ stored evidence. The fingerprint supplies comparison evidence only; authorizatio
 exclusive lane ownership, visible target identity, live provider identity and the
 exact domain set are still checked. Neither read nor plan writes records.
 
+To diagnose an application, use that same GET with its exact `context` and
+`instance` and an immutable digest reference as `expected_image`, without
+`service` or `event`. It retains the existing lane-scoped `driver.read`
+authorization; explicit target reads still require `dokploy_target.inspect`.
+Without `expected_image` the read remains saved metadata only. Compose runtime
+reads still require both `service` and `expected_image`.
+
+The application `runtime_evidence` distinguishes saved provider input from
+actual server/service, attributed tasks, running container digests, deployment
+identity and process health. Service and container `environment_keys.names`
+contain only Docker Env-array names, never values or multiline value fields.
+Container names include image-baked ENV defaults, so presence alone does not
+prove Launchplane supplied that key or that the application consumed its value.
+Each names object has its own `complete` flag, separate from task/container
+diagnostic coverage. An incomplete set cannot prove
+that a key is absent. A stopped or restarting process may leave no attributable
+running-container evidence, even when the service still lists the desired input.
+
+The read rechecks provider placement and the tracked lane binding before
+returning. `diagnostic_complete`, task coverage, observation time and
+`details_truncated` disclose partial or bounded results; image agreement is
+unknown without nonempty complete immutable container evidence. `process_ready`
+and `image_matches_expected` are separate: image agreement covers the containers
+observed, while replica convergence is reflected in process readiness. Neither
+proves endpoint health,
+authenticated WSS, release acceptance, original-operation settlement or effects
+exclusion, and inspection never releases a fence or repairs a runtime.
+
 Fingerprint comparison uses the existing managed-secret key ring, with its own
 purpose. If that bootstrap configuration is unavailable, ordinary inspection
 still works and the plan reports `dokploy_target_comparison_evidence_unavailable`
@@ -2537,13 +2721,7 @@ reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
 typed generic-web contract does not fit, and use `Dokploy Target Setup` for
 adoption, production, compose, or repair operations.
 
-To change the preview base URL later, rerun `Product Onboarding` with the new
-root URL. Onboarding updates its owned key while preserving unrelated values in
-the same preview-context runtime-environment record.
-
-Products onboarded before this input existed must rerun `Product Onboarding`
-once to record the preview base URL. Until then, preview readiness and refresh
-return a typed blocked result rather than guessing a domain.
+Conventional onboarding creates new products only.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
@@ -2650,6 +2828,21 @@ return a typed blocked result rather than guessing a domain.
 - Runtime log searches filter the bounded redacted tail locally, preserving
   Dokploy's literal, case-insensitive behavior while returning an empty list
   when no lines match. Real provider errors still fail the read.
+- Cookie values are redacted across each complete returned batch or provider-error
+  body before local tailing, filtering, or error truncation. Covered forms include
+  string/byte header pairs, rawHeaders arrays, HTTP_COOKIE, cookies/signedCookies
+  maps, Cookie2/Set-Cookie2, quoted dotted cookie keys, Python cookie objects and
+  jars, encoded JSON strings, and concatenated or folded values.
+  Escaped literals and balanced containers preserve adjacent diagnostics where
+  their boundaries are sound. Unquoted values suppress their same-line suffix
+  and indented continuations; incomplete literals or containers suppress the
+  remaining body. Raw `<Cookie ...>` strings also suppress the remaining body:
+  their unescaped values can forge closers and arbitrary newlines, even in
+  truncated output or quoted logger wrappers. This ambiguity invalidates enclosing
+  apparent strings too; their later diagnostics may be suppressed. A quoted prefix followed by more cookie data or logfmt
+  fields is likewise ambiguous and suppresses that suffix. Other secret patterns
+  keep their existing per-line log behavior. Name-free dumps, other encodings,
+  and continuations whose opener the provider omitted cannot be recognized.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
   /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
   status with exact `subject` and `recipient` filters plus a timezone-qualified
@@ -2874,7 +3067,14 @@ return a typed blocked result rather than guessing a domain.
   by key/count metadata only, and never prints plaintext env or secret values.
   Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
   then use `mode: "apply"` through an authorized workflow or admin API
-  caller. The `live-target-runtime.yml` workflow wraps this route with the
+  caller. For an exact subset, send the same nonempty `selected_keys` list in
+  dry-run, apply and readback, with deployment disabled. Selected sync delivers
+  only existing non-retired managed keys and leaves other provider values and
+  stored retirement intent unchanged. Its readback can pass while unselected
+  managed keys still drift. Use the installed caller's
+  [managed runtime sync contract](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md#managed-runtime-sync)
+  for selection flags and reviewed apply evidence.
+  The `live-target-runtime.yml` workflow wraps this route with the
   shared Launchplane request action and uploads sanitized request/response
   artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native
@@ -2990,6 +3190,15 @@ boolean verdicts and setting names only. Each apply key has its own schedule,
 separate from observations and ordinary data workflows, so later deployments
 cannot replace the original script or rotate its job out of shared history.
 Retain uncertain operation schedules and their logs as recovery evidence.
+Failed results always retain `readback_failed_predicate` and
+`readback_failure_kind` (`refused` or `unavailable`), plus safe setting findings,
+log availability and schedule references when observed. A stopped selected
+runner reports `runner_running` before SQL; a failed or empty probe cannot
+produce a review receipt. A provider job marked done without the required
+markers reports `schedule_evidence_complete`, not a successful readback.
+Inspect the selected runner and its retained lifecycle/log evidence before
+choosing a separately authorized runtime recovery. Preserve the original copy;
+do not use a SQL repair, restore or new generation to replace missing evidence.
 Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
@@ -3031,8 +3240,10 @@ carriers, clears their known stored credential columns (including USPS REST),
 and disables their production mode. Fixed-price/rule-based delivery remains
 available. `database.is_neutralized` makes Odoo disable freshly created IAP
 accounts; invalid-scheme SMS/IAP endpoints also reject synchronous sends before
-opening a network connection. Existing Shopify development-store settings are
-preserved. Neither a carrier nor an IAP allowance exempts these checks.
+opening a network connection. Readback accepts the neutralization flag as written
+(`true`) or as the shared settings add-on stores it at web startup (`True`); any
+other value, a missing flag, or a changed endpoint refuses. Existing Shopify
+development-store settings are preserved. Neither a carrier nor an IAP allowance exempts these checks.
 
 The independent integration readback now checks that state on every
 non-production deploy/bootstrap/restore. Ordinary maintenance reapplies isolation
@@ -3181,6 +3392,23 @@ alone is not proof that an existing testing copy has been repaired.
     refused too (the post-deploy renderer applies the same comparison),
     `test_store` on a production lane, a lane with no tracked target record, and
     missing or invalid bindings.
+    On non-production lanes, the protected keys also include the product's
+    production-lane store identities from stored Shopify addon settings or
+    `shopify.shop_url_key`, `shopify.shop_url` and `shopify.store_url`
+    config-parameter overrides. Apply reads this authority
+    again before writing, so a production-store change since dry-run cannot
+    authorize the same store on testing. These are record comparisons, not
+    proof of the store a running credential reaches; the read-only runtime
+    identity comparison remains necessary before Shopify writes.
+    The common post-deploy renderer also checks these production identities
+    when it has record-store authority, including for existing stored intent
+    delivered by post-deploy, bootstrap and target replacement. Offline renders
+    without a record store still require explicitly supplied protected keys;
+    they cannot verify production identity.
+    Integration allowances, including `pre_live`, do not bypass a production-store
+    match. Use a separate development store for a non-production lane when
+    production intent names that store. Store comparisons accept myshopify domains
+    and [Shopify admin store URLs](https://help.shopify.com/en/manual/intro-to-shopify/initial-setup/setup-business-settings).
   - The record changes only intent. Run Odoo post-deploy for the lane afterwards
     so the database receives the settings, then verify them in the lane database.
 - On a non-production lane, post-deploy always sends an explicit Shopify
@@ -4724,12 +4952,98 @@ URLs with `preview-<reservation-id>` as the environment selector and the existin
 reservation or recorded fence incident history; an arbitrary preview name is
 not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
-Separately,
-a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
-reporter and manual break-glass link. It explicitly reports zero replacement
+### Self-deploy drain timeout and continuation
+
+A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
+reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. Installation and later live settlement remain separate proof from
-source tests or a merge.
+pre-effect. The absolute ten-minute drain budget survives polls and service
+restarts. For a legacy drain without a saved budget, its first updated poll anchors
+the budget to the prior stored observation. This budget is independent of the
+worker stop, provider deployment and health-verification budgets after dispatch.
+New Client-release/event effects and agent-started rehearsal operations
+wait behind the active drain; rehearsal HTTP calls receive `409/service_deploy_draining`
+with `Retry-After`. Original-key observation, admitted heartbeats and completion
+remain available. Constant fresh traffic cannot extend the drain deadline.
+At timeout the request stops before provider writes and releases its admission
+pause, leaving supported recovery available. It never kills or settles a blocker.
+
+The alert includes bounded opaque blocker references. Match each reference to
+`runtime.release_drain.operation_details[].operation_ref` for its operation ID
+and ownership evidence. Raw operation IDs, keys and private coordinates are not
+sent to Discord. If the alert lists more blockers than fit, inspect the runtime
+status; its detail count and truncation flag report coverage.
+
+Let blockers finish or use their own supported recovery. Then dispatch a fresh
+normal Deploy Launchplane run on the default branch, with a new self-deploy key
+and marker (the workflow normally supplies both). A fresh normal request checks
+the remaining blockers before any provider write; the old timed-out request
+stays non-dispatchable even after blockers clear. A dispatched replacement fences
+new admission until matching startup. This continuation does not authorize an
+operation replay, clear a product recovery fence or supply a missing checkpoint.
+Installation and later live settlement remain separate proof from source tests
+or a merge.
+
+An expired rehearsal reservation can stop blocking replacement only when the
+original rehearsal execution lock proves the API executor has exited. Execution
+and incomplete retirement share that lock. This preserves the journal and custody;
+it does not prove a remote provider job stopped or authorize replay. Other provider
+families keep their existing admission and recovery boundaries. Broader top-level
+admission must preserve admitted child work; provider-target keys alone do not
+prove a live executor. A fresh
+normal request can still time out while a real blocker remains. If supported
+recovery cannot settle it, the existing approved manual break-glass path remains
+the emergency recovery route; this alert does not dispatch it or grant approval.
+
+Service rollback and marker-bound repair use this same drain. If a rehearsal
+starts on a confirmed replacement before verification fails, automated rollback
+can wait for that rehearsal and reach the bounded refusal. The existing approved
+manual break-glass route remains available for that emergency; a repair marker
+does not authorize killing an operation.
+
+#### Cooperative rehearsal execute continuation
+
+An agent rehearsal `execute` can yield its API observer after the provider has
+identified the exact independently running schedule job. While draining, the
+observer stops its lease and atomically records that job, the reviewed rehearsal
+and original journal identity. The HTTP request returns accepted with
+`result.state: checkpointed` and `original_key_required: true`. The remote job
+continues under its existing host lock and custody. The supported
+`scripts/odoo-upgrade-rehearsal.py` client reports `status: checkpointed`, the
+bounded `trace_id`, opaque `operation_id`, and `original_key_required: true`.
+It exits 1 because the rehearsal is pending, without claiming completion or
+sending another request. Preserve the original intent, saved review and execute
+key; use supported original-key readback to observe the same operation. Do not
+start another capture or upgrade or substitute a new key.
+No capture, upgrade or provider trigger is repeated, and no remote process is
+cancelled. The drain checks executor exclusion and can dispatch replacement without waiting for that
+job to finish or for new traffic to become idle.
+If checkpoint admission loses its lease or cannot store the continuation, the
+request instead retains the original journal with the existing typed
+`mutation_reconciliation_required` refusal. Preserve its key and use supported
+original-operation recovery; an uncommitted handoff supplies no resume authority.
+
+The existing Odoo worker schedules these persisted checkpoints from startup,
+on a separate sweep paced by its poll interval so observation cannot delay queued
+production operations. Each host observation has a one-minute execution budget.
+After matching-image API startup confirms the replacement, it observes the exact
+original provider job. Once that job is terminal, the existing original-operation
+host observation validates the result and settles the same journal. Replica
+exclusion and original reservation checks preserve custody; interruption between
+publishing the verified rehearsal result and journal settlement also converges.
+An expired pre-effect drain pause permits observation on the existing instance
+as well. Runtime `release_drain.rehearsal_checkpoints` lists unresolved checkpoint
+operation IDs and states without request fields or provider coordinates.
+
+Missing jobs, changed bindings and terminal jobs without a verified result are
+marked `recovery_required` once, preserving original-key custody without an
+automatic observation loop. Transient read failures remain pending for a later
+sweep. Unreadable checkpoint rows are reported as `unreadable` without hiding
+drain diagnostics. Only newly written execute checkpoints participate;
+historical interrupted journals, including C10, are not adopted by this worker.
+Prepare, retirement and other long-operation families retain their existing
+bounded drain/recovery behavior. Broader top-level admission and checkpoints for
+those families remain separate source work.
 
 ### Fishbowl import proof on an exact PR artifact
 
@@ -4948,25 +5262,31 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup applies the separately
-approved Q533 preview-enablement drop, `e8d2f6a0b4c7`, which branches from
+`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
+revision `b81ca763d924`, which follows the separately approved Q533
+preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts the common predecessor, either branch revision,
-or their empty merge revision, `e9e3a7b1c5d8`, plus the prepared hostname
-revision `f0a4c8e2b6d9` and its join `f1b5d9a3c7e0`. It retains expiry/key-retirement,
+their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
+its existing held-path join `da72490fce13`, and the prepared hostname revisions
+and compatibility joins described below. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-Schema initialization refuses a migration graph whose head has advanced beyond
-this reviewed compatibility graph. A later schema change must
+These are recognized revision paths; the HTTP service also requires the topics
+table and starts only after the release migration has added it.
+While this hold is active, schema initialization refuses a migration graph whose
+head has advanced beyond the reviewed compatibility join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop, startup applies only the preview drop and joins the paths.
+applied the held drop or the original join, startup applies the missing preview
+and topic migrations and joins the paths at `da72490fce13`.
 After explicit approval, requesting the held revision on a database already at
-the preview revision applies the held drop and the empty join. Both routes leave
+the preview or topics revision applies the held drop, adds topics if missing,
+and joins at `da72490fce13`. These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -4978,6 +5298,10 @@ across that boundary requires the pre-deploy database backup or host snapshot
 and its matching image; restoring that recovery point also discards later writes.
 The preview migration does not create a backup, and its downgrade cannot recover
 the retired rows.
+
+Although the topics migration is additive, older images reject its revision.
+Rolling back across it requires a compatible image or the pre-deploy database
+backup and matching image; downgrade does not erase discussion history.
 
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify
@@ -5023,22 +5347,37 @@ against the contracted database. Keep the Protection App/access decision separat
 ### Hostname schema compatibility prelude
 
 Issue #4229 publishes schema knowledge before #4005 activates canonical hostname
-fences. The compatibility image retains the preview-only startup target
-`e8d2f6a0b4c7` and existing hostname comparisons. Its migration entrypoint keeps
-the earlier explicit targets, including the independently approved delivery
-drop and old join. It recognizes an already-applied hostname revision or new
-join as compatible ahead, so startup and image rollback leave their schema and
-stored payloads unchanged. Neither prepared hostname revision is an accepted
-target of this image's migration entrypoint, even for an empty database.
+fences. The compatibility image retains the approved discussion-topics startup
+target `b81ca763d924` and existing hostname comparisons. Its migration entrypoint
+keeps the earlier explicit targets, including the independently approved delivery
+drop and existing topics/retirement join `da72490fce13`. The held-drop approval
+procedure above remains independent.
 
-The old delivery/preview crossing still maps explicitly to `e9e3a7b1c5d8`.
-Adding the new graph head must not change that route to one that applies the
-hostname migration. A hostname-only database cannot request the delivery drop
-or old join through this compatibility entrypoint: those branches are
-incomparable, and joining them would newly apply the held drop. Its ordinary
-startup target remains supported and leaves the hostname revision unchanged.
-An already-applied new join accepts all earlier targets without a downgrade.
-The held-drop approval procedure above remains independent.
+The immutable hostname revision `f0a4c8e2b6d9` still follows the preview revision
+`e8d2f6a0b4c7`; its immutable held-path join is `f1b5d9a3c7e0`. Empty join
+`f2c6e0a4b8d1` reconciles the topics and hostname branches without the held drop.
+Empty join `f3d7a1b5c9e2` reconciles that join with both existing held-path joins,
+providing one graph head. None of these four prepared revisions is an accepted
+target of this image's migration entrypoint, even for an empty database.
+Graph knowledge does not authorize applying hostname fences or the held drop.
+
+Startup from the predecessor or preview revision adds only approved topics.
+An already-applied delivery drop or original retirement join follows the existing
+route to `da72490fce13`; the explicit delivery/preview crossing also retains that
+route. These paths never apply hostname fences. An already-applied hostname-only
+schema adds topics through `f2c6e0a4b8d1`, retaining all held history. An
+already-applied hostname/retirement join adds topics through `f3d7a1b5c9e2`,
+including when explicitly requesting the historical topics/retirement join.
+Topics and compatible-ahead joins remain unchanged. Every route leaves one
+recorded revision and preserves discussion history and stored target payloads.
+
+A hostname-only schema, including its topics join, cannot request the delivery
+drop or either historical held-path join through this entrypoint: joining those
+branches would newly apply the held drop. An already-applied hostname/retirement
+join or final compatibility join accepts earlier ancestor targets without a
+downgrade. Image rollback to this compatibility image keeps compatible-ahead
+schemas and payloads unchanged; a hostname schema that predates topics first
+receives the already-approved additive topics migration.
 
 Before the first explicit public-host authority-key call, runtime provider
 operations acquire a shared transaction advisory schema-transition lock outside

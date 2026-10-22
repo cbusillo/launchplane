@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -192,18 +191,6 @@ class RunnerHostHygieneAuditSpool:
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
-
-
-def unresolved_audit_keys(
-    envelopes: Iterable[RunnerHostHygieneAuditDeliveryEnvelope],
-) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            envelope.audit_record_key
-            for envelope in envelopes
-            if RunnerHostHygieneAuditSpool.is_unresolved(envelope)
-        )
-    )
 
 
 def _safe_segment(value: str) -> str:

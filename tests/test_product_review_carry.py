@@ -604,6 +604,48 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 self.assertEqual(self._publish()["state"], "pending")
                 self.assertEqual(len(self._decisions()), 1)
 
+    def test_an_unrelated_current_head_decision_does_not_mask_a_carry(self) -> None:
+        for update in ({"owner_github_id": "9002"}, {"product": "another-product"}):
+            with self.subTest(update=update):
+                self.setUp()
+                self._later_commits("Adjust tests\n\nClient-impact: none")
+                unrelated = self.accepted.model_copy(
+                    update={
+                        "record_id": "unrelated-client-decision",
+                        "head_sha": _REFRESHED_HEAD,
+                        "decision": "changes_requested",
+                        "reason": "Unrelated feedback remains saved.",
+                        "decided_at": "2026-10-02T22:30:00.000Z",
+                        **update,
+                    }
+                )
+                self.store.write_product_review_decision_record(unrelated)
+
+                self.assertEqual(self._publish()["state"], "success")
+                carried, preserved, accepted = self._decisions()
+                self.assertEqual(preserved, unrelated)
+                self.assertEqual(accepted, self.accepted)
+                assert carried.carried_from is not None
+                self.assertEqual(carried.carried_from.record_id, self.accepted.record_id)
+
+    def test_base_is_recorded_only_on_the_current_clients_applicable_decision(self) -> None:
+        accepted = self.accepted.model_copy(update={"base_branch": ""})
+        unrelated = accepted.model_copy(
+            update={
+                "record_id": "former-client-decision",
+                "owner_github_id": "9002",
+                "decided_at": "2026-10-02T22:30:00.000Z",
+            }
+        )
+        self.store.write_product_review_decision_record(accepted)
+        self.store.write_product_review_decision_record(unrelated)
+        self.github.head_sha = _ACCEPTED_HEAD
+
+        self.assertEqual(self._publish()["state"], "success")
+        preserved, updated = self._decisions()
+        self.assertEqual(preserved, unrelated)
+        self.assertEqual(updated, accepted.model_copy(update={"base_branch": "main"}))
+
     def test_newer_client_rejection_during_comparison_is_not_overridden(self) -> None:
         def reject_during_read(path: str) -> object:
             result = self.github(path=path, token="fixture-token")

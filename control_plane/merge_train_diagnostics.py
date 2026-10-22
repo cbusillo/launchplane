@@ -40,6 +40,7 @@ def controller_last_result(
 ) -> tuple[MergeTrainControllerLastResult, str]:
     candidate = _object(result.get("candidate"))
     details = _object(result.get("details"))
+    deferred_roots = details.get("deferred_roots")
     action = _text(result.get("controller_action"), 128) or state.active_action or "unknown"
     reason = _text(result.get("reason_code"), 128)
     if reason == "failed_candidate_recovery_unavailable" or not reason:
@@ -67,6 +68,7 @@ def controller_last_result(
         if reason
         in {
             "failure_isolation",
+            "base_failure_exploration",
             "candidate_checks_recovered",
             "infrastructure_retry",
             "closed_batch_body_changed",
@@ -104,10 +106,29 @@ def controller_last_result(
     elif reason in {"candidate_check_retry_used", "infrastructure_retry_used"}:
         actor = "repository_agent"
         observation = "Repair the failed checks; then let the controller reobserve the lineage."
+    elif (
+        reason == "base_failure_exploration_exhausted"
+        and isinstance(deferred_roots, list)
+        and deferred_roots
+    ):
+        root = _object(deferred_roots[0])
+        code = root.get("code")
+        actor = (
+            "controller"
+            if code == "stack_disposition_label_creation_required"
+            else "provider"
+            if code == "stack_disposition_preparation_failed"
+            else "repository_agent"
+        )
+        observation = _text(
+            f"Resolve or recheck the deferred stack prerequisite {_text(code, 128)}: "
+            f"{_text(root.get('message'))}"
+        )
     elif action in {"wait_for_checks", "observe_candidate", "wait_for_root_checks"} or reason in {
         "candidate_checks_pending",
         "candidate_failure_evidence_unavailable",
         "base_checks_not_green",
+        "base_failure_exploration_exhausted",
     }:
         actor = "provider"
         observation = "Observe fresh candidate, original-head or base check evidence."

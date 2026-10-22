@@ -124,6 +124,7 @@ def _context() -> GenericWebPostDeployContext:
         target_id="compose-cm-prod",
         artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
         source_git_ref="abc123",
+        previous_inventory=None,
     )
 
 

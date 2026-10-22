@@ -2,7 +2,6 @@
 
 import base64
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,6 +66,19 @@ class GenericWebTestingResources(OdooTestingResources):
         }
 
 
+class ApplicationTestingResources(OdooTestingResources):
+    """Only the state actually requested for a fresh application recipient."""
+
+    resource_kind: Literal["application"] = "application"
+    state_kind: Literal["none", "volume"]
+
+    @property
+    def volumes(self) -> dict[str, str]:
+        if self.state_kind == "none":
+            return {}
+        return {"state": f"{self.namespace}-state"}
+
+
 class OdooRehearsalResources(BaseModel):
     """The same empty storage protocol, without a canonical lane identity."""
 
@@ -113,11 +125,6 @@ def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingRes
         evidence.get("testing_resources_ok") == "true"
         and evidence.get("testing_resources_binding_sha256") == resources.binding_sha256
     )
-
-
-def validate_resource_namespace(namespace: str) -> None:
-    if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
-        raise ValueError("Replacement requires its service-allocated resource namespace.")
 
 
 # The program runs on the selected Docker host, outside every application
@@ -172,6 +179,14 @@ def main():
             "database": namespace + "-db",
             "config": namespace + "-config",
         }
+    elif spec.get("resource_kind") == "application":
+        kind = spec.get("state_kind")
+        if kind == "none":
+            volumes = {}
+        elif kind == "volume":
+            volumes = {"state": namespace + "-state"}
+        else:
+            raise RuntimeError("Unsupported application state kind")
     elif "resource_kind" in spec and not rehearsal:
         raise RuntimeError("Unsupported testing resource kind")
     if spec["volumes"] != volumes:

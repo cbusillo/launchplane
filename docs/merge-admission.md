@@ -22,7 +22,8 @@ approval classifiers. Historical payload readers preserve prior record digests.
 
 Each batch entry is re-evaluated under the current repository/base controller
 lease immediately before its provider merge. The live adapter resolves current
-engineering decision and run evidence, required technical checks, policy fingerprints, structural candidate
+engineering decision and run evidence,
+[required technical checks](merge-train-policy.md#candidate-validation), policy fingerprints, structural candidate
 provenance, queue position, rolling base, exact head/tree, candidate identity,
 and the expected effect SHA. It re-reads the active merge-train policy record
 for every entry and the GitHub queue for every sequential entry, rather than

@@ -26,8 +26,9 @@ product's review label remains an explicit override requiring real test notes.
 `Nothing for the Client to test: <reason>` with a nonempty reason marks an
 engineering-only change; it cannot be used with the review label. When the
 Director reroutes an already labeled request, use [pending request withdrawal](#withdrawing-a-pending-request). Missing notes,
-empty template comments, or a malformed engineering-only declaration visibly
-refuse preview readiness and merge admission for repositories feeding a Client
+empty template comments, or a malformed engineering-only declaration (including
+other "nothing to test" wording such as `Nothing for Justin to test.`, which
+the check names instead of waiting for the Client) visibly refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
 not a checked-in repository list. Shared inputs require valid notes and remain
 covered by the consuming product's release review; they do not gain a separate
@@ -61,14 +62,39 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
-The preview reconciler refreshes the Client-review check even while waiting for
-a verified build or after a failed preview apply. Valid engineering-only notes
+The preview reconciler refreshes the Client-review check independently of
+preview planning and delivery, including a deferred operation, an unknown
+provider outcome, or a failure to recover the original preview proof. The
+publisher rereads the PR and saved decisions, even when there is no new preview
+comment to post, or when an open PR's preview is being destroyed. The open-PR
+sweep also refreshes reviews for products without previews or testing lanes;
+failed publication retries through the same reconcile row on a later sweep.
+When its fresh PR read observes a closed change, the publisher can still deliver
+already-requested saved Client feedback. It skips current review projection,
+decision-base binding, acceptance carry and retired-check maintenance, even if
+cleanup replaced its original reason with a retry limit, busy operation or
+recovery failure. **Retry delivery** remains available after closure or merge;
+closed cleanup may also retry saved feedback when it invokes the publisher.
+An unavailable read is not evidence of closure; normal best-effort retry behavior
+remains.
+When a product has no Client and the PR has no review label, only an existing
+Advisory App review check bound to that repository, PR and current head is
+completed neutrally. A PR with no earlier matching check stays silent. A review
+label without a Client still leaves the review pending. These updates create no
+decision or acceptance. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
+Both acceptance and rejection projections use the newest applicable decision
+for the product's current immutable Client ID, product, repository, pull request
+and current head. A changed login with the same ID keeps the decision applicable.
+A former Client's decision stays saved with its feedback, but neither accepts,
+vetoes nor masks the current Client's decision. Carried decisions must also match
+the current base branch. The same Client and target selection applies when
+recording a decision's first base branch or choosing an acceptance to carry.
 The train independently reads saved current-head decisions for the product's
 current Client at admission and immediately before merging. A Request changes
 decision blocks even after notes are edited to engineering-only or while its
@@ -144,10 +170,9 @@ If recorded train refreshes and invisible commits are mixed between status
 publishes, neither proof covers the whole history and a new decision is needed.
 
 This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The Client sees
-a short note that later commits were marked as having no Client-visible changes
-and their acceptance still applies. The recorded Client, original acceptance
-and delivered feedback remain the source, rather than inventing a new decision.
+`client_impact` trailer value in `carried_from.commits`, in order. The recorded
+Client, original acceptance and delivered feedback remain the source, rather
+than inventing a new decision.
 The same-current-Client, delivered-feedback and unchanged-base checks below apply.
 
 The Client accepts a feature, seen on its preview. A base update or rebase may
@@ -197,6 +222,13 @@ the review page shows which version it was carried from, and the ready preview
 comment says the change is accepted rather than asking the Client again. The
 carry is checked when the status is next written: on the ready preview comment
 from the feedback route or the reconciler, and after a decision.
+
+The review page's Recorded decision card preserves saved history, including a
+former Client's decision or an older preview version. Its carry explanation
+describes the recorded version and why the acceptance was carried at that time;
+it does not establish that the acceptance applies now. The current Client can
+still record a new decision on a ready preview. The shared review projection
+checks current Client, head and base applicability separately.
 
 The maintained `codex-skills` agent watcher recognizes the Client feedback marker
 from any publisher, then verifies the complete decision and exact comment receipt
@@ -273,6 +305,11 @@ and changes no release acceptance. It does not rewrite test notes or publish a
 successful Client-review check. Set truthful engineering notes separately; real
 test notes or a later review label request review normally, including on the
 same head. The normal preview reconciler refreshes the check after those edits.
+
+An unlabeled request needs no label withdrawal: edit its notes truthfully and
+the next event reconcile or open-PR sweep refreshes the check. A held preview
+operation remains held; check reclassification neither retries it nor records
+Client acceptance. Withdrawal still requires a labeled pending request.
 
 Recovery and readback can observe a closed PR; a new withdrawal still requires
 an open PR. A published history receipt remains historical proof after closure.

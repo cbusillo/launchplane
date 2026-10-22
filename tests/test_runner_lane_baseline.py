@@ -349,7 +349,6 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-baseline-observe",
                     "--observed-at",
                     "2026-05-18T18:28:00Z",
@@ -382,7 +381,6 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-baseline-observe",
                     "--runner-name",
                     "chris-testing-runtime-smoke",
@@ -457,7 +455,6 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-baseline-observe",
                     "--runner-name",
                     "chris-testing-runtime-smoke",
@@ -519,7 +516,6 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-baseline-observe",
                     "--runner-name",
                     "chris-testing-ops-gate",
@@ -558,7 +554,6 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-baseline-observe",
                     "--runner-name",
                     "chris-testing-odoo-tenant-cm",

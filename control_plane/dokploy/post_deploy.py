@@ -55,6 +55,12 @@ from control_plane.integration_readback import (
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
+from control_plane.copy_readback_diagnostics import (
+    READBACK_FAILURE_MARKERS,
+    ReadbackPredicate,
+    readback_failure_evidence,
+    readback_marker_is_safe,
+)
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     FreshRestoreScriptArguments,
@@ -76,6 +82,8 @@ def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
     lock_path = ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY / f"launchplane-odoo-{digest}.lock"
     return f"""exec 9>{shlex.quote(str(lock_path))}
 if ! flock -n 9; then
+    readback_predicate={ReadbackPredicate.EXECUTION_LOCK}
+    readback_failure_kind=refused
     printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
     exit 1
 fi
@@ -89,6 +97,8 @@ def odoo_testing_idle_runner_script(container_variable: str) -> str:
     runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
     case "$runner_execs" in null|'[]') break ;; esac
     if [ "$runner_probe" = 3 ]; then
+        readback_predicate={ReadbackPredicate.RUNNER_IDLE}
+        readback_failure_kind=refused
         printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2
         exit 1
     fi
@@ -225,6 +235,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {"website_settings_sha256"}
+    | READBACK_FAILURE_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -376,6 +387,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
             for key, value in evidence.items()
             if _safe_odoo_post_deploy_marker(key, value)
         }
+        if not any(key != "log_available" for key in self.evidence):
+            self.evidence = readback_failure_evidence(self.evidence)
         for key in ("schedule_id", "schedule_deployment_key", "schedule_deployment_id"):
             value = _bounded_dokploy_evidence_id(evidence.get(key, ""))
             if value:
@@ -383,6 +396,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if readback_marker_is_safe(key, value):
+        return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
         return bool(
             re.fullmatch(
@@ -514,6 +529,7 @@ def run_manual_data_schedule(
     resolved_schedule_execution_timeout_seconds: int,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    on_observation: Callable[[str, str], None] | None = None,
 ) -> dict[str, str]:
     api.validate_dokploy_schedule_script(schedule_payload)
     with (provider_mutation_guard or nullcontext)():
@@ -545,6 +561,8 @@ def run_manual_data_schedule(
             if before_provider_mutation
             else None,
         }
+    if on_observation is not None:
+        dispatch["on_observation"] = on_observation
     try:
         completed_schedule_deployment_key = api.deployment_key_from_wait_result(
             api.run_dokploy_schedule(
@@ -764,67 +782,6 @@ def run_compose_post_deploy_update(
                 desired_env_map.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""),
             ),
         )
-    if desired_env_map != current_env_map:
-        env_text = api.serialize_dokploy_env_text(
-            desired_env_map,
-            target_type="compose",
-            compose_type=str(target_payload.get("composeType") or "docker-compose"),
-            current_env_text=str(target_payload.get("env") or ""),
-        )
-        with (provider_mutation_guard or nullcontext)():
-            if before_provider_mutation is not None:
-                before_provider_mutation("post_deploy_target_update")
-            api.update_dokploy_target_env(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                target_payload=target_payload,
-                env_text=env_text,
-            )
-        latest_compose_deployment = api.latest_deployment_for_target(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-        )
-        with (provider_mutation_guard or nullcontext)():
-            if before_provider_mutation is not None:
-                before_provider_mutation("post_deploy_deploy_trigger")
-            api.trigger_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                no_cache=False,
-                **({"title": deployment_title} if deployment_title else {}),
-            )
-        api.wait_for_target_deployment(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            before_key=api.deployment_key(latest_compose_deployment),
-            timeout_seconds=schedule_timeout_seconds,
-            **({"deployment_title": deployment_title} if deployment_title else {}),
-        )
-        target_payload = api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-        )
-        refreshed_env_map = api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-        missing_runtime_override_keys = sorted(
-            key
-            for key, value in runtime_override_target_environment.items()
-            if refreshed_env_map.get(key, "") != value
-        )
-        if missing_runtime_override_keys:
-            raise click.ClickException(
-                "Compose post-deploy update did not persist runtime override key(s): "
-                + ", ".join(missing_runtime_override_keys)
-            )
 
     database_name = desired_env_map.get("ODOO_DB_NAME", "").strip()
     if not database_name:
@@ -898,13 +855,8 @@ def run_compose_post_deploy_update(
         if apply_website_settings
         else "",
     )
+    fresh_arguments: FreshRestoreScriptArguments | None = None
     if fresh_testing_generation is not None:
-        if (
-            not run_destructive_restore
-            or target_definition.instance != "testing"
-            or target_definition.target_id != fresh_testing_generation.target_id
-        ):
-            raise ValueError("Fresh testing transport requires its exact restore generation.")
         fresh_arguments = FreshRestoreScriptArguments(
             generation=fresh_testing_generation,
             compose_project=compose_app_name,
@@ -918,13 +870,93 @@ def run_compose_post_deploy_update(
             clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
             data_workflow_lock_path=data_workflow_lock_path,
         )
-        native_capture = None
-        if fresh_testing_generation.source_mode == "container-export":
-            if prepare_native_source is None or schedule_server_id is None:
-                raise ValueError("Native testing copy requires its service capture adapter.")
-            native_capture = prepare_native_source(
-                fresh_testing_restore_spec(**fresh_arguments), schedule_server_id
+        schedule_script = build_fresh_testing_restore_script(**fresh_arguments)
+    from control_plane.odoo_testing_restore import NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
+
+    api.validate_dokploy_schedule_script(
+        {
+            "script": schedule_script
+            + (
+                " " * NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
+                if fresh_testing_generation is not None
+                and fresh_testing_generation.source_mode == "container-export"
+                else ""
+            ),
+            "appName": schedule_app_name,
+        }
+    )
+    if desired_env_map != current_env_map:
+        env_text = api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
+        with (provider_mutation_guard or nullcontext)():
+            if before_provider_mutation is not None:
+                before_provider_mutation("post_deploy_target_update")
+            api.update_dokploy_target_env(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                target_payload=target_payload,
+                env_text=env_text,
             )
+        latest_compose_deployment = api.latest_deployment_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        with (provider_mutation_guard or nullcontext)():
+            if before_provider_mutation is not None:
+                before_provider_mutation("post_deploy_deploy_trigger")
+            api.trigger_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                no_cache=False,
+                **({"title": deployment_title} if deployment_title else {}),
+            )
+        api.wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            before_key=api.deployment_key(latest_compose_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+            **({"deployment_title": deployment_title} if deployment_title else {}),
+        )
+        target_payload = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        refreshed_env_map = api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        missing_runtime_override_keys = sorted(
+            key
+            for key, value in runtime_override_target_environment.items()
+            if refreshed_env_map.get(key, "") != value
+        )
+        if missing_runtime_override_keys:
+            raise click.ClickException(
+                "Compose post-deploy update did not persist runtime override key(s): "
+                + ", ".join(missing_runtime_override_keys)
+            )
+
+    if (
+        fresh_arguments is not None
+        and fresh_testing_generation is not None
+        and fresh_testing_generation.source_mode == "container-export"
+    ):
+        if prepare_native_source is None or schedule_server_id is None:
+            raise ValueError("Native testing copy requires its service capture adapter.")
+        native_capture = prepare_native_source(
+            fresh_testing_restore_spec(**fresh_arguments), schedule_server_id
+        )
         schedule_script = build_fresh_testing_restore_script(
             **fresh_arguments, native_capture=native_capture
         )
@@ -952,11 +984,7 @@ def run_compose_post_deploy_update(
         schedule_payload=schedule_payload,
         resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         before_provider_mutation=before_provider_mutation,
-        **(
-            {"provider_mutation_guard": provider_mutation_guard}
-            if provider_mutation_guard is not None
-            else {}
-        ),
+        provider_mutation_guard=provider_mutation_guard,
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)

@@ -844,6 +844,18 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         deploy = Mock()
         deploy.target_key.return_value = dokploy_generic_web_provider_target_key(self.provider)
         deploy.reconciliation_key.return_value = "next-testing-image"
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        deploy.provider_target_origin = Mock(
+            return_value=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.provider.context,
+                instance=self.provider.instance,
+                provider_id=self.provider.provider_id,
+                target_type=self.provider.target_category,
+                target_id=self.provider.target_id,
+            )
+        )
 
         def complete_deploy(key: str, lease: ProviderOperationLease) -> ProviderMutationOutcome:
             lease.checkpoint_effect("deploy_testing_image")

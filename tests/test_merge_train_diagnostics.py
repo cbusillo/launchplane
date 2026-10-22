@@ -19,7 +19,11 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     execute_merge_train_controller_with_client,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainGitHubError,
+    MergeTrainBaseCheckObservation,
+)
 from control_plane.merge_train_diagnostics import controller_last_result
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
@@ -124,7 +128,9 @@ class RecoveryDiagnosticsTests(TestCase):
         self.client.read_merge_train_snapshot.return_value = self.train.snapshot
         self.client.observe_batch_candidate_checks.return_value = candidate
         self.client.read_candidate_check_failures.return_value = TEST_FAILURE
-        self.client.read_base_check_status.return_value = "pending"
+        self.client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            "pending"
+        )
         self.attempt = 0
 
     def run_pass(self, *, mutate: bool = True) -> dict[str, object]:
@@ -244,7 +250,7 @@ class RecoveryDiagnosticsTests(TestCase):
         self.assertEqual(diagnosis.base_checks_status, "not_observed")
         self.assertEqual(diagnosis.check_retry_of, candidate.check_retry_of)
         self.assertEqual(diagnosis.next_actor, "repository_agent")
-        self.client.read_base_check_status.assert_not_called()
+        self.client.read_base_check_observation.assert_not_called()
 
     def test_missing_failure_evidence_and_transient_read_keep_their_guard(self) -> None:
         for failures, reason in (
@@ -267,7 +273,9 @@ class RecoveryDiagnosticsTests(TestCase):
                 self.assertEqual(diagnosis.base_checks_status, "not_observed")
 
     def test_isolation_has_failed_source_and_green_base_without_changing_members(self) -> None:
-        self.client.read_base_check_status.return_value = "pass"
+        self.client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            "pass"
+        )
         result = self.run_pass()
         diagnosis = self.state().last_result
         assert diagnosis is not None
@@ -286,14 +294,18 @@ class RecoveryDiagnosticsTests(TestCase):
         self.run_pass()
         waiting = self.state().last_result
         assert waiting is not None
-        self.client.read_base_check_status.return_value = "pass"
+        self.client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            "pass"
+        )
         self.run_pass()
         replacement = self.state().last_result
         assert replacement is not None
         self.assertGreater(replacement.semantic_progress_at, waiting.semantic_progress_at)
 
     def test_isolation_check_wait_keeps_its_source_across_restart(self) -> None:
-        self.client.read_base_check_status.return_value = "pass"
+        self.client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+            "pass"
+        )
         result = self.run_pass()
         candidate = MergeTrainBatchCandidate.model_validate(result["candidate"]).model_copy(
             update={

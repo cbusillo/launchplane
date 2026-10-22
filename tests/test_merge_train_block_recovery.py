@@ -22,7 +22,9 @@ from control_plane.merge_train import MergeTrainBlockResult, build_merge_train_d
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     _advance_from_live_snapshot,
+    _explore_nonpassing_base_candidates,
 )
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
@@ -38,12 +40,21 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_ca
 
 class CandidateBlockRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.arrange()
+
+    def arrange(self, *, repository: str | None = None) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store: FilesystemRecordStore | PostgresRecordStore = FilesystemRecordStore(
             Path(self.directory.name)
         )
-        self.policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
+        self.policy = (
+            build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
+            if repository is None
+            else build_test_merge_train_policy(
+                repository=repository, trusted_automation_github_user_ids=(42,)
+            )
+        )
         self.target = self.policy.policies[0]
         source_app = self.target.github_token.github_app
         assert source_app is not None
@@ -250,6 +261,91 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 "files": [{"filename": "control_plane/testing_retry.py", "status": "modified"}],
             },
         }
+
+    def test_red_base_stack_planning_preserves_unrelated_recorded_block_recovery(self) -> None:
+        root = self.other
+        child = root.model_copy(
+            update={
+                "number": 3,
+                "head_sha": "stack-child-head",
+                "head_ref": "feature/stack-child",
+                "base_ref": root.head_ref,
+                "base_sha": root.head_sha,
+            }
+        )
+        repair = root.model_copy(
+            update={
+                "number": 4,
+                "head_sha": "repair-head",
+                "head_ref": "feature/repair",
+                "created_at": "2026-10-18T00:04:00Z",
+            }
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (root, self.current, child, repair)}
+        )
+        trial = build_merge_train_dry_run_result(
+            policy=self.policy, snapshot=self.snapshot, batch_landing=True, new_candidate=True
+        )
+        failed = build_merge_train_batch_candidate(
+            dry_run_result=trial,
+            base_sha=self.snapshot.base_sha,
+            policy_sha256=self.policy_digest,
+            created_at=self.record.updated_at,
+        ).model_copy(
+            update={
+                "candidate_sha": "failed-current-group",
+                "status": "failed",
+                "required_checks_status": "fail",
+            }
+        )
+        parent = build_merge_train_batch_candidate_record(
+            candidate=failed,
+            source="service:controller:batch-candidate-failed:exploration",
+            updated_at=self.record.updated_at,
+        )
+        self.store.write_merge_train_batch_candidate_record(parent)
+        with patch.object(self.client, "ensure_repository_label", return_value=True):
+            result = _explore_nonpassing_base_candidates(
+                stack_collapse_store=self.store,
+                candidate_store=self.store,
+                github_client=self.client,
+                active_candidate_record=parent,
+                policy=self.policy,
+                policy_sha256=self.policy_digest,
+                snapshot=self.snapshot,
+                held_out=(),
+                details={"base_checks_status": "fail"},
+                recorded_at=self.lease.record.updated_at,
+                trace_id="exploration",
+                mutate=True,
+                lease=self.lease,
+            )
+        assert result is not None
+        payloads = build_feedback_payloads(response={"result": result})
+        self.assertEqual(
+            self.mutations,
+            [],
+            f"Recovery effect escaped in {result['controller_action']}; "
+            f"feedback reached {[row['pull_request_number'] for row in payloads]}",
+        )
+        self.assertIn(self.target.blocked_label, self.current.labels)
+        self.assertEqual(result["controller_action"], "plan_stack_collapse")
+        plan = next(
+            record
+            for record in self.store.list_merge_train_stack_collapse_plan_records(status="active")
+            if record.record_id == result["merge_train_stack_collapse_plan_record_id"]
+        )
+        self.assertEqual(
+            [entry.pull_request_number for entry in plan.plan.entries], [root.number, child.number]
+        )
+        recovery = self.advance(mutate=True)
+        self.assertEqual(recovery["controller_action"], "recover_candidate_block")
+        self.assertEqual(len(self.mutations), 1)
+        feedback = build_feedback_payloads(response={"result": recovery})
+        self.assertEqual([row["pull_request_number"] for row in feedback], [self.current.number])
+        self.assertEqual(feedback[0]["event"], "waiting")
+        self.assertTrue(feedback[0]["message"])
 
     def test_same_head_missing_store_block_recovers_once_with_durable_proof(self) -> None:
         self.setup_missing_store_failure()
@@ -721,6 +817,30 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.mutations[0].endswith(f"/labels/{quote(self.target.blocked_label, safe='')}")
         )
         self.lease.checkpoint.assert_called()
+
+    def test_mixed_case_repository_recovers_its_recorded_block(self) -> None:
+        self.arrange(repository="Owner/Mixed_Case")
+        # Candidates and the GitHub reader lowercase the name; the request,
+        # snapshot and policy keep the repository's own casing.
+        self.assertNotEqual(self.record.candidate.repository, self.target.repository)
+        provider_repository = self.target.repository.lower()
+        self.current = self.current.model_copy(
+            update={
+                "base_repository": provider_repository,
+                "head_repository": provider_repository,
+            }
+        )
+        result = self.advance(mutate=True)
+        self.assertEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(result["merge_train_batch_candidate_record_id"], self.record.record_id)
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_fork_head_keeps_block_and_reports_the_skip(self) -> None:
+        self.current = self.current.model_copy(update={"head_repository": "fork/repo"})
+        with self.assertLogs("control_plane.merge_train_github_block_recovery", "WARNING"):
+            result = self.advance(mutate=True)
+        self.assertNotEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(self.mutations, [])
 
     def test_same_head_and_unready_heads_keep_block(self) -> None:
         for changes in (

@@ -340,6 +340,17 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
     ),
     actions=(
         _action(
+            "service_restart",
+            "Restart a service (same version)",
+            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
+            safety="mutation",
+            scope="instance",
+            route_path=SERVICE_RESTART_ROUTE,
+            authz_action="live_target_runtime.apply",
+            alternate_authz_actions=("live_target_runtime.plan",),
+            writes_records=("service_restart",),
+        ),
+        _action(
             "stable_deploy",
             "Deploy lane",
             "Deploy an immutable container image to a configured generic-web product lane.",
@@ -558,17 +569,6 @@ ODOO_DRIVER = DriverDescriptor(
             authz_action=WALKTHROUGH_ACTION,
             alternate_authz_actions=(WALKTHROUGH_PLAN_ACTION,),
             writes_records=("secret", "odoo_testing_task"),
-        ),
-        _action(
-            "service_restart",
-            "Restart a service (same version)",
-            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
-            safety="mutation",
-            scope="instance",
-            route_path=SERVICE_RESTART_ROUTE,
-            authz_action="live_target_runtime.apply",
-            alternate_authz_actions=("live_target_runtime.plan",),
-            writes_records=("service_restart",),
         ),
         _action(
             "post_deploy",
@@ -901,6 +901,20 @@ def read_driver_descriptor(driver_id: str) -> DriverDescriptor:
         if descriptor.driver_id == normalized_driver_id:
             return descriptor
     raise FileNotFoundError(f"No Launchplane driver descriptor found for {driver_id!r}.")
+
+
+ODOO_DRIVER_ID = "odoo"
+
+
+def product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
+    profile_driver_id = profile.driver_id.strip()
+    if profile_driver_id == ODOO_DRIVER_ID:
+        return True
+    try:
+        descriptor = read_driver_descriptor(profile_driver_id)
+    except FileNotFoundError:
+        return False
+    return descriptor.base_driver_id == ODOO_DRIVER_ID
 
 
 def _product_profile_lanes(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:

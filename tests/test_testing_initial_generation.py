@@ -250,7 +250,31 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual((await self.post()).status_code, 409)
         self.store.write_dokploy_target_id_record(target)
-        self.store.write_odoo_stable_target_replacement_operation_record(self.fixture.operation)
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
+        )
+
+        original = self.fixture.operation
+        held_key = original.idempotency_key + ":stranded-original"
+        held = original.model_copy(
+            update={
+                "operation_id": build_odoo_stable_target_replacement_operation_id(
+                    product=original.product,
+                    context=original.context,
+                    instance=original.instance,
+                    created_at=original.created_at,
+                    idempotency_key=held_key,
+                    idempotency_scope=original.idempotency_scope,
+                ),
+                "idempotency_key": held_key,
+                "status": "reconciliation_required",
+                "finished_at": "",
+                "result": None,
+                "error_code": "provider_outcome_unknown",
+                "error_message": "Fixture original remains unverified.",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
         self.assertEqual((await self.post()).status_code, 409)
         preparation = self.store.read_disposable_resource_preparation(result["operation_id"])
         assert preparation is not None

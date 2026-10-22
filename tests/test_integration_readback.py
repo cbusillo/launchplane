@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
+    DokployTargetRecord,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy.api import JsonValue
 from control_plane.dokploy.post_deploy import (
     OdooPostDeployReadbackFailure,
     extract_odoo_post_deploy_readback_markers,
     require_integration_readback_evidence,
 )
-from control_plane.integration_readback import integration_readback_policy
+from control_plane.integration_readback import (
+    integration_readback_policy,
+    integration_credential_warnings,
+)
 
 
 def _policies(*allowed: str, protected: tuple[str, ...] = ()) -> DokployTargetPolicies:
@@ -33,6 +44,142 @@ def _integrations(policy_families: tuple[object, ...]) -> set[str]:
 
 
 class IntegrationReadbackPolicyTests(unittest.TestCase):
+    def test_mail_payment_and_web_push_credentials_warn_without_allowances(self) -> None:
+        for key, integration in (
+            ("SMTP_PASSWORD", "outgoing_mail"),
+            ("SENDGRID_API_KEY", "outgoing_mail"),
+            ("STRIPE_SECRET_KEY", "payment"),
+            ("VAPID_PRIVATE_KEY", "web_push"),
+            ("ODOO_OVERRIDE_SECRET__CONFIG_PARAMETER__MAIL_WEB_PUSH_VAPID_PRIVATE_KEY", "web_push"),
+            ("INCOMING_MAIL_PASSWORD", "incoming_mail"),
+        ):
+            with self.subTest(key=key):
+                binding = SecretBinding(
+                    binding_id="binding",
+                    secret_id="secret",
+                    integration="runtime_environment",
+                    binding_key=key,
+                    context="example",
+                    instance="testing",
+                    created_at="2026-10-21T00:00:00Z",
+                    updated_at="2026-10-21T00:00:00Z",
+                )
+                summary = LaunchplaneLaneSummary(
+                    context="example", instance="testing", secret_bindings=(binding,)
+                )
+                self.assertTrue(integration_credential_warnings(summary))
+                target = DokployTargetRecord(
+                    context="example",
+                    instance="testing",
+                    policies=_policies(integration),
+                    updated_at=binding.updated_at,
+                )
+                self.assertFalse(
+                    integration_credential_warnings(
+                        summary.model_copy(update={"dokploy_target": target})
+                    )
+                )
+
+    def test_custom_policy_marker_warns_when_integration_cannot_be_matched(self) -> None:
+        cases = (
+            ("ACCOUNTING_QB_TOKEN", ("__ACCOUNTING__", "QB"), ("accounting",), True),
+            ("ACCOUNTING_QB_TOKEN", ("__ACCOUNTING__", "QB"), ("accounting", "qb"), False),
+            ("SHOPIFY_ACCOUNTING_TOKEN", ("ACCOUNTING",), ("shopify",), True),
+            ("SHOPIFY_ACCOUNTING_TOKEN", ("ACCOUNTING",), ("shopify", "accounting"), False),
+            ("SMTP_PASSWORD", ("SMTP",), ("outgoing_mail",), False),
+            ("MAIL_WEB_PUSH_VAPID_PRIVATE_KEY", ("MAIL",), ("web_push",), False),
+            ("123VENDOR_TOKEN", ("123VENDOR",), (), True),
+            ("ACCOUNTING_TOKEN", (), (), False),
+        )
+        for key, markers, allowed, warned in cases:
+            with self.subTest(key=key, markers=markers, allowed=allowed):
+                binding = SecretBinding(
+                    binding_id="binding",
+                    secret_id="secret",
+                    integration="runtime_environment",
+                    binding_key=key,
+                    context="example",
+                    instance="testing",
+                    created_at="2026-10-21T00:00:00Z",
+                    updated_at="2026-10-21T00:00:00Z",
+                )
+                policy = RuntimeKeySafetyPolicyRecord(
+                    record_id="policy",
+                    source="test",
+                    updated_at=binding.updated_at,
+                    rules=(RuntimeSecretSafetyRule(binding_key=key, secret_class="testing"),),
+                    integration_key_markers=markers,
+                )
+                store = SimpleNamespace(
+                    list_runtime_key_safety_policy_records=lambda **_: (policy,)
+                )
+                target = DokployTargetRecord(
+                    context="example",
+                    instance="testing",
+                    policies=_policies(*allowed),
+                    updated_at=binding.updated_at,
+                )
+                summary = LaunchplaneLaneSummary(
+                    context="example",
+                    instance="testing",
+                    secret_bindings=(binding,),
+                    dokploy_target=target,
+                )
+                self.assertEqual(
+                    bool(integration_credential_warnings(summary, record_store=store)), warned
+                )
+
+    def test_credential_warnings_use_configured_in_scope_integrations_only(self) -> None:
+        binding = SecretBinding(
+            binding_id="binding",
+            secret_id="secret",
+            integration="runtime_environment",
+            binding_key="ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
+            context="example",
+            instance="testing",
+            created_at="2026-10-21T00:00:00Z",
+            updated_at="2026-10-21T00:00:00Z",
+        )
+        summary = LaunchplaneLaneSummary(
+            context="example", instance="testing", secret_bindings=(binding,)
+        )
+        self.assertTrue(integration_credential_warnings(summary))
+        for update in (
+            {"status": "disabled"},
+            {"context": "other"},
+            {"instance": "prod"},
+            {"binding_key": "DATABASE_PASSWORD"},
+            {"binding_key": "NOTSHOPIFY_TOKEN"},
+            {"binding_key": "WEB_PUSH_TOKEN"},
+            {"integration": "testing_application_state"},
+            {"integration": "odoo_walkthrough"},
+            {"integration": "odoo_diagnostics"},
+        ):
+            with self.subTest(update=update):
+                self.assertFalse(
+                    integration_credential_warnings(
+                        summary.model_copy(
+                            update={"secret_bindings": (binding.model_copy(update=update),)}
+                        )
+                    )
+                )
+        self.assertFalse(
+            integration_credential_warnings(summary.model_copy(update={"instance": "prod"}))
+        )
+        self.assertTrue(
+            integration_credential_warnings(
+                summary.model_copy(
+                    update={
+                        "secret_bindings": (
+                            binding.model_copy(
+                                update={"integration": "shopify", "binding_key": "API_TOKEN"}
+                            ),
+                        )
+                    }
+                )
+            )
+        )
+
     def test_non_production_lanes_check_every_family_and_carry_allowances(self) -> None:
         for instance in ("testing", "dev", "qa-2"):
             with self.subTest(instance=instance):

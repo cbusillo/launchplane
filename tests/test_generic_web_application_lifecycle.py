@@ -1,11 +1,13 @@
 from datetime import UTC, datetime
 from contextlib import nullcontext
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 import unittest
 from unittest.mock import Mock, patch
 
 import click
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.contracts.generic_web_extensions import (
     GenericWebApplicationSchedule,
@@ -82,11 +84,19 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         return dict(value) if value is not None else None
 
     def _upsert(self, **kwargs: object) -> api.JsonObject:
-        payload = cast(api.JsonObject, kwargs["schedule_payload"])
-        self.assertEqual(payload["applicationId"], kwargs["application_id"])
-        name = str(payload["name"])
-        self.schedules[name] = dict(payload)
-        return {**payload, "scheduleId": name}
+        guard = kwargs.get("provider_mutation_guard")
+        with guard() if callable(guard) else nullcontext():
+            payload = cast(api.JsonObject, kwargs["schedule_payload"])
+            self.assertEqual(payload["applicationId"], kwargs["application_id"])
+            name = str(payload["name"])
+            self.schedules[name] = dict(payload)
+            return {**payload, "scheduleId": name}
+
+    def _delete(self, **kwargs: object) -> None:
+        guard = kwargs.get("provider_mutation_guard")
+        with guard() if callable(guard) else nullcontext():
+            payload = cast(api.JsonObject, kwargs["schedule_payload"])
+            self.schedules.pop(str(payload["name"]), None)
 
     def _run(self, **kwargs: object) -> None:
         before_trigger = kwargs.get("before_trigger")
@@ -107,6 +117,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         verification_fails: bool = False,
         reset: bool = False,
         input_refusal: bool = False,
+        before_deployment_records: Callable[[], None] | None = None,
     ) -> tuple[GenericWebDeployResult, _GenericWebDeployStore]:
         self.failure_command = failure_command
         profile = _profile()
@@ -160,8 +171,54 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 post_deploy_executor=verification,
                 provider_operation_title="deploy-test",
                 provider_effect_checkpoint=self.phases.append,
+                before_deployment_records=before_deployment_records,
             )
         return result, store
+
+    def test_completed_activation_does_not_reinherit_historical_qualified_schedules(self) -> None:
+        result, store = self._deploy()
+        original = recorded_application_lifecycle(
+            store.read_deployment_record(result.deployment_record_id)
+        )
+        assert original is not None
+        with patch(
+            "control_plane.testing_activation.completed_application_predecessor", return_value=True
+        ):
+            snapshot = application_snapshot_for_deploy(
+                store=store,
+                product=original.product,
+                context=original.context,
+                instance=original.instance,
+                provider_id=original.provider_id,
+                target_id=original.target_id,
+                artifact_id=original.artifact_id,
+                source_git_ref=original.source_git_ref,
+                deployment_record_id="independent-successor",
+                extensions=GenericWebLaneExtensions(),
+                rollback=False,
+            )
+        self.assertIsNone(snapshot)
+
+    def test_source_refusal_before_lifecycle_effects_leaves_no_draft_for_next_attempt(self) -> None:
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        store = _GenericWebDeployStore(profile.model_copy(update={"lanes": (lane,)}))
+
+        def refuse() -> None:
+            raise GenericWebPromotionSourceRefused("Testing no longer qualifies.")
+
+        with patch(
+            "tests.test_generic_web_application_lifecycle._GenericWebDeployStore",
+            return_value=store,
+        ):
+            for _ in range(2):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    self._deploy(before_deployment_records=refuse)
+                self.assertEqual(store.deployments, [])
+                self.assertEqual(self.schedules["billing-recovery"], self.original)
+                self.assertEqual(self.commands, [])
+            result, _ = self._deploy()
+        self.assertEqual(result.deploy_status, "pass")
 
     def test_input_refusal_after_quiesce_restores_schedules_and_records_failure(self) -> None:
         result, store = self._deploy(input_refusal=True)
@@ -357,9 +414,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             patch.object(
                 api,
                 "delete_dokploy_application_schedule",
-                side_effect=lambda **kwargs: self.schedules.pop(
-                    str(cast(api.JsonObject, kwargs["schedule_payload"])["name"]), None
-                ),
+                side_effect=self._delete,
             )
         )
 
@@ -680,7 +735,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                     patch.object(
                         api,
                         "upsert_dokploy_application_schedule",
-                        return_value={"scheduleId": "fixture"},
+                        side_effect=self._upsert,
                     ),
                     patch.object(api, "dokploy_request", return_value=None) as provider,
                 ):
@@ -728,24 +783,32 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             lost_fence,
             lambda: None,
         )
-        with patch.object(api, "upsert_dokploy_application_schedule") as upsert:
+        with patch.object(
+            api, "dokploy_request", return_value=[{**self.original, "scheduleId": "captured"}]
+        ) as provider:
             with self.assertRaisesRegex(RuntimeError, "lost lease"):
                 lifecycle.restore()
-        upsert.assert_not_called()
+        self.assertTrue(provider.call_args_list)
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in provider.call_args_list)
+        )
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
 
     def test_recovery_does_not_adopt_image_success_without_lifecycle_receipt(self) -> None:
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
         profile = profile.model_copy(update={"lanes": (lane,)})
         store = _GenericWebDeployStore(profile)
+        operation_key = "provider-operation:lifecycle"
         provider = _LifecycleDeployProvider(
+            original_operation_key=operation_key,
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="success",
                 deployment_id="deployed-123",
                 started_at=utc_now_timestamp(),
                 finished_at=utc_now_timestamp(),
-            )
+            ),
         )
         adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=Path("."),
@@ -757,7 +820,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             deploy_provider=provider,
         )
         observation = adapter.observe(
-            "provider-operation:lifecycle",
+            operation_key,
             "application_schedule_canary",
             adapter.reconciliation_key(),
         )

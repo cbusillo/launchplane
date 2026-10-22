@@ -38,6 +38,11 @@ class CandidateObservationUnavailable(ValueError):
 class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
     """The fixed read-only probe returned a failure, rather than losing its transport."""
 
+    def __init__(self, message: str, *, native_failure: NativeProgramFailed | None = None) -> None:
+        super().__init__(message)
+        self.evidence = native_failure.evidence if native_failure is not None else {}
+        self.code = native_failure.code if native_failure is not None else ""
+
 
 def candidate_private_readiness(
     *,
@@ -96,8 +101,10 @@ def candidate_private_readiness(
             receive=frames.append,
             timeout_seconds=120,
         )
-    except NativeProgramFailed:
-        raise CandidatePrivateReadinessFailed("The private probe returned a failure.") from None
+    except NativeProgramFailed as error:
+        raise CandidatePrivateReadinessFailed(
+            "The private probe returned a failure.", native_failure=error
+        ) from None
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
         raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(

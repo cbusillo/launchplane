@@ -1,7 +1,8 @@
-"""Settle testing attempts proved pre-image or refused before dispatch."""
+"""Settle safe testing attempts and recognize their deterministic successors."""
 
 from collections.abc import Callable
 from pathlib import Path
+from contextlib import nullcontext
 from typing import Protocol, cast
 
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -25,7 +26,17 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
     provider_operation_title,
 )
-from control_plane.workflows.generic_web_application_lifecycle import application_lifecycle_for_lane
+from control_plane.workflows.generic_web_application_lifecycle import (
+    application_lifecycle_for_lane,
+    DokployApplicationLifecycle,
+)
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    ExecutionReceipt,
+    ExecutionRecordStore,
+    execution_receipt,
+    require_recorded_execution,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
     generic_web_provider_deployment_record_id,
@@ -40,11 +51,13 @@ from control_plane.workflows.ship import build_deployment_record, utc_now_timest
 
 
 TESTING_PRE_IMAGE_SETTLEMENT_PHASE = "testing_pre_image_settlement"
+TESTING_POST_IMAGE_SETTLEMENT_PHASE = "testing_failure_settlement"
 TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
 TESTING_DISPATCH_REFUSED_SETTLED = "testing_deploy_dispatch_refused_settled"
+TESTING_INERT_INVENTORY_REFUSAL_SETTLED = "testing_deploy_inert_inventory_refusal_settled"
 
 
-class _SettlementStore(TestingInputStore, Protocol):
+class _SettlementStore(TestingInputStore, ExecutionRecordStore, Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
@@ -52,11 +65,21 @@ class _SettlementStore(TestingInputStore, Protocol):
 
 def testing_attempt_was_settled(record: LaunchplaneIdempotencyRecord) -> bool:
     result = record.response_payload.get("result")
-    return (
-        record.state == "completed"
-        and isinstance(result, dict)
-        and result.get("error_code")
-        in {TESTING_PRE_IMAGE_SETTLED, TESTING_DISPATCH_REFUSED_SETTLED}
+    return record.state == "completed" and (
+        record.provider_effect_phase == TESTING_POST_IMAGE_SETTLEMENT_PHASE
+        or (
+            not record.provider_effect_phase
+            and not record.provider_effect_started_at
+            and record.response_payload.get("testing_settlement")
+            == TESTING_INERT_INVENTORY_REFUSAL_SETTLED
+            and isinstance(result, dict)
+            and result.get("deploy_status") == "fail"
+        )
+        or (
+            isinstance(result, dict)
+            and result.get("error_code")
+            in {TESTING_PRE_IMAGE_SETTLED, TESTING_DISPATCH_REFUSED_SETTLED}
+        )
     )
 
 
@@ -273,6 +296,18 @@ def settle_testing_pre_image_attempt(
                 "Original testing image outcome is no longer absent."
             )
         record, receipt = _record_and_receipt(store, profile, lane, target, operation_key)
+        recorder = (
+            ExecutionRecorder(
+                store,
+                record.record_id,
+                execution_receipt(record) or ExecutionReceipt(),
+                expected_record=record,
+            )
+            if record is not None
+            else None
+        )
+        if recorder is not None:
+            require_recorded_execution(recorder.receipt)
         settlement_without_effects = no_effect_checkpoint
 
         def checkpoint(_phase: str = "") -> None:
@@ -310,6 +345,8 @@ def settle_testing_pre_image_attempt(
                 effect_started=lambda: None,
             )
             assert lifecycle is not None
+            if isinstance(lifecycle, DokployApplicationLifecycle):
+                lifecycle.execution_recorder = recorder
             if refused_dispatch or receipt.resume_from_hold or receipt.state == "held":
                 lifecycle.hold()
                 receipt.state = "held"
@@ -347,6 +384,7 @@ def settle_testing_pre_image_attempt(
                 "evidence": {
                     **record.post_deploy_update.evidence,
                     **(receipt.evidence() if receipt is not None else {}),
+                    **(recorder.evidence() if recorder is not None else {}),
                 },
             }
         )
@@ -359,7 +397,35 @@ def settle_testing_pre_image_attempt(
             }
         )
         checkpoint()
-        store.write_deployment_record(record)
+        if recorder is not None:
+            require_recorded_execution(recorder.receipt)
+        publisher = getattr(store, "publish_generic_web_testing_result", None)
+        if publisher is not None:
+            try:
+                inventory = getattr(store, "read_environment_inventory")(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+            except FileNotFoundError:
+                inventory = None
+            guard = getattr(store, "provider_evidence_guard", None)
+
+            def authority() -> None:
+                check_execution()
+                _require_target(store, profile, lane, target)
+
+            with (
+                guard(lease.evidence_reservation, authority_checkpoint=authority)
+                if guard is not None and isinstance(lease, ProviderEvidenceLease)
+                else nullcontext()
+            ):
+                publisher(
+                    expected_deployment=recorder.expected_record if recorder is not None else None,
+                    expected_inventory=inventory,
+                    deployment=record,
+                    inventory=None,
+                )
+        else:
+            store.write_deployment_record(record)
         return ProviderMutationOutcome(
             response_status_code=502,
             response_payload=provider_operation_response_payload(

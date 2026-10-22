@@ -34,6 +34,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_configuration,
 )
 from control_plane.dokploy import api, post_deploy, source
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -320,6 +321,7 @@ def run_resource_schedule(
     resources: OdooTestingResources,
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
+    before_provider_mutation: Callable[[str], None] | None = None,
     allowed_domain_hosts: tuple[str, ...] = (),
     candidate_target: source.DokployTargetDefinition | None = None,
     candidate_server_id: str = "",
@@ -402,7 +404,31 @@ def run_resource_schedule(
     )
     if post_deploy._has_running_schedule_deployment(existing):
         raise ValueError("Replacement resource inspection is already running.")
+    schedule_payload: api.JsonObject = {
+        "name": name,
+        "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": "control-plane testing replacement resources",
+        "script": resources.script(mode, compose_project=app_name),
+        "serverId": server_id,
+        "userId": lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    api.validate_dokploy_schedule_script(schedule_payload)
     checkpoint()
+
+    effect_checkpointed = False
+
+    def before_mutation(phase: str) -> None:
+        nonlocal effect_checkpointed
+        checkpoint()
+        if before_provider_mutation is not None and not effect_checkpointed:
+            before_provider_mutation(phase)
+            effect_checkpointed = True
+
     try:
         evidence = post_deploy.run_manual_data_schedule(
             host=host,
@@ -412,21 +438,9 @@ def run_resource_schedule(
             schedule_type=schedule_type,
             schedule_name=name,
             schedule_app_name=schedule_app_name,
-            schedule_payload={
-                "name": name,
-                "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-                "appName": schedule_app_name,
-                "shellType": "bash",
-                "scheduleType": schedule_type,
-                "command": "control-plane testing replacement resources",
-                "script": resources.script(mode, compose_project=app_name),
-                "serverId": server_id,
-                "userId": lookup_id if schedule_type == "dokploy-server" else None,
-                "enabled": False,
-                "timezone": "UTC",
-            },
+            schedule_payload=schedule_payload,
             resolved_schedule_execution_timeout_seconds=300,
-            before_provider_mutation=lambda _phase: checkpoint(),
+            before_provider_mutation=before_mutation,
         )
     except post_deploy.OdooPostDeployReadbackFailure as error:
         if mode == "readback" and error.evidence.get(TESTING_RESOURCES_INCOMPLETE_MARKER) == "true":
@@ -499,7 +513,9 @@ class TestingReplacementResourceAdapter:
                     and bool(environment_id)
                 )
                 return (
-                    ProviderObservation("absent", retry_safe=True)
+                    ProviderObservation(
+                        "absent", retry_safe=True, preserve_effect_checkpoint=bool(phase)
+                    )
                     if terminal
                     else ProviderObservation("unknown")
                 )
@@ -775,7 +791,9 @@ class TestingReplacementResourceAdapter:
                 # empty compose. Apply cannot create another target. Every
                 # existing volume must match labels, backing, emptiness and
                 # non-use; an active remote schedule refused before this proof.
-                return ProviderObservation("absent", retry_safe=True)
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             return ProviderObservation("unknown")
         except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
             return ProviderObservation("unknown")
@@ -933,30 +951,38 @@ class TestingReplacementResourceAdapter:
                     lease.assert_current()
                     self.capture_checkpoint(old_check)
 
-                with self.store.capture_disposable_resource_adoption(
-                    preparation, checkpoint=capture_check
-                ):
-                    execute_dokploy_target_setup(
-                        control_plane_root_path=self.root,
-                        record_store=self.store,
-                        request=DokployTargetSetupEnvelope(
-                            mode="apply",
-                            operation="create-compose",
-                            context=self.request.context,
-                            instance="testing",
-                            target_name=preparation.resource_namespace,
-                            project_name=preparation.resource_namespace,
-                            environment_name=preparation.resource_namespace,
-                            server_id=server_id,
-                            expected_current_provider_target=provider.to_deployed_target_reference(),
-                            replaces_operation_id=operation.operation_id,
-                            reason=self.request.reason,
-                        ),
-                        required_context_owner=(self.product, self.request.context),
-                        disposable_checkpoint=capture_check,
-                        disposable_before_create=lease.checkpoint_effect,
-                        disposable_placement=placement[:2],
-                    )
+                try:
+                    with self.store.capture_disposable_resource_adoption(
+                        preparation, checkpoint=capture_check
+                    ):
+                        execute_dokploy_target_setup(
+                            control_plane_root_path=self.root,
+                            record_store=self.store,
+                            request=DokployTargetSetupEnvelope(
+                                mode="apply",
+                                operation="create-compose",
+                                context=self.request.context,
+                                instance="testing",
+                                target_name=preparation.resource_namespace,
+                                project_name=preparation.resource_namespace,
+                                environment_name=preparation.resource_namespace,
+                                server_id=server_id,
+                                expected_current_provider_target=provider.to_deployed_target_reference(),
+                                replaces_operation_id=operation.operation_id,
+                                reason=self.request.reason,
+                            ),
+                            required_context_owner=(self.product, self.request.context),
+                            disposable_checkpoint=capture_check,
+                            disposable_before_create=lease.checkpoint_effect,
+                            disposable_placement=placement[:2],
+                        )
+                except (
+                    BridgeNetworkCapacityRefused,
+                    DurableOperationAuthorizationDeniedError,
+                ) as error:
+                    # The runner releases only if no provider checkpoint exists;
+                    # earlier uncertain effects retain their original custody.
+                    raise ProviderMutationRejectedError(error) from error
                 captured = self.store.read_disposable_resource_preparation(operation.operation_id)
                 if captured is None or not captured.replacement_target_id:
                     raise ValueError("Atomic replacement target capture is unavailable.")
@@ -982,13 +1008,15 @@ class TestingReplacementResourceAdapter:
                 namespace=preparation.resource_namespace,
             )
             check()
-            lease.checkpoint_effect("prepare_fresh_storage")
             evidence = run_resource_schedule(
                 root=self.root,
                 store=self.store,
                 resources=resources,
                 mode="prepare",
                 checkpoint=check,
+                before_provider_mutation=lambda _phase: lease.checkpoint_effect(
+                    "prepare_fresh_storage"
+                ),
             )
             with self.store.serialize_disposable_testing_resources():
                 check()

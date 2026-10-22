@@ -28,6 +28,24 @@ def docker_image_repository(image_reference: str) -> str:
     return normalized_reference[: -len(last_component.rsplit(":", 1)[-1]) - 1].rstrip("/")
 
 
+def canonical_docker_image_repository(image_reference: str) -> str:
+    """Normalize runtime repository aliases without a tag or digest."""
+    reference = image_reference.strip().split("@", 1)[0]
+    repository = docker_image_repository(reference).lower()
+    if not repository:
+        return ""
+    first_segment, _, remainder = repository.partition("/")
+    if not remainder:
+        return f"docker.io/library/{repository}"
+    if first_segment == "index.docker.io":
+        first_segment = "docker.io"
+    elif "." not in first_segment and ":" not in first_segment and first_segment != "localhost":
+        return f"docker.io/{repository}"
+    if first_segment == "docker.io" and "/" not in remainder:
+        return f"docker.io/library/{remainder}"
+    return f"{first_segment}/{remainder}"
+
+
 def docker_image_tag(image_reference: str) -> str:
     normalized_reference = image_reference.strip()
     if "@" in normalized_reference:

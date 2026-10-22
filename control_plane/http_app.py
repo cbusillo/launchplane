@@ -1,3 +1,4 @@
+from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
@@ -243,7 +244,6 @@ from control_plane.http_routes import (
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     ReadRouteDependencies,
-    WorkGraphReadRouteDependencies,
     accepted_evidence_response,
     build_generic_web_write_route_handlers,
     idempotency_capable_store,
@@ -298,8 +298,6 @@ from control_plane.http_routes import (
     register_tenant_admission_write_routes,
     register_topology_read_routes,
     register_tracked_target_log_read_routes,
-    register_work_graph_issue_inbox_read_routes,
-    register_work_graph_snapshot_read_routes,
     replay_idempotent_response,
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
@@ -720,9 +718,6 @@ from control_plane.workflows.odoo_prod_backup_restore import (
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
 )
-from control_plane.contracts.product_environment_read_model import (
-    ActionAllowed,
-)
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -846,6 +841,7 @@ from control_plane.disposable_lane_collection import (
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.testing_rebuild_service import TestingRebuildRefused
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -912,6 +908,7 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.release_digest import ReleaseDigestScheduler
+from control_plane.discussion_reminders import DiscussionReminderScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -988,6 +985,7 @@ from control_plane.http_routes.product_generic_web_transition import (
     register_product_generic_web_transition_routes,
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
+from control_plane.http_routes.discussion_topics import register_discussion_topic_routes
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
@@ -1015,20 +1013,6 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
     launchplane_github_token,
-)
-from control_plane.work_graph_issue_inbox import (
-    GitHubIssueInboxReconcileRequest,
-)
-from control_plane.work_graph_service import (
-    WorkGraphIssueInboxProvider,
-    WorkGraphIssueInboxReconcileProvider,
-    WorkGraphIssueInboxReconcileResponse,
-    WorkGraphIssueInboxReconcileResponseResult,
-    WorkGraphPlanningFactsProvider,
-    WorkGraphRankEnvelope,
-    WorkGraphRankResponse,
-    WorkGraphRankResult,
-    build_work_graph_rank_result,
 )
 
 TrustedMaintenanceGitHubWebhookHandler = Callable[
@@ -4373,9 +4357,6 @@ def create_launchplane_fastapi_app(
     oauth_login_state_store: OAuthLoginStateRepository | None = None,
     control_plane_root_path: FilePath | None = None,
     state_dir: FilePath | None = None,
-    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
-    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
-    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     repository_evidence_provider: (RepositoryEvidenceProvider | None) = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
@@ -4391,6 +4372,7 @@ def create_launchplane_fastapi_app(
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
     release_digest_scheduler: ReleaseDigestScheduler | None = None,
+    discussion_reminder_scheduler: DiscussionReminderScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4469,6 +4451,8 @@ def create_launchplane_fastapi_app(
         try:
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.start)
+            if discussion_reminder_scheduler is not None:
+                await run_in_threadpool(discussion_reminder_scheduler.start)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
@@ -4486,6 +4470,8 @@ def create_launchplane_fastapi_app(
         finally:
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.stop)
+            if discussion_reminder_scheduler is not None:
+                await run_in_threadpool(discussion_reminder_scheduler.stop)
             if preview_lifecycle_scheduler is not None:
                 await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
@@ -4630,7 +4616,10 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
+            if request.url.path in (
+                _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
+                PROVIDER_HOLD_ATTENTION_ROUTE,
+            ) or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                 or request.url.path.startswith(("/v1/agent/ordinary-agent-", "/v1/ordinary-agent-"))
@@ -5172,8 +5161,8 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
 
-    # Only the Owner review routes accept a product Owner's session; each route
-    # still checks that the viewer is the named Owner of the requested product.
+    # Client-facing routes accept a Client session and check the requested
+    # product against its recorded Client identity.
     def read_owner_review_identity(
         request: Request,
         response: Response,
@@ -5341,36 +5330,6 @@ def create_launchplane_fastapi_app(
         if not human_session_manager.csrf_token_is_valid(session, csrf_token):
             reject_browser_mutation()
         return session.identity
-
-    def read_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        return read_identity(
-            request=request, response=response, authorization=authorization, cookie=cookie
-        )
-
-    def read_browser_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        identity = read_work_graph_rank_identity(
-            request=request,
-            response=response,
-            authorization=authorization,
-            cookie=cookie,
-        )
-        if not isinstance(identity, GitHubHumanIdentity):
-            return identity
-        session: object = getattr(request.state, "launchplane_human_session", None)
-        if not isinstance(session, LaunchplaneHumanSession):
-            reject_browser_mutation()
-        consume_browser_mutation_request(request=request, session=session)
-        return identity
 
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
@@ -5698,7 +5657,6 @@ def create_launchplane_fastapi_app(
     product_read_route_dependencies = ProductReadRouteDependencies(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         workflow_credentials_ready=lambda context, repository: delivery_github_credentials_ready(
             control_plane_root=resolved_control_plane_root,
             repository=repository,
@@ -5716,34 +5674,6 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         control_plane_root=resolved_control_plane_root,
         database_url=database_url,
-    )
-
-    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
-        def action_allowed(
-            requested_action: str,
-            requested_product: str,
-            requested_context: str,
-            requested_instances: tuple[str, ...],
-        ) -> bool:
-            return resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-                target=(
-                    AuthorizationTarget(scope="instance", instances=requested_instances)
-                    if requested_instances
-                    else AuthorizationTarget(scope="context")
-                ),
-            )
-
-        return action_allowed
-
-    work_graph_read_route_dependencies = WorkGraphReadRouteDependencies(
-        common=read_route_dependencies,
-        action_allowed_for_identity=work_graph_product_action_allowed,
-        planning_facts_provider=work_graph_planning_facts_provider,
-        issue_inbox_provider=work_graph_issue_inbox_provider,
     )
 
     def require_launchplane_service_read_authorization(
@@ -6190,40 +6120,6 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    def require_work_graph_rank_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, message: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="work_graph.rank",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=message,
-        )
-
-    def require_work_graph_issue_inbox_reconcile_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, action: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message="Workflow cannot reconcile the Launchplane GitHub issue inbox.",
-        )
-
     def require_every_code_read_methods(
         record_store: object,
         *,
@@ -6523,61 +6419,6 @@ def create_launchplane_fastapi_app(
             capability="Every Code preview gate writes",
         )
         return cast(_EveryCodePreviewGateWriteStore, record_store)
-
-    def rank_work_graph_snapshot(
-        payload: WorkGraphRankEnvelope,
-        identity: Annotated[
-            LaunchplaneIdentity,
-            Depends(read_browser_work_graph_rank_identity),
-        ],
-    ) -> WorkGraphRankResponse:
-        trace_id = next_trace_id()
-        require_work_graph_rank_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot rank the Launchplane work graph.",
-        )
-        _summary, driver_result = build_work_graph_rank_result(payload)
-        return WorkGraphRankResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphRankResult.model_validate(driver_result),
-        )
-
-    def reconcile_work_graph_issue_inbox(
-        payload: GitHubIssueInboxReconcileRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-    ) -> WorkGraphIssueInboxReconcileResponse:
-        trace_id = next_trace_id()
-        required_action = (
-            "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
-        )
-        require_work_graph_issue_inbox_reconcile_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            action=required_action,
-        )
-        if work_graph_issue_inbox_reconcile_provider is None:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="GitHub issue inbox reconciliation is not configured.",
-            )
-        try:
-            reconcile_result = work_graph_issue_inbox_reconcile_provider(payload)
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error) or "Request could not be completed.",
-            ) from error
-        return WorkGraphIssueInboxReconcileResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphIssueInboxReconcileResponseResult(reconcile=reconcile_result),
-        )
 
     def merge_train_policy_not_configured_error(
         *, trace_id: str, error: MergeTrainPolicyStoreMissingError
@@ -7572,6 +7413,17 @@ def create_launchplane_fastapi_app(
                 records=response.records,
             )
             return response
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -9052,7 +8904,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
     async def read_testing_hold(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         product: Annotated[str, Query()] = "",
         context: Annotated[str, Query()] = "",
@@ -9106,9 +8958,23 @@ def create_launchplane_fastapi_app(
             result=result.model_dump(mode="json"),
         )
 
+    def read_testing_hold_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, GitHubHumanIdentity) and not (
+            resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Testing hold controls require the signed-in administrator.",
+            )
+        return identity
+
     async def apply_testing_hold(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_testing_hold_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -11933,6 +11799,7 @@ def create_launchplane_fastapi_app(
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
             )
+            from control_plane.contracts.service_deploy_drain import operation_reference
 
             if isinstance(error, ServiceDeployDrainTimeout):
                 raise _launchplane_http_error(
@@ -11940,7 +11807,12 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="self_deploy_drain_timeout",
                     message=str(error),
-                    records={"running_operation_ids": json.dumps(error.blockers)},
+                    records={
+                        "running_operation_ids": json.dumps(error.blockers),
+                        "blocking_operation_refs": json.dumps(
+                            [operation_reference(item) for item in error.blockers]
+                        ),
+                    },
                 ) from error
             elif isinstance(error, ServiceDeployDispatchBusy):
                 driver_result = LaunchplaneSelfDeployResult(
@@ -17061,7 +16933,7 @@ def create_launchplane_fastapi_app(
                 message=_provider_mutation_failure_message(payload),
             )
 
-        if result.status in {"completed", "unstored", "adopted"}:
+        if result.status in {"completed", "unstored", "adopted", "checkpointed"}:
             if result.response_status_code >= 400:
                 terminal_failure(result.response_payload, result.response_status_code)
             return AcceptedEvidenceResponse.model_validate(result.response_payload)
@@ -17150,6 +17022,7 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
         public_failure_messages: Mapping[str, str] | None = None,
+        original_intent: dict[str, object] | None = None,
     ) -> AcceptedEvidenceResponse:
         def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
@@ -17162,6 +17035,7 @@ def create_launchplane_fastapi_app(
                 response_trace_id=trace_id,
                 adapter=adapter,
                 target_supersession=target_supersession,
+                original_intent=original_intent,
             )
 
         return await run_provider_operation_http(
@@ -17196,8 +17070,12 @@ def create_launchplane_fastapi_app(
             asyncio.to_thread(execute),
             name=f"provider-mutation:{trace_id}",
         )
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+
         try:
             result = await asyncio.shield(operation_task)
+        except ServiceDeployDraining:
+            raise _service_deploy_draining_error(trace_id) from None
         except asyncio.CancelledError as cancellation:
             while not operation_task.done():
                 try:
@@ -21861,7 +21739,7 @@ def create_launchplane_fastapi_app(
             from control_plane.testing_runtime_separation import (
                 TestingRuntimeSeparation,
                 TestingSeparationRefused,
-                separation_binding,
+                separation_admission,
             )
 
             if not director_agent_identity(identity):
@@ -21875,6 +21753,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 trace_id=trace_id,
             )
+            separation_origin = None
             prior = None
             if normalized_idempotency_key:
                 prior = separation_store.read_idempotency_record(
@@ -21907,7 +21786,7 @@ def create_launchplane_fastapi_app(
                 target_key = prior.provider_target_key
             else:
                 try:
-                    binding, target_key = separation_binding(
+                    binding, target_key, separation_origin = separation_admission(
                         separation_store,
                         live_target_runtime_request,
                         launchplane_identity_actor(identity),
@@ -21954,6 +21833,7 @@ def create_launchplane_fastapi_app(
                             actor=launchplane_identity_actor(identity),
                             binding=binding,
                             target_key=target_key,
+                            origin=separation_origin,
                             trace_id=trace_id,
                         ),
                         in_progress_message="Testing separation is in progress.",
@@ -22021,6 +21901,7 @@ def create_launchplane_fastapi_app(
                 ),
                 allow_owned_preview=director_disposable_apply,
                 requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
+                selected_keys=live_target_runtime_request.selected_keys,
                 deploy_trigger=(
                     control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
                 ),
@@ -24542,6 +24423,28 @@ def create_launchplane_fastapi_app(
             if observation.mode == "collect":
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
+                application_resources: dict[str, object] | None = None
+                if observation.include_application_resources:
+                    from control_plane.dokploy.application_resources import (
+                        collect_application_resource_observation,
+                    )
+
+                    try:
+                        application_resource_observation = await run_in_threadpool(
+                            collect_application_resource_observation,
+                            store,
+                            root=resolved_control_plane_root,
+                            product=profile.product,
+                            context=observation.context,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the application resource observation.",
+                        ) from None
+                    application_resources = application_resource_observation.model_dump(mode="json")
                 observed_at = store.disposable_lane_observation_time()
                 if profile.driver_id != "odoo" or observation.instance != "testing":
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
@@ -24710,6 +24613,11 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",
                         "source_coverage": disposable_collection_coverage(),
+                        **(
+                            {"application_resources": application_resources}
+                            if application_resources is not None
+                            else {}
+                        ),
                     },
                 )
             operation = None
@@ -24760,6 +24668,7 @@ def create_launchplane_fastapi_app(
                             "expected_binding_sha256",
                             "expected_observation_sha256",
                             "lifetime_seconds",
+                            "include_application_resources",
                         }
                     ),
                     "product": profile.product,
@@ -27225,6 +27134,17 @@ def create_launchplane_fastapi_app(
                     if disposable_rebuild_setup or first_testing_setup
                     else None,
                 )
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(
                 status_code=502,
@@ -29411,30 +29331,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=product_read_route_dependencies,
     )
-    register_work_graph_snapshot_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
 
-    app.add_api_route(
-        "/v1/work-graph/rank",
-        rank_work_graph_snapshot,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphRankResponse,
-        operation_id="rank_work_graph_snapshot",
-        summary="Rank Launchplane work graph snapshot",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    register_work_graph_issue_inbox_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
     register_tenant_admission_read_routes(
         app,
         dependencies=TenantAdmissionReadRouteDependencies(
@@ -29479,21 +29376,6 @@ def create_launchplane_fastapi_app(
             mutation_identity=read_operator_mutation_identity,
             root=resolved_control_plane_root,
         ),
-    )
-
-    app.add_api_route(
-        "/v1/work-graph/github/issues/reconcile",
-        reconcile_work_graph_issue_inbox,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphIssueInboxReconcileResponse,
-        operation_id="reconcile_work_graph_issue_inbox",
-        summary="Reconcile Launchplane GitHub issue inbox",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
     )
 
     register_merge_train_read_routes(app, dependencies=read_route_dependencies)
@@ -30912,6 +30794,11 @@ def create_launchplane_fastapi_app(
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
+    register_discussion_topic_routes(
+        app,
+        dependencies=owner_review_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
     register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
@@ -31373,6 +31260,17 @@ def merge_train_controller_fence_http_error(
         trace_id=trace_id,
         code=code,
         message=str(error),
+    )
+
+
+def _service_deploy_draining_error(trace_id: str) -> LaunchplaneHTTPException:
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code="service_deploy_draining",
+        message="Launchplane is draining provider operations. Retry after the deploy with "
+        "the original request and key; preserve any existing operation custody.",
+        headers={"Retry-After": "10"},
     )
 
 

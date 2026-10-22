@@ -426,7 +426,6 @@ class RunnerLaneRetirementCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-lane-retirement-executor",
                     "--repository",
                     "cbusillo/code",

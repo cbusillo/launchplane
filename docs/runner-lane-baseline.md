@@ -69,7 +69,7 @@ Use the existing read-only inventory command before adding or controlling runner
 lanes:
 
 ```bash
-uv run launchplane work-graph runner-inventory --repository owner/name
+uv run launchplane runner-inventory --repository owner/name
 ```
 
 That command reads GitHub runner metadata only. Host-level observation and future
@@ -86,7 +86,7 @@ To inspect whether recent workflow jobs look runner-capacity constrained from
 GitHub Actions timing evidence, run:
 
 ```bash
-uv run launchplane work-graph runner-queue-wait --repository owner/name
+uv run launchplane runner-queue-wait --repository owner/name
 ```
 
 The queue-wait command is also read-only. It reads recent workflow runs and their
@@ -99,7 +99,7 @@ Use `--skip-runner-inventory` for fixture-only or permission-limited reads.
 To emit baseline observation evidence from a self-hosted runner job, run:
 
 ```bash
-uv run launchplane work-graph runner-baseline-observe \
+uv run launchplane runner-baseline-observe \
   --allowed-service-user gha \
   --allowed-home-root /opt/actions-runners \
   --observe-docker-toolchain \
@@ -157,7 +157,7 @@ To build the first read-only control plan from saved inventory and baseline
 evidence, run:
 
 ```bash
-uv run launchplane work-graph runner-control-plan \
+uv run launchplane runner-control-plan \
   --action restart \
   --repository owner/name \
   --lane-name launchplane-runner-1 \
@@ -183,7 +183,7 @@ returns the future maintainer decision without contacting GitHub or the host.
 To build the first desired-state plan for a product lane, run:
 
 ```bash
-uv run launchplane work-graph runner-maintainer-plan \
+uv run launchplane runner-maintainer-plan \
   --repository owner/name \
   --host-name chris-testing \
   --lane-name product-runner-1 \
@@ -291,7 +291,7 @@ concurrency group and the runner-host hygiene lock.
 The registration CLI entrypoint is:
 
 ```bash
-uv run launchplane work-graph runner-lane-registration-executor \
+uv run launchplane runner-lane-registration-executor \
   --repository owner/name \
   --host-name chris-testing \
   --execution-lane chris-testing-ops-gate \
@@ -327,7 +327,7 @@ and keep unrelated workloads off the constrained service user during mutation.
 The retirement CLI entrypoint is:
 
 ```bash
-uv run launchplane work-graph runner-lane-retirement-executor \
+uv run launchplane runner-lane-retirement-executor \
   --repository owner/name \
   --host-name chris-testing \
   --execution-lane chris-testing-ops-gate \
@@ -389,6 +389,18 @@ with `operation: retire`, preserving the exact authorized workflow identity and
 persisted audit table while distinguishing lifecycle intent in the typed record.
 The workflow still uploads the JSON artifact so admins can inspect the exact
 plan/result packet.
+
+An audit key belongs to its first persisted, normalized lifecycle request,
+including its operation and all request inputs. PostgreSQL and local filesystem
+storage reject a different request under that key, even when its HTTP
+`Idempotency-Key` differs or is absent. The evidence route returns 409 for this
+conflict without replacing the original audit or recording an accepted upload.
+Use a fresh audit key for a different lifecycle request. The original request
+can still advance from planned to terminal evidence, update its observations
+and message, or deliver a retained terminal packet even if no planned packet
+was persisted. Audit recovery posts that original evidence; it never reruns a
+provider mutation. This binding preserves request identity, not authenticated
+actor provenance or a general terminal-status precedence policy.
 
 The current host bootstrap uses a root-owned template that runs the packaged
 service wrapper rather than the interactive runner script:

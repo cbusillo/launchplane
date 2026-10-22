@@ -3,7 +3,6 @@ from contextlib import closing, redirect_stdout
 import io
 import json
 import os
-import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from control_plane.dokploy.compose import (
     _odoo_web_command,
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -32,6 +32,8 @@ from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
     build_fresh_testing_restore_script,
+    fresh_testing_restore_spec,
+    render_fresh_testing_restore_spec,
     narrow_fresh_testing_requirements,
     require_distinct_testing_credentials,
 )
@@ -146,6 +148,68 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    def test_real_restore_renderer_fits_schedule_transport_for_ssh_and_native_copy(self) -> None:
+        from control_plane.dokploy.api import validate_dokploy_schedule_script
+        from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
+        from tests.test_odoo_stable_target_replacement import _UPSTREAM_RESTORE_ENV
+        from control_plane.odoo_testing_restore import (
+            FreshRestoreScriptArguments,
+            NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES,
+        )
+        from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
+
+        for native in (False, True):
+            with self.subTest(native=native):
+                record = generation().model_copy(
+                    update={
+                        "source_mode": "container-export" if native else "ssh",
+                        "source_binding_sha256": "e" * 64 if native else "",
+                    }
+                )
+                arguments = FreshRestoreScriptArguments(
+                    generation=record,
+                    compose_project=record.namespace,
+                    image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
+                    database_name=record.namespace.replace("-", "_"),
+                    source_environment={} if native else _UPSTREAM_RESTORE_ENV,
+                    readback_spec="fixture-spec",
+                    readback_program=INTEGRATION_READBACK_PROGRAM,
+                    workflow_environment={"ODOO_UPDATE_MODULES": "website"},
+                    runtime_environment={},
+                    clear_stale_lock=False,
+                    data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
+                )
+                script = build_fresh_testing_restore_script(
+                    **arguments,
+                    native_capture={
+                        "capture_id": "a" * 32,
+                        "generation_binding_sha256": generation_binding(record),
+                        "source_binding_sha256": record.source_binding_sha256,
+                        "database": {
+                            "sha256": "b" * 64,
+                            "size": NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+                        },
+                        "filestore": {
+                            "sha256": "c" * 64,
+                            "size": NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+                        },
+                    }
+                    if native
+                    else None,
+                )
+                materialized = validate_dokploy_schedule_script(
+                    {"script": script, "appName": record.namespace}
+                )
+                if native:
+                    reserved = validate_dokploy_schedule_script(
+                        {
+                            "script": build_fresh_testing_restore_script(**arguments)
+                            + " " * NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES,
+                            "appName": record.namespace,
+                        }
+                    )
+                    self.assertLessEqual(materialized, reserved)
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -161,7 +225,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "DATA_WORKFLOW_SSH_KEY": "/existing/read-only-identity",
             "DATA_WORKFLOW_SSH_DIR": "/existing/ssh",
         }
-        script = build_fresh_testing_restore_script(
+        self.spec: dict[str, Any] = fresh_testing_restore_spec(
             generation=self.gen,
             compose_project=self.gen.namespace,
             image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
@@ -174,13 +238,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             clear_stale_lock=False,
             data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
         )
-        # Execute the host payload actually emitted for the schedule, with fake
-        # provider commands below. A producer/consumer spec mismatch must fail.
-        command = next(
-            line for line in script.splitlines() if line.lstrip().startswith("python3 - ")
-        )
-        encoded = shlex.split(command)[2]
-        self.spec: dict[str, Any] = json.loads(base64.b64decode(encoded))
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
@@ -205,6 +262,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             suffixes = ("db",) if service == "database" else ("data", "logs")
             self.containers[service] = {
                 "Id": service,
+                "State": {"Status": "running"},
                 "Config": {
                     "Image": self.spec["image_reference"],
                     "Labels": {
@@ -309,7 +367,19 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             try:
-                exec(compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<fresh-copy>", "exec"), {})
+                if self.spec.get("inspection_only"):
+                    exec(compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<fresh-copy>", "exec"), {})
+                else:
+                    script = render_fresh_testing_restore_spec(self.spec)
+                    from control_plane.dokploy.api import validate_dokploy_schedule_script
+
+                    validate_dokploy_schedule_script(
+                        {"script": script, "appName": self.gen.namespace}
+                    )
+                    program = script.partition("<<'LP_FRESH_COPY'\n")[2].rsplit(
+                        "\nLP_FRESH_COPY", 1
+                    )[0]
+                    exec(compile(program, "<fresh-copy-stdin>", "exec"), {})
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
@@ -415,6 +485,46 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         )
 
+    def test_stopped_or_unreadable_runner_identifies_predicate_without_exec(self) -> None:
+        self.spec.update(inspection_only=True, usage_only=True)
+        for state, kind in (("exited", "refused"), (None, "unavailable")):
+            with self.subTest(state=state):
+                self.containers["script-runner"]["State"] = {"Status": state}
+                self.calls.clear()
+                status, output = self.run_program()
+                self.assertNotEqual(status, 0)
+                frames = [json.loads(line.removeprefix("fixture:")) for line in output.splitlines()]
+                self.assertEqual(frames[0].get("predicate"), ReadbackPredicate.RUNNER_RUNNING)
+                self.assertEqual(frames[0].get("kind"), kind)
+                self.assertFalse(any(call[:2] == ["docker", "exec"] for call in self.calls))
+
+    def test_cleanup_inspection_distinguishes_observed_missing_database_from_unreadable_history(
+        self,
+    ) -> None:
+        self.spec.update(inspection_only=True, task_account_cleanup=True)
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.CLEANUP_DATABASE)
+        self.assertEqual(frame["kind"], "refused")
+
+    def test_native_file_inspection_failure_does_not_report_database_read(self) -> None:
+        self.spec.update(inspection_only=True, native_capture={})
+        original = self.command
+
+        def fail_files(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if kwargs.get("input") == self.spec["native_files_program"].encode():
+                raise RuntimeError("private-native-files")
+            return original(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=fail_files):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.FILES_READ)
+        self.assertEqual(frame["kind"], "unavailable")
+        self.assertNotIn("private-native-files", output)
+
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,
     ) -> None:
@@ -450,7 +560,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         original = self.command
         witness = generation_binding(self.gen)
-        actual_image = self.spec["image_reference"]
+        actual_image: str | None = self.spec["image_reference"]
         sql = sqlite3.connect(":memory:")
         self.addCleanup(sql.close)
         sql.execute("CREATE TABLE ir_config_parameter (key TEXT PRIMARY KEY, value TEXT)")
@@ -459,6 +569,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             data = kwargs.get("input") or b""
             if command[:3] == ["docker", "image", "inspect"]:
                 self.calls.append(command)
+                if actual_image is None:
+                    raise RuntimeError("private image read")
                 return subprocess.CompletedProcess(
                     command,
                     0,
@@ -481,8 +593,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": payload}),
                     patch.object(sys, "argv", ["gate", self.database, str(gate)]),
                 ):
-                    exec(command[command.index("-c") + 1], {})
-                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                    with redirect_stdout(io.StringIO()) as gate_output:
+                        exec(command[command.index("-c") + 1], {})
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=gate_output.getvalue().encode(), stderr=b""
+                )
             return original(command, **kwargs)
 
         with patch.object(self, "command", side_effect=read):
@@ -494,13 +609,29 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 if line.startswith("fixture:")
             ]
             self.assertEqual(frames, [TESTING_COPY_VERIFICATION_FRAME])
-            for fault in ("witness", "image", "gate"):
+            for fault in ("witness", "image", "image-read", "gate", "missing-gate"):
                 with self.subTest(fault=fault):
                     witness = "wrong" if fault == "witness" else generation_binding(self.gen)
-                    actual_image = "wrong" if fault == "image" else self.spec["image_reference"]
+                    actual_image = (
+                        None
+                        if fault == "image-read"
+                        else "wrong"
+                        if fault == "image"
+                        else self.spec["image_reference"]
+                    )
                     gate.write_text("wrong" if fault == "gate" else self.gate_hash)
-                    status, _ = self.run_program()
+                    if fault == "missing-gate":
+                        gate.unlink()
+                    status, output = self.run_program()
                     self.assertNotEqual(status, 0)
+                    if fault in {"gate", "missing-gate"}:
+                        frame = json.loads(output.strip().removeprefix("fixture:"))
+                        self.assertEqual(frame["predicate"], ReadbackPredicate.WEB_GATE)
+                        self.assertEqual(frame["kind"], "refused")
+                    if fault == "image-read":
+                        frame = json.loads(output.strip().removeprefix("fixture:"))
+                        self.assertEqual(frame["predicate"], ReadbackPredicate.IMAGE_DIGEST)
+                        self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(
             any(
                 call[0] in {"ssh", "rsync"}
@@ -646,7 +777,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertEqual(frames, [{"type": "failed"}])
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "failed")
+        self.assertEqual(frames[0]["kind"], "unavailable")
 
     def test_host_lock_permission_error_is_failed_not_provider_denied(self) -> None:
         self.spec.update(inspection_only=True, verification_only=True)
@@ -658,7 +791,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertEqual(frames, [{"type": "failed"}])
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["type"], "failed")
+        self.assertEqual(frames[0]["kind"], "unavailable")
 
     def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
         from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
@@ -841,6 +976,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "capture_id": "a" * 32,
             "generation_binding_sha256": self.spec["copy_binding_sha256"],
             "source_binding_sha256": "f" * 64,
+            "database": {"sha256": "b" * 64, "size": 100},
+            "filestore": {"sha256": "c" * 64, "size": 100},
         }
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
@@ -1271,6 +1408,36 @@ class FreshTestingIntentTests(unittest.TestCase):
             encoded_payload=base64.b64encode(json.dumps(addon_payload).encode()).decode(),
             readback_spec=spec,
         )
+
+    def test_connection_fences_accept_only_safe_neutralization_literals(self) -> None:
+        from control_plane.odoo_testing_restore import validate_fresh_testing_intent
+        from control_plane.odoo_connection_isolation import (
+            CONNECTION_ISOLATION_PARAMETERS,
+            NEUTRALIZED_FLAG,
+        )
+
+        spec = base64.b64encode(json.dumps({"families": []}).encode()).decode()
+
+        def fence_payload(value: object) -> str:
+            item = {"key": NEUTRALIZED_FLAG, "value": value}
+            return base64.b64encode(json.dumps({"config_parameters": [item]}).encode()).decode()
+
+        for stored in (CONNECTION_ISOLATION_PARAMETERS[NEUTRALIZED_FLAG], str(True)):
+            validate_fresh_testing_intent(
+                modules="website",
+                encoded_payload=fence_payload({"source": "literal", "value": stored}),
+                readback_spec=spec,
+            )
+        for unsafe in (
+            {"source": "literal", "value": str(False)},
+            {"source": "literal", "value": ""},
+            {"source": "secret_binding", "value": str(True)},
+            {"source": "literal", "value": str(True), "environment_variable": "OVERRIDE"},
+        ):
+            with self.subTest(value=unsafe), self.assertRaises(ValueError):
+                validate_fresh_testing_intent(
+                    modules="website", encoded_payload=fence_payload(unsafe), readback_spec=spec
+                )
 
     def test_stale_lock_requires_terminal_schedule_and_dead_owner_and_stays_in_copy(self) -> None:
         with TemporaryDirectory() as directory:

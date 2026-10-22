@@ -40,6 +40,10 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebRuntimeArtifactObservation,
 )
 from tests import test_generic_web_deploy as generic_web_deploy_tests
+from tests.support.application_runtime import (
+    converged_application_runtime,
+    recovered_application_runtime,
+)
 from tests.test_generic_web_deploy import (
     _FakeGenericWebDeployProvider,
     _GenericWebDeployStore,
@@ -263,7 +267,7 @@ class _UntitledComposeProvider(_FakeGenericWebDeployProvider):
         self.runtime_calls = 0
         self.title_observations = 0
 
-    def execute_artifact_deploy(  # type: ignore[override]
+    def execute_artifact_deploy(
         self,
         *,
         control_plane_root: Path,
@@ -453,6 +457,10 @@ class DurableOperationOutcomeTests(unittest.TestCase):
         )
 
         def fail(**kwargs: object) -> None:
+            provider.application_runtime = converged_application_runtime(
+                cast(GenericWebResolvedDeployTarget, kwargs["resolved_deploy_target"]),
+                cast(RuntimeIdentity, kwargs["runtime_identity"]),
+            )
             effect_started = cast(Callable[[], None], kwargs["effect_started"])
             effect_started()
             raise GenericWebProviderDeploymentFailed(failed)
@@ -506,6 +514,40 @@ class _ComposeLegacyProvider(_LegacyFakeGenericWebDeployProvider):
 class ComposeReconciliationProofTests(unittest.TestCase):
     """A same-key retry must not adopt a compose deploy the initial wait could not prove."""
 
+    def test_ordinary_compose_producer_supplies_testing_qualification(self) -> None:
+        from control_plane.generic_web_source_qualification import (
+            qualified_generic_web_source_inventory,
+        )
+        from control_plane.workflows.generic_web_deploy import execute_generic_web_deploy
+
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request().model_copy(update={"source_git_ref": "a" * 40}),
+            deploy_provider=_ComposeLegacyProvider(_runtime()),
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        deployment = store.read_deployment_record(result.deployment_record_id)
+        assert deployment.resolved_target is not None
+        self.assertEqual(deployment.resolved_target.target_type, "compose")
+        qualified = qualified_generic_web_source_inventory(
+            store=store,
+            profile=profile,
+            lane=next(lane for lane in profile.lanes if lane.instance == "testing"),
+        )
+        self.assertEqual(qualified.deployment_record_id, deployment.record_id)
+        self.assertEqual(qualified.runtime_identity, deployment.runtime_identity)
+        from control_plane.release_review import ReleaseReviewStore, release_version
+
+        version = release_version(
+            store=cast(ReleaseReviewStore, cast(object, store)), profile=profile, instance="testing"
+        )
+        assert deployment.artifact_identity is not None
+        self.assertEqual(version.artifact_id, deployment.artifact_identity.artifact_id)
+        self.assertEqual(version.source_commit, deployment.source_git_ref)
+
     @staticmethod
     def _observe(provider: _ComposeLegacyProvider) -> str:
         profile = _profile()
@@ -554,6 +596,9 @@ class DokployProviderIdentityTests(unittest.TestCase):
             profile=profile, store=store, provider=provider, deploy_request=_request()
         )
         operation = "provider-operation:retained-dispatch"
+        provider.application_runtime = recovered_application_runtime(
+            adapter._resolve_deploy_target(), operation
+        )
         record_id = adapter._deployment_record_id(operation)
         old = _deployment("old")
         checked: list[object] = []

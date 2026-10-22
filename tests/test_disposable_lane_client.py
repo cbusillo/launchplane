@@ -36,6 +36,10 @@ class DisposableLaneClientTests(unittest.TestCase):
         observation_sha256: str = "d" * 64,
         observation: object = None,
         request_mock: Mock | None = None,
+        application_resources: object = None,
+        include_application_resources: bool = False,
+        instance: str = "testing",
+        preview_id: str = "",
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -66,6 +70,8 @@ class DisposableLaneClientTests(unittest.TestCase):
         }
         if qualification is not None:
             collected_result["never_served_qualification"] = qualification
+        if include_application_resources:
+            collected_result["application_resources"] = application_resources
         if reason_code is not None:
             odoo_usage = collected_result["odoo_usage"]
             assert isinstance(odoo_usage, dict)
@@ -118,8 +124,10 @@ class DisposableLaneClientTests(unittest.TestCase):
                 "--context",
                 "example",
                 "--instance",
-                "testing",
+                instance,
             ]
+            if preview_id:
+                arguments += ["--preview-id", preview_id]
             if command_mode == "record":
                 arguments += [
                     "--preview-id",
@@ -139,6 +147,8 @@ class DisposableLaneClientTests(unittest.TestCase):
                 ]
             if lifetime_seconds is not None:
                 arguments += ["--lifetime-seconds", str(lifetime_seconds)]
+            if include_application_resources:
+                arguments += ["--application-resources"]
             if command_mode == "clear" and expected_observation_sha256 is not None:
                 arguments += ["--expected-observation-sha256", expected_observation_sha256]
             if expected_binding_sha256 is not None:
@@ -151,6 +161,59 @@ class DisposableLaneClientTests(unittest.TestCase):
             ):
                 status = client["main"]()
             return status, output.getvalue(), request
+
+    def test_application_resource_observation_is_explicit_and_value_free(self) -> None:
+        from control_plane.contracts.application_resource_observation import (
+            ApplicationResourceObservation,
+        )
+
+        for metadata in (
+            ApplicationResourceObservation(reason_code="resource_inventory_unavailable"),
+            ApplicationResourceObservation(
+                reason_code="resource_inventory_changed", changed_component="container_metadata"
+            ),
+        ):
+            with self.subTest(metadata=metadata):
+                observation = metadata.model_dump(mode="json")
+                status, output, request = self.call_client(
+                    application_resources=observation, include_application_resources=True
+                )
+                self.assertEqual(status, 0, output)
+                self.assertEqual(json.loads(output)["application_resources"], observation)
+                self.assertTrue(request.call_args.kwargs["body"]["include_application_resources"])
+                self.assertNotIn(
+                    "include_application_resources", request.call_args_list[0].kwargs["body"]
+                )
+        status, output, request = self.call_client()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("application_resources", json.loads(output))
+        self.assertNotIn("include_application_resources", request.call_args.kwargs["body"])
+
+    def test_invalid_application_resource_metadata_does_not_escape_the_client(self) -> None:
+        status, output, _request = self.call_client(
+            include_application_resources=True,
+            application_resources={
+                "reason_code": "synthetic-private-detail",
+                "private_file": "synthetic-private-content",
+            },
+        )
+        self.assertNotEqual(status, 0)
+        self.assertNotIn("synthetic-private", output)
+        self.assertEqual(json.loads(output)["status"], "unverified")
+
+    def test_invalid_application_resource_scope_is_rejected_before_inspection(self) -> None:
+        for instance, preview_id in (("prod", ""), ("testing", "preview")):
+            with self.subTest(instance=instance, preview_id=preview_id):
+                request = Mock()
+                with self.assertRaises(SystemExit) as raised:
+                    self.call_client(
+                        include_application_resources=True,
+                        instance=instance,
+                        preview_id=preview_id,
+                        request_mock=request,
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                request.assert_not_called()
 
     def test_record_binds_preview_facts_to_the_inspection_without_printing_references(self) -> None:
         status, output, request = self.call_client(

@@ -17,8 +17,12 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
     e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
     e9e3a7b1c5d8_join_retirement_paths as retirement_join,
+    b81ca763d924_add_discussion_topics as discussion_topics,
+    da72490fce13_join_topics_retirement as topics_join,
     f0a4c8e2b6d9_canonical_public_host_fences as public_host_fences,
     f1b5d9a3c7e0_join_public_host_fences as public_host_join,
+    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
+    f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -26,19 +30,23 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-# Q533 approves only preview enablement. #2437's sibling migration stays held.
-SCHEMA_MIGRATION_TARGET_REVISION = retired_preview.revision
+# Topics extend the approved preview path. #2437's sibling drop stays held.
+SCHEMA_MIGRATION_TARGET_REVISION = discussion_topics.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
     retired_preview.revision,
     retired_delivery.revision,
     retirement_join.revision,
+    discussion_topics.revision,
+    topics_join.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
     public_host_fences.revision,
     public_host_join.revision,
+    topics_hostnames.revision,
+    compatibility_join.revision,
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
 SchemaMigrationAction = Literal["current", "upgrade", "compatible_ahead"]
@@ -68,7 +76,25 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
     # auto-join it. Explicitly requesting that branch remains the approved-host
     # application path; when preview has applied, join both on that request.
     if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
-        return retirement_join.revision
+        return topics_join.revision
+    if (
+        current_revision in {retired_delivery.revision, retirement_join.revision}
+        and target_revision == discussion_topics.revision
+    ) or (
+        current_revision == discussion_topics.revision
+        and target_revision in {retired_delivery.revision, retirement_join.revision}
+    ):
+        return topics_join.revision
+    if (
+        current_revision == public_host_fences.revision
+        and target_revision == discussion_topics.revision
+    ):
+        return topics_hostnames.revision
+    if current_revision == public_host_join.revision and target_revision in {
+        discussion_topics.revision,
+        topics_join.revision,
+    }:
+        return compatibility_join.revision
     return target_revision
 
 
@@ -90,8 +116,6 @@ def migrate_schema(
     database_url: str,
     target_revision: str = SCHEMA_MIGRATION_TARGET_REVISION,
 ) -> str:
-    # Future graph knowledge supports image rollback, not migration activation.
-    # Validate even on an empty database before opening it or applying any DDL.
     _require_supported_target(target_revision)
     engine = _build_engine(database_url)
     try:

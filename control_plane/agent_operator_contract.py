@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
@@ -36,6 +37,7 @@ from control_plane.openapi_export import (
 )
 from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
 from control_plane.odoo_website_settings import ODOO_WEBSITE_SETTINGS_ROUTE
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 SCHEMA_VERSION = 1
@@ -73,7 +75,6 @@ _SCHEMA_KEYS = frozenset(
     }
 )
 _SEMANTICALLY_UNORDERED_LIST_KEYS = frozenset({"enum", "required"})
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_PATTERN = re.compile(r"^(unknown|[0-9a-f]{40}|[0-9a-f]{64})$")
 _UNSAFE_STRING_PATTERNS = (
     re.compile(r"https?://", re.IGNORECASE),
@@ -98,6 +99,42 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/health-history",
+        "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        DISCUSSION_TOPICS_ROUTE,
+        "Read a product's discussion topics within existing product-profile read access.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "PUT",
+        DISCUSSION_TOPICS_ROUTE + "/{topic_id}",
+        "Add neutral discussion metadata as an admin or Director agent; retries preserve the topic.",
+        ("service_api",),
+        ("add",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        DISCUSSION_TOPICS_ROUTE + "/{topic_id}/close",
+        "Close discussion metadata without accepting a release or changing product configuration.",
+        ("service_api",),
+        ("close",),
+        "none",
+        (),
+    ),
     OperationSpec(
         "GET",
         TESTING_RETRY_ROUTE,
@@ -182,9 +219,16 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
-        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        (
+            "dry-run",
+            "apply",
+            "readback",
+            "route-repair-dry-run",
+            "route-repair-apply",
+            "route-repair-readback",
+        ),
         "apply",
         ("reviewed_plan_sha256",),
     ),
@@ -290,7 +334,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         LEGACY_PREVIEW_RECONCILIATION_ROUTE,
-        "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         ("agent_helper", "service_api"),
         ("inspect", "plan", "apply"),
         "plan_and_apply",
@@ -725,7 +769,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
     if artifact["normalization_version"] != NORMALIZATION_VERSION:
         raise AgentOperatorContractError("Unsupported normalization_version")
     digest = artifact["semantic_digest_sha256"]
-    if not isinstance(digest, str) or not _SHA256_PATTERN.fullmatch(digest):
+    if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
         raise AgentOperatorContractError("Invalid semantic_digest_sha256")
     provenance = artifact["provenance"]
     if not isinstance(provenance, Mapping):
@@ -801,7 +845,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
         if not operation["identity_dependencies"]:
             raise AgentOperatorContractError("Operation has no identity dependencies")
         fingerprint = operation["schema_fingerprint_sha256"]
-        if not isinstance(fingerprint, str) or not _SHA256_PATTERN.fullmatch(fingerprint):
+        if not isinstance(fingerprint, str) or not SHA256_PATTERN.fullmatch(fingerprint):
             raise AgentOperatorContractError("Invalid operation fingerprint")
     if seen_operations != expected_operations:
         raise AgentOperatorContractError("Operation allow-list is incomplete")

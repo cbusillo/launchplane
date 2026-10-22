@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
+
+if TYPE_CHECKING:
+    from control_plane.github_required_checks import CheckRequirement
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 
@@ -49,6 +52,7 @@ class CandidateCheckFailures:
     checks: tuple[CandidateCheckFailure, ...]
     # A check run is still queued or running, for example a re-run of a failed job.
     checks_pending: bool = False
+    attribution_requirements: tuple[CheckRequirement, ...] = ()
 
     @property
     def conclusive(self) -> bool:
@@ -150,18 +154,6 @@ def classify_candidate_check_failures(
                 )
             )
     return CandidateCheckFailures(checks=tuple(failures), checks_pending=checks_pending)
-
-
-def candidate_failure_summary(failures: CandidateCheckFailures) -> str:
-    """Return a short, link-free sentence naming the failing checks and tests."""
-    names = failures.check_names
-    tests = failures.failed_tests
-    parts: list[str] = []
-    if names:
-        parts.append("failing checks: " + ", ".join(names[:MAX_NAMED_FAILURES]) + _more(len(names)))
-    if tests:
-        parts.append("failing tests: " + ", ".join(tests[:MAX_NAMED_FAILURES]) + _more(len(tests)))
-    return "; ".join(parts)
 
 
 def _more(count: int) -> str:
