@@ -841,6 +841,14 @@ from control_plane.disposable_lane_collection import (
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.testing_rebuild_service import TestingRebuildRefused
+from control_plane.testing_rebuild_authorization import (
+    capture_director_testing_rebuild_authorization,
+    director_testing_rebuild_allowed,
+    director_testing_rebuild_owner_allowed,
+)
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
@@ -10366,7 +10374,12 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Operation is not supported by this cancellation route.",
             )
-        if not resolved_authz_policy_runtime.allows(
+        director_rebuild_owner = isinstance(
+            operation, OdooStableTargetReplacementOperationRecord
+        ) and director_testing_rebuild_owner_allowed(
+            identity=identity, operation=operation, store=record_store
+        )
+        if not director_rebuild_owner and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=operation.product,
@@ -10989,7 +11002,13 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes.native_driver_route_authorization_allows(
+        director_rebuild = director_testing_rebuild_allowed(
+            identity=identity,
+            request=apply_request.replacement,
+            context=lane.context,
+            store=record_store,
+        )
+        if not director_rebuild and not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_target_replacement_apply,
             authorization_allows=resolved_authz_policy_runtime.allows,
             identity=identity,
@@ -11025,17 +11044,28 @@ def create_launchplane_fastapi_app(
             )
         created_at = utc_now_timestamp()
         try:
-            operation_authorization = capture_durable_operation_authorization(
-                identity=identity,
-                action=native_routes.native_driver_route_authz_action(
-                    write_odoo_target_replacement_apply
-                ),
-                product=apply_request.product,
-                context=lane.context,
-                instances=(lane.instance,),
-                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
-                authorized_at=created_at,
-            )
+            if director_rebuild:
+                operation_authorization = capture_director_testing_rebuild_authorization(
+                    identity=identity,
+                    request=apply_request.replacement,
+                    context=lane.context,
+                    store=record_store,
+                    authorized_at=created_at,
+                )
+            else:
+                operation_authorization = capture_durable_operation_authorization(
+                    identity=identity,
+                    action=native_routes.native_driver_route_authz_action(
+                        write_odoo_target_replacement_apply
+                    ),
+                    product=apply_request.product,
+                    context=lane.context,
+                    instances=(lane.instance,),
+                    policy_record=resolved_authz_policy_runtime.policy_record(
+                        updated_at=created_at
+                    ),
+                    authorized_at=created_at,
+                )
         except DurableOperationAuthorizationCaptureError as error:
             raise _launchplane_http_error(
                 status_code=503,

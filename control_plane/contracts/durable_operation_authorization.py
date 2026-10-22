@@ -32,12 +32,15 @@ DurableOperationIdentityType = Literal[
 # "temporary_hotfix": the Director started a temporary hotfix; no policy rule. It names
 # the decision, and the worker re-checks that the decision is still the product's newest
 # and that the active policy still names its caller as administrator.
+# "director_testing_rebuild": source-owned standing permission for a native testing
+# rebuild, bound to the original authenticated operator and rechecked by that worker.
 DurableOperationGrant = Literal[
     "policy_rule",
     "launchplane_reconcile",
     "policy_administrator",
     "client_release_acceptance",
     "temporary_hotfix",
+    "director_testing_rebuild",
 ]
 # Grants that name a release decision Launchplane's release worker runs.
 RELEASE_DECISION_GRANTS: frozenset[str] = frozenset(
@@ -184,6 +187,19 @@ class DurableOperationAuthorization(BaseModel):
                 or self.policy_schema_version is not None
             ):
                 raise ValueError("A Launchplane reconcile grant carries no policy rule.")
+            return self
+        if self.grant == "director_testing_rebuild":
+            if (
+                self.caller.identity_type != "local_operator"
+                or self.instances != ("testing",)
+                or self.action != "odoo_target_replacement_apply.execute"
+                or any(getattr(self, field_name) for field_name in _POLICY_RULE_TEXT_FIELDS)
+                or self.policy_revision
+                or self.policy_schema_version is not None
+            ):
+                raise ValueError(
+                    "Director testing rebuild provenance is testing-only, without a policy rule."
+                )
             return self
         if self.caller.identity_type == "launchplane_reconcile":
             raise ValueError("The Launchplane reconcile identity has no policy-rule grant.")
