@@ -132,10 +132,10 @@ test("failed smoke startup removes its allocated cache", { timeout: isolationDea
 import original from ${JSON.stringify(join(frontendRoot, "vite.config.ts"))};
 import { existsSync, writeFileSync } from "node:fs";
 export default async environment => {
-  const config = await original(environment);
+  const config = await (typeof original === "function" ? original(environment) : original);
   return {
     ...config,
-    plugins: [...config.plugins, {
+    plugins: [...(config.plugins ?? []), {
       name: "controlled-startup-failure",
       configureServer(server) {
         writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({

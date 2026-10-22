@@ -17,7 +17,7 @@
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
     "test:browser": "pnpm check:browser-timing && node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && node scripts/run-browser-smoke.mjs",
-    "typecheck": "pnpm generate:openapi-types && tsc --noEmit",
+    "typecheck": "pnpm generate:openapi-types && tsc --noEmit && tsc --project tsconfig.node.json",
     "validate": "pnpm check:browser-timing && pnpm test && pnpm check:openapi-drift && pnpm build",
     "check:browser-timing": "node scripts/check-browser-timing.mjs && pnpm typecheck:browser-support",
     "typecheck:browser-support": "pnpm generate:openapi-types && tsc --project tsconfig.browser-support.json"

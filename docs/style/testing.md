@@ -337,10 +337,11 @@ type, OpenAPI, and production-build gate:
 The Playwright suite starts its own Vite development server on an OS-assigned
 loopback port. Playwright captures the listener URL from Vite's startup output
 and passes it to workers; overlapping runner jobs never reuse another job's
-server. Each smoke server also owns a temporary dependency-optimizer cache,
-removed after server teardown or startup failure. The isolation test holds two
-focused browser probes open together, proves their actual caches and origins
-differ, and checks that one server's cleanup preserves its peer's serving cache.
+server. Each smoke server process also owns its temporary dependency-optimizer
+caches, removed when that process exits after teardown or startup failure.
+The isolation test holds two focused browser probes open together, proves their
+actual caches and origins differ, and checks that one server's cleanup preserves
+its peer's serving cache.
 It runs as part of `test:browser`; the standalone command above is for focused
 diagnosis. It writes only task-local test artifacts.
 

@@ -19,13 +19,7 @@ export default defineConfig(({ command, mode }) => {
   return {
     base: "/ui/",
     cacheDir,
-    plugins: [react(), ...(cacheDir ? [{
-      name: "browser-smoke-cache",
-      closeServer() {
-        removeCache();
-        process.off("exit", removeCache);
-      },
-    }] : [])],
+    plugins: [react()],
     build: {
       outDir: "../control_plane/ui_static",
       emptyOutDir: true
