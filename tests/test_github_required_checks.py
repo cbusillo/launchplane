@@ -1,4 +1,5 @@
 import unittest
+from control_plane.github_required_checks import CheckRequirement
 
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -87,10 +88,159 @@ def _superseded_with_unrelated_running() -> tuple[list[dict[str, object]], dict[
 
 
 class GitHubRequiredCheckVerdictTests(unittest.TestCase):
+    def test_required_attribution_accepts_positive_proof_without_ignoring_real_blockers(
+        self,
+    ) -> None:
+        requirement = CheckRequirement("ci-gate", 77)
+        for uninformative in ("skipped", "neutral"):
+            for positive_app in (None, 77, 78):
+                for blocker in (None, "failure", "pending", "unrecognized"):
+                    with self.subTest(
+                        uninformative=uninformative, positive_app=positive_app, blocker=blocker
+                    ):
+                        checks = [
+                            {
+                                **_required_check_run(
+                                    requirement.name, "completed", uninformative, app_id=77
+                                ),
+                                "id": 1,
+                                "check_suite": {"id": 10},
+                            }
+                        ]
+                        if positive_app is not None:
+                            checks.append(
+                                {
+                                    **_required_check_run(
+                                        requirement.name,
+                                        "completed",
+                                        "success",
+                                        app_id=positive_app,
+                                    ),
+                                    "id": 2,
+                                    "check_suite": {"id": 20},
+                                }
+                            )
+                        if blocker is not None:
+                            checks.append(
+                                {
+                                    **_required_check_run(
+                                        requirement.name,
+                                        "queued" if blocker == "pending" else "completed",
+                                        None if blocker == "pending" else blocker,
+                                        app_id=77,
+                                    ),
+                                    "id": 3,
+                                    "check_suite": {"id": 30},
+                                }
+                            )
+                        transport = RecordingMergeTrainGitHubTransport(
+                            responses=(
+                                _protected_branch_with_checks(requirement.name, app_id=77),
+                                [],
+                                _combined_status(statuses=()),
+                                {"check_runs": checks},
+                            )
+                        )
+                        observation = GitHubMergeTrainClient(
+                            transport=transport
+                        ).read_base_check_observation(
+                            candidate=_batch_candidate(), attribution_requirements=(requirement,)
+                        )
+                        expected = (
+                            "fail"
+                            if blocker == "failure"
+                            else "pending"
+                            if blocker == "pending"
+                            else "unknown"
+                            if blocker == "unrecognized" or positive_app != 77
+                            else "pass"
+                        )
+                        self.assertEqual(observation.status, expected)
+
+    def test_attribution_keeps_required_identity_and_names_unproved_base_evidence(self) -> None:
+        requirement = CheckRequirement("ci-gate", 77)
+        for policy_name, policy_app, conclusion, expected, reason in (
+            (requirement.name, 77, "success", "pass", ""),
+            (requirement.name, 77, "skipped", "unknown", "unavailable"),
+            (requirement.name, 77, "neutral", "unknown", "unavailable"),
+            (requirement.name, 77, None, "pending", "Missing"),
+            (requirement.name, 78, "success", "unknown", "policy changed"),
+            ("replacement-gate", 77, "success", "unknown", "policy changed"),
+        ):
+            with self.subTest(policy_name=policy_name, app=policy_app, conclusion=conclusion):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(policy_name, app_id=policy_app),
+                        [],
+                        _combined_status(statuses=()),
+                        {
+                            "check_runs": [
+                                _required_check_run(
+                                    requirement.name, "completed", conclusion, app_id=77
+                                )
+                            ]
+                            if conclusion
+                            else []
+                        },
+                    )
+                )
+                observation = GitHubMergeTrainClient(
+                    transport=transport
+                ).read_base_check_observation(
+                    candidate=_batch_candidate(), attribution_requirements=(requirement,)
+                )
+                self.assertEqual(observation.status, expected)
+                if reason:
+                    self.assertIn(reason, observation.diagnostic)
+                    self.assertIn(requirement.name, observation.diagnostic)
+                    self.assertIn(str(requirement.app_id), observation.diagnostic)
+
+    def test_latest_status_controls_which_required_identity_can_be_attributed(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate", "status-gate", app_id=None),
+                [],
+                {"check_runs": [_required_check_run("ci-gate", "completed", "failure")]},
+                _combined_status(
+                    statuses=(
+                        {"context": "status-gate", "state": "success"},
+                        {"context": "status-gate", "state": "failure"},
+                    )
+                ),
+            )
+        )
+        failures = GitHubMergeTrainClient(transport=transport).read_candidate_check_failures(
+            candidate=_batch_candidate().model_copy(update={"candidate_sha": HEAD})
+        )
+        self.assertEqual(failures.attribution_requirements, (CheckRequirement("ci-gate"),))
+        self.assertEqual(failures.check_identity_names, ("ci-gate",))
+
+    def test_base_allows_optional_reuse_leaves_and_excludes_projections(self) -> None:
+        for leaf in (None, "skipped", "neutral", "failure"):
+            with self.subTest(leaf=leaf):
+                checks = [_required_check_run("ci-gate", "completed", "success")]
+                if leaf is not None:
+                    checks.append(_required_check_run("test_shard (0)", "completed", leaf))
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", "launchplane/owner-review"),
+                        [],
+                        _combined_status(statuses=()),
+                        {"check_runs": checks},
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(),
+                        failed_check_names=("ci-gate", "test_shard (0)"),
+                    ),
+                    "pass",
+                )
+
     def test_base_requires_success_for_every_implicated_check(self) -> None:
         for source in ("check_run", "commit_status"):
             for state, expected in (
-                ("absent", "unknown"),
+                ("absent", "pending"),
                 ("success", "pass"),
                 ("failure", "fail"),
                 ("pending", "pending"),
@@ -114,7 +264,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                             statuses.append({"context": "implicated", "state": state})
                     transport = RecordingMergeTrainGitHubTransport(
                         responses=(
-                            _protected_branch_with_checks("ci-gate"),
+                            _protected_branch_with_checks("ci-gate", "implicated", app_id=None),
                             [],
                             _combined_status(statuses=tuple(statuses)),
                             {"check_runs": checks},
@@ -130,7 +280,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
 
     def test_base_implicated_subset_and_conflicting_sources_are_not_green(self) -> None:
         cases: tuple[tuple[list[dict[str, object]], list[dict[str, object]], str], ...] = (
-            ([], [], "unknown"),
+            ([], [], "pending"),
             ([{"context": "second", "state": "success"}], [], "pass"),
             (
                 [{"context": "second", "state": "success"}],
@@ -140,14 +290,14 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
             (
                 [{"context": "second", "state": "success"}],
                 [_required_check_run("second", "completed", "neutral")],
-                "unknown",
+                "pass",
             ),
         )
         for extra_statuses, extra_runs, expected in cases:
             with self.subTest(statuses=extra_statuses, runs=extra_runs):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
-                        _protected_branch_with_checks("ci-gate"),
+                        _protected_branch_with_checks("ci-gate", "first", "second", app_id=None),
                         [],
                         _combined_status(statuses=tuple(extra_statuses)),
                         {
@@ -196,7 +346,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                 ]
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
-                        _protected_branch_with_checks("ci-gate"),
+                        _protected_branch_with_checks("ci-gate", "implicated"),
                         [],
                         {**_combined_status(statuses=()), "sha": HEAD},
                         {"check_runs": checks},
@@ -210,7 +360,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                         ),
                         failed_check_names=("implicated",),
                     ),
-                    "pass" if reported else "unknown",
+                    "pass" if reported else "pending",
                 )
 
     def test_head_snapshot_keeps_queue_visible_without_enforced_policy(self) -> None:
@@ -334,7 +484,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                 self.assertEqual(observed.status, "unavailable")
                 self.assertFalse(observed.required_checks)
 
-    def test_check_run_head_binding_agrees_across_readers(self) -> None:
+    def test_check_run_head_binding_preserves_each_reader_contract(self) -> None:
         for consumer in ("head", "candidate", "admission"):
             for present, returned_head in (
                 (True, HEAD),
@@ -488,6 +638,10 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                 )
                 self.assertEqual((failures.conclusive, failures.infrastructure_only), expected)
                 self.assertEqual(failures.failed_tests, (failed_test,) if named_test else ())
+                self.assertEqual(
+                    failures.attribution_requirements,
+                    (CheckRequirement("ci-gate", 15368),) if gate_conclusion == "failure" else (),
+                )
 
     def test_admission_reads_required_commit_status_on_later_page(self) -> None:
         for state, page_sha, expected in (

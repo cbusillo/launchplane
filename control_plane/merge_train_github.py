@@ -1,6 +1,6 @@
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from hashlib import sha256
 import logging
@@ -80,6 +80,7 @@ from control_plane.github_payload import json_object
 from control_plane.github_required_checks import (
     CheckRequirement,
     CheckSignal,
+    RequiredCheckVerdict,
     check_run_state,
     commit_status_state,
     evaluate_required_checks,
@@ -396,6 +397,12 @@ class UrllibMergeTrainGitHubTransport:
             raise MergeTrainGitHubError(
                 f"GitHub API response for {path} was not valid JSON."
             ) from error
+
+
+@dataclass(frozen=True)
+class MergeTrainBaseCheckObservation:
+    status: MergeTrainCheckStatus
+    diagnostic: str = ""
 
 
 class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
@@ -1038,12 +1045,68 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
     ) -> MergeTrainCheckStatus:
         """Verify required base checks and checks implicated by the failed candidate."""
-        repository_path = _repository_path(candidate.repository)
-        required_checks = _required_branch_checks(
-            transport=self.transport,
-            repository_path=repository_path,
-            base_branch=candidate.base_branch,
+        return self._read_base_check_observation(
+            candidate=candidate,
+            failed_check_names=failed_check_names,
+            attribution_requirements=None,
+        ).status
+
+    def read_base_check_observation(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        attribution_requirements: tuple[CheckRequirement, ...],
+    ) -> MergeTrainBaseCheckObservation:
+        if not attribution_requirements:
+            return MergeTrainBaseCheckObservation(
+                "unknown", "No failed required-check identity is available for attribution."
+            )
+        return self._read_base_check_observation(
+            candidate=candidate,
+            failed_check_names=(),
+            attribution_requirements=attribution_requirements,
         )
+
+    def _read_base_check_observation(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        failed_check_names: tuple[str, ...],
+        attribution_requirements: tuple[CheckRequirement, ...] | None,
+    ) -> MergeTrainBaseCheckObservation:
+        repository_path = _repository_path(candidate.repository)
+        comparison = _config_comparison(
+            self._branch_refresh_store,
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            base_sha=candidate.base_sha,
+            head_sha=candidate.candidate_sha,
+        )
+        required_checks = _effective_technical_requirements(
+            _required_branch_checks(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=candidate.base_branch,
+            ),
+            config_comparison=comparison,
+        )
+        identities = {(name.casefold(), app_id) for name, app_id in required_checks}
+        if attribution_requirements is not None:
+            changed = tuple(
+                check
+                for check in attribution_requirements
+                if (check.name.casefold(), check.app_id) not in identities
+            )
+            if changed:
+                return MergeTrainBaseCheckObservation(
+                    "unknown",
+                    "Required-check policy changed for: "
+                    + ", ".join(_required_check_identity(check) for check in changed),
+                )
+            implicated = tuple((check.name, check.app_id) for check in attribution_requirements)
+        else:
+            names = {name.casefold() for name in failed_check_names}
+            implicated = tuple(check for check in required_checks if check[0].casefold() in names)
         encoded_sha = quote(
             require_text(candidate.base_sha, "Merge train candidate base SHA is required."),
             safe="",
@@ -1055,39 +1118,65 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_sha,
-            required_checks=required_checks + tuple((name, None) for name in failed_check_names),
+            required_checks=required_checks,
         )
-        required_status, _ = _required_check_evidence_status(
+        required = _required_check_evidence_verdict(
             required_checks=required_checks, status_payload=statuses, check_runs_payload=check_runs
         )
-        if not failed_check_names:
-            return required_status
-        implicated_status, missing = _required_check_evidence_status(
-            required_checks=tuple((name, None) for name in failed_check_names),
+        if not implicated:
+            return _base_check_observation(required, check_runs)
+        attribution = _required_check_evidence_verdict(
+            required_checks=implicated,
             status_payload=statuses,
             check_runs_payload=check_runs,
             require_successful_runs=True,
         )
-        if missing and implicated_status != "fail":
-            implicated_status = "unknown"
-        status = _combine_check_statuses(required_status, implicated_status)
-        if "unknown" in (required_status, implicated_status) and status == "pass":
-            return "unknown"
-        return status
+        required_observation = _base_check_observation(required, check_runs)
+        attribution_observation = _base_check_observation(attribution, check_runs)
+        status = _combine_check_statuses(
+            required_observation.status, attribution_observation.status
+        )
+        if (
+            "unknown" in (required_observation.status, attribution_observation.status)
+            and status == "pass"
+        ):
+            status = "unknown"
+        return MergeTrainBaseCheckObservation(
+            status,
+            "; ".join(
+                dict.fromkeys(
+                    detail
+                    for detail in (
+                        required_observation.diagnostic,
+                        attribution_observation.diagnostic,
+                    )
+                    if detail
+                )
+            ),
+        )
 
     def read_candidate_check_failures(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:
         """Read which checks failed on the candidate commit and whether runners caused it."""
         repository_path = _repository_path(candidate.repository)
+        comparison = _config_comparison(
+            self._branch_refresh_store,
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            base_sha=candidate.base_sha,
+            head_sha=candidate.candidate_sha,
+        )
         requirements = tuple(
             CheckRequirement(name, app_id)
-            for name, app_id in _required_branch_checks(
-                transport=self.transport,
-                repository_path=repository_path,
-                base_branch=candidate.base_branch,
+            for name, app_id in _effective_technical_requirements(
+                _required_branch_checks(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                ),
+                config_comparison=comparison,
             )
-            if not is_launchplane_projected_check(name)
         )
         encoded_sha = quote(
             require_text(
@@ -1152,7 +1241,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
             is not None
         }
-        return classify_candidate_check_failures(
+        failures = classify_candidate_check_failures(
             check_runs=[
                 check
                 for check in normalized_runs
@@ -1169,6 +1258,17 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 if is_required(status, "commit_status")
             ],
             read_annotations=read_annotations,
+        )
+        verdict = _required_check_evidence_verdict(
+            required_checks=tuple((check.name, check.app_id) for check in requirements),
+            status_payload={"statuses": statuses},
+            check_runs_payload={"check_runs": normalized_runs},
+        )
+        return replace(
+            failures,
+            attribution_requirements=tuple(
+                requirement for requirement, state in verdict.blocking if state == "fail"
+            ),
         )
 
     def read_head_check_reuse(
@@ -5006,6 +5106,9 @@ def _required_checks_observation(
     required_checks = _required_branch_checks(
         transport=transport, repository_path=repository_path, base_branch=base_branch
     )
+    filtered_requirements = _effective_technical_requirements(
+        required_checks, config_comparison=config_comparison
+    )
     status_payload = _list_commit_statuses(
         transport=transport,
         repository_path=repository_path,
@@ -5015,13 +5118,7 @@ def _required_checks_observation(
         transport=transport,
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
-        required_checks=required_checks,
-    )
-    filtered_requirements = tuple(
-        check
-        for check in required_checks
-        if not is_launchplane_projected_check(check[0])
-        and (config_comparison is None or not is_config_authority_check(check[0]))
+        required_checks=filtered_requirements,
     )
     required_status, missing = (
         _required_check_evidence_status(
@@ -5058,6 +5155,42 @@ def _required_checks_observation(
         if detail
     )
     return status, diagnostic
+
+
+def _effective_technical_requirements(
+    requirements: tuple[tuple[str, int | None], ...],
+    *,
+    config_comparison: "_ConfigComparison | None",
+) -> tuple[tuple[str, int | None], ...]:
+    return tuple(
+        check
+        for check in requirements
+        if not is_launchplane_projected_check(check[0])
+        and (config_comparison is None or not is_config_authority_check(check[0]))
+    )
+
+
+def _required_check_identity(check: CheckRequirement) -> str:
+    name = " ".join(check.name.split())[:160]
+    return name if check.app_id is None else f"{name} (app_id={check.app_id})"
+
+
+def _base_check_observation(
+    verdict: RequiredCheckVerdict, check_runs: dict[str, object]
+) -> MergeTrainBaseCheckObservation:
+    missing = set(verdict.missing)
+    details = [
+        f"{'Missing' if _required_check_identity(check) in missing else state} required check: "
+        + _required_check_identity(check)
+        for check, state in verdict.blocking[:8]
+    ]
+    if not verdict.blocking and verdict.status == "unavailable":
+        details.append("No independent technical required checks are available.")
+    if verdict.status != "pass" and check_runs.get("actions_observation_error"):
+        details.append(str(check_runs["actions_observation_error"]))
+    return MergeTrainBaseCheckObservation(
+        "unknown" if verdict.status == "unavailable" else verdict.status, "; ".join(details)
+    )
 
 
 @runtime_checkable
@@ -5582,6 +5715,22 @@ def _required_check_evidence_status(
     check_runs_payload: dict[str, object],
     require_successful_runs: bool = False,
 ) -> tuple[MergeTrainCheckStatus, tuple[str, ...]]:
+    verdict = _required_check_evidence_verdict(
+        required_checks=required_checks,
+        status_payload=status_payload,
+        check_runs_payload=check_runs_payload,
+        require_successful_runs=require_successful_runs,
+    )
+    return ("unknown" if verdict.status == "unavailable" else verdict.status), verdict.missing
+
+
+def _required_check_evidence_verdict(
+    *,
+    required_checks: tuple[tuple[str, int | None], ...],
+    status_payload: dict[str, object],
+    check_runs_payload: dict[str, object],
+    require_successful_runs: bool = False,
+) -> RequiredCheckVerdict:
     raw_statuses = status_payload.get("statuses")
     if not isinstance(raw_statuses, list):
         raise MergeTrainGitHubError("GitHub combined status response must include statuses.")
@@ -5589,6 +5738,7 @@ def _required_check_evidence_status(
     if not isinstance(raw_check_runs, list):
         raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
     signals: list[CheckSignal] = []
+    successful_signals: list[CheckSignal] = []
     seen_contexts: set[str] = set()
     for item in raw_statuses:
         status = _json_object(item, "GitHub commit status")
@@ -5597,14 +5747,15 @@ def _required_check_evidence_status(
         if is_launchplane_projected_check(context) or normalized_context in seen_contexts:
             continue
         seen_contexts.add(normalized_context)
-        signals.append(
-            CheckSignal(
-                "commit_status",
-                context,
-                _check_payload_app_id(status),
-                commit_status_state(str(status.get("state") or "")),
-            )
+        signal = CheckSignal(
+            "commit_status",
+            context,
+            _check_payload_app_id(status),
+            commit_status_state(str(status.get("state") or "")),
         )
+        signals.append(signal)
+        if signal.state == "pass":
+            successful_signals.append(signal)
     for item in raw_check_runs:
         check_run = _json_object(item, "GitHub check run")
         name = _required_text(check_run.get("name"), "GitHub check run requires name.")
@@ -5615,26 +5766,18 @@ def _required_check_evidence_status(
         app_id = (
             raw_app_id if isinstance(raw_app_id, int) and not isinstance(raw_app_id, bool) else None
         )
-        state = check_run_state(check_run)
+        signal = CheckSignal("check_run", name, app_id, check_run_state(check_run))
+        signals.append(signal)
         if (
-            require_successful_runs
-            and state == "pass"
-            and str(check_run.get("conclusion") or "").strip().lower() != "success"
+            signal.state == "pass"
+            and str(check_run.get("conclusion") or "").strip().lower() == "success"
         ):
-            state = "unavailable"
-        signals.append(
-            CheckSignal(
-                "check_run",
-                name,
-                app_id,
-                state,
-            )
-        )
-    verdict = evaluate_required_checks(
+            successful_signals.append(signal)
+    return evaluate_required_checks(
         requirements=tuple(CheckRequirement(name, app_id) for name, app_id in required_checks),
         signals=signals,
+        successful_signals=successful_signals if require_successful_runs else None,
     )
-    return ("unknown" if verdict.status == "unavailable" else verdict.status), verdict.missing
 
 
 def _check_payload_app_id(payload: dict[str, object]) -> int | None:

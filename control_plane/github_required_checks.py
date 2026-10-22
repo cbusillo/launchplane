@@ -46,6 +46,7 @@ class CheckSignal:
 class RequiredCheckVerdict:
     status: RequiredCheckState
     missing: tuple[str, ...] = ()
+    blocking: tuple[tuple[CheckRequirement, RequiredCheckState], ...] = ()
 
 
 def matches_required_check(
@@ -60,13 +61,22 @@ def matches_required_check(
 
 
 def evaluate_required_checks(
-    *, requirements: Sequence[RequiredCheckIdentity], signals: Sequence[RequiredCheckSignal]
+    *,
+    requirements: Sequence[RequiredCheckIdentity],
+    signals: Sequence[RequiredCheckSignal],
+    successful_signals: Sequence[RequiredCheckSignal] | None = None,
 ) -> RequiredCheckVerdict:
     if not requirements:
         return RequiredCheckVerdict("unavailable")
     states: set[RequiredCheckState] = set()
     missing: list[str] = []
+    blocking: list[tuple[CheckRequirement, RequiredCheckState]] = []
     for requirement in requirements:
+        identity = (
+            requirement.name
+            if requirement.app_id is None
+            else f"{requirement.name} (app_id={requirement.app_id})"
+        )
         matches = tuple(
             signal
             for signal in signals
@@ -77,17 +87,32 @@ def evaluate_required_checks(
             )
         )
         if matches:
-            states.update(signal.state for signal in matches)
+            requirement_states = {signal.state for signal in matches}
+            if (
+                successful_signals is not None
+                and requirement_states == {"pass"}
+                and not any(
+                    matches_required_check(
+                        requirement=requirement,
+                        name=signal.name,
+                        app_id=signal.app_id,
+                    )
+                    for signal in successful_signals
+                )
+            ):
+                requirement_states.add("unavailable")
+            states.update(requirement_states)
+            for state in ("fail", "pending", "unavailable"):
+                if state in requirement_states:
+                    blocking.append((CheckRequirement(requirement.name, requirement.app_id), state))
+                    break
         else:
             states.add("pending")
-            missing.append(
-                requirement.name
-                if requirement.app_id is None
-                else f"{requirement.name} (app_id={requirement.app_id})"
-            )
+            missing.append(identity)
+            blocking.append((CheckRequirement(requirement.name, requirement.app_id), "pending"))
     for state in ("fail", "pending", "unavailable"):
         if state in states:
-            return RequiredCheckVerdict(state, tuple(missing))
+            return RequiredCheckVerdict(state, tuple(missing), tuple(blocking))
     return RequiredCheckVerdict("pass")
 
 

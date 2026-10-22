@@ -24,6 +24,7 @@ from control_plane.merge_train_github import (
     RecordingMergeTrainGitHubTransport,
 )
 from control_plane.product_config_authority_events import request_product_config_authority_event
+from control_plane.github_required_checks import CheckRequirement
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_config_authority_audit import CLI_MAIN
 from tests.test_github_app_webhook import _inventory
@@ -113,6 +114,29 @@ class CurrentComparisonTests(unittest.TestCase):
             head_sha=self.head,
             app_id=app_id,
         )
+
+    def test_base_config_exclusion_requires_the_independent_comparison_facet(self) -> None:
+        name = f"{CONFIG_AUTHORITY_CHECK_NAME}/current-comparison/main"
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", name, app_id=None),
+                        [],
+                        _combined_status(statuses=()),
+                        {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+                    )
+                )
+                observation = GitHubMergeTrainClient(
+                    transport=transport,
+                    branch_refresh_store=self.store if configured else None,
+                ).read_base_check_observation(
+                    candidate=self.candidate(),
+                    attribution_requirements=(CheckRequirement("ci-gate"),),
+                )
+                self.assertEqual(observation.status, "pass" if configured else "pending")
+                if not configured:
+                    self.assertIn(name, observation.diagnostic)
 
     def test_missing_queued_stale_untrusted_and_neutral_are_not_passing(self) -> None:
         cases: list[list[object]] = [

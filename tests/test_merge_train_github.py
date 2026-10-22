@@ -1575,7 +1575,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             "pending",
         )
 
-    def test_same_failed_nonrequired_check_on_base_prevents_blame(self) -> None:
+    def test_optional_failed_base_leaf_does_not_override_required_success(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
@@ -1593,7 +1593,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             GitHubMergeTrainClient(transport=transport).read_base_check_status(
                 candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
             ),
-            "fail",
+            "pass",
         )
 
     def test_unrelated_base_only_checks_do_not_stop_isolation(self) -> None:
@@ -1620,12 +1620,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "pass",
                 )
 
-    def test_base_commit_status_only_stops_blame_when_implicated(self) -> None:
+    def test_base_commit_status_stops_blame_for_a_required_identity(self) -> None:
         for context, expected in (("external/gate", "fail"), ("deploy", "pass")):
             with self.subTest(context=context):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
-                        _protected_branch_with_checks("ci-gate"),
+                        _protected_branch_with_checks("ci-gate", "external/gate", app_id=None),
                         [],
                         {
                             "statuses": [
@@ -1701,7 +1701,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         }
                     transport = RecordingMergeTrainGitHubTransport(
                         responses=(
-                            _protected_branch_with_checks("ci-gate"),
+                            _protected_branch_with_checks("ci-gate", candidate_name, app_id=None),
                             [],
                             statuses,
                             {"check_runs": runs},

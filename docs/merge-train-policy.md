@@ -949,7 +949,8 @@ comparison/review bindings.
 An unprotected train base or one with no enforced required checks remains visible
 in read-only queue snapshots with an unknown check verdict and a policy diagnostic.
 A policy containing only Launchplane advisory projections also leaves the
-independent technical verdict unknown. Candidate validation, check reuse and landing still require
+independent technical verdict unknown unless an independently verified current
+configuration comparison supplies that facet. Candidate validation, check reuse and landing still require
 usable protected-branch technical requirements; retaining the queue view cannot
 qualify delivery.
 
@@ -1221,17 +1222,25 @@ unrelated optional workflows cannot change its classification:
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
 - **Base checks.** Before splitting or blaming a pull request, the controller
-  reads the base's required checks and the checks that failed on the candidate,
-  on the candidate's exact base commit. Every implicated check needs actual
-  success evidence there; missing evidence, including a missing member of several
-  implicated names or a superseded job without its replacement, is unknown.
-  Skipped and neutral check runs are also unknown for attribution, even though
-  they satisfy the ordinary required-check gate. Passing required aggregates
-  cannot replace this proof. Unrelated optional base-only checks do not stop
-  isolation. If a candidate check fails there too, its evidence is unproved, or
+  reads the base's effective technical requirements on the candidate's exact
+  base commit. It retains the name and App binding of each required identity
+  that actually caused the candidate's failure. Those identities need actual
+  successful base evidence. Skipped or neutral rows supply no positive proof,
+  but do not erase an actual success for the same required identity. Matching
+  failure, pending or unreadable evidence still vetoes attribution. Missing
+  evidence or a superseded required job without its replacement cannot authorize blame.
+  A changed required identity also stops attribution with a named policy mismatch.
+  Same-execution leaf jobs remain cause and counterevidence, rather than becoming
+  additional base requirements. A successful required aggregate can therefore
+  prove a verified-tree reuse base whose optional shards were intentionally
+  skipped. A genuinely required shard still needs its own successful base evidence.
+  Advisory projections are excluded consistently; configuration checks retain
+  their separate current-comparison facet when configured. If a required
+  candidate identity fails there too, its evidence is unproved, or
   the base's required checks are pending, missing or unreadable, it stays stopped
   with `reason_code: base_checks_not_green`
-  and a reason naming the base branch. No pull request gets `blocked_label`, and
+  and a reason naming the base branch and missing or unproved required identities.
+  The same diagnostic appears in controller details. No pull request gets `blocked_label`, and
   the failed candidate stays active for fresh reads on the next pass. A rerun
   passing on the same base allows isolation to resume; a changed base or eligible
   queue uses the existing replacement path.
