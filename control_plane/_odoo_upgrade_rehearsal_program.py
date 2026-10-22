@@ -502,12 +502,14 @@ def rehearsal_storage_capacity(spec, root, containers, action):
     database=budget['database_bytes']; filestore=budget['filestore_bytes']
     # Free space already excludes every completed phase's working/recovery
     # copies. Charge only this phase's new allocations, including transients.
-    working=2 if action in {'execute','simulate-final'} else 0
+    working=3 if action=='rebuild-final' else 2 if action in {'execute','simulate-final'} else 0
     host=database+filestore+budget['staging_bytes']
     if action=='execute':
         # Raw dump + tar + extracted filestore remain until upgrade succeeds,
         # overlapping the sanitized source snapshot and both working copies.
         host+=database+2*filestore
+    elif action=='rebuild-final':
+        host=filestore+budget['staging_bytes']
     elif action=='simulate-final':
         # Restoring the retained source extracts on the host and copies its
         # dump into the database container, not the runner's writable layer.
@@ -519,7 +521,7 @@ def rehearsal_storage_capacity(spec, root, containers, action):
         containers,{**budget,'database_bytes':working*database,'filestore_bytes':working*filestore},
         runner_staging_bytes=database if action=='execute' else 0,
         host_staging_bytes=host,
-        database_staging_bytes=database if action=='simulate-final' else 0)
+        database_staging_bytes=database if action in {'simulate-final','rebuild-final'} else 0)
 
 
 def refusal_receipt(spec, root, code):
@@ -774,9 +776,11 @@ def main():
     if root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Rehearsal custody path is aliased')
     action=spec['action']
-    if action=='retire-incomplete':
+    if action in {'retire-incomplete','abandon-validation'}:
         incomplete_retirement(spec,root)
         return
+    if action=='rebuild-final':
+        action+='-'+spec['attempt_sha256']
     if action=='validate-business':
         # Each original operation has its own effect marker and receipt. A
         # later reviewed attempt cannot replay or adopt an earlier attempt.
@@ -818,13 +822,21 @@ def main():
         names=database_names(spec)
         action=spec['action']
         database,image=current(spec)
-        if action=='prepare':
-            (root/(action+'.started')).touch(mode=0o600)
-            compose(spec,root,image=spec['source_image'],database=names['source'])
+        if action in {'prepare','rebuild-final'}:
+            if action=='rebuild-final':
+                archived=record.get('abandoned_validations',[])
+                if (record['state']!='retired' or not archived
+                        or archived[-1]['host_disposal'].get('recovery_snapshots_preserved') is not True
+                        or archived[-1]['host_disposal']['recovery_snapshots']!=record['copies']):
+                    raise RuntimeError('A verified retained FINAL tuple is required')
+                validate_snapshots(spec,root,{},record['copies'],retired=True)
+            (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
+            selected=names['final_upgrade'] if action=='rebuild-final' else names['source']
+            compose(spec,root,image=spec['source_image'],database=selected)
             deadline=time.monotonic()+120
             while True:
                 try:
-                    containers=inspection(spec,names['source'],spec['source_image'])
+                    containers=inspection(spec,selected,spec['source_image'])
                     sql(containers,'SELECT 1')
                     break
                 except Exception:
@@ -835,6 +847,20 @@ def main():
             # modules exist before reading any business data.
             docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
             state='prepared'; copies=[]
+            if action=='rebuild-final':
+                if not rehearsal_storage_capacity(spec,root,containers,'rebuild-final'):
+                    raise RuntimeError('FINAL rebuild storage is insufficient')
+                for role in ('source','final_source'):
+                    restore_preserved_snapshot(spec,root,containers,names[role],names[role])
+                    sql(containers,'ALTER DATABASE "'+names[role]+'" SET default_transaction_read_only=on')
+                clone(spec,containers,names['final_source'],names['final_upgrade'])
+                sql(containers,'ALTER DATABASE "'+names['final_upgrade']+'" SET default_transaction_read_only=off')
+                upgrade_started=time.monotonic()
+                copy_runner(spec,containers,names['final_upgrade'],fresh=False)
+                spec['phase_elapsed']['final-rebuild-upgrade']=time.monotonic()-upgrade_started
+                before_web(spec,containers,names['final_upgrade'])
+                private_health(spec,containers)
+                state='switched'; copies=list(record['copies'])
         else:
             code=''
             try:

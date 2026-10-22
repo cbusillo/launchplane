@@ -68,10 +68,23 @@ def later_phase_snapshots(spec,root):
                 raise RuntimeError('Recovery snapshot custody is missing or aliased')
     # Witness, lineage and bytes must still be exactly the recorded tuples.
     validate_snapshots(spec,root,{},copies,retired=True)
-    # Every started effect settled with its receipt; none may still be writing.
     receipts=[]
+    abandoned=('validate-business-'+spec['abandoned_attempt_sha256']+'.started'
+        if spec['action']=='abandon-validation' else '')
+    archived={('validate-business-'+item['attempt_sha256']+'.started')
+        for item in record.get('abandoned_validations',[])}
+    if abandoned and (record['state']!='switched' or not (root/abandoned).is_file()
+            or (root/abandoned).is_symlink()):
+        raise RuntimeError('Missing original validation marker')
     for marker in root.iterdir():
         if marker.name.endswith('.started'):
+            if marker.name==abandoned:
+                if any((root/(marker.name[:-len('.started')]+suffix)).exists()
+                        for suffix in ('.json','.outcome.json','.outcome.pending')):
+                    raise RuntimeError('A recorded validation outcome cannot be abandoned')
+                continue
+            if marker.name in archived:
+                continue
             receipt=root/(marker.name[:-len('.started')]+'.json')
             if receipt.is_symlink() or not receipt.is_file():
                 raise RuntimeError('Uncertain original effect retains its custody')
@@ -105,8 +118,10 @@ def incomplete_retirement(spec, root):
 def incomplete_retirement_locked(spec,root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    marker=root/'incomplete-retirement.json'
-    refusals=root/'incomplete-retirement-refusals.json'
+    preserve=spec['action']=='abandon-validation'
+    prefix=('abandon-validation-'+spec['attempt_sha256'] if preserve else 'incomplete-retirement')
+    marker=root/(prefix+'.json')
+    refusals=root/(prefix+'-refusals.json')
     binding={'intent':record['intent_sha256'],'record':spec['record_binding_sha256'],
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
     progress=record.get('incomplete_retirement') or {}
@@ -242,8 +257,9 @@ def incomplete_retirement_locked(spec,root):
                 or set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
                 or manifest['network_name'] in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())):
             raise RuntimeError('Resource absence is unverified; preserve recovery custody')
-        for path in root.iterdir():
+        for path in ([root/'raw-source'] if preserve else root.iterdir()):
             if path.name in {'.execution.lock',marker.name,refusals.name}: continue
+            if not path.exists() and not path.is_symlink(): continue
             if path.is_symlink(): path.unlink()
             elif path.is_dir(): shutil.rmtree(path)
             else: path.unlink()
@@ -253,7 +269,10 @@ def incomplete_retirement_locked(spec,root):
         for item in inventory())
     volumes_absent=not set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
     network_absent=manifest['network_name'] not in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())
-    raw_absent=all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir())
+    raw_absent=(not (root/'raw-source').exists() if preserve else
+        all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir()))
+    if preserve:
+        later_phase_snapshots(spec,root)
     disposed=containers_absent and volumes_absent and network_absent and raw_absent
     if spec['mode']=='apply' and not disposed: raise RuntimeError('Disposal is incomplete')
     result={'qualified':True,'disposed':disposed,'binding_sha256':binding_sha256,
@@ -263,6 +282,7 @@ def incomplete_retirement_locked(spec,root):
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'initial_source_snapshot':manifest.get('initial_source_snapshot'),
         'recovery_snapshots':manifest.get('recovery_snapshots',[]),
+        'recovery_snapshots_preserved':preserve,
         'public_route':False,'business_host_frozen':False}
     emit_rehearsal_result(result)
     return result

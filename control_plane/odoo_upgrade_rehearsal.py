@@ -258,6 +258,7 @@ def rehearsal_inputs(
     previous = store.read_odoo_upgrade_rehearsal(request.rehearsal_id)
     if previous is not None and request.action in {
         "simulate-final",
+        "rebuild-final",
         "validate-business",
         "verify",
         "retire",
@@ -274,10 +275,11 @@ def rehearsal_inputs(
             and not previous.business_validations[-1].passed
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if (
-            request.action == "simulate-final"
-            and previous.credential_bindings_sha256
-            != rehearsal_credential_bindings(store, previous.rehearsal_id)
+        if request.action in {
+            "simulate-final",
+            "rebuild-final",
+        } and previous.credential_bindings_sha256 != rehearsal_credential_bindings(
+            store, previous.rehearsal_id
         ):
             raise RehearsalRefused(RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE)
         return previous, previous.upgrade_environment, previous.shape_environment
@@ -377,7 +379,14 @@ def require_rehearsal_transition(record: OdooUpgradeRehearsalRecord, action: str
         "validate-business": {"switched"},
         "verify": {"switched"},
         "retire": {"verified"},
+        "rebuild-final": {"retired"},
     }
+    if action == "rebuild-final" and (
+        not record.abandoned_validations
+        or not record.abandoned_validations[-1].host_disposal.recovery_snapshots_preserved
+        or tuple(record.copies) != record.abandoned_validations[-1].host_disposal.recovery_snapshots
+    ):
+        raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
     if record.state not in allowed.get(action, set()):
         raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
 
@@ -393,7 +402,7 @@ def require_unaliased_rehearsal(
         for item in store.list_physical_provider_target_records()
     ):
         raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-    if record.compose_id:
+    if record.compose_id and not (record.state == "retired" and record.abandoned_validations):
         owned = store.read_provider_target_record(
             context_name=record.rehearsal_id, instance_name="rehearsal"
         )
@@ -1211,12 +1220,14 @@ class OdooRehearsalAdapter:
         *,
         operation_key: str = "",
         inspect_capture: bool = False,
+        abandoned_attempt_sha256: str = "",
     ) -> str:
         if mode == "observe" or self.request.action in {
             "validate-business",
             "verify",
             "retire",
             "retire-incomplete",
+            "abandon-validation",
         }:
             source_values: dict[str, str] = {}
             shape: dict[str, str] = {}
@@ -1230,6 +1241,8 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
+        if abandoned_attempt_sha256:
+            spec["abandoned_attempt_sha256"] = abandoned_attempt_sha256
         if self.request.action == "validate-business":
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
@@ -1397,6 +1410,7 @@ class OdooRehearsalAdapter:
             "prepare": "prepared",
             "execute": "upgraded",
             "simulate-final": "switched",
+            "rebuild-final": "switched",
             "validate-business": "switched",
             "verify": "verified",
             "retire": "retired",
@@ -1429,6 +1443,11 @@ class OdooRehearsalAdapter:
                 "elapsed_seconds": result["elapsed_seconds"],
                 "updated_at": datetime.now(timezone.utc),
                 "business_validations": validations,
+                **(
+                    {"incomplete_retirement": None}
+                    if self.request.action == "rebuild-final"
+                    else {}
+                ),
             }
         )
         old_copies = {copy.database: copy for copy in record.copies}
@@ -1613,7 +1632,8 @@ class OdooRehearsalAdapter:
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
                 require_unaliased_rehearsal(self.store, fresh)
 
-            if self.request.action == "prepare" and not self._continue_prepare_host:
+            rebuilding = self.request.action == "rebuild-final"
+            if (self.request.action == "prepare" and not self._continue_prepare_host) or rebuilding:
                 existing_placement: tuple[str, str, str] = ("", "", "")
                 if not recovering_project:
                     try:
@@ -1653,7 +1673,15 @@ class OdooRehearsalAdapter:
                             prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
                         )
                     )
-                elif not any((record.project_id, record.environment_id, record.compose_id)):
+                if rebuilding:
+                    checkpoint()
+                    lease.checkpoint_effect("rebuild_final_placement")
+                    updated = record.model_copy(
+                        update={"project_id": "", "environment_id": "", "compose_id": ""}
+                    )
+                    self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
+                    record = updated
+                if not any((record.project_id, record.environment_id, record.compose_id)):
                     # Only a genuinely new placement can be refused cleanly.
                     # Partial creation stays on its original recovery protocol.
                     try:
