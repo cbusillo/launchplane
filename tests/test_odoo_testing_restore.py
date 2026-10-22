@@ -1187,7 +1187,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         self.addCleanup(logging.disable, logging.root.manager.disable)
         self.enterContext(patch.object(sys, "path", list(sys.path)))
         with TemporaryDirectory() as directory:
-            database = Path(directory) / "fresh.db"
+            fixture_root = Path(directory).resolve()
+            database = fixture_root / "fresh.db"
             connection = sqlite3.connect(database)
             seed(connection)
             connection.executescript("""
@@ -1197,7 +1198,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 INSERT INTO website VALUES ('live-analytics');
                 INSERT INTO ir_config_parameter VALUES ('google_analytics.client_secret', 'live-secret');
             """)
-            filestore = Path(directory).resolve() / "filestore"
+            filestore = fixture_root / "filestore"
             if native_attachment:
                 from control_plane.odoo_testing_restore import NATIVE_TESTING_FILES_PROGRAM
 
@@ -1224,7 +1225,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                                 b"x" * len(content) if native_attachment == "hash" else content
                             ),
                         )
-                staging = Path(directory).absolute() / "tmp"
+                staging = fixture_root / "tmp"
                 staging.mkdir()
                 identity = "f" * 32
                 artifacts = {"database": b"fixture verified dump", "filestore": archive.getvalue()}
@@ -1241,7 +1242,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
                 def receiver_path(*segments: str) -> Path:
                     path = Path(*segments)
-                    if path.is_relative_to(staging):
+                    if path.is_relative_to(fixture_root):
                         return path
                     if path == Path("/tmp") or path.is_relative_to("/tmp"):
                         return staging / path.relative_to("/tmp")
