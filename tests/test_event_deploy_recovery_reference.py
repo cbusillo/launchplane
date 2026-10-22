@@ -255,17 +255,18 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.assertEqual(before, self.store.list_held_provider_target_reservations())
         self.assertEqual(provider.observation_calls, 2)
 
-    def test_director_agent_plan_permission_does_not_admit_recovery_writes(self) -> None:
+    def test_director_plan_permission_cannot_apply_event_or_production_originals(self) -> None:
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
         )
         self.app = _create_recovery_app(
             root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
         )
-        with patch.object(
-            self.store,
-            "lookup_existing_mutation_reservation",
-            side_effect=AssertionError("write authority must precede reservation inspection"),
+        with patch(
+            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+            side_effect=AssertionError(
+                "Foreign or production originals must not reach the provider."
+            ),
         ):
             for instance in ("testing", "prod"):
                 with self.subTest(instance=instance):
@@ -287,6 +288,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                     )
                     self.assertEqual(code, 403, refused)
                     self.assertEqual(refused["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
 
     def test_missing_and_ambiguous_reservations_refuse(self) -> None:
         with patch.object(self.store, "list_held_provider_target_reservations", return_value=()):
