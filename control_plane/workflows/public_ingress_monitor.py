@@ -341,6 +341,9 @@ class PublicIngressNotificationDrivers(Protocol):
     ) -> PublicIngressNotificationDelivery: ...
 
 
+INCIDENT_RESOLVED_SUPERSESSION_ACTION = "superseded_incident_resolved"
+
+
 class PublicIngressMonitorResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3723,7 +3726,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                 elif incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
                     reason = "retired_source_lag"
                 else:
-                    reason = "superseded_incident_resolved"
+                    reason = INCIDENT_RESOLVED_SUPERSESSION_ACTION
                 attempt = PublicIngressNotificationAttemptRecord.model_validate(
                     {
                         **attempt_payload,
@@ -3735,7 +3738,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     update={
                         "state": "delivered",
                         "action": reason
-                        if reason.startswith("superseded_")
+                        if reason == INCIDENT_RESOLVED_SUPERSESSION_ACTION
                         else f"skipped_{reason}",
                         "error_code": "",
                         "lease_owner": "",

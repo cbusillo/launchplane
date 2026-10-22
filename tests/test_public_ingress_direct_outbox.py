@@ -10,6 +10,7 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressNotif
 from control_plane.outbox_worker import OutboxWorkerStepResult, run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
+    INCIDENT_RESOLVED_SUPERSESSION_ACTION,
     HttpObservation,
     PublicIngressMonitorResult,
     PublicIngressNotificationDriverSet,
@@ -121,7 +122,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             superseded = self._work(store, drivers, "2026-05-29T12:07:01Z")
             self.assertEqual(
                 store.read_outbox_delivery_record(superseded.delivery_id).action,
-                "superseded_incident_resolved",
+                INCIDENT_RESOLVED_SUPERSESSION_ACTION,
             )
             self.assertEqual(len(sends), 1)
             self.assertEqual(self._work(store, drivers, "2026-05-29T12:08:01Z").status, "idle")

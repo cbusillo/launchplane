@@ -412,6 +412,11 @@ An existing provider-start marker remains an unknown outcome instead of being
 reported as superseded. Still-open incidents retain the existing send, lease,
 retry and completion rules.
 
+Historical provider retirement records may retain an empty target list. They
+remain skipped reconciliation evidence with `monitoring_intent_changed`, never
+a passing or failing health probe. Incident detail reads preserve that missing
+target evidence rather than inventing a replacement target.
+
 Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
 workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
 one locked row does not block unrelated pending deliveries. A worker records a
@@ -1811,9 +1816,10 @@ Acknowledgement suppresses reminders for the acknowledged fingerprint. A
 material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
-failure can emit the current reminder. Resolution is never silenced because
-GitHub issue sinks must be closed and other admins must see recovery. Public,
-private, and provider checks use the configured consecutive-pass recovery
+failure can emit the current reminder. Resolution remains a durable incident
+event; the outbox supersedes delivery once the incident is resolved. External
+GitHub issues are therefore not automatically closed by durable recovery
+delivery. Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2082,11 +2088,12 @@ The file-backed rehearsal path retains synchronous delivery; durable service
 recovery uses the DB-backed transition and worker.
 
 GitHub delivery bodies carry a material-event marker for exact replay and a
-stable incident marker for issue recovery. Updates, reminders, and resolutions
+stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
-opening attempt record, then comment or close the recovered issue rather than
-creating a duplicate. Do not clear provider markers or outbox rows to force a
-retry.
+opening attempt record, then comment on the recovered issue rather than
+creating a duplicate. File-backed rehearsals retain synchronous resolution
+delivery and issue closure. Durable deliveries for resolved incidents are
+superseded instead. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped

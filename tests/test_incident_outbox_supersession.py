@@ -4,7 +4,10 @@ import unittest
 
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
-from control_plane.workflows.public_ingress_monitor import PublicIngressNotificationDriverSet
+from control_plane.workflows.public_ingress_monitor import (
+    INCIDENT_RESOLVED_SUPERSESSION_ACTION,
+    PublicIngressNotificationDriverSet,
+)
 from tests.support.stores import _sqlite_database_url
 from tests import test_public_ingress_direct_outbox as direct_outbox
 from tests.test_public_ingress_monitor import _notification_policy, _profile
@@ -53,7 +56,7 @@ class IncidentOutboxSupersessionTests(unittest.TestCase):
                     )
                     self.assertEqual(result.status, "delivered")
                     completed = store.read_outbox_delivery_record(result.delivery_id)
-                    self.assertEqual(completed.action, "superseded_incident_resolved")
+                    self.assertEqual(completed.action, INCIDENT_RESOLVED_SUPERSESSION_ACTION)
                     self.assertFalse(completed.provider_operation_key)
                     self.assertEqual(completed.attempt, delivery.attempt + 1)
                 self.assertEqual(
@@ -66,5 +69,8 @@ class IncidentOutboxSupersessionTests(unittest.TestCase):
                 self.assertTrue(attempts)
                 self.assertTrue(all(attempt.delivery_status == "skipped" for attempt in attempts))
                 self.assertTrue(
-                    all(attempt.action == "superseded_incident_resolved" for attempt in attempts)
+                    all(
+                        attempt.action == INCIDENT_RESOLVED_SUPERSESSION_ACTION
+                        for attempt in attempts
+                    )
                 )
