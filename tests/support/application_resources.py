@@ -72,9 +72,10 @@ class ApplicationResourceFixture:
             output = "\n".join(self.tasks)
         elif arguments[0] == "ps":
             self.container_list_calls += 1
-            output = "\n".join(self.containers)
+            containers = list(self.containers)
             if self.change_containers and self.container_list_calls > 1:
-                output += "\nnew-container"
+                containers.append("new-container")
+            output = "\n".join(containers)
         elif arguments[:2] == ["volume", "ls"]:
             output = "\n".join(self.volumes)
         elif arguments[:2] == ["volume", "inspect"]:

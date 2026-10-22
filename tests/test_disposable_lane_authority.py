@@ -829,6 +829,46 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
 
+    async def test_changed_application_inventory_keeps_unknown_and_projects_its_category(
+        self,
+    ) -> None:
+        provider = self.testing_application()
+        fixture = ApplicationResourceFixture(Path(self.temporary.name) / "provider")
+        fixture.change_containers = True
+        payload = {
+            "applicationId": provider.target_id,
+            "appName": fixture.application,
+            "serverId": "recorded-server",
+            "mounts": [{"type": "volume", "volumeName": "owned-state"}],
+        }
+        inspected = await self.observe()
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch("control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=payload),
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=fixture.native_read,
+            ),
+        ):
+            response = await self.observe(
+                mode="collect",
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                include_application_resources=True,
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        resource = result["application_resources"]
+        self.assertEqual(resource["changed_component"], "container_membership")
+        self.assertEqual(resource["status"], "unknown")
+        self.assertIsNone(resource["referenced_volume_count"])
+        self.assertEqual((result["data"], result["production_resources"]), ("unknown", "unknown"))
+        self.assertFalse(result["provider_mutation"])
+        self.assertNotIn(payload["appName"], response.text)
+        self.assertNotIn("synthetic-provider-token", response.text)
+
     async def test_application_resource_denial_preserves_protection_without_further_reads(
         self,
     ) -> None:
