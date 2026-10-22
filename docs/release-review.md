@@ -973,6 +973,15 @@ reservations, missing or changed records, failed health and unproven runtime
 stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
 
+A queued generic-web backup keeps its existing saved-pair authority. A new testing
+operation or current-recipient rebind alone does not terminally fail that admitted
+capture. Its worker still rechecks the current decision, Client, release hold,
+production boundary and complete saved testing pair at every stage; failed or
+changed saved qualification still refuses. Fresh backup queueing and promotion
+admission use the stronger current-recipient and unresolved-operation checks.
+An unresolved testing operation reports `candidate_operation_unresolved`, with
+guidance to finish or reconcile that original operation before fresh release work.
+
 Each step runs under a `client_release_acceptance` grant that names the
 decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
 

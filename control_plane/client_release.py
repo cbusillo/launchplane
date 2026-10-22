@@ -104,6 +104,7 @@ from control_plane.release_review import (
     ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
+    recorded_generic_web_testing_version,
     checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
@@ -576,8 +577,14 @@ def client_release_grant_allows(
     if decision.release_start == "rollback" and profile.driver_id == "generic-web":
         return True
     try:
-        testing = release_version(
-            store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+        testing = (
+            recorded_generic_web_testing_version(
+                store=cast(PostgresRecordStore, store), profile=profile
+            )
+            if profile.driver_id == "generic-web"
+            else release_version(
+                store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+            )
         )
     except (FileNotFoundError, ValueError):
         return False
@@ -788,6 +795,8 @@ def _release_run_blocked_reason(
             else None
         )
     except ReleaseEvidenceUnavailable as error:
+        if error.code == "candidate_operation_unresolved":
+            return str(error)
         if error.code == "candidate_identity_missing":
             return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
         return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
@@ -1384,8 +1393,13 @@ def _require_current_release(
             and review.latest_decision.record_id != decision.record_id
         ):
             raise ClientReleaseNotReady("release_not_accepted")
-        if review.unavailable_reason == "candidate_identity_missing":
-            raise GenericWebPromotionSourceRefused("Testing is no longer qualified for release.")
+        if review.unavailable_reason in {
+            "candidate_identity_missing",
+            "candidate_operation_unresolved",
+        }:
+            raise GenericWebPromotionSourceRefused(
+                str(ReleaseEvidenceUnavailable(review.unavailable_reason))
+            )
         if review.checklist is not None:
             if review.checklist.production != checklist.production:
                 raise ClientReleaseNotReady("release_changed")

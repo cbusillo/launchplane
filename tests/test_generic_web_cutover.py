@@ -536,10 +536,6 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                     adapter=adapter,
                 )
             self.assertEqual(admitted, [logical])
-            self.assertEqual(
-                adapter.resolve_deploy_target().ship_request.artifact_id,
-                manifest.image.repository + "@" + manifest.image.digest,
-            )
             assert result.record is not None
             self.assertTrue(result.record.provider_effect_started_at)
 

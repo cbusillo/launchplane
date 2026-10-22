@@ -54,6 +54,10 @@ class GenericWebSourceUnqualified(ValueError):
     """Testing no longer proves that the candidate passed its complete deployment."""
 
 
+class GenericWebSourceOperationUnresolved(GenericWebSourceUnqualified):
+    pass
+
+
 class GenericWebPromotionSourceRefused(click.ClickException):
     """Fresh forward admission refused; it is not a failed production attempt."""
 
@@ -67,8 +71,6 @@ def qualified_generic_web_source_inventory(
     lane: ProductLaneProfile,
 ) -> EnvironmentInventory:
     """Read fresh evidence; acceptance remains bound to the artifact, not this record ID."""
-    from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
-
     try:
         snapshot = store.read_generic_web_source_snapshot(
             product=profile.product, context_name=lane.context, instance_name=lane.instance
@@ -80,7 +82,69 @@ def qualified_generic_web_source_inventory(
             "Testing requires current source inventory and its referenced deployment record, "
             "bound to a current product lane."
         ) from error
-    current_profile = snapshot.profile
+    _qualified_generic_web_source_pair(
+        profile=profile,
+        lane=lane,
+        current_profile=snapshot.profile,
+        inventory=inventory,
+        record=record,
+    )
+    target = record.deployed_target
+    assert target is not None
+    current_target = snapshot.provider_target
+    if (
+        current_target.context != lane.context
+        or current_target.instance != lane.instance
+        or any(
+            getattr(current_target, field) != getattr(target, field)
+            for field in ("provider_id", "target_category", "provider_target_type", "target_id")
+        )
+    ):
+        raise GenericWebSourceUnqualified(
+            "Testing's passing deployment does not match its current physical recipient."
+        )
+    if any(
+        held.state in {"running", "reconcile_required"}
+        and held.provider_target_key
+        == generic_web_source_target_key(current_target, record.deploy.target_type)
+        for held in snapshot.held_reservations
+    ):
+        raise GenericWebSourceOperationUnresolved(
+            "Testing's current physical recipient has an unresolved provider operation."
+        )
+    return inventory
+
+
+def recorded_generic_web_source_inventory(
+    *,
+    store: GenericWebSourceQualificationStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+) -> EnvironmentInventory:
+    current_profile = store.read_product_profile_record(profile.product)
+    inventory = store.read_environment_inventory(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    record = store.read_deployment_record(inventory.deployment_record_id)
+    return _qualified_generic_web_source_pair(
+        profile=profile,
+        lane=lane,
+        current_profile=current_profile,
+        inventory=inventory,
+        record=record,
+    )
+
+
+def _qualified_generic_web_source_pair(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    current_profile: LaunchplaneProductProfileRecord,
+    inventory: EnvironmentInventory,
+    record: DeploymentRecord,
+) -> EnvironmentInventory:
+    from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+
     current_lane = next(
         (item for item in current_profile.lanes if item.instance.strip() == "testing"), None
     )
@@ -94,7 +158,6 @@ def qualified_generic_web_source_inventory(
         raise GenericWebSourceUnqualified("The product's testing source changed before release.")
     identity = inventory.runtime_identity
     target = record.deployed_target
-    current_target = snapshot.provider_target
     artifact = inventory.artifact_identity
     if (
         lane.instance != "testing"
@@ -143,25 +206,5 @@ def qualified_generic_web_source_inventory(
     ):
         raise GenericWebSourceUnqualified(
             "Testing's referenced deployment is not qualified for the current source inventory."
-        )
-    if (
-        current_target.context != lane.context
-        or current_target.instance != lane.instance
-        or any(
-            getattr(current_target, field) != getattr(target, field)
-            for field in ("provider_id", "target_category", "provider_target_type", "target_id")
-        )
-    ):
-        raise GenericWebSourceUnqualified(
-            "Testing's passing deployment does not match its current physical recipient."
-        )
-    if any(
-        held.state in {"running", "reconcile_required"}
-        and held.provider_target_key
-        == generic_web_source_target_key(current_target, record.deploy.target_type)
-        for held in snapshot.held_reservations
-    ):
-        raise GenericWebSourceUnqualified(
-            "Testing's current physical recipient has an unresolved provider operation."
         )
     return inventory

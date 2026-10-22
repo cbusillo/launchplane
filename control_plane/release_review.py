@@ -20,6 +20,8 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
+    GenericWebSourceOperationUnresolved,
+    recorded_generic_web_source_inventory,
     qualified_generic_web_source_inventory,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -109,6 +111,7 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
     "candidate_identity_missing": "Testing has no qualified deployed version.",
+    "candidate_operation_unresolved": "Testing has an unresolved provider operation. Wait for it to finish or reconcile its original operation before starting a fresh release step.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
 }
@@ -270,13 +273,39 @@ def release_version(
             if instance == "testing"
             else store.read_environment_inventory(context_name=lane.context, instance_name=instance)
         )
+    except GenericWebSourceOperationUnresolved as error:
+        raise ReleaseEvidenceUnavailable("candidate_operation_unresolved") from error
     except GenericWebSourceUnqualified as error:
         raise _identity_missing(instance) from error
     except FileNotFoundError as error:
         raise ReleaseEvidenceUnavailable("release_record_missing") from error
+    return _generic_web_inventory_release_version(
+        inventory=inventory, profile=profile, instance=instance, context=lane.context
+    )
+
+
+def recorded_generic_web_testing_version(
+    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord
+) -> ReleaseVersion:
+    lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+    if lane is None:
+        raise ReleaseEvidenceUnavailable("testing_lane_missing")
+    inventory = recorded_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    return _generic_web_inventory_release_version(
+        inventory=inventory, profile=profile, instance="testing", context=lane.context
+    )
+
+
+def _generic_web_inventory_release_version(
+    *,
+    inventory: EnvironmentInventory,
+    profile: LaunchplaneProductProfileRecord,
+    instance: str,
+    context: str,
+) -> ReleaseVersion:
     identity = inventory.runtime_identity
     if (
-        inventory.context != lane.context
+        inventory.context != context
         or inventory.instance != instance
         or identity is None
         or inventory.deploy.status != "pass"

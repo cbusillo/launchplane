@@ -307,7 +307,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         )
 
-    def capture(self) -> None:
+    def capture(self, *, host: BackupHost | None = None, expected_status: str = "pass") -> None:
         with (
             # Real backup captures take longer than a second. Preserve ordering
             # for the two fast stub captures without a wall-clock sleep.
@@ -324,7 +324,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.production_backup_provider.subprocess.run",
-                side_effect=BackupHost().run,
+                side_effect=(host or BackupHost()).run,
             ),
         ):
             result = run_production_backup_gate_operation_worker_once(
@@ -332,9 +332,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         self.assertTrue(result.terminal_write_committed)
         operation = self.store.list_verireel_prod_backup_gate_operation_records()[0]
-        self.assertEqual(operation.status, "pass")
+        self.assertEqual(operation.status, expected_status)
         self.assertEqual(
-            self.store.read_backup_gate_record(operation.backup_record_id).status, "pass"
+            self.store.read_backup_gate_record(operation.backup_record_id).status, expected_status
         )
 
     def _qualification_lost_after_acceptance(self, *, backup_completed: bool) -> None:
@@ -2242,6 +2242,161 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             ),
         )
         self.assertEqual(reservation.status, "acquired")
+
+    def test_queued_backup_preserves_saved_source_authority_during_testing_retest(self) -> None:
+        for change in (
+            "hold_before_queue",
+            "hold_before_capture",
+            "hold_during_preflight",
+            "hold_after_snapshot",
+            "binding_repoint",
+            "failed_pair",
+            "changed_pair",
+            "withdrawal",
+            "release_hold",
+        ):
+            with self.subTest(change=change):
+                fixture = GenericWebClientReleaseTests()
+                fixture.setUp()
+                try:
+                    decision = fixture.accept()
+                    if change == "hold_before_queue":
+                        fixture.hold_testing_source()
+                        self.assertEqual(fixture.advance(), ())
+                        self.assertEqual(
+                            fixture.store.list_verireel_prod_backup_gate_operation_records(), ()
+                        )
+                        with self.assertRaises(ReleaseEvidenceUnavailable) as refused:
+                            fixture.review()
+                        self.assertEqual(refused.exception.code, "candidate_operation_unresolved")
+                        continue
+                    self.assertTrue(fixture.advance())
+                    inventory = fixture.store.read_environment_inventory(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    record = fixture.store.read_deployment_record(inventory.deployment_record_id)
+                    binding = fixture.store.read_provider_target_record(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+
+                    def after_snapshot() -> None:
+                        if change == "hold_after_snapshot":
+                            fixture.hold_testing_source()
+                        elif change == "binding_repoint":
+                            fixture.store.write_provider_target_record(
+                                binding.model_copy(update={"target_id": "replacement-testing"})
+                            )
+                        elif change == "failed_pair":
+                            fixture.store.write_deployment_record(
+                                record.model_copy(
+                                    update={
+                                        "deploy": record.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
+                            )
+                        elif change == "changed_pair":
+                            assert inventory.runtime_identity is not None
+                            fixture.write_qualified_testing_inventory(
+                                inventory.model_copy(
+                                    update={
+                                        "runtime_identity": inventory.runtime_identity.model_copy(
+                                            update={
+                                                "artifact_id": fixture.profile.image.repository
+                                                + "@sha256:"
+                                                + "d" * 64,
+                                                "source_git_ref": "d" * 40,
+                                            }
+                                        )
+                                    }
+                                )
+                            )
+                        elif change == "withdrawal":
+                            fixture.accept("changes_requested", suffix="-withdrawal")
+                        elif change == "release_hold":
+                            fixture.switch("held")
+
+                    host = BackupHost(after_snapshot=after_snapshot)
+                    host_run = host.run
+
+                    def run(command: list[str], **kwargs: Any) -> Any:
+                        result = host_run(command, **kwargs)
+                        if change == "hold_during_preflight" and host.commands[-1] == [
+                            "pvesm",
+                            "status",
+                            "--storage",
+                            host.storage,
+                        ]:
+                            fixture.hold_testing_source()
+                        return result
+
+                    if change == "hold_before_capture":
+                        fixture.hold_testing_source()
+                    admission_only_change = (
+                        change.startswith("hold_") or change == "binding_repoint"
+                    )
+                    with patch.object(host, "run", side_effect=run):
+                        fixture.capture(
+                            host=host, expected_status="pass" if admission_only_change else "fail"
+                        )
+                    operation = fixture.store.list_verireel_prod_backup_gate_operation_records()[0]
+                    self.assertTrue(
+                        any(row[:2] == [host.guest_command, "snapshot"] for row in host.commands)
+                    )
+                    self.assertEqual(
+                        any(row[0] == "vzdump" for row in host.commands), admission_only_change
+                    )
+                    self.assertEqual(fixture.advance(), ())
+                    self.assertEqual(fixture.provider.deployed_artifacts, [])
+                    if admission_only_change:
+                        self.assertEqual(
+                            fixture.store.read_environment_inventory(
+                                context_name=fixture.context, instance_name="testing"
+                            ),
+                            inventory,
+                        )
+                        self.assertEqual(
+                            fixture.store.read_release_review_decision_record(
+                                product=fixture.profile.product, record_id=decision.record_id
+                            ),
+                            decision,
+                        )
+                        if change == "binding_repoint":
+                            fixture.store.write_provider_target_record(binding)
+                        else:
+                            held = fixture.store.read_idempotency_record(
+                                scope="testing-source",
+                                route_path="/v1/drivers/generic-web/deploy",
+                                idempotency_key="uncertain-original",
+                            )
+                            assert held is not None
+                            completion = held.model_copy(
+                                update={
+                                    "state": "completed",
+                                    "response_status_code": 200,
+                                    "response_trace_id": "testing-finished",
+                                    "response_payload": {},
+                                    "recorded_at": datetime.now(UTC).isoformat(),
+                                }
+                            )
+                            self.assertEqual(
+                                fixture.store.complete_mutation_reservation(
+                                    completion=completion
+                                ).status,
+                                "completed",
+                            )
+                        self.assertTrue(fixture.advance())
+                        self.assertEqual(
+                            fixture.provider.deployed_artifacts,
+                            [decision.checklist.candidate.artifact_id],
+                        )
+                    else:
+                        self.assertEqual(
+                            operation.error_code, "operation_authorization_client_release_refused"
+                        )
+                finally:
+                    fixture.doCleanups()
 
     def test_default_input_promotion_rechecks_the_selected_build_at_final_checkpoint(self) -> None:
         from control_plane.generic_web_promotion_provider_adapter import (
