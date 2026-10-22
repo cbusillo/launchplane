@@ -17,7 +17,7 @@ class ApplicationResourceObservationTests(unittest.TestCase):
             "application_id": "application1",
             "server_id": "registered-server",
             "configured_volumes": ["owned-state"],
-            "configured_unsupported_mount_count": 0,
+            "configured_unsupported_mounts": False,
         }
 
     def observe(self) -> ApplicationResourceObservation:
@@ -37,7 +37,8 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         self.assertEqual(
             observed.image_declared_volume_count, len(self.fixture.image_row["Volumes"])
         )
-        self.assertFalse(observed.quiescent)
+        self.assertFalse(observed.service_quiescent)
+        self.assertIs(observed.unsupported_mounts_present, False)
         self.assertNotIn(private_name, observed.model_dump_json())
         self.assertNotIn(private_value, observed.model_dump_json())
         self.assertEqual(retained.read_text(), private_value)
@@ -48,9 +49,7 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         observed = self.observe()
         self.assertEqual(observed.status, "observed")
         self.assertEqual(observed.empty_volume_count, 1)
-        self.assertTrue(observed.quiescent)
-        self.assertNotIn("data", observed.model_dump())
-        self.assertNotIn("production_resources", observed.model_dump())
+        self.assertTrue(observed.service_quiescent)
         self.assertEqual(list(self.fixture.data.iterdir()), [])
 
     def test_exited_container_is_included_when_no_task_is_running(self) -> None:
@@ -66,7 +65,7 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         }
         observed = self.observe()
         self.assertEqual(observed.extant_container_count, 1)
-        self.assertFalse(observed.quiescent)
+        self.assertFalse(observed.service_quiescent)
 
     def test_remote_task_duplicate_inventory_and_changed_inventory_remain_unknown(self) -> None:
         for change in ("remote-task", "duplicate-volumes", "changed-containers"):
@@ -104,6 +103,55 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         self.fixture.denied = True
         frame = self.fixture.run(APPLICATION_RESOURCE_OBSERVATION_PROGRAM, self.payload)
         self.assertEqual(frame, {"type": "denied"})
+        self.fixture.denied = False
+        self.fixture.image_error = b"authorization denied by plugin: synthetic-private-detail"
+        frame = self.fixture.run(APPLICATION_RESOURCE_OBSERVATION_PROGRAM, self.payload)
+        self.assertEqual(frame, {"type": "denied"})
+
+    def test_image_aliases_match_and_missing_image_metadata_preserves_storage_observation(
+        self,
+    ) -> None:
+        digest = self.fixture.image.rpartition("@")[2]
+        self.fixture.service["Image"] = "example:build@" + digest
+        self.fixture.image_row["RepoDigests"] = ["docker.io/library/example@" + digest]
+        observed = self.observe()
+        self.assertEqual(observed.status, "observed")
+        self.assertEqual(
+            observed.image_declared_volume_count, len(self.fixture.image_row["Volumes"])
+        )
+        for unavailable in ("mismatched", "missing"):
+            with self.subTest(unavailable=unavailable):
+                self.fixture.image_row["RepoDigests"] = ["different-repository@" + digest]
+                self.fixture.image_error = b"No such image" if unavailable == "missing" else None
+                observed = self.observe()
+                self.assertEqual(observed.status, "observed")
+                self.assertEqual(observed.empty_volume_count, 1)
+                self.assertIsNone(observed.image_declared_volume_count)
+
+    def test_repeated_unsupported_mounts_are_reported_as_presence(self) -> None:
+        self.payload["configured_unsupported_mounts"] = True
+        self.fixture.service["Mounts"].append(
+            {"Type": "bind", "Source": str(self.fixture.root), "Target": "/external"}
+        )
+        observed = self.observe()
+        self.assertEqual(observed.status, "observed")
+        self.assertIs(observed.unsupported_mounts_present, True)
+
+    def test_service_quiescence_does_not_claim_other_volume_consumers_are_excluded(self) -> None:
+        self.fixture.service["Mode"]["Replicated"]["Replicas"] = 0
+        self.fixture.tasks["task1"].update(DesiredState="shutdown", Status={"State": "failed"})
+        identifier = "b" * 64
+        self.fixture.containers[identifier] = {
+            "Id": identifier,
+            "Name": "/other-service.writer",
+            "Labels": {"com.docker.swarm.service.id": "other-service"},
+            "Mounts": [{"Type": "volume", "Name": "owned-state"}],
+            "Status": "running",
+        }
+        observed = self.observe()
+        self.assertEqual(observed.status, "observed")
+        self.assertTrue(observed.service_quiescent)
+        self.assertEqual(observed.extant_container_count, 0)
 
     def test_incomplete_cluster_or_ambiguous_container_does_not_produce_counts(self) -> None:
         self.fixture.nodes.append({"ID": "node2", "Self": False})
@@ -137,7 +185,7 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         }
         observed = self.observe()
         self.assertEqual(observed.status, "unknown")
-        self.assertIsNone(observed.quiescent)
+        self.assertIsNone(observed.service_quiescent)
 
     def test_symlinked_backing_is_unavailable_without_following_it(self) -> None:
         redirected = self.fixture.root / "retained"
@@ -150,7 +198,9 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         self.assertEqual(observed.empty_volume_count, 0)
         self.assertNotIn("private", observed.model_dump_json())
 
-    def test_matching_task_container_is_observed_and_keeps_sample_nonquiescent(self) -> None:
+    def test_matching_task_container_is_observed_and_keeps_sample_nonservice_quiescent(
+        self,
+    ) -> None:
         identifier = "f" * 64
         self.fixture.service["Mode"]["Replicated"]["Replicas"] = 0
         self.fixture.tasks["task1"].update(
@@ -170,7 +220,7 @@ class ApplicationResourceObservationTests(unittest.TestCase):
         observed = self.observe()
         self.assertEqual(observed.status, "observed")
         self.assertEqual(observed.extant_container_count, 1)
-        self.assertFalse(observed.quiescent)
+        self.assertFalse(observed.service_quiescent)
         self.fixture.tasks["task2"] = dict(self.fixture.tasks["task1"], ID="task2")
         self.assertEqual(self.observe().status, "unknown")
         del self.fixture.tasks["task2"]

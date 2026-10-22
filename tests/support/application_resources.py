@@ -55,6 +55,7 @@ class ApplicationResourceFixture:
         self.container_list_calls = 0
         self.change_containers = False
         self.denied = False
+        self.image_error: bytes | None = None
 
     def docker(self, command: list[str], **_arguments: Any) -> subprocess.CompletedProcess[bytes]:
         arguments = command[1:]
@@ -79,6 +80,8 @@ class ApplicationResourceFixture:
         elif arguments[:2] == ["volume", "inspect"]:
             output = json.dumps(self.volume)
         elif arguments[:2] == ["image", "inspect"]:
+            if self.image_error is not None:
+                return subprocess.CompletedProcess(command, 1, b"", self.image_error)
             output = json.dumps(self.image_row)
         elif arguments[0] == "info":
             output = json.dumps(str(self.root))

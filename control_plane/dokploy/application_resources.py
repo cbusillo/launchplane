@@ -5,6 +5,10 @@ import re
 import click
 
 from control_plane.contracts.application_resource_observation import ApplicationResourceObservation
+from control_plane.contracts.deploy_reference import (
+    canonical_docker_image_repository,
+    docker_image_repository,
+)
 from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy import api, native_copy_stream, source
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient
@@ -25,7 +29,7 @@ def _target_resources(payload: api.JsonObject, application_id: str) -> dict[str,
         raise ValueError("Application resource identity is unavailable.")
     server = native_copy_stream.require_registered_remote_server(server)
     volumes: set[str] = set()
-    unsupported = 0
+    unsupported = False
     for mount in mounts:
         if not isinstance(mount, dict):
             raise ValueError("Application mount inventory is unavailable.")
@@ -37,13 +41,13 @@ def _target_resources(payload: api.JsonObject, application_id: str) -> dict[str,
         ):
             volumes.add(name)
         else:
-            unsupported += 1
+            unsupported = True
     return {
         "application": application,
         "application_id": application_id,
         "server_id": server,
         "configured_volumes": sorted(volumes),
-        "configured_unsupported_mount_count": unsupported,
+        "configured_unsupported_mounts": unsupported,
     }
 
 
@@ -111,6 +115,10 @@ APPLICATION_RESOURCE_OBSERVATION_PROGRAM = (
     "import base64,json,os,re,subprocess,sys,time\nfrom pathlib import Path\n"
     + inspect.getsource(docker_daemon_authorization_denied)
     + "\n"
+    + inspect.getsource(docker_image_repository)
+    + "\n"
+    + inspect.getsource(canonical_docker_image_repository)
+    + "\n"
     + inspect.getsource(single_local_swarm_node)
     + r"""
 
@@ -172,7 +180,7 @@ def observation(spec):
     volumes = identifiers('volume', 'ls', '--quiet')
     referenced = set(spec['configured_volumes'])
     configured_count = len(referenced)
-    unsupported = spec['configured_unsupported_mount_count']
+    unsupported = spec['configured_unsupported_mounts']
 
     def mounts(value):
         nonlocal unsupported
@@ -190,14 +198,14 @@ def observation(spec):
             if kind == 'volume' and isinstance(name, str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', name):
                 referenced.add(name)
             else:
-                unsupported += 1
+                unsupported = True
 
     mounts(service['Mounts'])
     terminal = True
     task_rows = {}
     task_containers = {}
     for identifier in tasks:
-        task = row('inspect', '--format', TASK_FORMAT, identifier)
+        task = row('inspect', '--type', 'task', '--format', TASK_FORMAT, identifier)
         if (task['ID'] != identifier or task['ServiceID'] != service_id
             or task['NodeID'] not in ('', nodes[0]['ID']) or not isinstance(task['Status'], dict)):
             raise ValueError('Task attribution unavailable')
@@ -223,7 +231,7 @@ def observation(spec):
     owned = 0
     container_rows = {}
     for identifier in containers:
-        container = row('inspect', '--format', CONTAINER_FORMAT, identifier)
+        container = row('inspect', '--type', 'container', '--format', CONTAINER_FORMAT, identifier)
         labels = container['Labels']
         if (container['Id'] != identifier or not isinstance(container['Name'], str)
             or not isinstance(labels, (dict, type(None))) or not isinstance(container['Mounts'], list)):
@@ -284,13 +292,19 @@ def observation(spec):
     image_volumes = None
     image = service['Image']
     if isinstance(image, str) and re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}', image):
-        image_row = row('image', 'inspect', '--format', IMAGE_FORMAT, image)
-        if image not in (image_row['RepoDigests'] or []):
-            raise ValueError('Image identity unavailable')
-        declared = image_row['Volumes']
-        if declared is not None and not isinstance(declared, dict):
-            raise ValueError('Image volumes unavailable')
-        image_volumes = len(declared or {})
+        try:
+            image_row = row('image', 'inspect', '--format', IMAGE_FORMAT, image)
+            digests = image_row['RepoDigests']
+            declared = image_row['Volumes']
+            if (isinstance(digests, list)
+                and any(isinstance(value, str)
+                        and value.rpartition('@')[2] == image.rpartition('@')[2]
+                        and canonical_docker_image_repository(value) == canonical_docker_image_repository(image)
+                        for value in digests)
+                and (declared is None or isinstance(declared, dict))):
+                image_volumes = len(declared or {})
+        except (ValueError, KeyError, TypeError):
+            pass
     if (single_local_swarm_node(docker) != nodes
         or row('service', 'inspect', '--format', SERVICE_FORMAT, application) != service
         or identifiers('service', 'ps', '--no-trunc', '--quiet', service_id) != tasks
@@ -298,10 +312,10 @@ def observation(spec):
         or identifiers('volume', 'ls', '--quiet') != volumes):
         raise InventoryChanged()
     for identifier, initial in task_rows.items():
-        if row('inspect', '--format', TASK_FORMAT, identifier) != initial:
+        if row('inspect', '--type', 'task', '--format', TASK_FORMAT, identifier) != initial:
             raise InventoryChanged()
     for identifier, initial in container_rows.items():
-        if row('inspect', '--format', CONTAINER_FORMAT, identifier) != initial:
+        if row('inspect', '--type', 'container', '--format', CONTAINER_FORMAT, identifier) != initial:
             raise InventoryChanged()
     for name, initial in volume_rows.items():
         if row('volume', 'inspect', '--format', VOLUME_FORMAT, name) != initial:
@@ -309,15 +323,15 @@ def observation(spec):
     update = service['Update']
     if update is not None and not isinstance(update, dict):
         raise ValueError('Service update unavailable')
-    quiescent = (replicas == 0 and owned == 0 and terminal
+    service_quiescent = (replicas == 0 and owned == 0 and terminal
                  and (update or {}).get('State', '') in {'','completed','rollback_completed'})
     return {'status':'observed','reason_code':'resource_inventory_observed',
             'service_version':version,'desired_replicas':replicas,'task_count':len(tasks),
             'extant_container_count':owned,'configured_volume_count':configured_count,
             'referenced_volume_count':len(referenced),'nonempty_volume_count':nonempty,
             'empty_volume_count':empty,'unavailable_volume_count':unavailable,
-            'unsupported_mount_count':unsupported,'image_declared_volume_count':image_volumes,
-            'quiescent':quiescent}
+            'unsupported_mounts_present':unsupported,'image_declared_volume_count':image_volumes,
+            'service_quiescent':service_quiescent}
 
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))

@@ -55,8 +55,10 @@ def main() -> int:
     for field in ("usage", "data", "isolation"):
         parser.add_argument(f"--{field}-evidence", default="")
     args = parser.parse_args()
-    if args.application_resources and args.mode != "collect":
-        parser.error("--application-resources requires collect.")
+    if args.application_resources and (
+        args.mode != "collect" or args.instance != "testing" or args.preview_id
+    ):
+        parser.error("--application-resources requires collect for testing without a preview ID.")
     if args.mode == "record" and not args.preview_id:
         parser.error("Recording cleanup facts requires an exact preview ID.")
     if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):

@@ -38,6 +38,8 @@ class DisposableLaneClientTests(unittest.TestCase):
         request_mock: Mock | None = None,
         application_resources: object = None,
         include_application_resources: bool = False,
+        instance: str = "testing",
+        preview_id: str = "",
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -122,8 +124,10 @@ class DisposableLaneClientTests(unittest.TestCase):
                 "--context",
                 "example",
                 "--instance",
-                "testing",
+                instance,
             ]
+            if preview_id:
+                arguments += ["--preview-id", preview_id]
             if command_mode == "record":
                 arguments += [
                     "--preview-id",
@@ -189,6 +193,20 @@ class DisposableLaneClientTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertNotIn("synthetic-private", output)
         self.assertEqual(json.loads(output)["status"], "unverified")
+
+    def test_invalid_application_resource_scope_is_rejected_before_inspection(self) -> None:
+        for instance, preview_id in (("prod", ""), ("testing", "preview")):
+            with self.subTest(instance=instance, preview_id=preview_id):
+                request = Mock()
+                with self.assertRaises(SystemExit) as raised:
+                    self.call_client(
+                        include_application_resources=True,
+                        instance=instance,
+                        preview_id=preview_id,
+                        request_mock=request,
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                request.assert_not_called()
 
     def test_record_binds_preview_facts_to_the_inspection_without_printing_references(self) -> None:
         status, output, request = self.call_client(

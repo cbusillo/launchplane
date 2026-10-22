@@ -28,9 +28,9 @@ class ApplicationResourceObservation(BaseModel):
     nonempty_volume_count: int | None = Field(default=None, ge=0, le=10000)
     empty_volume_count: int | None = Field(default=None, ge=0, le=10000)
     unavailable_volume_count: int | None = Field(default=None, ge=0, le=10000)
-    unsupported_mount_count: int | None = Field(default=None, ge=0, le=10000)
+    unsupported_mounts_present: bool | None = None
     image_declared_volume_count: int | None = Field(default=None, ge=0, le=10000)
-    quiescent: bool | None = None
+    service_quiescent: bool | None = None
 
     @model_validator(mode="after")
     def validate_observation(self) -> "ApplicationResourceObservation":
@@ -52,7 +52,7 @@ class ApplicationResourceObservation(BaseModel):
             + (self.nonempty_volume_count or 0)
             + (self.unavailable_volume_count or 0)
             or (self.configured_volume_count or 0) > (self.referenced_volume_count or 0)
-            or self.quiescent
+            or self.service_quiescent
             and (self.desired_replicas != 0 or self.extant_container_count != 0)
         ):
             raise ValueError("Observed resource inventory is incomplete.")

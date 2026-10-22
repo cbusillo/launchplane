@@ -588,9 +588,20 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 clock.return_value = started + timedelta(seconds=2)
                 return OdooTestingUsage("unused", False, False)
 
-            with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired):
+            from control_plane.contracts.application_resource_observation import (
+                ApplicationResourceObservation,
+            )
+
+            with (
+                patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired),
+                patch(
+                    "control_plane.dokploy.application_resources.collect_application_resource_observation",
+                    return_value=ApplicationResourceObservation(),
+                ),
+            ):
                 response = await self.observe(
                     mode="collect",
+                    include_application_resources=True,
                     lifetime_seconds=1,
                     expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
                 )
@@ -772,7 +783,16 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         }
 
         inspected = await self.observe()
+        clock = [datetime.now(timezone.utc)]
+
+        def delayed_resources(**arguments: Any) -> None:
+            clock[0] += timedelta(seconds=2)
+            fixture.native_read(**arguments)
+
         with (
+            patch.object(
+                self.store, "disposable_lane_observation_time", side_effect=lambda: clock[0]
+            ),
             patch(
                 "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://provider.invalid", "synthetic-provider-token"),
@@ -780,20 +800,25 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             patch("control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=payload),
             patch(
                 "control_plane.dokploy.native_copy_stream._read_remote",
-                side_effect=fixture.native_read,
+                side_effect=delayed_resources,
             ) as reader,
         ):
             response = await self.observe(
                 mode="collect",
                 expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
                 include_application_resources=True,
+                lifetime_seconds=1,
             )
         self.assertEqual(response.status_code, 202, response.text)
         result = response.json()["result"]
         self.assertEqual(result["application_resources"]["nonempty_volume_count"], 1)
-        self.assertFalse(result["application_resources"]["quiescent"])
+        self.assertFalse(result["application_resources"]["service_quiescent"])
         self.assertEqual((result["data"], result["production_resources"]), ("unknown", "unknown"))
         self.assertFalse(result["provider_mutation"])
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.observed_at, clock[0])
+        self.assertEqual(evidence.expires_at, clock[0] + timedelta(seconds=1))
         reader.assert_called_once()
         self.assertEqual(reader.call_args.kwargs["server_id"], payload["serverId"])
         self.assertEqual(reader.call_args.kwargs["payload"]["application"], payload["appName"])
