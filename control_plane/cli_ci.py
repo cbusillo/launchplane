@@ -46,6 +46,7 @@ LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
 POSTGRES_INTEGRATION_MODULES = (
     "tests.test_public_host_schema_compatibility",
     "tests.test_generic_web_execution_postgres",
+    "tests.test_generic_web_testing_abandonment_postgres",
     "tests.test_disposable_observation_clear_postgres",
     "tests.test_postgres_integration",
     "tests.test_testing_private_ingress_postgres",
