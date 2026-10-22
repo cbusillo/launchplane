@@ -310,12 +310,21 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertTrue(self.retained["stopped"])
             self.assertIsNone(self.owned)
             self.removed_container_ids = kwargs["payload"]["container_ids"]
-            self.retained.update(
-                availability="absent",
-                container_ids=[],
-                inventory_sha256=service.retained_inventory_sha256(
-                    [], {"project": self.intent.project}
-                ),
+            self.retained = {
+                "type": "complete",
+                "availability": "absent",
+                "stopped": True,
+                "web_stopped": True,
+                "volumes": [],
+                "container_ids": [],
+                "inventory_sha256": retained_inventory_sha256([], {"project": self.intent.project}),
+            }
+            self.retained["observation_sha256"] = canonical_json_sha256(
+                {
+                    "project": self.intent.project,
+                    "context": self.operation.context,
+                    "custody": self.retained,
+                }
             )
         result = dict(self.retained)
         if kwargs["payload"]["mode"] == "readiness":
@@ -518,6 +527,59 @@ class NativeTestingWorkerTests(unittest.TestCase):
             result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(len(removals), 1)
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_removal_before_application_save_resumes_its_original_candidate(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        self.admit_unavailable("stopped")
+        allocation = self.fixture.candidate.model_copy(update={"application": None})
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, allocation.namespace)
+            assert row is not None
+            row.payload = allocation.model_dump(mode="json", exclude_none=True)
+
+        with patch.object(
+            service, "retained_copy_operation", side_effect=self.physical
+        ) as physical:
+            for _ in range(2):
+                with patch.object(
+                    service,
+                    "prepare_candidate_application",
+                    side_effect=NativeSourceUnavailable(
+                        "Fixture dies before the first application save"
+                    ),
+                ) as prepare:
+                    with self.assertRaises(service.NativeTestingRebuildPending):
+                        self.execute()
+                prepare.assert_called_once()
+                resumed = prepare.call_args.kwargs["allocation"]
+                self.assertEqual(resumed.namespace, allocation.namespace)
+                self.assertIsNone(resumed.application)
+                self.assertEqual(self.retained["availability"], "absent")
+                self.assertEqual(self.checkpoint().step, "preparing")
+                self.assertFalse(self.checkpoint().admission_refusal)
+            removals = [
+                call.kwargs["payload"]["container_ids"]
+                for call in physical.call_args_list
+                if call.kwargs["payload"]["mode"] == "remove"
+            ]
+        self.assertEqual(removals, [self.intent.retained["container_ids"]])
+
+    def test_removed_copy_resumes_interrupted_forward_preparation(self) -> None:
+        from control_plane.testing_route_effects import TestingRouteEffects, ROUTE_PREPARING
+
+        self.admit_unavailable("stopped")
+
+        def interrupted(effect: Any, lease: Any) -> None:
+            lease.checkpoint_effect(ROUTE_PREPARING)
+            raise NativeSourceUnavailable("Fixture lost route preparation reply")
+
+        with patch.object(TestingRouteEffects, "apply", new=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.retained["availability"], "absent")
+        self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new"])
 
     def test_new_staff_hold_blocks_container_removal_before_dispatch(self) -> None:

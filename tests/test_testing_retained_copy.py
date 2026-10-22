@@ -159,6 +159,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
             elif command[1] == "rm":
                 self.assertNotIn("-f", command)
                 self.assertNotIn("-v", command)
+                self.assertTrue(set(command[2:]) <= {item["Id"] for item in self.containers})
                 self.containers[:] = [
                     item for item in self.containers if item["Id"] not in command[2:]
                 ]

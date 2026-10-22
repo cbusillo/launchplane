@@ -669,7 +669,23 @@ class NativeTestingRebuildExecution:
         self.route: TestingLaneRoute
         self.transport: DokployTestingRouteTransport
         self.publication: TestingPublicationPlan | None = None
-        self.removed_old_containers = False
+
+    @property
+    def removed_old_containers(self) -> bool:
+        phase = "remove-old-containers"
+        receipt = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+        )
+        return (
+            receipt is not None
+            and receipt.state == "completed"
+            and receipt.response_payload.get("not_dispatched") is not True
+            and receipt.request_fingerprint
+            == canonical_json_sha256({"intent": self.intent.digest, "phase": phase})
+            and receipt.provider_target_key == self.adapter.target_key() + ":" + phase
+        )
 
     @property
     def base_url(self) -> str:
@@ -1305,13 +1321,13 @@ class NativeTestingRebuildExecution:
             else None,
         )
         existing_publication = read_publication(self.store, self.publication_key)
-        if historical is not None and isinstance(self.intent.old, UnavailableTestingPredecessor):
+        if isinstance(self.intent.old, UnavailableTestingPredecessor):
             removal = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
                 route_path=REBUILD_ROUTE + ":effect",
                 idempotency_key=self.operation.operation_id + ":remove-old-containers",
             )
-            if removal is not None and not self.cutover_started():
+            if removal is not None:
                 self.remove_old_containers()
         if historical is not None and historical.step == "switching":
             dispatched = self.store.read_idempotency_record(
@@ -1461,13 +1477,13 @@ class NativeTestingRebuildExecution:
                 payload={**self.retained_payload("remove"), "container_ids": identifiers},
             )
 
-        self.run_effect(
-            "remove-old-containers",
-            absent,
-            lambda dispatch: dispatch(remove),
-            recovery=True,
-        )
-        self.removed_old_containers = True
+        if not self.removed_old_containers:
+            self.run_effect(
+                "remove-old-containers",
+                absent,
+                lambda dispatch: dispatch(remove),
+                recovery=True,
+            )
         self.transport.payload["unavailable_predecessor"] = {
             "project": self.intent.project,
             "availability": "absent",
