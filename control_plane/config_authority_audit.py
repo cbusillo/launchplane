@@ -510,8 +510,6 @@ PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS = frozenset(
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
-        "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
-        "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": frozenset(
             ("${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}",)
         ),
