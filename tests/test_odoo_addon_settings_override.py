@@ -162,6 +162,52 @@ def _request(**kwargs: object) -> OdooAddonSettingsApplyRequest:
 
 
 class OdooAddonSettingsPlanTests(unittest.TestCase):
+    def test_apply_refuses_retained_production_store_parameter_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_lane(store, protected_keys=())
+            production = _existing_record("prod").model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key="shopify.shop_url_key",
+                            value=OdooOverrideValue(source="literal", value=_PROTECTED_KEY),
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(production)
+            existing = _existing_record().model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key="shopify.store_url",
+                            value=OdooOverrideValue(
+                                source="literal", value=f"https://{_PROTECTED_KEY}.myshopify.com"
+                            ),
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(existing)
+            for mode in ("dry-run", "apply"):
+                with self.subTest(mode=mode):
+                    with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                        request = _request(
+                            mode=mode, reviewed_plan_sha256="0" * 64 if mode == "apply" else ""
+                        )
+                        if mode == "apply":
+                            apply_odoo_addon_settings_plan(record_store=store, request=request)
+                        else:
+                            build_odoo_addon_settings_plan(record_store=store, request=request)
+                    self.assertEqual(raised.exception.code, "protected_store_key")
+                    self.assertEqual(
+                        store.read_odoo_instance_override_record(
+                            context_name=_CONTEXT, instance_name="testing"
+                        ),
+                        existing,
+                    )
+
     def test_apply_refuses_store_that_became_production_after_review(self) -> None:
         for field in (
             "addon_settings",

@@ -168,8 +168,8 @@ def integration_credential_warnings(
     for binding in summary.secret_bindings:
         if (
             binding.status != "configured"
-            or binding.context not in {"", summary.context}
-            or binding.instance not in {"", summary.instance}
+            or binding.context != summary.context
+            or binding.instance != summary.instance
         ):
             continue
         if binding.integration in INTEGRATION_KEY_MARKERS:

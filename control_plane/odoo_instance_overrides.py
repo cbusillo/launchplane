@@ -123,6 +123,16 @@ def shopify_record_store_keys(record: OdooInstanceOverrideRecord) -> tuple[str, 
     )
 
 
+def require_shopify_store_separation(
+    record: OdooInstanceOverrideRecord, protected_store_keys: tuple[str, ...]
+) -> None:
+    if any(
+        shopify_store_key_is_protected(key, protected_store_keys)
+        for key in shopify_record_store_keys(record)
+    ):
+        raise click.ClickException("Shopify settings match a protected or production store.")
+
+
 def production_shopify_store_keys(
     record_store: object | None,
     *,
@@ -310,10 +320,7 @@ def render_post_deploy_payload(
                 record_store, context=record.context, instance=record.instance
             ),
         )
-        if any(
-            shopify_store_key_is_protected(key, protected_shopify_store_keys) for key in store_keys
-        ):
-            raise click.ClickException("Shopify settings match a protected or production store.")
+        require_shopify_store_separation(record, protected_shopify_store_keys)
     try:
         if preview_import_source is not None:
             preview_import_source.require_override_agreement(record)

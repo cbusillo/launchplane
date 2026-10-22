@@ -41,6 +41,7 @@ from control_plane.odoo_instance_overrides import (
     addon_setting_secret_env_key,
     odoo_instance_is_production,
     production_shopify_store_keys,
+    require_shopify_store_separation,
     shopify_store_key_is_protected,
 )
 
@@ -561,6 +562,10 @@ def build_odoo_addon_settings_plan(
         desired=desired,
         updated_at=existing.updated_at if existing is not None else _utc_now_timestamp(),
     )
+    try:
+        require_shopify_store_separation(replacement, protected_store_keys)
+    except click.ClickException as error:
+        raise OdooAddonSettingsRefusal("protected_store_key", error.message) from error
     # Prove the post-deploy renderer accepts the replacement and renders an apply action.
     try:
         rendered = _resolve_shopify_payload_settings(
