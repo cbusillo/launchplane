@@ -1076,6 +1076,71 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(by_key["launchplane.lanes.testing.url"]["allow_reason"], "")
         self.assertEqual(by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], "")
 
+    def test_renovate_config_is_repo_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            (root / "renovate.json").write_text(
+                json.dumps(
+                    {
+                        "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+                        "extends": ["github>example-owner/shared-config//renovate/default"],
+                        "packageRules": [
+                            {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False},
+                            {
+                                "matchDatasources": ["docker"],
+                                "replacementNameTemplate": (
+                                    "registry.production.example.com/team/{{{packageName}}}"
+                                ),
+                            },
+                        ],
+                        "customManagers": [
+                            {
+                                "autoReplaceStringTemplate": (
+                                    "API_BASE_URL=https://api.production.example.com"
+                                ),
+                                "matchStrings": [
+                                    '"registryUrl": "https://registry.production.example.com"'
+                                ],
+                            }
+                        ],
+                        "registryAliases": {
+                            "registry.description": "https://registry.production.example.com"
+                        },
+                        "postUpgradeTasks": {
+                            "commands": ["curl https://deploy.production.example.com"]
+                        },
+                        "env": {"API_BASE_URL": "https://api.production.example.com"},
+                        "registryUrls": ["https://registry.production.example.com"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        allow_reasons = {
+            finding["key"]: finding["allow_reason"]
+            for finding in _findings(payload)
+            if finding["path"] == "renovate.json"
+        }
+        self.assertEqual(
+            allow_reasons,
+            {
+                "$schema": "repo_metadata_ergonomics",
+                "extends[0]": "repo_metadata_ergonomics",
+                "packageRules[0].matchPackageNames[1]": "repo_metadata_ergonomics",
+                "packageRules[1].replacementNameTemplate": "",
+                "customManagers[0].autoReplaceStringTemplate": "",
+                "customManagers[0].matchStrings[0]": "",
+                "registryAliases.registry.description": "",
+                "postUpgradeTasks.commands[0]": "",
+                "env.API_BASE_URL": "",
+                "registryUrls[0]": "",
+            },
+        )
+
     def test_codeowners_and_local_filesystem_paths_are_repo_mechanics(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
