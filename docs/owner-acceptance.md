@@ -209,6 +209,13 @@ comment says the change is accepted rather than asking the Client again. The
 carry is checked when the status is next written: on the ready preview comment
 from the feedback route or the reconciler, and after a decision.
 
+The review page's Recorded decision card preserves saved history, including a
+former Client's decision or an older preview version. Its carry explanation
+describes the recorded version and why the acceptance was carried at that time;
+it does not establish that the acceptance applies now. The current Client can
+still record a new decision on a ready preview. The shared review projection
+checks current Client, head and base applicability separately.
+
 The maintained `codex-skills` agent watcher recognizes the Client feedback marker
 from any publisher, then verifies the complete decision and exact comment receipt
 against Launchplane through its configured private read route. It retains full
