@@ -194,6 +194,14 @@ def register_service_restart_route(
                     "restart_identity_unavailable", "Recorded restart identity is unavailable.", 404
                 )
                 raise AssertionError
+            except ServiceRestartRefused as error:
+                if recovering:
+                    refuse(
+                        "mutation_reconciliation_required",
+                        "Original restart is unsettled; the lane or identity is temporarily unavailable. Preserve the original request.",
+                    )
+                refuse("restart_refused", str(error))
+                raise AssertionError
             except (ValueError, click.ClickException, OSError):
                 if recovering:
                     refuse(
@@ -264,11 +272,8 @@ def register_service_restart_route(
                     "Testing restart requires current disposable-lane evidence and resolved use, custody and isolation protections. Inspect /v1/disposable-lanes/observations.",
                 )
                 raise AssertionError
-            except ServiceRestartRefused:
-                refuse(
-                    "restart_refused",
-                    "Service identity or release ownership changed before restart.",
-                )
+            except ServiceRestartRefused as error:
+                refuse("restart_refused", str(error))
                 raise AssertionError
             if result.status in {"completed", "replayed", "adopted"}:
                 response = LaneServiceRestartResponse.model_validate(result.response_payload)

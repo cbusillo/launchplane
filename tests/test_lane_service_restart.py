@@ -5,7 +5,7 @@ from tests.support.auth import scoped_agent_test
 import asyncio
 from contextlib import redirect_stderr
 from contextlib import contextmanager
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
@@ -26,6 +26,8 @@ from control_plane.contracts.artifact_identity import (
 )
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_target_replacement_failures import deploy_blocked_code
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -34,7 +36,11 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.contracts.product_environment_read_model import build_product_activity_read_model
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    RecordFailure,
+)
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseReviewDecisionRecord,
@@ -127,6 +133,19 @@ def seed_lane(
             ),
         )
     )
+    deployment = store.read_deployment_record(expected.deployment_record_id)
+    store.write_environment_inventory(
+        EnvironmentInventory(
+            context=expected.context,
+            instance=expected.instance,
+            source_git_ref=expected.source_git_ref,
+            artifact_identity=deployment.artifact_identity,
+            runtime_identity=expected,
+            deploy=deployment.deploy,
+            updated_at=deployment.deploy.finished_at,
+            deployment_record_id=deployment.record_id,
+        )
+    )
     return expected
 
 
@@ -141,6 +160,7 @@ class RestartProvider:
         self.remote_command_failed = False
         self.restart_started_at = "2026-10-10T00:02:00Z"
         self.transient_after_reads = 0
+        self.database: dict[str, Any] | None = None
         self.config: dict[str, Any] = {
             "Id": self.container_id,
             "Image": "sha256:" + "e" * 64,
@@ -179,10 +199,16 @@ class RestartProvider:
                     detail="transient inventory unavailable",
                     status_code=502,
                 )
-            return [{"containerId": self.container_id}] + (
-                [{"containerId": "f" * 64}] if self.duplicate else []
+            return (
+                ([{"containerId": "d" * 64}] if self.database is not None else [])
+                + [{"containerId": self.container_id}]
+                + ([{"containerId": "f" * 64}] if self.duplicate else [])
             )
         if path == "/api/docker.getConfig":
+            if self.database is not None and kwargs["query"]["containerId"] == "d" * 64:
+                value = deepcopy(self.database)
+                value["Id"] = kwargs["query"]["containerId"]
+                return [value]
             value = deepcopy(self.config)
             value["Id"] = kwargs["query"]["containerId"]
             return [value]
@@ -196,8 +222,12 @@ class RestartProvider:
                     status_code=self.rejection,
                     remote_command_failed=self.remote_command_failed,
                 )
-            self.config["State"].update(
-                StartedAt=self.restart_started_at, Health={"Status": "healthy"}
+            restarted = (
+                self.database if kwargs["payload"]["containerId"] == "d" * 64 else self.config
+            )
+            assert restarted is not None
+            restarted["State"].update(
+                Running=True, StartedAt=self.restart_started_at, Health={"Status": "healthy"}
             )
             if self.after_bad_image:
                 self.config["Image"] = "sha256:" + "1" * 64
@@ -297,6 +327,296 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(status, 200, response)
         self.payload.update(mode="apply", reviewed_plan_sha256=response["result"]["plan_sha256"])
         return response
+
+    def record_newer_attempt(
+        self, *, code: str, uncertain: bool = False, status: str = "fail"
+    ) -> None:
+        current = self.store.read_deployment_record(self.expected.deployment_record_id)
+        self.store.write_deployment_record(
+            DeploymentRecord.model_validate(
+                {
+                    **current.model_dump(mode="json"),
+                    "record_id": "newer-attempt",
+                    "runtime_source": {"provider_outcome": "uncertain"} if uncertain else {},
+                    "failure": RecordFailure(code=code, description="Deploy refused.").model_dump(),
+                    "deploy": {
+                        **current.deploy.model_dump(mode="json"),
+                        "status": status,
+                        "started_at": "2026-10-10T00:02:00Z",
+                        "finished_at": "2026-10-10T00:03:00Z",
+                    },
+                }
+            )
+        )
+
+    def select_stopped_database(self) -> None:
+        self.payload["service"] = "database"
+        self.provider.config["State"]["Running"] = False
+        self.provider.database = deepcopy(self.provider.config)
+        self.provider.database.update(Id="d" * 64, Created="2026-10-10T00:00:30Z")
+        self.provider.database["Config"].update(Image="postgres:17", Env=[])
+        self.provider.database["Config"]["Labels"]["com.docker.compose.service"] = "database"
+        self.provider.database["Mounts"] = [{"Type": "volume", "Name": "isolated-data"}]
+
+    def test_pre_provider_failure_keeps_inventory_artifact_restartable(self) -> None:
+        self.record_newer_attempt(code=deploy_blocked_code("retained_database_credential_changed"))
+        reviewed = self.review()
+        self.assertEqual(
+            reviewed["result"]["plan"]["deployment_record_id"], self.expected.deployment_record_id
+        )
+        self.assertEqual(self.invoke(key="inventory-artifact")[1]["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_newer_provider_effect_or_success_refuses_restart(self) -> None:
+        for code, uncertain, status in (
+            ("deploy_failed", False, "fail"),
+            ("deploy_blocked.unknown_check", False, "fail"),
+            (deploy_blocked_code("compose_keys_missing"), True, "fail"),
+            (deploy_blocked_code("compose_keys_missing"), False, "pass"),
+        ):
+            with self.subTest(code=code, uncertain=uncertain, status=status):
+                self.record_newer_attempt(code=code, uncertain=uncertain, status=status)
+                self.assertEqual(self.invoke()[0], 409)
+                self.assertEqual(self.provider.writes, [])
+
+    def test_unfinished_newer_attempt_refuses_despite_sorting_after_inventory(self) -> None:
+        self.record_newer_attempt(
+            code=deploy_blocked_code("compose_keys_missing"), status="pending"
+        )
+        attempt = self.store.read_deployment_record("newer-attempt")
+        self.store.write_deployment_record(
+            attempt.model_copy(
+                update={"deploy": attempt.deploy.model_copy(update={"finished_at": ""})}
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_completed_history_without_start_keeps_current_artifact_restartable(self) -> None:
+        original = self.store.read_deployment_record(self.expected.deployment_record_id)
+        self.store.write_deployment_record(
+            original.model_copy(
+                update={
+                    "record_id": "historical-activation-image",
+                    "deploy": original.deploy.model_copy(
+                        update={"started_at": "", "finished_at": "2026-10-09T23:59:00Z"}
+                    ),
+                }
+            )
+        )
+        self.review()
+        self.assertEqual(self.invoke(key="historical-activation")[1]["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_unplaceable_or_malformed_history_refuses_without_dispatch(self) -> None:
+        original = self.store.read_deployment_record(self.expected.deployment_record_id)
+        for started_at, finished_at in (
+            ("", ""),
+            ("2026-10-09T23:58:00", "2026-10-09T23:59:00Z"),
+            ("2026-10-09T23:58:00Z", "invalid"),
+        ):
+            with self.subTest(started_at=started_at, finished_at=finished_at):
+                self.store.write_deployment_record(
+                    original.model_copy(
+                        update={
+                            "record_id": "unplaceable-history",
+                            "deploy": original.deploy.model_copy(
+                                update={"started_at": started_at, "finished_at": finished_at}
+                            ),
+                        }
+                    )
+                )
+                self.assertEqual(self.invoke()[0], 409)
+                self.assertEqual(self.provider.writes, [])
+
+    def test_overlapping_attempt_and_missing_current_start_refuse(self) -> None:
+        current = self.store.read_deployment_record(self.expected.deployment_record_id)
+        self.store.write_deployment_record(
+            current.model_copy(
+                update={"deploy": current.deploy.model_copy(update={"started_at": ""})}
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.store.write_deployment_record(current)
+        self.store.write_deployment_record(
+            current.model_copy(
+                update={
+                    "record_id": "overlapping-deployment",
+                    "deploy": current.deploy.model_copy(
+                        update={
+                            "started_at": "2026-10-09T23:59:00Z",
+                            "finished_at": current.deploy.started_at,
+                        }
+                    ),
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_blocked_code_after_post_deploy_effect_refuses_restart(self) -> None:
+        self.record_newer_attempt(code=deploy_blocked_code("backup_restore_proof_required"))
+        attempt = self.store.read_deployment_record("newer-attempt")
+        self.store.write_deployment_record(
+            attempt.model_copy(
+                update={
+                    "post_deploy_update": attempt.post_deploy_update.model_copy(
+                        update={"attempted": True, "status": "fail"}
+                    )
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_inventory_identity_must_agree_with_record_and_container(self) -> None:
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": self.expected.model_copy(update={"artifact_id": "other"})
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.store.write_environment_inventory(inventory)
+        self.record_newer_attempt(code=deploy_blocked_code("compose_keys_missing"))
+        self.provider.config["Config"]["Image"] = "ghcr.io/example/new@sha256:" + "9" * 64
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_stopped_database_restarts_before_web_with_unchanged_mounts_and_image(self) -> None:
+        self.select_stopped_database()
+        reviewed = self.review()
+        status, response = self.invoke(key="database-first")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        before = reviewed["result"]["plan"]["before"]
+        after = response["result"]["after"]
+        for field in ("container_id", "image_id", "image_reference", "configuration_sha256"):
+            self.assertEqual(after[field], before[field])
+        self.assertNotEqual(after["started_at"], before["started_at"])
+        self.assertFalse(self.provider.config["State"]["Running"])
+        self.assertEqual(self.invoke(key="database-first")[1]["replayed"], True)
+        self.health.assert_not_called()
+        self.payload.update(service="web", mode="dry-run")
+        self.payload.pop("reviewed_plan_sha256")
+        self.review()
+        self.assertEqual(self.invoke(key="web-after-database")[1]["result"]["status"], "pass")
+        self.assertEqual(
+            [write["payload"]["containerId"] for write in self.provider.writes],
+            [before["container_id"], self.provider.container_id],
+        )
+        self.health.assert_called_once()
+
+    def test_database_lost_reply_reconciles_running_container_without_second_post(self) -> None:
+        self.select_stopped_database()
+        self.review()
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="database-lost-reply")[0], 409)
+        assert self.provider.database is not None
+        self.provider.database["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+        self.record_newer_attempt(code=deploy_blocked_code("compose_keys_missing"))
+        self.payload["mode"] = "reconcile"
+        status, response = self.invoke(key="database-lost-reply")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_database_requires_stopped_deployment_bound_container_and_matching_web(self) -> None:
+        mutations: tuple[Callable[[dict[str, Any]], object], ...] = (
+            lambda database: database["State"].update(Running=True),
+            lambda database: database.update(Created="2026-10-10T00:02:00Z"),
+            lambda database: database.pop("Created"),
+            lambda database: database["State"].pop("Health"),
+            lambda database: database["Config"]["Labels"].update(
+                {"com.docker.compose.project": "other"}
+            ),
+            lambda database: database["Config"]["Labels"].update(
+                {"com.docker.compose.oneoff": "True"}
+            ),
+            lambda database: self.provider.config["Config"].update(Env=[]),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.provider.config = RestartProvider(self.expected).config
+                self.select_stopped_database()
+                assert self.provider.database is not None
+                mutate(self.provider.database)
+                self.assertEqual(self.invoke()[0], 409)
+                self.assertEqual(self.provider.writes, [])
+
+    def test_two_database_containers_refuse_without_dispatch(self) -> None:
+        self.select_stopped_database()
+        assert self.provider.database is not None
+        original_request = self.provider.request
+
+        def request_with_duplicate_database(**kwargs: Any) -> Any:
+            response = original_request(**kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [*response, {"containerId": "f" * 64}]
+            if (
+                kwargs["path"] == "/api/docker.getConfig"
+                and kwargs["query"]["containerId"] == "f" * 64
+            ):
+                value = deepcopy(self.provider.database)
+                assert value is not None
+                value["Id"] = "f" * 64
+                return [value]
+            return response
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request", side_effect=request_with_duplicate_database
+        ):
+            self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_new_provider_effect_after_review_refuses_apply(self) -> None:
+        self.review()
+        self.record_newer_attempt(code="deploy_failed")
+        self.assertEqual(self.invoke(key="provider-changed")[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_database_started_since_review_refuses_before_dispatch(self) -> None:
+        self.select_stopped_database()
+        self.review()
+        assert self.provider.database is not None
+        self.provider.database["State"]["Running"] = True
+        self.assertEqual(self.invoke(key="database-already-running")[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_database_dependency_excludes_generic_web_and_production(self) -> None:
+        self.select_stopped_database()
+        profile = self.store.read_product_profile_record(self.expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"driver_id": "generic-web"})
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.store.write_product_profile_record(profile)
+        expected = seed_lane(self.store, instance="prod")
+        self.provider.config = RestartProvider(expected).config
+        self.payload["instance"] = "prod"
+        self.record_acceptance(expected)
+        self.payload["service"] = "web"
+        status, response = self.invoke()
+        self.assertEqual(status, 200, response)
+        self.select_stopped_database()
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_route_preserves_fixed_planner_refusal(self) -> None:
+        from control_plane.lane_service_restart import ServiceRestartRefused
+
+        error = ServiceRestartRefused("The lane has no settled current deployment.")
+        with patch(
+            "control_plane.http_routes.lane_service_restart.plan_service_restart", side_effect=error
+        ):
+            status, response = self.invoke()
+        self.assertEqual(status, 409)
+        self.assertEqual(response["error"]["code"], "restart_refused")
+        self.assertEqual(response["error"]["message"], str(error))
 
     def test_legacy_container_identity_keeps_its_reviewed_restart_digest(self) -> None:
         # A container deployed before the two-slot contract has no slot fields.
@@ -555,13 +875,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(self.invoke()[0], 409)
         self.assertEqual(self.provider.writes, [])
 
-    def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
-        expected = seed_lane(self.store, instance="prod")
-        self.provider.config["Config"]["Env"] = [
-            f"{k}={v}" for k, v in runtime_identity_env(expected).items()
-        ]
-        self.payload["instance"] = "prod"
-        self.assertEqual(self.invoke()[0], 409)
+    def record_acceptance(self, expected: RuntimeIdentity) -> ReleaseReviewDecisionRecord:
         version = ReleaseVersion(
             artifact_id=expected.artifact_id, source_commit=expected.source_git_ref
         )
@@ -584,6 +898,16 @@ class ServiceRestartTests(unittest.TestCase):
             decided_at="2026-10-10T00:00:00Z",
         )
         self.store.write_release_review_decision_record(decision)
+        return decision
+
+    def test_production_requires_acceptance_of_the_current_artifact(self) -> None:
+        expected = seed_lane(self.store, instance="prod")
+        self.provider.config["Config"]["Env"] = [
+            f"{k}={v}" for k, v in runtime_identity_env(expected).items()
+        ]
+        self.payload["instance"] = "prod"
+        self.assertEqual(self.invoke()[0], 409)
+        decision = self.record_acceptance(expected)
         status, response = self.invoke()
         self.assertEqual(status, 200, response)
         self.assertEqual(response["result"]["plan"]["acceptance_record_id"], decision.record_id)
@@ -721,6 +1045,20 @@ class ServiceRestartTests(unittest.TestCase):
                             "finished_at": "2026-10-10T00:04:00Z",
                         }
                     ),
+                }
+            )
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        replacement = self.store.read_deployment_record(replacement_identity.deployment_record_id)
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "deployment_record_id": replacement.record_id,
+                    "runtime_identity": replacement_identity,
+                    "deploy": replacement.deploy,
+                    "updated_at": replacement.deploy.finished_at,
                 }
             )
         )

@@ -59,6 +59,11 @@ from control_plane.dokploy.api import (
     is_transient_dokploy_error,
 )
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.memory_capacity import (
+    PreviewMemoryCapacityRefused,
+    preview_memory_failure_details,
+)
+from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_MESSAGES
 from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
@@ -2499,6 +2504,9 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        return _preview_failure(plan, error.code)
     except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
         return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
@@ -2517,6 +2525,8 @@ def _run_preview_operation(
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
     summary = record_failure_summary(code)
+    if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
+        summary += preview_memory_failure_details(plan)
     if code == "preview_config_refused":
         keys = env_key_names(cast(list[object], plan.get("missing_keys", [])))
         plan["missing_keys"] = list(keys)
@@ -2633,6 +2643,10 @@ def _run_generic_web_preview_operation(
                 profile=profile,
             )
             status = str(result.get("destroy_status") or "")
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        plan["preview_result_status"] = "refused"
+        return _preview_failure(plan, error.code)
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
@@ -2899,6 +2913,7 @@ def run_product_reconcile_once(
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
             *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            *PREVIEW_MEMORY_FAILURE_MESSAGES,
             "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
