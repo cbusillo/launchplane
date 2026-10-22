@@ -56,6 +56,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
         )
         self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])
         self.unavailable = self.evidence["readback_failure_kind"] == "unavailable"
+        self.code = self.predicate.value + "_" + self.evidence["readback_failure_kind"]
 
 
 class NativeSourceExceedsBound(NativeSourceUnavailable):

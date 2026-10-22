@@ -3890,8 +3890,11 @@ else:
         qualified = self.inspect()
         self.assertEqual(set(qualified), set(self.fixture.containers))
         self.fixture.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.NETWORK_REACH)
 
     def test_another_container_on_the_private_network_is_refused(self) -> None:
         original = self.host["one_inspection"]

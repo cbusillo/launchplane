@@ -383,7 +383,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
             for key, value in evidence.items()
             if _safe_odoo_post_deploy_marker(key, value)
         }
-        self.evidence = readback_failure_evidence(self.evidence)
+        if not any(key != "log_available" for key in self.evidence):
+            self.evidence = readback_failure_evidence(self.evidence)
         for key in ("schedule_id", "schedule_deployment_key", "schedule_deployment_id"):
             value = _bounded_dokploy_evidence_id(evidence.get(key, ""))
             if value:

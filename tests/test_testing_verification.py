@@ -426,6 +426,35 @@ class TestingVerificationTests(TestingVerificationScenario):
 
 
 class TestingVerificationHttpTests(TestingVerificationScenario, unittest.IsolatedAsyncioTestCase):
+    async def test_native_copy_predicate_is_returned_without_publishing_or_private_text(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        for kind in ("refused", "unavailable"):
+            with self.subTest(kind=kind):
+                cause = NativeProgramFailed(
+                    "private-provider-value", predicate=ReadbackPredicate.RUNNER_RUNNING, kind=kind
+                )
+                with patch(
+                    "control_plane.testing_verification.inspect_native_testing_receiver",
+                    side_effect=cause,
+                ):
+                    result = await request(
+                        self.fixture.app,
+                        "POST",
+                        ROUTE.format(product=self.profile.product),
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload=self.verification_request.model_dump(mode="json"),
+                    )
+                self.assertEqual(result.status_code, 409)
+                self.assertEqual(result.json()["error"]["code"], cause.code)
+                self.assertNotIn("private-provider-value", result.text)
+                self.assertEqual(
+                    self.store.read_deployment_record(self.deployment.record_id), self.deployment
+                )
+
     async def test_lost_executor_connection_keeps_bounded_refusal_code(self) -> None:
         from sqlalchemy.exc import SQLAlchemyError
 

@@ -152,16 +152,31 @@ def main() -> int:
         print(json.dumps(receipt))
         return 0 if args.mode == "dry-run" or safe.get("integration_readback_ok") == "true" else 1
     except urllib.error.HTTPError as error:
-        transport["emit_http_error_payload"](
-            operation="odoo-copy-connections", request=request, exc=error
+        try:
+            error_payload = transport["summarize_http_error"](
+                operation="odoo-copy-connections", request=request, exc=error
+            )
+        except transport["LaunchplaneSafetyError"]:
+            error_payload = {"status": "unverified", "mode": args.mode}
+        error_payload["evidence"] = readback_failure_evidence(
+            {
+                "readback_failed_predicate": ReadbackPredicate.SERVICE_RESPONSE,
+                "readback_failure_kind": "unavailable",
+            }
         )
+        print(json.dumps(error_payload))
     except (ValueError, KeyError, TypeError, OSError, urllib.error.URLError):
         print(
             json.dumps(
                 {
                     "status": "unverified",
                     "mode": args.mode,
-                    "evidence": readback_failure_evidence({}),
+                    "evidence": readback_failure_evidence(
+                        {
+                            "readback_failed_predicate": ReadbackPredicate.SERVICE_RESPONSE,
+                            "readback_failure_kind": "unavailable",
+                        }
+                    ),
                     "message": "Inspect the original operation; retain its evidence and idempotency key.",
                 }
             )

@@ -18,7 +18,6 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.dokploy import api as dokploy_api, post_deploy as dokploy_post_deploy
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
@@ -725,8 +724,6 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 "schedule_id": "schedule-example",
                 "log_available": "true",
                 "odoo_module_update_completed": "false",
-                "readback_failed_predicate": ReadbackPredicate.SCHEDULE_EVIDENCE,
-                "readback_failure_kind": "unavailable",
             },
         )
 

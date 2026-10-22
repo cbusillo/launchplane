@@ -209,5 +209,5 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(frame, {"type": "denied"})
         self.assertEqual(len(commands), 1)
         frame, commands = self.run_host(mode="stop")
-        self.assertEqual(frame, {"type": "failed"})
+        self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))

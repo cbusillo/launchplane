@@ -160,7 +160,7 @@ class CandidateHostProbeTests(unittest.TestCase):
             "password authentication failed for user fixture"
         )
         self.container_probe = container_probe
-        self.assertEqual(self.failure_frame(), {"type": "failed"})
+        self.assertEqual(self.failure_frame()["kind"], "unavailable")
 
     def test_integration_readback_errors_fail_before_the_credential_program(self) -> None:
         for error in (
@@ -171,7 +171,7 @@ class CandidateHostProbeTests(unittest.TestCase):
             with self.subTest(error=error):
                 self.integration_error = error
                 self.fixture.calls.clear()
-                self.assertEqual(self.failure_frame(), {"type": "failed"})
+                self.assertEqual(self.failure_frame()["kind"], "unavailable")
                 self.assertFalse(
                     any(
                         probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls
@@ -194,8 +194,11 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.fixture.containers["web"]["HostConfig"]["PortBindings"] = {
             "8069/tcp": [{"HostPort": "8069"}]
         }
-        with self.assertRaises(RuntimeError):
-            self.run_probe()
+        frame = self.failure_frame()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(frame["predicate"], ReadbackPredicate.PORTS)
+        self.assertEqual(frame["kind"], "refused")
         self.assertFalse(
             any(probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls)
         )

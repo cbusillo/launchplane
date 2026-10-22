@@ -29,7 +29,7 @@ from control_plane.connection_isolation_qualification import (
     RESOURCE_QUALIFICATION_PROGRAM,
     resource_inventory_script,
 )
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
 
 
 CONNECTION_ISOLATION_SCHEDULE_NAME = "platform-odoo-connection-isolation"
@@ -103,17 +103,26 @@ readback_predicate={ReadbackPredicate.WEB_SELECTED}
 web=$(resolve web)
 readback_predicate={ReadbackPredicate.RUNNER_RUNNING}
 runner_running=$(docker inspect -f '{{{{.State.Running}}}}' "$runner")
-if [ "$runner_running" != true ]; then
+if [ "$runner_running" = false ]; then
     readback_failure_kind=refused
     exit 1
 fi
+[ "$runner_running" = true ] || exit 1
 readback_predicate={ReadbackPredicate.RUNNER_IDLE}
 {post_deploy.odoo_testing_idle_runner_script("runner")}
 readback_predicate={ReadbackPredicate.RESOURCES}
 {resource_inventory_script(program=RESOURCE_QUALIFICATION_PROGRAM)}
 if [ "$mode" = apply ]; then
-    [ "$(docker inspect -f '{{{{.Image}}}}' "$web")" = "$(docker inspect -f '{{{{.Image}}}}' "$runner")" ] || exit 1
+    readback_predicate={ReadbackPredicate.IMAGE}
+    web_image=$(docker inspect -f '{{{{.Image}}}}' "$web")
+    runner_image=$(docker inspect -f '{{{{.Image}}}}' "$runner")
+    if [ "$web_image" != "$runner_image" ]; then
+        readback_failure_kind=refused
+        exit 1
+    fi
+    readback_predicate={ReadbackPredicate.WEB_STOPPED}
     docker stop "$web" >/dev/null
+    readback_predicate={ReadbackPredicate.GATE_REMOVED}
     docker exec -u root "$runner" rm -f {shlex.quote(INTEGRATION_READBACK_PASSED_PATH)}
 fi
 isolation_status=0
@@ -249,22 +258,46 @@ def run_connection_isolation(
         "enabled": False,
         "timezone": "UTC",
     }
-    evidence = post_deploy.run_manual_data_schedule(
-        host=host,
-        token=token,
-        target_definition=target_definition,
-        schedule_lookup_id=lookup_id,
-        schedule_type=schedule_type,
-        schedule_name=name,
-        schedule_app_name=app_name,
-        schedule_payload=schedule_payload,
-        resolved_schedule_execution_timeout_seconds=300,
-        before_provider_mutation=before_mutation if mode == "apply" else None,
-    )
+    try:
+        evidence = post_deploy.run_manual_data_schedule(
+            host=host,
+            token=token,
+            target_definition=target_definition,
+            schedule_lookup_id=lookup_id,
+            schedule_type=schedule_type,
+            schedule_name=name,
+            schedule_app_name=app_name,
+            schedule_payload=schedule_payload,
+            resolved_schedule_execution_timeout_seconds=300,
+            before_provider_mutation=before_mutation if mode == "apply" else None,
+        )
+    except post_deploy.OdooPostDeployReadbackFailure as error:
+        raise post_deploy.OdooPostDeployReadbackFailure(
+            "Connection isolation observation did not pass.",
+            evidence=readback_failure_evidence(error.evidence),
+        ) from None
+    except api.DokployScheduleExecutionFailed as error:
+        if mode == "apply":
+            raise
+        predicate = {
+            "trigger_rejected": ReadbackPredicate.SCHEDULE_TRIGGER,
+            "trigger_baseline_unavailable": ReadbackPredicate.SCHEDULE_BASELINE,
+        }.get(error.cause, ReadbackPredicate.SCHEDULE_TERMINAL)
+        raise post_deploy.OdooPostDeployReadbackFailure(
+            "Connection isolation schedule observation is incomplete.",
+            evidence={
+                "readback_failed_predicate": predicate,
+                "readback_failure_kind": "refused"
+                if error.cause == "trigger_rejected"
+                else "unavailable",
+                "schedule_id": error.schedule_id,
+                "schedule_deployment_id": error.deployment_id,
+            },
+        ) from None
     evidence["connection_isolation_plan_sha256"] = plan_digest
     if evidence.get("connection_isolation_resources_ok") != "true":
         raise post_deploy.OdooPostDeployReadbackFailure(
-            "Testing resources were not qualified.", evidence=evidence
+            "Testing resources were not qualified.", evidence=readback_failure_evidence(evidence)
         )
     if evidence.get("integration_readback_ok") not in {"true", "false"}:
         raise post_deploy.OdooPostDeployReadbackFailure(
@@ -278,12 +311,20 @@ def run_connection_isolation(
     if mode != "dry-run":
         if evidence.get("connection_isolation_ok") != "true":
             raise post_deploy.OdooPostDeployReadbackFailure(
-                "Connection isolation did not prove success.", evidence=evidence
+                "Connection isolation did not prove success.",
+                evidence=readback_failure_evidence(evidence),
             )
-        post_deploy.require_integration_readback_evidence(evidence, policy)
+        try:
+            post_deploy.require_integration_readback_evidence(evidence, policy)
+        except post_deploy.OdooPostDeployReadbackFailure as error:
+            raise post_deploy.OdooPostDeployReadbackFailure(
+                "Connection isolation integration observation did not pass.",
+                evidence=readback_failure_evidence(error.evidence),
+            ) from None
     elif evidence.get("connection_isolation_ok") not in {"true", "false"}:
         raise post_deploy.OdooPostDeployReadbackFailure(
-            "Connection isolation dry-run returned no evidence.", evidence=evidence
+            "Connection isolation dry-run returned no evidence.",
+            evidence=readback_failure_evidence(evidence),
         )
     return evidence
 

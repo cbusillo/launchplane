@@ -72,7 +72,7 @@ new record, account, policy change or alternate identity:
 | `testing_task_physical_copy_unverified` | Fixed host inspection could not qualify the exact copy, storage, network, image or login-history read. Preserve the copy and inspect the original operation. |
 | `runner_running` | The selected physical-copy script runner was observed stopped. Inspect its lifecycle and logs before a separately authorized runtime recovery; no SQL or sign-in verdict was observed. |
 | `resources_qualified`, `copy_*`, `database_*`, `backing_*`, `storage_*` | The fixed physical-copy reader identifies its individual resource predicate. `blocked` means an observed negative; `unknown` means that predicate could not be read. The description carries the same value-free observation. |
-| `native_inspection_complete`, `runner_capabilities_available` | The native transport or selected runner probe returned no usable evidence. Keep downstream isolation and use unknown, and preserve the copy and original operation. |
+| `native_inspection_complete`, `runner_capabilities_available` | The native transport or selected runner probe returned no usable evidence. This observation supplies no isolation or usage verdict. Independent steps keep their own observations; preserve the copy and original operation. |
 | `testing_task_runtime_unavailable` | The current provider runtime or recipient could not be verified. Compare recorded and observed testing identity. |
 | `testing_task_origin_unverified` | The recorded HTTPS origin could not be verified on the selected testing target. Read its route/domain evidence. |
 | `testing_task_database_unverified` | Recorded and running testing database names are missing, unreadable or disagree. Read configuration metadata without credential values. |

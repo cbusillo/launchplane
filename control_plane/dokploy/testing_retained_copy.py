@@ -174,8 +174,8 @@ try:
 except PermissionError:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
-except Exception:
-    print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+except Exception as error:
+    print(sys.argv[2]+json.dumps(copy_readback_failure_frame(error)),flush=True)
 """
     )
 

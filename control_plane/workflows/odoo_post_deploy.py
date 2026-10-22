@@ -33,6 +33,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     fresh_testing_override_record,
@@ -502,6 +503,12 @@ def execute_odoo_post_deploy(
                         spec=spec,
                         before_mutation=before_provider_effect,
                     )
+                except NativeProgramFailed as error:
+                    raise click.ClickException(
+                        "Native testing copy predicate "
+                        + error.code
+                        + "; retain the original generation and capture receipt."
+                    ) from None
                 except ValueError:
                     raise click.ClickException(
                         "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."

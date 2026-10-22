@@ -485,27 +485,28 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         )
 
-    def test_stopped_runner_inspection_identifies_predicate_without_exec_or_private_text(
+    def test_stopped_or_unreadable_runner_identifies_predicate_without_exec(self) -> None:
+        self.spec.update(inspection_only=True, usage_only=True)
+        for state, kind in (("exited", "refused"), (None, "unavailable")):
+            with self.subTest(state=state):
+                self.containers["script-runner"]["State"] = {"Status": state}
+                self.calls.clear()
+                status, output = self.run_program()
+                self.assertNotEqual(status, 0)
+                frames = [json.loads(line.removeprefix("fixture:")) for line in output.splitlines()]
+                self.assertEqual(frames[0].get("predicate"), ReadbackPredicate.RUNNER_RUNNING)
+                self.assertEqual(frames[0].get("kind"), kind)
+                self.assertFalse(any(call[:2] == ["docker", "exec"] for call in self.calls))
+
+    def test_cleanup_inspection_distinguishes_observed_missing_database_from_unreadable_history(
         self,
     ) -> None:
-        self.spec.update(inspection_only=True, usage_only=True)
-        self.containers["script-runner"]["State"] = {"Status": "exited"}
-        command = self.command
-
-        def stopped(arguments: list[str], **kwargs: Any) -> Any:
-            if arguments[:3] == ["docker", "exec", "script-runner"]:
-                return subprocess.CompletedProcess(
-                    arguments, 1, stdout=b"", stderr=b"private-provider-value"
-                )
-            return command(arguments, **kwargs)
-
-        with patch.object(self, "command", side_effect=stopped):
-            status, output = self.run_program()
+        self.spec.update(inspection_only=True, task_account_cleanup=True)
+        status, output = self.run_program()
         self.assertNotEqual(status, 0)
-        frames = [json.loads(line.removeprefix("fixture:")) for line in output.splitlines()]
-        self.assertEqual(frames[0].get("predicate"), ReadbackPredicate.RUNNER_RUNNING)
-        self.assertNotIn("private-provider-value", output)
-        self.assertFalse(any(call[:2] == ["docker", "exec"] for call in self.calls))
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.CLEANUP_DATABASE)
+        self.assertEqual(frame["kind"], "refused")
 
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,

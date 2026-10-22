@@ -8,6 +8,7 @@ from control_plane.disposable_lanes import (
 )
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.lane_usage import lane_usage_protected
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 
 def require_connection_isolation_lane(
@@ -241,7 +242,9 @@ snapshot=$(set -e
 """ + (
         'qualification=$(printf \'%s\n\' "$snapshot" | docker exec -i "$runner" python3 -I -c '
         + shlex.quote(program)
-        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources") || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate=resources_qualified\\nreadback_failure_kind=unavailable\\n" >&2; exit 1; }\n'
+        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources") || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate='
+        + ReadbackPredicate.RESOURCES
+        + '\\nreadback_failure_kind=unavailable\\n" >&2; exit 1; }\n'
         + 'read -r resource_digest database_address <<< "$qualification"\n'
         + '[[ "$resource_digest" =~ ^[a-f0-9]{64}$ ]] || inventory_refused qualification_unverified\n'
         + 'printf "connection_isolation_resources_ok=true\\nconnection_isolation_resource_sha256=%s\\n" "$resource_digest"\n'
