@@ -79,7 +79,9 @@ def build_feedback_payloads(
                 "repository": repository,
                 "base_branch": base_branch,
                 "pull_request_number": pull_request_number,
-                "event": "blocked",
+                "event": "waiting"
+                if _as_dict(result.get("details")).get("base_checks_status") in {"fail", "unknown"}
+                else "blocked",
                 "controller_action": controller_action,
                 "controller_record_id": controller_record_id,
                 "message": held_out_message,
@@ -218,7 +220,9 @@ def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
         return "waiting"
     if controller_action == "recover_candidate_block":
         return "waiting" if _as_dict(result.get("details")).get("block_removed") is True else "skip"
-    if result.get("reason_code") in {"base_checks_not_green", "base_failure_exploration_exhausted"}:
+    if result.get("reason_code") == "base_failure_exploration_exhausted":
+        return "waiting"
+    if result.get("reason_code") == "base_checks_not_green":
         return (
             "waiting"
             if _as_dict(result.get("details")).get("base_checks_status") == "pending"
@@ -451,10 +455,7 @@ def _held_out_messages(
             # Nothing for its author to do; it joins the next candidate.
             continue
         if held_out_entry.get("reason") == "failure_isolation":
-            if result.get("reason_code") in {
-                "base_failure_exploration",
-                "base_failure_exploration_exhausted",
-            }:
+            if _as_dict(result.get("details")).get("base_checks_status") in {"fail", "unknown"}:
                 messages.append(
                     (
                         number,

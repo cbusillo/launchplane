@@ -1238,8 +1238,9 @@ unrelated optional workflows cannot change its classification:
   their separate current-comparison facet when configured. If a required
   candidate identity fails there too, its evidence is unproved, or the base's
   required checks are pending or missing, no pull request gets `blocked_label`.
-  A successful read returning fail, pending or unknown can start the bounded
-  exploration below. A provider/read exception stops with
+  A successful read returning fail or unknown can start the bounded
+  exploration below. Pending base checks retain their ordinary wait. A
+  provider/read exception stops with
   `reason_code: base_checks_not_green`; an error is never permission to explore.
   Without conclusive current candidate failure evidence naming actual required
   identities, exploration also stays stopped. A lone failed eligible member stays
@@ -1251,8 +1252,9 @@ unrelated optional workflows cannot change its classification:
   when another queued change still fails. Each probe uses current eligibility,
   Ready and Client evidence, release/manual holds, stack discovery or the exact
   recorded collapse proof, and the ordinary candidate and protected landing
-  gates. Existing conflict and dependency holds remain; only temporary
-  `failure_isolation` deferrals are reconsidered between failed probes. The
+  gates. Conflict holds survive only while their recorded preceding-head lineage
+  still matches; changed lineage is probed again. Dependency holds retain their
+  existing base/head binding. Only temporary `failure_isolation` deferrals are reconsidered between failed probes. The
   currently tested probe keeps the other roots deferred while it runs.
   History on the exact base commit, source head and compatible policy avoids
   repeating failed singleton inputs, including after a service restart. A
@@ -1260,10 +1262,12 @@ unrelated optional workflows cannot change its classification:
   Historical failure is scheduling evidence, never culprit proof. Fresh reads
   can still observe an earlier singleton's passing same-SHA CI rerun; its closed
   candidate uses the existing bounded replacement-ref recovery and retry budget.
-  Exploration does not dispatch a CI rerun itself. If every
-  eligible singleton has failed, `base_failure_exploration_exhausted` reports the
-  non-blaming stop without launching more unchanged probes. A new eligible head,
-  added repair, changed base or incompatible policy supplies new inputs;
+  Exploration does not dispatch a CI rerun itself. Unsupported stacks and stacks
+  awaiting preparation or other evidence defer to later eligible roots; their
+  failed parent is retired only when replacement work makes progress. When no
+  further singleton probe is currently plannable, `base_failure_exploration_exhausted`
+  reports a non-blaming wait without claiming that every root failed or launching
+  more unchanged probes. A new eligible head, added repair, changed base or incompatible policy supplies new inputs;
   operational policy changes that retain the existing authority binding retain
   their history. Fresh successful base evidence permits ordinary green-base
   isolation. This finite sweep does not promise to find repairs that require an

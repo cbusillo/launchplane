@@ -168,9 +168,6 @@ class RecoveryDiagnosticsTests(TestCase):
         return self.store.list_merge_train_controller_state_records()[0]
 
     def test_base_wait_survives_release_restart_and_repeated_heartbeats(self) -> None:
-        self.client.read_base_check_observation.side_effect = MergeTrainGitHubError(
-            "base read unavailable", status_code=503
-        )
         result = self.run_pass()
         state = self.state()
         diagnosis = state.last_result
@@ -178,7 +175,7 @@ class RecoveryDiagnosticsTests(TestCase):
         self.assertEqual(state.status, "idle")
         self.assertFalse(state.lease_owner)
         self.assertEqual(diagnosis.reason_code, "base_checks_not_green")
-        self.assertEqual(diagnosis.base_checks_status, "unknown")
+        self.assertEqual(diagnosis.base_checks_status, "pending")
         self.assertEqual(diagnosis.source_failed_record_id, self.failed.record_id)
         self.assertEqual(result["last_controller_result"], diagnosis.model_dump(mode="json"))
         self.store = FilesystemRecordStore(self.path)
@@ -197,17 +194,6 @@ class RecoveryDiagnosticsTests(TestCase):
         )
         self.assertEqual(read_model.last_controller_result, self.state().last_result)
         self.assertEqual(read_model.last_controller_result_policy_status, "current")
-
-    def test_semantic_pending_base_records_nonblaming_exploration(self) -> None:
-        result = self.run_pass()
-        diagnosis = self.state().last_result
-        assert diagnosis is not None
-        self.assertEqual(result["controller_action"], "plan_candidate")
-        self.assertEqual(diagnosis.reason_code, "base_failure_exploration")
-        self.assertEqual(diagnosis.recovery_kind, "base_failure_exploration")
-        self.assertEqual(diagnosis.base_checks_status, "pending")
-        self.assertEqual(diagnosis.source_failed_record_id, self.failed.record_id)
-        self.client.add_pull_request_label.assert_not_called()
 
     def test_pending_original_heads_stop_before_candidate_or_base_reads(self) -> None:
         snapshot = self.train.snapshot
@@ -305,13 +291,9 @@ class RecoveryDiagnosticsTests(TestCase):
         )
 
     def test_real_replacement_advances_the_semantic_progress_time(self) -> None:
-        self.client.read_base_check_observation.side_effect = MergeTrainGitHubError(
-            "base read unavailable", status_code=503
-        )
         self.run_pass()
         waiting = self.state().last_result
         assert waiting is not None
-        self.client.read_base_check_observation.side_effect = None
         self.client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
             "pass"
         )

@@ -5862,7 +5862,11 @@ def _recover_failed_merge_train_candidate(
         base_check_diagnostic = "Required base check evidence could not be read."
     lease.observe(base_checks_status=base_check_status)
     if base_check_status != "pass":
-        if base_read_succeeded and failures.attribution_requirements:
+        if (
+            base_read_succeeded
+            and base_check_status != "pending"
+            and failures.attribution_requirements
+        ):
             exploration = _explore_nonpassing_base_candidates(
                 stack_collapse_store=stack_collapse_store,
                 transport=transport,
@@ -6074,6 +6078,11 @@ def _explore_nonpassing_base_candidates(
                 lease=lease,
             )
             if recovered is not None and recovered["controller_action"] != "candidate_failed":
+                recovered_details = recovered.get("details")
+                recovered["details"] = {
+                    **details,
+                    **(recovered_details if isinstance(recovered_details, dict) else {}),
+                }
                 if mutate:
                     replacement_id = recovered.get("merge_train_batch_candidate_record_id")
                     lease.checkpoint(
@@ -6108,22 +6117,10 @@ def _explore_nonpassing_base_candidates(
             discovery = discover_merge_train_stack(
                 policy=policy, snapshot=available_snapshot, root_pull_request_number=entry.number
             )
-            if discovery.status != "not_stacked":
-                if mutate:
-                    lease.checkpoint(
-                        active_action="reflow_candidate",
-                        active_phase="retire_reflowed_failed_lineage",
-                        active_record_id=active_candidate_record.record_id,
-                        active_pull_request_number=None,
-                    )
-                    _supersede_active_merge_train_batch_candidate_records(
-                        record_store=candidate_store,
-                        repository=snapshot.repository,
-                        base_branch=snapshot.base_branch,
-                        batch_id=failed.batch_id,
-                        replacement_record_id=None,
-                    )
-                return _advance_from_live_snapshot(
+            if discovery.status == "unsupported":
+                continue
+            if discovery.status == "ready_for_collapse":
+                progress = _advance_from_live_snapshot(
                     request=MergeTrainControllerRunOnceEnvelope(
                         repository=snapshot.repository,
                         base_branch=snapshot.base_branch,
@@ -6141,6 +6138,32 @@ def _explore_nonpassing_base_candidates(
                     snapshot=trial_snapshot,
                     held_out=trial_holds,
                 )
+                if progress["controller_action"] not in {
+                    "plan_stack_collapse",
+                    "execute_stack_collapse",
+                    "admit_collapsed_root",
+                    "plan_candidate",
+                }:
+                    continue
+                if mutate:
+                    replacement_id = progress.get("merge_train_batch_candidate_record_id")
+                    lease.checkpoint(
+                        active_action="reflow_candidate",
+                        active_phase="retire_reflowed_failed_lineage",
+                        active_record_id=active_candidate_record.record_id,
+                        active_pull_request_number=None,
+                        step_payload={"replacement_record_id": replacement_id},
+                    )
+                    _supersede_active_merge_train_batch_candidate_records(
+                        record_store=candidate_store,
+                        repository=snapshot.repository,
+                        base_branch=snapshot.base_branch,
+                        batch_id=failed.batch_id,
+                        replacement_record_id=(
+                            replacement_id if isinstance(replacement_id, str) else None
+                        ),
+                    )
+                return progress
         candidate = build_merge_train_batch_candidate(
             dry_run_result=trial,
             base_sha=snapshot.base_sha,
@@ -6182,8 +6205,8 @@ def _explore_nonpassing_base_candidates(
         "reason_code": "base_failure_exploration_exhausted",
         "blocking_reason": {
             "code": "merge_train_base_failure_exploration_exhausted",
-            "message": "Every currently eligible singleton has failed on this base and policy; "
-            "queued pull requests are not blamed. A changed head, base or policy can be tried anew."
+            "message": "No further singleton probe is currently plannable on this base and policy. "
+            "Queued pull requests are not blamed; fresh evidence or changed inputs may allow progress."
             + (
                 f" {details['base_checks_diagnostic']}"
                 if details.get("base_checks_diagnostic")

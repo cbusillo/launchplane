@@ -409,12 +409,16 @@ class CulpritIsolationTests(unittest.TestCase):
         )
         assert train.stopped is not None
         self.assertEqual(train.stopped["reason_code"], "base_failure_exploration_exhausted")
-        self.assertIn("not blamed", train.stopped["blocking_reason"]["message"])
         self.assertEqual(train.stopped["details"]["base_sha"], train.snapshot.base_sha)
         feedback = build_feedback_payloads(response={"result": train.stopped})
         self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
-        self.assertTrue(all(payload["event"] == "blocked" for payload in feedback))
-        self.assertTrue(all("not blamed" in cast(str, payload["message"]) for payload in feedback))
+        self.assertTrue(all(payload["event"] == "waiting" for payload in feedback))
+        self.assertTrue(
+            all(
+                train.stopped["blocking_reason"]["message"] in cast(str, payload["message"])
+                for payload in feedback
+            )
+        )
 
     def test_nonpassing_observation_explores_but_base_read_exception_stops(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError
@@ -431,7 +435,7 @@ class CulpritIsolationTests(unittest.TestCase):
                     train.reason_codes,
                     [
                         "base_checks_not_green"
-                        if isinstance(status, Exception)
+                        if isinstance(status, Exception) or status == "pending"
                         else "base_failure_exploration"
                     ],
                 )
