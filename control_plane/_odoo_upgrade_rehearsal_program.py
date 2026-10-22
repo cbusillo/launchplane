@@ -107,7 +107,7 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
                         if not chunk:
                             selector.unregister(event.fileobj)
                         elif event.data=='error':
-                            errors=(errors+chunk)[-65536:]
+                            errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
                         else:
                             size+=len(chunk)
                             if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
@@ -115,7 +115,7 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
         status=process.wait(timeout=30)
         if status:
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=errors),None)
+                arguments,status,stdout=b'',stderr=diagnostic_tail(errors)),None)
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
@@ -322,36 +322,44 @@ def business_validation_precheck(spec,containers):
 
 
 def product_command(arguments, *, stdin=None):
-    # Discard product stderr and failed stdout, which can contain Client data.
     process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
     output=bytearray()
+    errors=b''
     try:
         if stdin is not None:
             process.stdin.write(stdin)
             process.stdin.close()
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout,selectors.EVENT_READ)
-            while True:
+            selector.register(process.stdout,selectors.EVENT_READ,'output')
+            selector.register(process.stderr,selectors.EVENT_READ,'error')
+            while selector.get_map():
                 remaining=deadline-time.monotonic()
-                if remaining<=0 or not selector.select(remaining):
+                events=selector.select(max(0,remaining))
+                if remaining<=0 or not events:
                     raise subprocess.TimeoutExpired('product validation',PRODUCT_COMMAND_TIMEOUT_SECONDS)
-                chunk=os.read(process.stdout.fileno(),65536)
-                if not chunk:
-                    break
-                if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
-                    raise ValueError('Product output exceeds its bound')
-                output.extend(chunk)
+                for event,_ in events:
+                    chunk=os.read(event.fd,65536)
+                    if not chunk:
+                        selector.unregister(event.fileobj)
+                    elif event.data=='error':
+                        errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
+                    else:
+                        if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
+                            raise ValueError('Product output exceeds its bound')
+                        output.extend(chunk)
         status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
         if status:
             raise ValueError('Product validation failed')
         return bytes(output)
-    except (ValueError,OSError,subprocess.TimeoutExpired):
-        raise RehearsalCommandFailure({'step':'business_validation',
-            'exit_status':process.returncode or -1,'error_text':'Product validation unavailable'}) from None
+    except (ValueError,OSError,subprocess.TimeoutExpired) as error:
+        diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
+            arguments,process.returncode or -1,stdout=b'',stderr=diagnostic_tail(errors)+b'\n'+str(error).encode()),None)
+        raise RehearsalCommandFailure({**diagnostic,'step':'business_validation'}) from None
     finally:
         process.stdout.close()
+        process.stderr.close()
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
         if process.poll() is None:

@@ -14,7 +14,15 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneObservationRequest,
 )
 from control_plane.disposable_lane_collection import disposable_collection_coverage
+from control_plane.contracts.application_resource_observation import ApplicationResourceObservation
 from control_plane.odoo_testing_usage import ODOO_USAGE_REASON_CODES
+
+
+def observation_body(payload: DisposableLaneObservationRequest) -> dict[str, object]:
+    excluded = {"expected_observation_sha256"} if payload.mode != "clear" else set()
+    if not payload.include_application_resources:
+        excluded.add("include_application_resources")
+    return payload.model_dump(mode="json", exclude=excluded)
 
 
 def main() -> int:
@@ -30,6 +38,11 @@ def main() -> int:
     parser.add_argument("--expected-binding-sha256", default="")
     parser.add_argument("--expected-observation-sha256", default="")
     parser.add_argument("--lifetime-seconds", type=int)
+    parser.add_argument(
+        "--application-resources",
+        action="store_true",
+        help="Observe existing testing application storage metadata without qualifying safety.",
+    )
     parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
     parser.add_argument(
         "--data", choices=("unknown", "reproducible", "only_copy"), default="unknown"
@@ -42,6 +55,10 @@ def main() -> int:
     for field in ("usage", "data", "isolation"):
         parser.add_argument(f"--{field}-evidence", default="")
     args = parser.parse_args()
+    if args.application_resources and (
+        args.mode != "collect" or args.instance != "testing" or args.preview_id
+    ):
+        parser.error("--application-resources requires collect for testing without a preview ID.")
     if args.mode == "record" and not args.preview_id:
         parser.error("Recording cleanup facts requires an exact preview ID.")
     if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):
@@ -74,10 +91,7 @@ def main() -> int:
             service_url=settings["service_url"],
             path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
             settings=settings,
-            body=payload.model_dump(
-                mode="json",
-                exclude={"expected_observation_sha256"} if payload.mode != "clear" else set(),
-            ),
+            body=observation_body(payload),
             timeout=30,
         )
         if args.mode == "clear":
@@ -106,6 +120,7 @@ def main() -> int:
                     **payload.model_dump(),
                     "mode": args.mode,
                     "expected_binding_sha256": digest,
+                    "include_application_resources": args.application_resources,
                     **(
                         {"lifetime_seconds": args.lifetime_seconds}
                         if args.lifetime_seconds is not None
@@ -129,10 +144,7 @@ def main() -> int:
                 service_url=settings["service_url"],
                 path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
                 settings=settings,
-                body=payload.model_dump(
-                    mode="json",
-                    exclude={"expected_observation_sha256"} if payload.mode != "clear" else set(),
-                ),
+                body=observation_body(payload),
                 timeout=240,
             )
         result = response["result"]
@@ -221,6 +233,13 @@ def main() -> int:
             qualification = "never_served_diagnostics_unavailable"
         if (reason_code == "never_served") != (qualification == "never_served"):
             raise ValueError("Never-served qualification and usage disagree.")
+        application_resources = {}
+        if args.application_resources:
+            application_resources["application_resources"] = (
+                ApplicationResourceObservation.model_validate(
+                    result.get("application_resources")
+                ).model_dump(mode="json")
+            )
         print(
             json.dumps(
                 {
@@ -232,6 +251,7 @@ def main() -> int:
                     "never_served_qualification": qualification,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    **application_resources,
                 }
             )
         )
