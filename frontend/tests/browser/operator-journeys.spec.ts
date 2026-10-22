@@ -234,12 +234,7 @@ test.describe("operator journeys", () => {
     });
     await expect(heading).toBeVisible();
     await expect(heading).toBeFocused();
-    await expect(
-      page.getByText(
-        "This browser does not invent a sample product or infer provider state.",
-        { exact: false },
-      ),
-    ).toBeVisible();
+    await expect(page.getByRole("list", { name: "Launchplane products" }).getByRole("listitem")).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Refresh product inventory" }),
     ).toBeVisible();
