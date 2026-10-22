@@ -5353,8 +5353,8 @@ keeps the earlier explicit targets, including the independently approved deliver
 drop and existing topics/retirement join `da72490fce13`. The held-drop approval
 procedure above remains independent.
 
-The immutable hostname revision `f0a4c8e2b6d9` still follows the preview revision
-`e8d2f6a0b4c7`; its immutable held-path join is `f1b5d9a3c7e0`. Empty join
+The prepared hostname revision `f0a4c8e2b6d9` still follows the preview revision
+`e8d2f6a0b4c7`; its prepared held-path join is `f1b5d9a3c7e0`. Empty join
 `f2c6e0a4b8d1` reconciles the topics and hostname branches without the held drop.
 Empty join `f3d7a1b5c9e2` reconciles that join with both existing held-path joins,
 providing one graph head. None of these four prepared revisions is an accepted
@@ -5379,6 +5379,14 @@ downgrade. Image rollback to this compatibility image keeps compatible-ahead
 schemas and payloads unchanged; a hostname schema that predates topics first
 receives the already-approved additive topics migration.
 
+The held-drop procedure above remains available from the earlier approved
+schemas. Before hostname activation reaches main, its release must also qualify
+an explicit held-drop application path for the hostname-only schemas it can
+leave behind, including image rollback. After activation, use that separately
+qualified release and its reviewed mapping for an independently approved drop;
+this compatibility entrypoint continues to refuse that transition. Do not bypass
+the refusal with direct Alembic or manual SQL.
+
 Before the first explicit public-host authority-key call, runtime provider
 operations acquire a shared transaction advisory schema-transition lock outside
 the validation savepoint. They retain it across provider I/O and reacquire it
@@ -5401,8 +5409,9 @@ Source delivery alone does not establish rollback compatibility for #4005.
 An authorized deployment session must record the immutable compatibility image,
 verify that every earlier HTTP replica and worker has been replaced, and retain
 that qualified image as activation's previous-image rollback target. A drain
-marker alone does not prove older hostname writers have gone. Both new migration
-files remain byte-identical between the compatibility and activation changes.
+marker alone does not prove older hostname writers have gone. All four new
+migration files remain byte-identical between the final qualified compatibility
+and activation changes, preserving the compatibility graph as an exact prefix.
 A release that changes startup's migration target can activate the transition
 during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
