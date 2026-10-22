@@ -241,6 +241,11 @@ def _runtime_secret_binding(*, status: SecretStatus = "configured") -> SecretBin
 
 
 class GenericWebPreviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
+        )
+
     def test_backward_refusal_is_blocked_and_cached_without_provider_or_generation_changes(
         self,
     ) -> None:

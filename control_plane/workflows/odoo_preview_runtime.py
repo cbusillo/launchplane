@@ -66,6 +66,7 @@ from control_plane.dokploy.preview_inventory import (
     complete_preview_compose_inventory as _complete_preview_compose_inventory,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import memory_capacity
 from control_plane.dokploy.network_capacity import require_bridge_network_capacity
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.dokploy import source as dokploy_source
@@ -1164,6 +1165,7 @@ def execute_odoo_preview_dokploy_apply(
             propagate_domain_lookup_error=propagate_domain_lookup_error,
         )
     return _execute_refresh(
+        database_url=database_url,
         host=host,
         token=token,
         request=request,
@@ -1572,6 +1574,7 @@ def _execute_refresh(
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    database_url: str | None = None,
 ) -> OdooPreviewDokployApplyResult:
     guard = provider_mutation_guard or nullcontext
     plan = request.dry_run_plan
@@ -1604,6 +1607,7 @@ def _execute_refresh(
             target_id=source_compose_id,
         )
         compose_id, created_compose = _resolve_or_create_compose(
+            database_url=database_url,
             host=host,
             token=token,
             plan=plan,
@@ -1921,6 +1925,7 @@ def _resolve_or_create_compose(
     template_payload: JsonObject,
     steps: list[OdooPreviewDokployApplyStep],
     provider_effect_checkpoint: Callable[[str], None],
+    database_url: str | None = None,
 ) -> tuple[str, bool]:
     if not plan.compose_ref.startswith("${created.composeId:"):
         return plan.compose_ref, False
@@ -1941,6 +1946,9 @@ def _resolve_or_create_compose(
         )
     require_bridge_network_capacity(
         host=host, token=token, server_id=server_id, required_networks=1
+    )
+    memory_capacity.require_preview_host_memory_capacity(
+        host=host, token=token, server_id=server_id, database_url=database_url
     )
     provider_effect_checkpoint("compose_create")
     created = dokploy_api.dokploy_request(

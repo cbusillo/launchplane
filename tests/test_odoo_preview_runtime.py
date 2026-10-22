@@ -391,6 +391,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
+        )
         from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
 
         self.enterContext(

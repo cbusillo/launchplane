@@ -53,6 +53,7 @@ from control_plane.workflows.preview_resource_destroy import (
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
+from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.api import JsonObject, JsonValue
@@ -508,6 +509,7 @@ def _ensure_application(
     app_name: str,
     description: str,
     template_application: JsonObject,
+    record_store: GenericWebPreviewProfileStore | None = None,
 ) -> tuple[JsonObject, bool]:
     existing = _find_application_by_name(host=host, token=token, application_name=application_name)
     if existing is not None:
@@ -532,6 +534,9 @@ def _ensure_application(
     }
     if server_id:
         application_payload["serverId"] = server_id
+    memory_capacity.require_preview_host_memory_capacity(
+        host=host, token=token, server_id=server_id, record_store=record_store
+    )
     created = dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -1548,6 +1553,7 @@ def _execute_generic_web_preview_refresh_unserialized(
             runtime_identity=preview_runtime_identity,
         )
         application, created_application = _ensure_application(
+            record_store=record_store,
             host=host,
             token=token,
             application_name=application_name,
@@ -1621,7 +1627,7 @@ def _execute_generic_web_preview_refresh_unserialized(
         lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
-    except click.ClickException as exc:
+    except (click.ClickException, memory_capacity.PreviewMemoryCapacityRefused) as exc:
         rollback_errors: list[str] = []
         if created_domain_id:
             try:
