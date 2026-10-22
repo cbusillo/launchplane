@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 from click import ClickException
 
+from control_plane import dokploy as control_plane_dokploy
+
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -2279,11 +2281,17 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 ) as latest_deployment_mock,
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
-                    return_value=(
-                        "starting deployment",
-                        "SMTP_PASSWORD=smtp-secret deployment complete",
-                    ),
+                    wraps=control_plane_dokploy.fetch_dokploy_deployment_logs,
                 ) as deployment_logs_mock,
+                patch(
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "starting deployment",
+                            "SMTP_PASSWORD=smtp-secret deployment complete",
+                        ]
+                    },
+                ),
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs"
                 ) as runtime_logs_mock,
@@ -2323,12 +2331,13 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         runtime_logs_mock.assert_not_called()
         payload = response.json()
         self.assertEqual(payload["request"]["source"], "deployment")
+        deployment = dict(payload["deployment"])
+        self.assertIn("status=502", deployment.pop("error_message"))
         self.assertEqual(
-            payload["deployment"],
+            deployment,
             {
                 "deployment_id": "deployment-123",
                 "status": "done",
-                "error_message": "Cookie: [redacted]\nstatus=502",
                 "created_at": "2026-07-11T17:33:15Z",
                 "started_at": "2026-07-11T17:33:15Z",
                 "finished_at": "2026-07-11T17:33:18Z",
@@ -2430,8 +2439,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("API_TOKEN=plain-secret-value",),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={"logs": ["API_TOKEN=plain-secret-value"]},
                 ),
             ):
                 app = create_launchplane_fastapi_app(

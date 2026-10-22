@@ -6,6 +6,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from click import ClickException
+
 
 _SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
@@ -23,6 +25,25 @@ _SPEC.loader.exec_module(deploy_diagnostics)
 
 
 class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
+    def test_container_log_failure_keeps_sanitized_provider_diagnostics(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                deploy_diagnostics.control_plane_dokploy,
+                "dokploy_request",
+                side_effect=ClickException("provider failed (500): Cookie: sid=made-up-cookie"),
+            ),
+            redirect_stdout(output),
+        ):
+            deploy_diagnostics._print_container_logs(
+                host="https://provider.example",
+                token="test-token",
+                target_id="test-target",
+                container={"containerId": "test-container"},
+            )
+        self.assertIn("failed (500)", output.getvalue())
+        self.assertNotIn("made-up-", output.getvalue())
+
     def test_captures_compose_metadata_and_redacted_container_logs(self) -> None:
         requests: list[dict[str, object]] = []
 

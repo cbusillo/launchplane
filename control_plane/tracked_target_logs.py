@@ -188,7 +188,6 @@ def build_tracked_target_logs_payload(
             )
         except click.ClickException as error:
             raise _provider_error(operation="runtime-log-read", error=error) from error
-    logs = dokploy_api.normalize_dokploy_log_payload(list(logs))[-normalized_line_count:]
     result: dict[str, object] = {
         "context": normalized_context,
         "instance": normalized_instance,

@@ -2828,8 +2828,10 @@ Conventional onboarding creates new products only.
   Quoted values, nested containers and string concatenations retain context
   across lines; unclosed quoted values or containers suppress the rest of the
   available batch or error body, including later diagnostics and result markers.
-  Adjacent diagnostics survive completed values. Continuations whose opener
-  the provider already omitted cannot be identified as cookie values.
+  Complete encoded JSON strings are decoded for cookie redaction; malformed or
+  truncated encoded strings can lose diagnostics on that same line. Other
+  secret patterns keep their existing per-line log behavior. Continuations
+  whose opener the provider already omitted cannot be identified as cookies.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
   /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
   status with exact `subject` and `recipient` filters plus a timezone-qualified

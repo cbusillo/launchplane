@@ -45,6 +45,39 @@ class DokployCookieLogTests(unittest.TestCase):
                     self.assertNotIn("made-up-", redacted)
                     self.assertIn("status=502", redacted)
 
+    def test_value_start_and_continuation_rules_share_transport_prefixes_and_indentation(
+        self,
+    ) -> None:
+        for prefix in ("", "web-1 | ", "2026-10-22T01:00:00Z "):
+            for lines in (
+                ["Cookie:", '"sid=made-up-one"', "status=502"],
+                ["Cookie:", "sid=made-up-one", "status=502"],
+                ["Cookie:", '["sid=made-up-one",', '"other=made-up-two"]', "status=502"],
+                ["Cookie:", "- sid=made-up-one", "- other=made-up-two", "status=502"],
+                ["Cookie:", "  - sid=made-up-one", "  - other=made-up-two", "status=502"],
+                ["Cookie: sid=made-up-one;", "  other=made-up-two", "status=502"],
+                ["  Cookie: sid=made-up-one", "  X-Request-Id: req-123", "status=502"],
+            ):
+                with self.subTest(prefix=prefix, lines=lines):
+                    output = "\n".join(
+                        api.normalize_dokploy_log_payload([prefix + line for line in lines])
+                    )
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn(prefix + "status=502", output)
+                    if "  X-Request-Id: req-123" in lines:
+                        self.assertIn(prefix + "  X-Request-Id: req-123", output)
+
+    def test_generic_whole_error_bodies_keep_multiline_secret_protection(self) -> None:
+        for body in ('{"API_TOKEN":\n"made-up-token"}', "TOKEN=\nmade-up-token"):
+            with self.subTest(body=body):
+                self.assertNotIn("made-up-", api.redact_dokploy_log_line(body))
+
+    def test_truncated_encoded_error_retains_later_log_lines(self) -> None:
+        body = '{"message":"{\\"set-cookie\\":[\\"sid=made-up-one\\"],\\"detail\\":\\"abc'
+        output = api.redact_dokploy_log_line(body + "\nretry scheduled\ndeploy finished")
+        self.assertNotIn("made-up-", output)
+        self.assertIn("retry scheduled\ndeploy finished", output)
+
     def test_cookie_keys_in_encoded_json_errors_redact_without_losing_diagnostics(self) -> None:
         text = json.dumps(
             {"message": json.dumps({"headers": {"set-cookie": ["sid=made-up-one"]}, "status": 502})}
@@ -64,7 +97,7 @@ class DokployCookieLogTests(unittest.TestCase):
             'Cookie: "sid=made-up-one"\n"status": 502',
         ):
             with self.subTest(text=text):
-                redacted = api.redact_dokploy_log_line(text)
+                redacted = "\n".join(api.normalize_dokploy_log_payload(text))
                 self.assertNotIn("made-up-", redacted)
                 self.assertIn(text.splitlines()[-1], redacted)
 

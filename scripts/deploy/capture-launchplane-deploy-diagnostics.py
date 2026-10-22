@@ -153,7 +153,10 @@ def _print_container_logs(
         query={"composeId": target_id, "containerId": container_id, "tail": 300, "since": "1h"},
     )
     print(f"--- Dokploy logs for {container.get('name')} ({container_id}) ---")
-    for line in control_plane_dokploy.normalize_dokploy_log_payload(log_payload)[-120:]:
+    lines = control_plane_dokploy.normalize_dokploy_log_payload(log_payload)
+    if not lines:
+        lines = control_plane_dokploy.normalize_dokploy_log_payload(json.dumps(log_payload))
+    for line in lines[-120:]:
         print(line[:1200])
 
 

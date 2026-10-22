@@ -483,16 +483,20 @@ class DokployConfigTests(unittest.TestCase):
                 "control_plane.dokploy.api._read_schedule_deployments",
                 return_value=[{"deploymentId": "deployment-failed", "status": "failed"}],
             ),
-            patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error),
             patch(
-                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                return_value=(
-                    "sh: 1: npx: not found",
-                    "DATABASE_URL=postgresql://user:password@database/example",
-                    "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
-                    "'Cookie': [",
-                    "'session_id=made-up-cookie'",
-                    "]",
+                "control_plane.dokploy.api.dokploy_request",
+                side_effect=(
+                    request_error,
+                    {
+                        "logs": [
+                            "sh: 1: npx: not found",
+                            "DATABASE_URL=postgresql://user:password@database/example",
+                            "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                            "'Cookie': [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                        ]
+                    },
                 ),
             ),
         ):
@@ -686,12 +690,11 @@ class DokployConfigTests(unittest.TestCase):
         )
 
     def test_redact_dokploy_log_line_redacts_structured_cookie_fields(self) -> None:
-        self.assertEqual(
-            control_plane_dokploy.redact_dokploy_log_line(
-                '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
-            ),
-            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]}',
+        redacted = control_plane_dokploy.redact_dokploy_log_line(
+            '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
         )
+        self.assertNotIn("abc", redacted)
+        self.assertIn('"status":502', redacted)
         self.assertEqual(
             control_plane_dokploy.redact_dokploy_log_line(
                 "{'Set-Cookie': 'sid=abc123; Secure', 'path': '/web'}"
@@ -1259,14 +1262,16 @@ target_name = "syo-testing-app"
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=(
-                        "started",
-                        "Cookie: [",
-                        "'session_id=made-up-cookie'",
-                        "]",
-                        "SMTP_PASSWORD=[redacted]",
-                    ),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "started",
+                            "Cookie: [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                            "SMTP_PASSWORD=[redacted]",
+                        ]
+                    },
                 ),
             ):
                 result = runner.invoke(

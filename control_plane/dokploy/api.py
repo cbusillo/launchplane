@@ -53,31 +53,31 @@ _SECRET_LOG_KEY_PATTERN = (
     r"DATABASE_URL|CREDENTIAL|ARGS_BASE64|PAYLOAD_BASE64)[A-Z0-9_]*"
 )
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf"(?i)(\b{_SECRET_LOG_KEY_PATTERN}[^\S\r\n]*[=:][^\S\r\n]*)([^\s,;]+)"
+    rf"(?i)(\b{_SECRET_LOG_KEY_PATTERN}\s*[=:]\s*)([^\s,;]+)"
 )
 _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf'(?i)("?\b{_SECRET_LOG_KEY_PATTERN}"?[^\S\r\n]*[=:][^\S\r\n]*)"[^"\r\n]*"'
+    rf'(?i)("?\b{_SECRET_LOG_KEY_PATTERN}"?\s*[=:]\s*)"[^"\r\n]*"'
 )
 _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?[^\S\r\n]*[=:][^\S\r\n]*)'[^'\r\n]*'"
+    rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
-_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer[^\S\r\n]+)[A-Za-z0-9._~+/=-]+")
+_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 _COOKIE_LOG_KEY_PATTERN = re.compile(r"""(?i)(?<![\w-])["']?(?:set-)?cookie["']?[ \t]*[=:][ \t]*""")
 _ESCAPED_COOKIE_LOG_KEY_PATTERN = re.compile(
     r"""(?<![\w-])\\+["'](?:set-)?cookie\\+["'][ \t]*[=:][ \t]*""", re.IGNORECASE
 )
 _JSON_OR_ESCAPED_COOKIE_PATTERN = re.compile(
-    r'"(?:\\.|[^"\\\r\n])*"|(?P<key>' + _ESCAPED_COOKIE_LOG_KEY_PATTERN.pattern + r")[\s\S]*",
+    r'"(?:\\.|[^"\\\r\n])*"|(?P<key>' + _ESCAPED_COOKIE_LOG_KEY_PATTERN.pattern + r")[^\r\n]*",
     re.IGNORECASE,
 )
-_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(
-    r"[ \t]*(?:\+[ \t]*)?(?:\r?\n[ \t]*(?:[^\r\n|]*\|[ \t]*|"
-    r"\d{4}-\d{2}-\d{2}[T ][\d:.+-]+Z?[ \t]+)?)?"
-    r"""[ \t]*(?:\+[ \t]*)?(?=["'])"""
+_LOG_LINE_PREFIX_PATTERN = re.compile(
+    r"(?:[A-Za-z0-9][\w.-]*[ \t]+\| )?"
+    r"(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}) )?"
 )
-_LOG_NEWLINE_PATTERN = re.compile(r"[\r\n]")
-_INDENTED_LOG_VALUE_PATTERN = re.compile(r"\r?\n[ \t]+")
-_INDENTED_LOG_LINE_PATTERN = re.compile(r"\r?\n[ \t]+[^\r\n]*")
+_LOG_NEWLINE_PATTERN = re.compile(r"\r\n|[\r\n]")
+_LOG_INDENT_PATTERN = re.compile(r"[ \t]*")
+_COOKIE_PAIR_PATTERN = re.compile(r"[!#$%&'*+.^_`|~\w-]+=")
+_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(r"[ \t]*(?P<plus>\+)?[ \t]*")
 _LOG_FIELD_DELIMITER_PATTERN = re.compile(r"[ \t]*[:=]")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
@@ -544,15 +544,47 @@ def normalize_dokploy_compose_service_name(raw_service_name: str) -> str:
     return service_name
 
 
-def _cookie_value_end(text: str, start: int) -> int:
+def _line_body(text: str, line_start: int) -> tuple[int, int]:
+    while True:
+        prefix = _LOG_LINE_PREFIX_PATTERN.match(text, line_start)
+        body_start = prefix.end() if prefix else line_start
+        indentation = _LOG_INDENT_PATTERN.match(text, body_start)
+        assert indentation is not None
+        if newline := _LOG_NEWLINE_PATTERN.match(text, indentation.end()):
+            line_start = newline.end()
+            continue
+        return indentation.end(), indentation.end() - body_start
+
+
+def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
+    if newline := _LOG_NEWLINE_PATTERN.match(text, start):
+        start, indent = _line_body(text, newline.end())
+        if (
+            text[start : start + 1] not in {'"', "'", "[", "{"}
+            and indent <= key_indent
+            and not _COOKIE_PAIR_PATTERN.match(text, start)
+            and not text.startswith("- ", start)
+        ):
+            return None
+    return start if start < len(text) else None
+
+
+def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
     closing = {"[": "]", "{": "}", '"': '"', "'": "'"}
     if start >= len(text):
         return start
     if text[start] not in closing:
         newline = _LOG_NEWLINE_PATTERN.search(text, start)
         end = newline.start() if newline else len(text)
-        while continuation := _INDENTED_LOG_LINE_PATTERN.match(text, end):
-            end = continuation.end()
+        list_indent = _line_body(text, text.rfind("\n", 0, start) + 1)[1]
+        is_list = text.startswith("- ", start)
+        while newline:
+            body_start, indent = _line_body(text, newline.end())
+            list_item = is_list and indent == list_indent and text.startswith("- ", body_start)
+            if indent <= key_indent and not list_item:
+                break
+            newline = _LOG_NEWLINE_PATTERN.search(text, body_start)
+            end = newline.start() if newline else len(text)
         return end
     stack = [closing[text[start]]]
     index = start + 1
@@ -597,13 +629,24 @@ def _redact_cookie_values(text: str) -> str:
     for match in _COOKIE_LOG_KEY_PATTERN.finditer(text):
         if match.start() < cursor:
             continue
-        start = match.end()
-        if indented_value := _INDENTED_LOG_VALUE_PATTERN.match(text, start):
-            start = indented_value.end()
-        end = _cookie_value_end(text, start)
+        key_indent = _line_body(text, text.rfind("\n", 0, match.start()) + 1)[1]
+        start = _cookie_value_start(text, match.end(), key_indent)
+        if start is None:
+            continue
+        end = _cookie_value_end(text, start, key_indent)
         if text[start : start + 1] in {'"', "'"}:
             while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
-                continued_end = _cookie_value_end(text, continuation.end())
+                next_start = continuation.end()
+                if newline := _LOG_NEWLINE_PATTERN.match(text, next_start):
+                    next_start, indent = _line_body(text, newline.end())
+                    if not continuation["plus"] and indent <= key_indent:
+                        break
+                    next_part = _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, next_start)
+                    assert next_part is not None
+                    next_start = next_part.end()
+                if text[next_start : next_start + 1] not in {'"', "'"}:
+                    break
+                continued_end = _cookie_value_end(text, next_start, key_indent)
                 if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
                     break
                 end = continued_end
@@ -617,8 +660,11 @@ def _redact_cookie_values(text: str) -> str:
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:
-    redacted_line = _redact_cookie_values(raw_line)
-    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', redacted_line)
+    return _redact_generic_secrets(_redact_cookie_values(raw_line))
+
+
+def _redact_generic_secrets(raw_line: str) -> str:
+    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', raw_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
     redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
     redacted_line = _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
@@ -626,7 +672,10 @@ def redact_dokploy_log_line(raw_line: str) -> str:
 
 
 def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
-    return tuple(redact_dokploy_log_line("\n".join(_raw_dokploy_log_lines(payload))).splitlines())
+    return tuple(
+        _redact_generic_secrets(line)
+        for line in _redact_cookie_values("\n".join(_raw_dokploy_log_lines(payload))).splitlines()
+    )
 
 
 def _raw_dokploy_log_lines(payload: JsonValue) -> list[str]:
@@ -1730,7 +1779,7 @@ def _schedule_execution_failure(
         except click.ClickException:
             recent_output = ()
     redacted_provider_detail = redact_dokploy_log_line(provider_detail).strip()
-    redacted_recent_output = _bounded_redacted_log_lines(recent_output)
+    redacted_recent_output = _bounded_log_lines(recent_output)
     return DokployScheduleExecutionFailed(
         schedule_id=schedule_id,
         deployment_id=deployment_id,
@@ -1741,10 +1790,10 @@ def _schedule_execution_failure(
     )
 
 
-def _bounded_redacted_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
+def _bounded_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
     remaining_length = _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH
     redacted_lines: list[str] = []
-    for line in normalize_dokploy_log_payload(list(lines)):
+    for line in lines:
         if remaining_length <= 0:
             break
         redacted_lines.append(line[:remaining_length])
