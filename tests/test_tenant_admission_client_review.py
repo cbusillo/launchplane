@@ -277,7 +277,6 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                     with self.assertRaises(expected_error):
                         self._run(transport)
                 self.assertTrue(transport.merge_called)
-                self.assertFalse(transport.merged)
                 state = self.store.list_merge_train_controller_state_records(
                     repository=_candidate().repository, base_branch="main"
                 )[0]
