@@ -19,6 +19,19 @@ class ApplicationResourceObservation(BaseModel):
         "resource_inventory_unsupported",
         "resource_observation_invalid",
     ] = "resource_inventory_unavailable"
+    changed_component: (
+        Literal[
+            "swarm_nodes",
+            "service",
+            "task_membership",
+            "container_membership",
+            "volume_membership",
+            "task_metadata",
+            "container_metadata",
+            "volume_metadata",
+        ]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     service_version: int | None = Field(default=None, ge=1)
     desired_replicas: int | None = Field(default=None, ge=0)
     task_count: int | None = Field(default=None, ge=0, le=10000)
@@ -37,8 +50,13 @@ class ApplicationResourceObservation(BaseModel):
         counts = tuple(
             getattr(self, field)
             for field in type(self).model_fields
-            if field not in {"status", "reason_code", "image_declared_volume_count"}
+            if field
+            not in {"status", "reason_code", "image_declared_volume_count", "changed_component"}
         )
+        if self.changed_component is not None and (
+            self.status != "unknown" or self.reason_code != "resource_inventory_changed"
+        ):
+            raise ValueError("Changed components require an unknown changed resource inventory.")
         if self.status == "unknown":
             if self.reason_code == "resource_inventory_observed" or any(
                 value is not None for value in (*counts, self.image_declared_volume_count)

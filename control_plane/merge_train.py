@@ -315,6 +315,36 @@ class MergeTrainMergeResult(BaseModel):
     detail: str
 
 
+def build_merge_train_queue_entries(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    batch_landing: bool = False,
+    planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
+    planned_handoff_heads: frozenset[tuple[int, str]] = frozenset(),
+) -> tuple[MergeTrainQueueEntry, ...]:
+    repository_policy = policy.find_repository_policy(
+        repository=snapshot.repository, base_branch=snapshot.base_branch
+    )
+    base_pull_requests = tuple(
+        pull_request
+        for pull_request in snapshot.pull_requests
+        if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
+    )
+    return tuple(
+        _build_queue_entry(
+            repository_policy,
+            pull_request,
+            skip_blocked=batch_landing,
+            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
+            in planned_dependency_heads | planned_handoff_heads,
+        )
+        for pull_request in sorted(
+            base_pull_requests, key=lambda item: (item.created_at, item.number)
+        )
+    )
+
+
 def build_merge_train_dry_run_result(
     *,
     policy: MergeTrainPolicy,
@@ -328,22 +358,12 @@ def build_merge_train_dry_run_result(
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
     )
-    base_pull_requests = tuple(
-        pull_request
-        for pull_request in snapshot.pull_requests
-        if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
-    )
-    queue = tuple(
-        _build_queue_entry(
-            repository_policy,
-            pull_request,
-            skip_blocked=batch_landing,
-            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
-            in planned_dependency_heads | planned_handoff_heads,
-        )
-        for pull_request in sorted(
-            base_pull_requests, key=lambda item: (item.created_at, item.number)
-        )
+    queue = build_merge_train_queue_entries(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=batch_landing,
+        planned_dependency_heads=planned_dependency_heads,
+        planned_handoff_heads=planned_handoff_heads,
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
@@ -414,7 +434,11 @@ def build_merge_train_dry_run_result(
         if batch_size is not None and existing_candidate_size is not None:
             batch_size = max(batch_size, existing_candidate_size)
         batch_entries: list[MergeTrainQueueEntry] = []
-        paths_by_number = {pr.number: pr.changed_paths for pr in base_pull_requests}
+        paths_by_number = {
+            pr.number: pr.changed_paths
+            for pr in snapshot.pull_requests
+            if _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
+        }
         group_areas = new_candidate and not any(
             entry.owner_review_required for entry in eligible_entries
         )

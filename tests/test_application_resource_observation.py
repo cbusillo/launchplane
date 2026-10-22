@@ -1,6 +1,10 @@
+import json
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
+from typing import Any
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.application_resource_observation import ApplicationResourceObservation
 from control_plane.dokploy.application_resources import APPLICATION_RESOURCE_OBSERVATION_PROGRAM
@@ -83,6 +87,86 @@ class ApplicationResourceObservationTests(unittest.TestCase):
                 observed = self.observe()
                 self.assertEqual(observed.status, "unknown")
                 self.assertIsNone(observed.empty_volume_count)
+
+    def test_changed_inventory_identifies_the_changed_component_without_values(self) -> None:
+        identifier = "b" * 64
+        self.fixture.containers[identifier] = {
+            "Id": identifier,
+            "Name": "/unrelated-service.writer",
+            "Labels": {},
+            "Mounts": [],
+            "Status": "running",
+        }
+        cases = (
+            ("swarm_nodes", ["node", "ls"]),
+            ("service", ["service", "inspect"]),
+            ("task_membership", ["service", "ps"]),
+            ("container_membership", ["ps"]),
+            ("volume_membership", ["volume", "ls"]),
+            ("task_metadata", ["inspect", "--type", "task"]),
+            ("container_metadata", ["inspect", "--type", "container"]),
+            ("volume_metadata", ["volume", "inspect"]),
+        )
+        original = self.fixture.docker
+        private_detail = "synthetic-private-change-detail"
+        for component, prefix in cases:
+            with self.subTest(component=component):
+                reads = 0
+
+                def changing_read(
+                    command: list[str], **arguments: Any
+                ) -> subprocess.CompletedProcess[bytes]:
+                    nonlocal reads
+                    result = original(command, **arguments)
+                    if command[1 : 1 + len(prefix)] != prefix:
+                        return result
+                    reads += 1
+                    if reads != 2:
+                        return result
+                    if component.endswith("membership"):
+                        result.stdout += b"\nsynthetic-new-member"
+                    else:
+                        changed = json.loads(result.stdout)
+                        if component == "swarm_nodes":
+                            changed["Status"] = "Down"
+                        elif component == "service":
+                            changed["Version"] += 1
+                        elif component == "task_metadata":
+                            changed["Status"]["State"] = "failed"
+                        elif component == "container_metadata":
+                            changed["Status"] = "exited"
+                            changed["Labels"]["synthetic-private-label"] = private_detail
+                        else:
+                            changed["Options"] = {"device": private_detail}
+                        result.stdout = json.dumps(changed).encode()
+                    return result
+
+                with patch.object(self.fixture, "docker", side_effect=changing_read):
+                    observed = self.observe().model_dump()
+                self.assertEqual(observed["status"], "unknown")
+                self.assertEqual(observed["reason_code"], "resource_inventory_changed")
+                self.assertEqual(observed.get("changed_component"), component)
+                self.assertIsNone(observed["referenced_volume_count"])
+                self.assertNotIn(private_detail, json.dumps(observed))
+        self.assertNotIn("changed_component", self.observe().model_dump())
+
+    def test_change_diagnostic_requires_unknown_changed_inventory_and_no_counts(self) -> None:
+        valid = {
+            "reason_code": "resource_inventory_changed",
+            "changed_component": "service",
+        }
+        ApplicationResourceObservation.model_validate(valid)
+        invalid = (
+            {**valid, "reason_code": "resource_inventory_unavailable"},
+            {**valid, "changed_component": "synthetic-private-detail"},
+            {**valid, "referenced_volume_count": 0},
+            {**self.observe().model_dump(), "changed_component": "service"},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                ApplicationResourceObservation.model_validate(payload)
+        legacy = ApplicationResourceObservation(reason_code="resource_inventory_changed")
+        self.assertNotIn("changed_component", legacy.model_dump())
 
     def test_unavailable_or_redirected_backing_is_not_reported_empty(self) -> None:
         for change in ("missing-volume", "remote-driver", "driver-options", "redirected-backing"):
