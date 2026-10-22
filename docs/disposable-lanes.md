@@ -144,9 +144,10 @@ route preimage covers its public listeners and middleware dependencies, excludin
 unrelated proxy management routes and canonical certificate challenges. Inverse
 restoration uses the current proxy/file CAS; unrelated static configuration edits
 do not require keeping a failed candidate selected. An unavailable
-original is not started or advertised as healthy by rollback. Original-file
-readback proves exact bytes or absence and reports current stopped, absent or
-present process state separately; a reappeared process has unverified health.
+original is not started or advertised as healthy by rollback. Inverse readback
+waits for exact original bytes or absence and the captured lane-owned applied
+routing before reversing metadata. It reports current stopped, absent or present
+process state separately; a reappeared process has unverified health.
 After successful publication, automatic
 deployment of the old target is disabled and its stop is recorded as undispatched
 because it was already unavailable. That success receipt does not itself request
