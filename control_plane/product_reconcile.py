@@ -2024,7 +2024,9 @@ def reconcile_preview_target(
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )
         outcome = _preview_failure(plan, code)
-    if cleanup and plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+    if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+        plan.pop("last_failed_error_code", None)
+        plan.pop("last_failed_error_summary", None)
         plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
         return ReconcileOutcome(plan)
     if (
@@ -2054,6 +2056,8 @@ def _preview_cleanup_guard(
         require_lane_target_ownership,
     )
 
+    from control_plane.workflows.preview_resource_destroy import PreviewTargetOwnershipStore
+
     if store.read_product_profile_record(profile.product) != profile:
         raise ProductReconcileError(
             "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
@@ -2066,7 +2070,7 @@ def _preview_cleanup_guard(
             profile.preview.context,
             instance,
         )
-        target_store = cast(DisposableLaneStore, store)
+        target_store = cast(PreviewTargetOwnershipStore, store)
         require_lane_target_ownership(
             (
                 *target_store.list_dokploy_target_id_records(),

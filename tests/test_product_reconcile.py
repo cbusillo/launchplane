@@ -6827,6 +6827,8 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             result = self.reconcile()
         self.assertTrue(result["held"], result)
         self.assertFalse(result["destroy_failed_attempts"])
+        self.assertNotIn("last_failed_error_code", result)
+        self.assertNotIn("last_failed_error_summary", result)
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
     def test_closed_cleanup_retry_limit_does_not_republish_review(self) -> None:

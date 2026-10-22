@@ -653,7 +653,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     updated_at=self.profile.updated_at,
                 )
             )
-        self.prepare_cleanup(production_resources="shared")
+        self.prepare_cleanup()
         result = self.cleanup()
         self.assertTrue(result.plan["held"])
         self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
@@ -662,7 +662,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
     def test_cleanup_holds_when_closed_pr_is_not_confirmed(self) -> None:
         self.remove_original_intent()
-        self.prepare_cleanup(production_resources="shared")
+        self.prepare_cleanup()
         for state in (None, "unavailable", "open"):
             with self.subTest(state=state):
                 result = self.cleanup(pr_state=state)

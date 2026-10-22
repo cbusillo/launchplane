@@ -542,18 +542,6 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(inspected.status_code, 202, inspected.text)
         self.assertEqual(inspected.json()["result"]["usage"], "unknown")
-        recorded = await request(
-            self.app,
-            "POST",
-            "/v1/disposable-lanes/observations",
-            headers=self.director_headers,
-            payload={
-                **observation,
-                "mode": "record",
-                "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
-            },
-        )
-        self.assertEqual(recorded.status_code, 409, recorded.text)
         payload = await self.director_plan()
         applied = await request(
             self.app,

@@ -33,8 +33,6 @@ class DisposableLaneSafetyUnknown(ValueError):
 
 
 class DisposableLaneStore(Protocol):
-    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
-
     def list_runtime_key_safety_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
