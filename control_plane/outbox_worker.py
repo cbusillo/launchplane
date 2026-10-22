@@ -27,8 +27,6 @@ DEFAULT_OUTBOX_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 
 
 class OutboxWorkerStore(Protocol):
-    def prepare_public_ingress_notification_backlog(self) -> None: ...
-
     def claim_next_outbox_delivery_record(
         self,
         *,
@@ -196,7 +194,6 @@ def run_outbox_worker_loop(
     notification_drivers: PublicIngressNotificationDriverSet | None = None,
     discussion_reminder_sender: DiscussionReminderSender | None = None,
 ) -> None:
-    record_store.prepare_public_ingress_notification_backlog()
     consecutive_errors = 0
     while not should_stop():
         try:

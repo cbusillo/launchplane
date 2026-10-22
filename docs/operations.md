@@ -422,13 +422,17 @@ a provider call. Their terminal outbox action and durable skipped attempt record
 say `superseded_incident_resolved`. This includes queued recovery messages.
 An existing provider-start marker remains an unknown outcome instead of being
 reported as superseded.
-At worker startup, pending email and Discord incident deliveries without a
-provider-start marker are grouped by incident, policy and destination in one
-transaction. Each group retains one summary delivery; the other rows complete
+The first dispatcher claim groups the existing pending email and Discord
+incident deliveries by incident, policy and destination in one transaction.
+It includes expired unmarked claims and excludes provider-start markers and
+active leases. Each group retains one summary delivery; the other rows complete
 with `superseded_incident_backlog` and skipped attempts. The summary reads the
 incident's current observation when it sends. This selection is persisted in
 the existing row payload, so a restart cannot revive the discarded backlog.
-New alerts queued after that transaction follow the normal delivery rules.
+The existing idempotency store retains a completion receipt in that same
+transaction, making this a one-time snapshot without a schema change. Worker
+restarts and the `run-once` path reuse its selection; new alerts queued after
+that transaction follow the normal delivery rules.
 GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
 Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 

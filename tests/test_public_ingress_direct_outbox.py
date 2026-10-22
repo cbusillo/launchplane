@@ -33,11 +33,21 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self._probe(store, 503, "2026-05-30T00:03:00Z")
         queued = store.list_outbox_delivery_records(states=("pending",))
         self.assertGreater(len(queued), 1)
+        store.write_outbox_delivery_record(
+            queued[0].model_copy(
+                update={
+                    "state": "running",
+                    "lease_owner": "lost-worker",
+                    "lease_expires_at": "2026-05-29T12:05:00Z",
+                    "attempt": 1,
+                }
+            )
+        )
         incident = store.list_public_ingress_incident_records()[0]
         observation = store.read_public_ingress_observation_record(incident.latest_observation_id)
         sent: list[dict[str, object]] = []
         drivers = self._capturing_discord(sent)
-        store.prepare_public_ingress_notification_backlog()
+        self._work(store, drivers, "2026-05-30T00:04:00Z")
         database_url = store.database_url
         store.close()
         store = PostgresRecordStore(database_url=database_url)
@@ -54,11 +64,17 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             sum(attempt.delivery_status == "skipped" for attempt in attempts), len(queued) - 1
         )
         self._probe(store, 503, "2026-05-30T06:03:00Z")
-        new_delivery = store.list_outbox_delivery_records(states=("pending",))[0]
-        self._work(store, drivers, "2026-05-30T06:04:00Z")
-        self.assertEqual(len(sent), 2)
-        embed = cast(list[dict[str, object]], sent[1]["embeds"])[0]
-        self.assertEqual(new_delivery.payload["body"], embed["description"])
+        self._probe(store, 503, "2026-05-30T12:04:00Z")
+        new_deliveries = store.list_outbox_delivery_records(states=("pending",))
+        self._drain_loop(store, drivers, "2026-05-30T12:05:00Z")
+        self.assertEqual(len(sent), 1 + len(new_deliveries))
+        self.assertEqual(
+            {str(delivery.payload["body"]) for delivery in new_deliveries},
+            {
+                str(cast(list[dict[str, object]], payload["embeds"])[0]["description"])
+                for payload in sent[1:]
+            },
+        )
 
     def test_startup_keeps_each_incident_and_destination_separate(self) -> None:
         store = self._backlog_store()
@@ -98,6 +114,26 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             self.assertEqual(
                 sum(incident.incident_id in str(payload) for payload in sent), len(destinations)
             )
+
+    def test_empty_activation_does_not_collapse_future_alerts_after_restart(self) -> None:
+        store = self._backlog_store()
+        sent: list[dict[str, object]] = []
+        drivers = self._capturing_discord(sent)
+        self.assertEqual(self._work(store, drivers, "2026-05-29T11:59:00Z").status, "idle")
+        self._probe(store, 503, "2026-05-29T12:00:00Z")
+        self._probe(store, 503, "2026-05-29T18:01:00Z")
+        queued = store.list_outbox_delivery_records(states=("pending",))
+
+        self._drain_loop(store, drivers, "2026-05-29T18:02:00Z")
+
+        self.assertEqual(len(sent), len(queued))
+        self.assertEqual(
+            {str(delivery.payload["body"]) for delivery in queued},
+            {
+                str(cast(list[dict[str, object]], payload["embeds"])[0]["description"])
+                for payload in sent
+            },
+        )
 
     def test_startup_never_sends_resolved_incident_backlog(self) -> None:
         store = self._backlog_store()
@@ -247,7 +283,6 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             self._probe(store, 200, "2026-05-29T12:01:00Z")
             store.close()
             store = PostgresRecordStore(database_url=url)
-            store.prepare_public_ingress_notification_backlog()
             result = self._work(store, drivers, "2026-05-29T12:06:01Z")
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.error_code, "delivery_outcome_unknown")

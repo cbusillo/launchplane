@@ -8298,64 +8298,84 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def prepare_public_ingress_notification_backlog(self) -> None:
+    def _prepare_public_ingress_notification_backlog(self, session: Session, now: str) -> None:
         from control_plane.contracts.outbox_delivery import (
             PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
         )
-        from control_plane.service_deploy_drain import lock
 
-        with self._session_factory() as session:
-            lock(self, session)
-            statement = (
-                select(LaunchplaneOutboxDeliveryRow)
-                .where(
-                    LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+        scope = "system:incident-notification-backlog"
+        route = "outbox:incident-backlog"
+        key = "current-incident-summary"
+        receipt_id = build_launchplane_mutation_reservation_id(
+            scope=scope, route_path=route, idempotency_key=key
+        )
+        if session.get(LaunchplaneIdempotencyRow, receipt_id) is not None:
+            return
+        statement = (
+            select(LaunchplaneOutboxDeliveryRow)
+            .where(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.provider_operation_key == "",
+                or_(
                     LaunchplaneOutboxDeliveryRow.state == "pending",
-                    LaunchplaneOutboxDeliveryRow.provider_operation_key == "",
-                )
-                .order_by(
-                    LaunchplaneOutboxDeliveryRow.created_at.asc(),
-                    LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
-                )
+                    and_(
+                        LaunchplaneOutboxDeliveryRow.state == "running",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at < now,
+                    ),
+                ),
             )
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-            groups: dict[
-                tuple[str, str, str, str],
-                list[tuple[LaunchplaneOutboxDeliveryRow, OutboxDeliveryRecord]],
-            ] = {}
-            for row in session.scalars(statement):
-                record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
-                if PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY in record.payload:
-                    continue
-                attempt = record.payload.get("attempt")
-                destination = record.payload.get("destination")
-                if not isinstance(attempt, dict) or not isinstance(destination, dict):
-                    continue
-                if destination.get("kind") not in {"email", "discord"}:
-                    continue
-                key = (
-                    record.aggregate_id,
-                    str(attempt.get("policy_id", "")),
-                    str(destination.get("kind", "")),
-                    str(destination.get("destination_id", "")),
-                )
-                groups.setdefault(key, []).append((row, record))
-            for group in groups.values():
-                summary_delivery_id = group[-1][1].delivery_id
-                for row, record in group:
-                    self._sync_outbox_delivery_row(
-                        row,
-                        record.model_copy(
-                            update={
-                                "payload": {
-                                    **record.payload,
-                                    PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY: summary_delivery_id,
-                                }
+            .order_by(
+                LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        groups: dict[
+            tuple[str, str, str, str],
+            list[tuple[LaunchplaneOutboxDeliveryRow, OutboxDeliveryRecord]],
+        ] = {}
+        for row in session.scalars(statement):
+            record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            attempt = record.payload.get("attempt")
+            destination = record.payload.get("destination")
+            if not isinstance(attempt, dict) or not isinstance(destination, dict):
+                continue
+            if destination.get("kind") not in {"email", "discord"}:
+                continue
+            group_key = (
+                record.aggregate_id,
+                str(attempt.get("policy_id", "")),
+                str(destination.get("kind", "")),
+                str(destination.get("destination_id", "")),
+            )
+            groups.setdefault(group_key, []).append((row, record))
+        for group in groups.values():
+            summary_delivery_id = group[-1][1].delivery_id
+            for row, record in group:
+                self._sync_outbox_delivery_row(
+                    row,
+                    record.model_copy(
+                        update={
+                            "payload": {
+                                **record.payload,
+                                PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY: summary_delivery_id,
                             }
-                        ),
-                    )
-            session.commit()
+                        }
+                    ),
+                )
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=receipt_id,
+            scope=scope,
+            route_path=route,
+            idempotency_key=key,
+            request_fingerprint=receipt_id,
+            response_status_code=200,
+            response_trace_id=receipt_id,
+            recorded_at=now,
+            response_payload={"summary_count": len(groups)},
+        )
+        session.add(self._idempotency_row(receipt))
 
     def claim_next_outbox_delivery_record(
         self,
@@ -8374,6 +8394,7 @@ class PostgresRecordStore(HumanSessionStore):
             lock(self, session)
             if not observed_at:
                 observed_at = self._database_mutation_timestamp(session)
+            self._prepare_public_ingress_notification_backlog(session, observed_at)
             lease_expires_at = self._mutation_lease_expiry(
                 observed_at=observed_at,
                 lease_seconds=lease_seconds,
@@ -8410,6 +8431,7 @@ class PostgresRecordStore(HumanSessionStore):
                 statement = statement.with_for_update(skip_locked=True)
             row = session.scalar(statement)
             if row is None:
+                session.commit()
                 return OutboxDeliveryClaimResult(status="empty")
             record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
             if record.state == "running" and record.provider_operation_key:
