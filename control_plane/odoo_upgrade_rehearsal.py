@@ -623,7 +623,6 @@ class OdooRehearsalAdapter:
             or phase
             or record.state != "planned"
             or any((record.project_id, record.environment_id, record.compose_id))
-            or record.credential_bindings_sha256
             or record.copies
             or record.elapsed_seconds
         ):
@@ -1056,7 +1055,11 @@ class OdooRehearsalAdapter:
         return rehearsal_inputs(self.root, self.store, self.product, self.request, self.principal)
 
     def reviewed_binding(self, record: OdooUpgradeRehearsalRecord) -> str:
-        return record.binding_sha256
+        return (
+            self.initial_prepare_binding(record)
+            if self.request.action == "prepare"
+            else record.binding_sha256
+        )
 
     def run_script(
         self, record: OdooUpgradeRehearsalRecord, script: str, checkpoint: Callable[[], None]
@@ -1503,9 +1506,10 @@ class OdooRehearsalAdapter:
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
                 if self.request.action == "prepare" and not provider_effect_phase:
-                    if (
-                        record.binding_sha256 != self.request.reviewed_plan_sha256
-                        or not self.can_retry_empty_prepare(record, provider_effect_phase)
+                    if self.reviewed_binding(
+                        record
+                    ) != self.request.reviewed_plan_sha256 or not self.can_retry_empty_prepare(
+                        record, provider_effect_phase
                     ):
                         return ProviderObservation("unknown")
                     check()
@@ -1593,12 +1597,7 @@ class OdooRehearsalAdapter:
                     )
                 ) from None
             recovering_project = bool(self._observed_project_id)
-            reviewed_binding = (
-                self.initial_prepare_binding(record)
-                if recovering_project or self._continue_prepare_host
-                else self.reviewed_binding(record)
-            )
-            if reviewed_binding != self.request.reviewed_plan_sha256:
+            if self.reviewed_binding(record) != self.request.reviewed_plan_sha256:
                 raise ProviderMutationRejectedError(
                     RehearsalRefused(
                         RehearsalPrerequisite.PRECHECK_REFUSED,
