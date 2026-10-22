@@ -1460,22 +1460,24 @@ class NativeTestingRebuildExecution:
                 )
             return
 
-        def absent() -> bool:
+        def read(mode: str) -> dict[str, Any]:
             proof = retained_copy_operation(
                 host=self.host,
                 token=self.token,
                 server_id=self.intent.server_id,
-                payload={**self.retained_payload("removal-readback"), "container_ids": identifiers},
+                payload={**self.retained_payload(mode), "container_ids": identifiers},
             )
-            return proof.get("availability") == "absent"
+            if proof.get("availability") == "changed":
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted stopped testing containers changed."
+                )
+            return proof
+
+        def absent() -> bool:
+            return read("removal-readback").get("availability") == "absent"
 
         def remove() -> None:
-            retained_copy_operation(
-                host=self.host,
-                token=self.token,
-                server_id=self.intent.server_id,
-                payload={**self.retained_payload("remove"), "container_ids": identifiers},
-            )
+            read("remove")
 
         if not self.removed_old_containers:
             self.run_effect(

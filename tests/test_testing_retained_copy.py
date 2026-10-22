@@ -4,6 +4,7 @@ import base64
 from contextlib import redirect_stdout
 from copy import deepcopy
 import io
+from itertools import product
 import json
 from pathlib import Path
 import subprocess
@@ -323,10 +324,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(replay["availability"], "absent")
         self.assertFalse(any(command[1] == "rm" for command in commands))
 
-    def test_removal_refuses_running_foreign_or_incomplete_inventory(self) -> None:
+    def test_removal_distinguishes_changed_custody_from_unknown_inventory(self) -> None:
         expected = [item["Id"] for item in self.containers]
-        for change in ("running", "foreign", "incomplete"):
-            with self.subTest(change=change):
+        for mode, change in product(
+            ("remove", "removal-readback"), ("running", "foreign", "incomplete", "unknown")
+        ):
+            with self.subTest(mode=mode, change=change):
                 for item in self.containers:
                     item["State"]["Status"] = "exited"
                 extra = {"allow_unavailable": True, "container_ids": expected}
@@ -334,12 +337,19 @@ class RetainedTestingCopyTests(unittest.TestCase):
                     self.containers[0]["State"]["Status"] = "running"
                 if change == "foreign":
                     extra["container_ids"] = ["another-copy"]
+                if change == "unknown":
+                    self.containers[0]["State"]["Status"] = "unrecognized"
                 frame, commands = self.run_host(
-                    mode="remove",
+                    mode=mode,
                     extra=extra,
                     inspect_result=[] if change == "incomplete" else None,
                 )
-                self.assertEqual(frame["type"], "failed")
+                self.assertEqual(
+                    frame,
+                    {"type": "complete", "availability": "changed"}
+                    if change in {"running", "foreign"}
+                    else {"type": "failed"},
+                )
                 self.assertFalse(any(command[1] == "rm" for command in commands))
 
     def test_interrupted_removal_finishes_only_the_admitted_leftovers(self) -> None:

@@ -599,6 +599,51 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.apply_staff_hold(False, "Fixture ends the hold")
         self.assertEqual(self.execute().deploy_status, "pass")
 
+    def test_changed_original_after_interrupted_removal_ends_admission(self) -> None:
+        self.admit_unavailable("stopped")
+        changed = False
+
+        def interrupted(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] in {"remove", "removal-readback"}:
+                if changed:
+                    return {"type": "complete", "availability": "changed"}
+                if kwargs["payload"]["mode"] == "remove":
+                    raise NativeSourceUnavailable("Fixture interrupted container removal")
+            return self.physical(**kwargs)
+
+        with patch.object(service, "retained_copy_operation", side_effect=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+            changed = True
+            self.start_original()
+            result = self.execute()
+            self.assertEqual(self.execute(), result)
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.checkpoint().step, "failed")
+        self.assertEqual(self.effects, [])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_changed_original_after_interrupted_route_preparation_ends_admission(self) -> None:
+        from control_plane.testing_route_effects import TestingRouteEffects, ROUTE_PREPARING
+
+        self.admit_unavailable("stopped")
+
+        def interrupted(effect: Any, lease: Any) -> None:
+            lease.checkpoint_effect(ROUTE_PREPARING)
+            raise NativeSourceUnavailable("Fixture interrupted route preparation")
+
+        with patch.object(TestingRouteEffects, "apply", new=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.start_original()
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.checkpoint().step, "failed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.execute(), result)
+
     def start_original(self) -> None:
         self.retained.update(availability="available", stopped=False, web_stopped=False)
         original = route_tests.TestingRouteTests()

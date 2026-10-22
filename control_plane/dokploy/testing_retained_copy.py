@@ -219,16 +219,20 @@ try:
         expected=spec.get('container_ids')
         if spec.get('allow_unavailable') is not True or not isinstance(expected,list) or not expected or not all(isinstance(value,str) and value for value in expected):
             raise ValueError('Container removal requires admitted unavailable testing custody')
-        if not own.issubset(set(expected)) or any(item['State']['Status'] not in {'exited','created'} for item in containers if item['Id'] in own):
-            raise ValueError('The admitted stopped testing containers changed')
-        if spec['mode']=='remove':
+        states={item['State']['Status'] for item in containers if item['Id'] in own}
+        if not own.issubset(set(expected)) or states.intersection({'running','restarting','paused'}):
+            result={'type':'complete','availability':'changed'}
+        elif not states.issubset({'exited','created'}):
+            raise ValueError('Old testing container state is unverified')
+        elif spec['mode']=='remove':
             for identifier in sorted(own):
                 docker('rm',identifier)
             containers=inventory()
             if any((item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project'] for item in containers):
                 raise ValueError('Old testing containers remain')
-            own=set()
-        result={'type':'complete','availability':'stopped' if own else 'absent'}
+            result={'type':'complete','availability':'absent'}
+        else:
+            result={'type':'complete','availability':'stopped' if own else 'absent'}
     else:
         result=qualify_retained_copy(containers,spec)
         if spec.get('allow_unavailable') is True:
