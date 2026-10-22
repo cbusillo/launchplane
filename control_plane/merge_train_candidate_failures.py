@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
+
+if TYPE_CHECKING:
+    from control_plane.github_required_checks import CheckRequirement
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 
@@ -49,6 +52,7 @@ class CandidateCheckFailures:
     checks: tuple[CandidateCheckFailure, ...]
     # A check run is still queued or running, for example a re-run of a failed job.
     checks_pending: bool = False
+    attribution_requirements: tuple[CheckRequirement, ...] = ()
 
     @property
     def conclusive(self) -> bool:

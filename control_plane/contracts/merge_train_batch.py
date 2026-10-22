@@ -156,6 +156,7 @@ class MergeTrainBatchCandidate(BaseModel):
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     head_check_reuse: MergeTrainHeadCheckReuse | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -680,7 +681,7 @@ def build_merge_train_batch_candidate_record(
         ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
-        candidate=candidate,
+        candidate=candidate.model_copy(update={"required_checks_observation_error": ""}),
     )
     return MergeTrainBatchCandidateRecord.model_validate(
         {

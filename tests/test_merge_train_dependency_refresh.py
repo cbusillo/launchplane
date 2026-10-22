@@ -16,7 +16,8 @@ from control_plane.merge_train_github import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, MAJOR
 from tests.test_merge_train_github import (
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
     _combined_status,
     _conversation_rule,
     _github_branch,
@@ -88,6 +89,7 @@ class DependencyRefreshTests(unittest.TestCase):
             pull_request,
             MergeTrainGitHubError("permission not found", status_code=404),
             _label_events(),
+            _protected_branch_with_checks("ci-status", app_id=None),
         )
 
         # Refused classifications exit before reading the timeline. Provide responses
@@ -112,7 +114,9 @@ class DependencyRefreshTests(unittest.TestCase):
                 if "/status" in path:
                     return _combined_status()
                 if "/check-runs" in path:
-                    return {"check_runs": [_check_run("completed", "success")]}
+                    return {
+                        "check_runs": [_required_check_run("ci-status", "completed", "success")]
+                    }
                 if path == "/graphql":
                     return _conversation_rule()
                 if "/rules/branches/" in path:

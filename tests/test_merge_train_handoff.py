@@ -49,7 +49,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_stack_collapse import _RecordingStackCollapseBranchClient
 from tests.test_merge_train import _pull_request
 from tests.test_merge_train_github import (
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
     _combined_status,
     _conversation_rule,
     _github_branch,
@@ -413,8 +414,10 @@ class GitHubHandoffTests(unittest.TestCase):
                 [pull],
                 [_comment(user={"id": 20, "login": "example"})],
                 pull,
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],
                 [{"filename": "api/a.py"}],
@@ -459,8 +462,10 @@ class GitHubHandoffTests(unittest.TestCase):
         reader.transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 newer,
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
             )
         )
         current = reader._pull_request_snapshot(repository_path=REPOSITORY, pull_request=pull)
@@ -848,8 +853,10 @@ class GitHubHandoffTests(unittest.TestCase):
                     "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}],
                 },
                 pull,
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],
                 [{"filename": "api/a.py"}],
@@ -947,8 +954,10 @@ class GitHubHandoffTests(unittest.TestCase):
             responses=(
                 pull,
                 [_comment(user={"id": 20, "login": "example"})],
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],
             )
@@ -981,8 +990,10 @@ class GitHubHandoffTests(unittest.TestCase):
                 ],
                 {"permission": "write"},
                 [_comment(user={"id": 20, "login": "example"})],
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],
             )

@@ -5829,11 +5829,14 @@ def _recover_failed_merge_train_candidate(
             lease=lease,
         )
     try:
-        base_check_status = github_client.read_base_check_status(
-            candidate=failed, failed_check_names=failures.check_identity_names
+        base_observation = github_client.read_base_check_observation(
+            candidate=failed, attribution_requirements=failures.attribution_requirements
         )
+        base_check_status = base_observation.status
+        base_check_diagnostic = base_observation.diagnostic
     except MergeTrainGitHubError:
         base_check_status = "unknown"
+        base_check_diagnostic = "Required base check evidence could not be read."
     lease.observe(base_checks_status=base_check_status)
     if base_check_status != "pass":
         # Failure on an unverified base cannot identify a queued change as its cause.
@@ -5855,12 +5858,14 @@ def _recover_failed_merge_train_candidate(
             "blocking_reason": {
                 "code": "merge_train_base_checks_not_green",
                 "message": f"The base branch {base_branch} {base_detail}; "
-                "queued pull requests are not blamed.",
+                "queued pull requests are not blamed."
+                + (f" {base_check_diagnostic}" if base_check_diagnostic else ""),
             },
             "details": {
                 **details,
                 "base_sha": failed.base_sha,
                 "base_checks_status": base_check_status,
+                "base_checks_diagnostic": base_check_diagnostic,
             },
         }
     if len(failed.entries) > 1:
