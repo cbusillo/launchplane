@@ -10916,6 +10916,7 @@
               "retry_original_operation",
               "close_out_observed",
               "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Recovery Action",
@@ -11043,6 +11044,7 @@
               "retry_original_operation",
               "close_out_observed",
               "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Proposed Action",
