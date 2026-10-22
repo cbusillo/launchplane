@@ -155,10 +155,9 @@ If recorded train refreshes and invisible commits are mixed between status
 publishes, neither proof covers the whole history and a new decision is needed.
 
 This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The Client sees
-a short note that later commits were marked as having no Client-visible changes
-and their acceptance still applies. The recorded Client, original acceptance
-and delivered feedback remain the source, rather than inventing a new decision.
+`client_impact` trailer value in `carried_from.commits`, in order. The recorded
+Client, original acceptance and delivered feedback remain the source, rather
+than inventing a new decision.
 The same-current-Client, delivered-feedback and unchanged-base checks below apply.
 
 The Client accepts a feature, seen on its preview. A base update or rebase may
