@@ -5,7 +5,7 @@ from tests.support.auth import scoped_agent_test
 import asyncio
 from contextlib import redirect_stderr
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import json
 import hashlib
@@ -25,7 +25,10 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.contracts.product_environment_read_model import build_product_activity_read_model
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -50,6 +53,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from tests.support.disposable_lanes import record_safety
 from tests.test_service import create_launchplane_fastapi_test_app
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation
@@ -211,6 +215,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
         self.expected = seed_lane(self.store)
+        record_safety(self.store, self.expected.product, self.expected.context, "testing")
         self.provider = RestartProvider(self.expected)
         self.payload: dict[str, object] = {
             "product": "odoo-tenant-cm",
@@ -344,6 +349,99 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertIn("local-owner-agent", event.summary)
         self.assertIn(self.provider.container_id, event.summary)
 
+    def test_director_restarts_qualified_testing_service_without_a_write_grant(self) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        self.payload["service"] = "script-runner"
+        self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "script-runner"
+        self.review()
+        status, response = self.invoke(key="standing-restart")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        record_safety(
+            self.store, self.expected.product, self.expected.context, "testing", data="only_copy"
+        )
+        self.assertTrue(self.invoke(key="standing-restart")[1]["replayed"])
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_director_restart_refuses_unsafe_or_unknown_testing_before_dispatch(self) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        self.review()
+        now = datetime.now(timezone.utc)
+        unsafe_facts: tuple[dict[str, object], ...] = (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"data": "unknown"},
+            {"production_resources": "shared"},
+            {"production_resources": "unknown"},
+            {"binding_sha256": "0" * 64},
+            {
+                "observed_at": now - timedelta(minutes=2),
+                "expires_at": now - timedelta(minutes=1),
+            },
+        )
+        for index, changes in enumerate(unsafe_facts):
+            with self.subTest(changes=changes):
+                record_safety(
+                    self.store, self.expected.product, self.expected.context, "testing", **changes
+                )
+                status, response = self.invoke(key=f"unsafe-restart-{index}")
+                self.assertEqual(status, 409, response)
+                self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+                self.assertEqual(self.provider.writes, [])
+        self.store.clear_disposable_lane_safety(
+            self.expected.product, self.expected.context, "testing"
+        )
+        status, response = self.invoke(key="missing-safety")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(self.provider.writes, [])
+
+    def test_director_grant_does_not_bypass_testing_hold_or_target_alias(self) -> None:
+        self.review()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.expected.context, instance_name="testing"
+        )
+        target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+            reason="Staff is testing.", recorded_by="fixture-admin"
+        )
+        self.store.write_dokploy_target_record(target)
+        record_safety(self.store, self.expected.product, self.expected.context, "testing")
+        status, response = self.invoke(key="held-restart")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        target.policies.staff_testing_hold = None
+        self.store.write_dokploy_target_record(target)
+        record_safety(self.store, self.expected.product, self.expected.context, "testing")
+        current = self.store.read_dokploy_target_id_record(
+            context_name=self.expected.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(current.model_copy(update={"instance": "prod"}))
+        status, response = self.invoke(key="aliased-restart")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(self.provider.writes, [])
+
+    @scoped_agent_test
+    def test_scoped_agent_cannot_inherit_director_restart_permission(self) -> None:
+        self.app = self.create_app(actions=("live_target_runtime.plan",))
+        self.review()
+        self.assertEqual(self.invoke(key="scoped-restart")[0], 403)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_standing_restart_permission_excludes_production_and_terminal_transport(self) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        self.review()
+        self.assertEqual(self.invoke(key="terminal-restart", token="valid-token")[0], 403)
+        self.payload["instance"] = "prod"
+        self.assertEqual(self.invoke(key="production-restart")[0], 403)
+        self.assertEqual(self.provider.writes, [])
+
     @scoped_agent_test
     def test_denied_scope_and_terminal_identity_never_inspect_or_restart(self) -> None:
         self.app = self.create_app(contexts=("other-context",))
@@ -355,6 +453,7 @@ class ServiceRestartTests(unittest.TestCase):
             self.assertEqual(self.invoke(token="valid-token")[0], 403)
         self.assertEqual(self.provider.writes, [])
 
+    @scoped_agent_test
     def test_live_apply_grant_revocation_is_seen_without_restarting_the_service(self) -> None:
         runtime = LaunchplaneAuthzPolicyRuntime(
             local_operator_policy(
@@ -431,9 +530,15 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(len(self.provider.writes), 1)
 
     def test_lost_reply_recovers_fresh_healthy_identity_without_restarting_again(self) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
         self.review()
         self.provider.unknown = True
         self.assertEqual(self.invoke(key="lost-reply")[0], 409)
+        record_safety(
+            self.store, self.expected.product, self.expected.context, "testing", usage="in_use"
+        )
         self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
         status, response = self.invoke(key="lost-reply")
         self.assertEqual(status, 200, response)
@@ -531,7 +636,12 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(self.invoke(key="missing-original")[0], 404)
         self.app = self.create_app(subject="different-authorized-operator")
         self.assertEqual(self.invoke(key=event.restart_recovery.idempotency_key)[0], 409)
-        self.app = self.create_app()
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        record_safety(
+            self.store, self.expected.product, self.expected.context, "testing", usage="in_use"
+        )
         self.provider.config["State"]["Restarting"] = True
         status, response = self.invoke(key=event.restart_recovery.idempotency_key)
         self.assertEqual(status, 409, response)

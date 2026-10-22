@@ -128,6 +128,9 @@ reviewed digests, original-key replay, generation and custody fences, staff
 holds, active/unknown-operation refusal and the worker's safety checks remain
 in force. See [testing retry](testing-deploy-retry.md).
 
+The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
+also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
 compatibility alternative. The authenticated Director agent inherits this inert
