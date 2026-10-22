@@ -647,13 +647,13 @@ Frontend contract generation uses the same boundary. Run
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
 The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-from that canonical export. `pnpm --dir frontend check:openapi-drift` regenerates
+from that canonical export. `(cd frontend && pnpm check:openapi-drift)` regenerates
 the checked schemas and agent contract in temporary paths and fails on backend
 contract drift. The TypeScript client at `frontend/src/generated/openapi.ts` is
 ignored rather than committed, so concurrent client generation cannot create a
 merge conflict. Development and both TypeScript checks regenerate it from the
 checked UI schema; production builds (including the container) run the type check.
-Use `pnpm --dir frontend generate:openapi-types` for generation alone. No custom
+Use `(cd frontend && pnpm generate:openapi-types)` for generation alone. No custom
 merge driver or train candidate regeneration is required. The canonical
 `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
@@ -677,7 +677,7 @@ The same canonical export also feeds the narrower checked
 to project only the explicit agent/admin allow-list plus the semantic
 lifecycle, deploy, reconciliation, workflow, and governance overlay. The
 artifact carries a semantic digest and non-gating source revision. The existing
-`pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
+`(cd frontend && pnpm check:openapi-drift)` gate regenerates it in a temporary
 path and compares only its normalization version and semantic digest, so
 unrelated OpenAPI or provenance-only changes do not create consumer drift.
 
