@@ -1953,7 +1953,39 @@ Controller actions have these retry/stop semantics:
   checks pass, fail, or remain pending.
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
-  evidence. If the eligible queue/base changes, the next controller action may
+  evidence. Before isolation, the controller can retry proven failed push checks
+  once on the same candidate SHA by deleting and recreating only its canonical
+  train ref at that exact SHA. It never force-resets a moved ref or requests
+  Actions write. Each write rechecks the controller lease. The original execution
+  IDs/attempts and `check_rerun_requested_at` are persisted after prerequisite
+  reads and before publication, reserving the retry for this queue/base across
+  restarts. Read failures leave that budget unused. A crash after reservation
+  but before deletion conservatively retains the reservation: an existing ref
+  cannot prove whether publication happened before a reply was lost.
+  A replacement already carrying
+  check, infrastructure or generated-body retry lineage gets no additional retry;
+  infrastructure-only failures keep their existing rebuild budget.
+  Dry-run reports `candidate_checks_retry_requested` without consuming it.
+  Restart restores an absent ref with a create-only request before reading
+  check evidence, even after the wait deadline; it never deletes an already
+  restored ref again. Fresh workflow inventory must prove a newer
+  completed execution before repeat failures enter isolation. After ten minutes
+  without that proof, `candidate_check_retry_unavailable` preserves the hold
+  rather than waiting indefinitely under a pending reason. Passing checks use
+  the existing audited closed-batch recovery; the batch PR is never reopened.
+  Conflicting current success/failure runs of the same required check and App
+  on this SHA instead report `candidate_checks_disagree`. This transient conflict
+  cannot blame a member or authorize landing. Earlier superseded attempts do
+  not count as current conflicts. Admin holds are never retried or blamed.
+  Missing Actions read, non-push checks and unproved execution provenance skip
+  automatic republication and retain existing failure handling. Transient
+  Actions read failures preserve the hold without consuming the retry.
+  No permission
+  is added here. The existing stall monitor names recovery waits and reports
+  any open head retaining the train's blocked label for thirty minutes,
+  including candidate-failure blocks. This remains visible with an empty
+  eligible queue or while other candidates progress.
+  If the eligible queue/base changes, the next controller action may
   become `plan_candidate` for a superseding candidate. A failed candidate with
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build

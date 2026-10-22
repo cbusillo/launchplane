@@ -21253,6 +21253,13 @@
       "MergeTrainStallObservation": {
         "additionalProperties": false,
         "properties": {
+          "blocked_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Blocked Since",
+            "type": "object"
+          },
           "progress_key": {
             "default": "",
             "title": "Progress Key",
@@ -21295,6 +21302,7 @@
         "title": "MergeTrainStallObservation",
         "type": "object",
         "required": [
+          "blocked_since",
           "progress_key",
           "progress_since",
           "queue_suspended",
