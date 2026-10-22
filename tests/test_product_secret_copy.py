@@ -335,7 +335,15 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                         products=("example-site", "launchplane"),
                         contexts=("launchplane", "example-site"),
                         actions=("product_profile.read", "secret.list"),
-                    )
+                    ),
+                    GitHubHumanPolicyRule(
+                        github_ids=(human.github_id,),
+                        roles=("admin",),
+                        products=("launchplane",),
+                        contexts=("example-site",),
+                        actions=("secret.list",),
+                        instances=("*",),
+                    ),
                 ]
                 if administrator:
                     rules.append(
@@ -378,6 +386,17 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                         "GLOBAL_SOURCE" in {binding["name"] for binding in lane["bindings"]},
                         administrator,
                     )
+                narrower = await _asgi_request(
+                    app,
+                    "GET",
+                    "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context&scopes=context_instance",
+                    headers={"Cookie": manager.session_cookie_header(session)},
+                )
+                self.assertEqual(narrower.status_code, 200, narrower.text)
+                self.assertEqual(
+                    narrower.json()["lane_binding_resolution"]["coverage"]["status"], "complete"
+                )
+                self.assertIn(self.source.name, narrower.text)
 
     @scoped_agent_test
     async def test_explicit_context_and_instance_reads_prove_complete_copy_coverage(self) -> None:
@@ -848,11 +867,33 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                     )
 
     @scoped_agent_test
-    async def test_ambiguous_context_does_not_inherit_environment_read(self) -> None:
+    async def test_ambiguous_context_does_not_change_inherited_role_coverage(self) -> None:
         self.write_binding(name="CONTEXT_SHADOW", key="SHARED_KEY", scope="context")
         profiles = self.store.list_product_profile_records()
         foreign = self.profile.model_copy(update={"product": "foreign-site"})
-        context_app = self._environment_read_app(products=("example-site",), instances=())
+        context_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=tuple(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-write",),
+                        products=("example-site", "launchplane"),
+                        contexts=("*",),
+                        actions=("agent.read",),
+                        instances=instances,
+                    )
+                    for instances in ((), ("*",))
+                ),
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
         context_url = (
             "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context"
         )
@@ -882,6 +923,9 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             before.json()["lane_binding_resolution"], after.json()["lane_binding_resolution"]
         )
+        self.assertEqual(before.json()["coverage"], after.json()["coverage"])
+        self.assertEqual(before.json()["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
 
     def test_copy_bundle_rechecks_product_and_context_ownership(self) -> None:
         for alter_profile in (True, False):

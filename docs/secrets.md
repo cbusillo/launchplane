@@ -910,7 +910,6 @@ copy names, but selection stays `scoped` without that proof. Metadata enumeratio
 still uses the shared resolver even when selection rows are withheld. Hidden
 context-ownership records cannot change the qualification projection or its
 coverage through inherited product-read rules.
-Product-environment metadata access does not prove selection scope coverage.
 Existing copy eligibility and grants are unchanged.
 
 All-scope selection is not a delivery claim: site delivery may exclude global

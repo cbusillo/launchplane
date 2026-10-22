@@ -837,7 +837,6 @@ def register_managed_secret_read_routes(
                 instance: str,
                 *,
                 environment_read: bool,
-                inherit_agent_read_role: bool = True,
             ) -> bool:
                 target = AuthorizationTarget(
                     scope="instance" if instance else "context",
@@ -849,7 +848,7 @@ def register_managed_secret_read_routes(
                     product=LAUNCHPLANE_SERVICE_CONTEXT,
                     context=context,
                     target=target,
-                    inherit_agent_read_role=inherit_agent_read_role,
+                    inherit_agent_read_role=False,
                 ) or (
                     environment_read
                     and dependencies.authorization_allows(
@@ -858,14 +857,12 @@ def register_managed_secret_read_routes(
                         product=product,
                         context=context,
                         target=target,
-                        inherit_agent_read_role=inherit_agent_read_role,
+                        inherit_agent_read_role=False,
                     )
                 )
 
             copy_authorization_complete = universal_secret_reader or all(
-                metadata_scope_read_allowed(
-                    lane.context, instance, environment_read=True, inherit_agent_read_role=False
-                )
+                metadata_scope_read_allowed(lane.context, instance, environment_read=True)
                 for lane in profile.lanes
                 for instance in ("", lane.instance)
             )
@@ -905,12 +902,11 @@ def register_managed_secret_read_routes(
                         context,
                         instance if scope == "context_instance" else "",
                         environment_read=False,
-                        inherit_agent_read_role=False,
                     )
 
                 resolution = product_binding_resolution(
                     store,
-                    product=product,
+                    profile=profile,
                     integration=integration,
                     scopes=frozenset(scopes or ("global", "context", "context_instance")),
                     scope_read_allowed=scope_read_allowed,

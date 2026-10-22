@@ -86,6 +86,7 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import (
+    director_agent_identity,
     AuthorizationTarget,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
@@ -1577,20 +1578,7 @@ def register_product_environment_read_routes(
                 collections=("product_profiles",),
                 population="active_product_profiles",
                 authorization_complete=(
-                    service_reader
-                    or (
-                        identity is not None
-                        and "*"
-                        in common.read_role_products(
-                            identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
-                        )
-                        and common.authorization_allows(
-                            identity=identity,
-                            action="product_profile.read",
-                            product="launchplane",
-                            context=LAUNCHPLANE_SERVICE_CONTEXT,
-                        )
-                    )
+                    service_reader or (identity is not None and director_agent_identity(identity))
                 ),
                 exclusions=("inactive_products",),
             ),

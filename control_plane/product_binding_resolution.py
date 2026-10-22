@@ -5,11 +5,8 @@ from pydantic import BaseModel, ConfigDict
 from control_plane import secrets
 from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.product_secret_copy import (
-    ProductSecretBindingMetadata,
-    ProductSecretCopyError,
-    ProductSecretCopyStore,
-)
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.product_secret_copy import ProductSecretBindingMetadata
 
 
 class LaneBindingSelection(BaseModel):
@@ -31,18 +28,13 @@ class ProductBindingResolution(BaseModel):
 
 
 def product_binding_resolution(
-    store: ProductSecretCopyStore,
+    store: secrets.SecretBindingSelectionStore,
     *,
-    product: str,
+    profile: LaunchplaneProductProfileRecord,
     integration: str,
     scopes: frozenset[SecretScope],
     scope_read_allowed: Callable[[SecretScope, str, str], bool],
 ) -> ProductBindingResolution:
-    profile = next(
-        (item for item in store.list_product_profile_records() if item.product == product), None
-    )
-    if profile is None:
-        raise ProductSecretCopyError("Product secret bindings require an existing product.")
     lanes = []
     authorization_complete = True
     for lane in profile.lanes:
