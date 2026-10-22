@@ -59,6 +59,7 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_url,
 )
 from control_plane.workflows.preview_resource_destroy import (
+    PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
@@ -1120,6 +1121,8 @@ def execute_odoo_preview_dokploy_apply(
     *,
     control_plane_root: Path,
     request: OdooPreviewDokployApplyRequest,
+    record_store: object | None = None,
+    preview_context: str = "",
     database_url: str | None = None,
     provider_operation_title: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
@@ -1157,6 +1160,8 @@ def execute_odoo_preview_dokploy_apply(
     )
     if plan.operation == "destroy":
         return _execute_destroy(
+            record_store=record_store,
+            context=preview_context,
             host=host,
             token=token,
             request=request,
@@ -1853,6 +1858,8 @@ def _execute_refresh(
 
 def _execute_destroy(
     *,
+    record_store: object | None,
+    context: str,
     host: str,
     token: str,
     request: OdooPreviewDokployApplyRequest,
@@ -1870,6 +1877,9 @@ def _execute_destroy(
             error_message="" if absent else "Preview provider absence is unknown.",
         )
     destroy_result = destroy_dokploy_preview_resource(
+        record_store=record_store,
+        context=context,
+        instance=plan.preview_slug,
         host=host,
         token=token,
         resource_type="compose",
@@ -1881,6 +1891,15 @@ def _execute_destroy(
         missing_resource_is_clean=True,
         before_provider_mutation=provider_effect_checkpoint,
     )
+    if destroy_result.cleanup_errors and destroy_result.cleanup_errors[0].startswith(
+        f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
+    ):
+        return _apply_result(
+            request=request,
+            status="blocked",
+            compose_id=compose_id,
+            error_message=destroy_result.cleanup_errors[0],
+        )
     steps = tuple(
         _step(cast("OdooPreviewDokployOperationName", step.name), step.target)
         for step in destroy_result.steps

@@ -27,7 +27,7 @@ def observation_body(payload: DisposableLaneObservationRequest) -> dict[str, obj
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("inspect", "collect", "record", "clear"))
+    parser.add_argument("mode", choices=("inspect", "collect", "clear"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--config")
     parser.add_argument("--env-config")
@@ -43,24 +43,11 @@ def main() -> int:
         action="store_true",
         help="Observe existing testing application storage metadata without qualifying safety.",
     )
-    parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
-    parser.add_argument(
-        "--data", choices=("unknown", "reproducible", "only_copy"), default="unknown"
-    )
-    parser.add_argument(
-        "--production-resources",
-        choices=("unknown", "isolated", "shared", "separation_ready"),
-        default="unknown",
-    )
-    for field in ("usage", "data", "isolation"):
-        parser.add_argument(f"--{field}-evidence", default="")
     args = parser.parse_args()
     if args.application_resources and (
         args.mode != "collect" or args.instance != "testing" or args.preview_id
     ):
         parser.error("--application-resources requires collect for testing without a preview ID.")
-    if args.mode == "record" and not args.preview_id:
-        parser.error("Recording cleanup facts requires an exact preview ID.")
     if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):
         parser.error("Clearing requires --expected-binding-sha256 from a reviewed inspection.")
     if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_observation_sha256):
@@ -113,7 +100,7 @@ def main() -> int:
             return 0
         if response["result"]["mode"] != "inspect":
             raise ValueError("The inspection did not settle as requested.")
-        if args.mode in {"collect", "record"}:
+        if args.mode == "collect":
             digest = response["result"]["binding_sha256"]
             payload = DisposableLaneObservationRequest(
                 **{
@@ -124,18 +111,6 @@ def main() -> int:
                     **(
                         {"lifetime_seconds": args.lifetime_seconds}
                         if args.lifetime_seconds is not None
-                        else {}
-                    ),
-                    **(
-                        {
-                            "usage": args.usage,
-                            "data": args.data,
-                            "production_resources": args.production_resources,
-                            "usage_evidence": args.usage_evidence,
-                            "data_evidence": args.data_evidence,
-                            "isolation_evidence": args.isolation_evidence,
-                        }
-                        if args.mode == "record"
                         else {}
                     ),
                 }
@@ -173,7 +148,7 @@ def main() -> int:
                 inspection.update(observation_sha256=observation_digest, observation=report)
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
-        if args.mode in {"collect", "record"} and (
+        if args.mode == "collect" and (
             result["binding_sha256"] != payload.expected_binding_sha256
             or result["provider_mutation"] is not False
         ):

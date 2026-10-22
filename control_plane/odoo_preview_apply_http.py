@@ -494,6 +494,8 @@ def execute_odoo_preview_apply_result(
         }
     )
     driver_result = execute_odoo_preview_dokploy_apply(
+        record_store=record_store,
+        preview_context=profile.preview.context,
         control_plane_root=control_plane_root_path,
         request=service_apply_request,
         database_url=database_url,

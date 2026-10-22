@@ -58,7 +58,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         }
         collected_result: dict[str, object] = {
             "mode": collection_mode,
-            "observer_kind": "director_agent_preview_cleanup",
+            "observer_kind": "director_agent",
             "source_coverage": disposable_collection_coverage(),
             "binding_sha256": binding_sha256,
             "provider_mutation": provider_mutation,
@@ -128,23 +128,6 @@ class DisposableLaneClientTests(unittest.TestCase):
             ]
             if preview_id:
                 arguments += ["--preview-id", preview_id]
-            if command_mode == "record":
-                arguments += [
-                    "--preview-id",
-                    "fixture-preview",
-                    "--usage",
-                    usage,
-                    "--data",
-                    data,
-                    "--production-resources",
-                    production_resources,
-                    "--usage-evidence",
-                    "private-evidence",
-                    "--data-evidence",
-                    "private-evidence",
-                    "--isolation-evidence",
-                    "private-evidence",
-                ]
             if lifetime_seconds is not None:
                 arguments += ["--lifetime-seconds", str(lifetime_seconds)]
             if include_application_resources:
@@ -214,22 +197,6 @@ class DisposableLaneClientTests(unittest.TestCase):
                     )
                 self.assertEqual(raised.exception.code, 2)
                 request.assert_not_called()
-
-    def test_record_binds_preview_facts_to_the_inspection_without_printing_references(self) -> None:
-        status, output, request = self.call_client(
-            command_mode="record",
-            collection_mode="record",
-            usage="unused",
-            data="reproducible",
-            production_resources="isolated",
-        )
-        self.assertEqual(status, 0, output)
-        body = request.call_args.kwargs["body"]
-        self.assertEqual(body["mode"], "record")
-        self.assertTrue(body["expected_binding_sha256"])
-        self.assertEqual(body["usage"], "unused")
-        self.assertTrue(body["preview_id"])
-        self.assertNotIn("private-evidence", output)
 
     def test_clear_uses_the_existing_evidence_only_service_operation(self) -> None:
         proof = "a" * 64
