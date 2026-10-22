@@ -384,13 +384,13 @@ class CulpritIsolationTests(unittest.TestCase):
                 assert train.stopped is not None
                 self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
 
-    def test_red_base_dry_run_stops_without_writing(self) -> None:
+    def test_red_base_dry_run_plans_without_writing_or_blame(self) -> None:
         with TemporaryDirectory() as directory:
             train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 4)
             train.run(culprits={1, 2, 3, 4}, base_status="fail", mutate=False)
         self.assertEqual(train.blocked, [])
-        assert train.stopped is not None
-        self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+        self.assertIsNone(train.stopped)
+        self.assertEqual(train.reason_codes, ["base_failure_exploration"])
 
     def test_red_base_stops_without_blocking_any_queued_pull_request(self) -> None:
         with TemporaryDirectory() as directory:
@@ -400,21 +400,53 @@ class CulpritIsolationTests(unittest.TestCase):
             active = store.list_merge_train_batch_candidate_records(status="active")
         self.assertEqual(train.blocked, [])
         self.assertEqual(train.landed, [])
-        self.assertEqual(train.candidates, [(1, 2, 3, 4)])
+        self.assertEqual(train.candidates[0], (1, 2, 3, 4))
+        self.assertEqual(set(train.candidates[1:]), {(1,), (2,), (3,), (4,)})
+        self.assertEqual(len(train.candidates), len(set(train.candidates)))
         self.assertTrue(active)
         self.assertTrue(
             all(record.candidate.entries == active[0].candidate.entries for record in active)
         )
         assert train.stopped is not None
-        self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
-        self.assertIn("base branch main", train.stopped["blocking_reason"]["message"])
+        self.assertEqual(train.stopped["reason_code"], "base_failure_exploration_exhausted")
+        self.assertIn("not blamed", train.stopped["blocking_reason"]["message"])
         self.assertEqual(train.stopped["details"]["base_sha"], train.snapshot.base_sha)
         feedback = build_feedback_payloads(response={"result": train.stopped})
         self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
         self.assertTrue(all(payload["event"] == "blocked" for payload in feedback))
-        self.assertTrue(
-            all("base branch main" in cast(str, payload["message"]) for payload in feedback)
-        )
+        self.assertTrue(all("not blamed" in cast(str, payload["message"]) for payload in feedback))
+
+    def test_nonpassing_observation_explores_but_base_read_exception_stops(self) -> None:
+        from control_plane.merge_train_github import MergeTrainGitHubError
+
+        for status in ("fail", "pending", "unknown", MergeTrainGitHubError("denied read")):
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 2)
+                train.run(
+                    culprits={1, 2}, base_status=status, max_passes=1, settle=False, mutate=False
+                )
+                self.assertEqual(train.blocked, [])
+                self.assertEqual(train.landed, [])
+                self.assertEqual(
+                    train.reason_codes,
+                    [
+                        "base_checks_not_green"
+                        if isinstance(status, Exception)
+                        else "base_failure_exploration"
+                    ],
+                )
+
+    def test_conclusive_optional_failure_without_required_identity_cannot_explore(self) -> None:
+        with TemporaryDirectory() as directory:
+            train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 2)
+            train.run(
+                culprits={1, 2},
+                base_status="unknown",
+                infrastructure_failure=lambda: CandidateCheckFailures(checks=TEST_FAILURE.checks),
+            )
+            self.assertEqual(train.candidates, [(1, 2)])
+            self.assertEqual(train.reason_codes, ["base_checks_not_green"])
+            self.assertEqual(train.blocked, [])
 
     def test_lone_member_is_not_blamed_until_base_checks_pass(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError

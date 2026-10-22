@@ -1221,7 +1221,7 @@ unrelated optional workflows cannot change its classification:
   stays stopped with `reason_code: infrastructure_retry_used` until the queue or
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
-- **Base checks.** Before splitting or blaming a pull request, the controller
+- **Base checks.** Before blaming a pull request, the controller
   reads the base's effective technical requirements on the candidate's exact
   base commit. It retains the name and App binding of each required identity
   that actually caused the candidate's failure. Those identities need actual
@@ -1236,18 +1236,42 @@ unrelated optional workflows cannot change its classification:
   skipped. A genuinely required shard still needs its own successful base evidence.
   Advisory projections are excluded consistently; configuration checks retain
   their separate current-comparison facet when configured. If a required
-  candidate identity fails there too, its evidence is unproved, or
-  the base's required checks are pending, missing or unreadable, it stays stopped
-  with `reason_code: base_checks_not_green`
-  and a reason naming the base branch and missing or unproved required identities.
-  The same diagnostic appears in controller details. No pull request gets `blocked_label`, and
-  the failed candidate stays active for fresh reads on the next pass. A rerun
-  passing on the same base allows isolation to resume; a changed base or eligible
-  queue uses the existing replacement path.
-  Feedback names the base failure or missing evidence as needing attention;
-  pending checks are reported as waiting. A repository without required-check
-  evidence on its base stays stopped without blame; evidence must be supplied
-  before isolation can identify a culprit.
+  candidate identity fails there too, its evidence is unproved, or the base's
+  required checks are pending or missing, no pull request gets `blocked_label`.
+  A successful read returning fail, pending or unknown can start the bounded
+  exploration below. A provider/read exception stops with
+  `reason_code: base_checks_not_green`; an error is never permission to explore.
+  Without conclusive current candidate failure evidence naming actual required
+  identities, exploration also stays stopped. A lone failed eligible member stays
+  stopped for fresh base reads. The reason names the base branch and missing or
+  unproved required identities, and the same diagnostic appears in controller details.
+  A rerun passing on the same base allows ordinary isolation to resume.
+- **Non-blaming base exploration.** A failed candidate on an unproved base can
+  test eligible roots individually in queue order, so a repair can land even
+  when another queued change still fails. Each probe uses current eligibility,
+  Ready and Client evidence, release/manual holds, stack discovery or the exact
+  recorded collapse proof, and the ordinary candidate and protected landing
+  gates. Existing conflict and dependency holds remain; only temporary
+  `failure_isolation` deferrals are reconsidered between failed probes. The
+  currently tested probe keeps the other roots deferred while it runs.
+  History on the exact base commit, source head and compatible policy avoids
+  repeating failed singleton inputs, including after a service restart. A
+  failed first singleton does not prevent the next eligible one from running.
+  Historical failure is scheduling evidence, never culprit proof. Fresh reads
+  can still observe an earlier singleton's passing same-SHA CI rerun; its closed
+  candidate uses the existing bounded replacement-ref recovery and retry budget.
+  Exploration does not dispatch a CI rerun itself. If every
+  eligible singleton has failed, `base_failure_exploration_exhausted` reports the
+  non-blaming stop without launching more unchanged probes. A new eligible head,
+  added repair, changed base or incompatible policy supplies new inputs;
+  operational policy changes that retain the existing authority binding retain
+  their history. Fresh successful base evidence permits ordinary green-base
+  isolation. This finite sweep does not promise to find repairs that require an
+  arbitrary combination of queued changes, and it does not retest or clear an
+  existing unchanged `merge-blocked` head. Infrastructure retry budgets remain
+  unchanged. A passing repair lands through the same exact tested tree and
+  fresh admission checks as any other candidate; only then does the advanced
+  base permit subsequent culprit attribution.
 - **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while

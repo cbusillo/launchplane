@@ -67,6 +67,7 @@ def controller_last_result(
         if reason
         in {
             "failure_isolation",
+            "base_failure_exploration",
             "candidate_checks_recovered",
             "infrastructure_retry",
             "closed_batch_body_changed",
@@ -108,6 +109,7 @@ def controller_last_result(
         "candidate_checks_pending",
         "candidate_failure_evidence_unavailable",
         "base_checks_not_green",
+        "base_failure_exploration_exhausted",
     }:
         actor = "provider"
         observation = "Observe fresh candidate, original-head or base check evidence."

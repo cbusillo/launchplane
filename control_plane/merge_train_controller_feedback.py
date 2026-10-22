@@ -218,7 +218,7 @@ def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
         return "waiting"
     if controller_action == "recover_candidate_block":
         return "waiting" if _as_dict(result.get("details")).get("block_removed") is True else "skip"
-    if result.get("reason_code") == "base_checks_not_green":
+    if result.get("reason_code") in {"base_checks_not_green", "base_failure_exploration_exhausted"}:
         return (
             "waiting"
             if _as_dict(result.get("details")).get("base_checks_status") == "pending"
@@ -350,7 +350,10 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
-        if result.get("reason_code") == "base_checks_not_green":
+        if result.get("reason_code") in {
+            "base_checks_not_green",
+            "base_failure_exploration_exhausted",
+        }:
             return f"Launchplane is waiting for the base checks: {_blocking_detail(result)}"
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         candidate = _as_dict(result.get("candidate"))
@@ -422,7 +425,7 @@ def _held_out_messages(
     out, so later passes do not repeat the message.
     """
     probed: set[object] | None = None
-    if stopped:
+    if stopped and result.get("reason_code") != "base_failure_exploration_exhausted":
         probe = _as_dict(result.get("conflict_probe"))
         probed = {
             _as_dict(entry).get("pull_request_number")
@@ -448,6 +451,21 @@ def _held_out_messages(
             # Nothing for its author to do; it joins the next candidate.
             continue
         if held_out_entry.get("reason") == "failure_isolation":
+            if result.get("reason_code") in {
+                "base_failure_exploration",
+                "base_failure_exploration_exhausted",
+            }:
+                messages.append(
+                    (
+                        number,
+                        _blocking_detail(result)
+                        if stopped
+                        else "Launchplane is testing eligible changes separately while the base "
+                        "checks are unproved. No queued pull request is blamed; nothing is needed "
+                        "from its author while another candidate runs.",
+                    )
+                )
+                continue
             messages.append(
                 (
                     number,
