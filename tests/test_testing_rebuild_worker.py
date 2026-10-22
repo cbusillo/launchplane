@@ -324,6 +324,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 str(transport.payload["host"]),
                 cast(tuple[str, ...], transport.payload["entrypoints"]),
                 cast(tuple[str, ...] | None, transport.payload.get("external_middlewares")),
+                discover_external_redirects=(
+                    transport.payload.get("unavailable_predecessor") is not None
+                    and "external_middlewares" not in transport.payload
+                ),
             )
             if transport is not None
             else deepcopy(self.raw),
