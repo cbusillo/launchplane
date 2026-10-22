@@ -617,19 +617,25 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.assertEqual(self.current(), self.fixture.before)
 
     def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
         self.operation = self.operation.model_copy(
             update={"operation_id": "fresh-transient-capture"}
         )
         self.capture.side_effect = self.capture_function
+        cause = NativeProgramFailed(
+            "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+        )
         with patch.object(
             DokployTestingRouteTransport,
             "read",
-            side_effect=NativeSourceUnavailable("fixture unavailable"),
+            side_effect=cause,
         ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
+            with self.assertRaises(service.NativeTestingRebuildPending) as caught:
                 self.execute()
+            self.assertIn(cause.code, str(caught.exception))
+            self.assertNotIn("private-value", str(caught.exception))
         self.capture.assert_called_once()
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
@@ -2664,7 +2670,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving(self) -> None:
         from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import (
+            NativeProgramFailed,
+            NativeSourceUnavailable,
+        )
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
         from control_plane.testing_candidate_application import (
             CandidatePrivateReadinessFailed,
             CandidateObservationUnavailable,
@@ -2672,6 +2682,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
         original_readiness = service.NativeTestingRebuildExecution.readiness
+        cause = NativeProgramFailed(
+            "private-value", predicate=ReadbackPredicate.PORTS, kind="refused"
+        )
         plans: list[Any] = []
 
         def readiness(executor: Any, plan: Any) -> Any:
@@ -2682,12 +2695,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
             patch.object(
                 service,
                 "candidate_private_readiness",
-                side_effect=CandidatePrivateReadinessFailed("fixture credential mismatch"),
+                side_effect=CandidatePrivateReadinessFailed(
+                    "fixture credential mismatch", native_failure=cause
+                ),
             ),
             patch.object(service.NativeTestingRebuildExecution, "readiness", readiness),
         ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
+            with self.assertRaises(service.NativeTestingRebuildPending) as pending:
                 self.execute()
+            self.assertIn(cause.code, str(pending.exception))
             checkpoint = RecordTestingRebuildStore(self.store)
             record = checkpoint.load(plans[0])
             self.assertIsNotNone(record.private_readiness_failed_at)
@@ -2726,6 +2742,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 ):
                     self.assertEqual(
                         self.execute().error_code, "candidate_private_readiness_failed"
+                    )
+                    self.assertIn(
+                        cause.code, checkpoint.load(plans[0]).preparation_failure_evidence
                     )
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)

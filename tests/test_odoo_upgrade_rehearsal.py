@@ -3929,8 +3929,11 @@ else:
         qualified = self.inspect()
         self.assertEqual(set(qualified), set(self.fixture.containers))
         self.fixture.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.NETWORK_REACH)
 
     def test_another_container_on_the_private_network_is_refused(self) -> None:
         original = self.host["one_inspection"]
@@ -3984,8 +3987,11 @@ else:
         self.host["one_inspection"] = lambda name: __import__("json").loads(
             network("inspect", name)
         )[0]
-        with self.assertRaisesRegex(RuntimeError, "state is exposed"):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.PRIVATE_STATE)
 
     def test_host_bind_and_published_ports_refuse_before_data_work(self) -> None:
         web = self.fixture.containers["web"]
