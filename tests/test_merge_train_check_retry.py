@@ -46,6 +46,11 @@ class CandidateCheckRetryTests(TestCase):
         self.client.candidate_block_label_events.return_value = []
         self.client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
         self.client.candidate_check_retry_finished.return_value = False
+        self.client.prepare_candidate_check_retry.side_effect = lambda *, candidate: (
+            lambda before_write: self.client.retry_candidate_checks(
+                candidate=candidate, before_write=before_write
+            )
+        )
 
     def recover(
         self, *, mutate: bool = True, recorded_at: str = "2026-10-10T12:01:00Z"
@@ -211,7 +216,13 @@ class CandidateCheckRetryTests(TestCase):
         result = self.recover(recorded_at="2026-10-10T13:00:00Z")
         self.assertEqual(result["reason_code"], "candidate_check_retry_unavailable")
         self.client.add_pull_request_label.assert_not_called()
-        self.client.retry_candidate_checks.assert_called_once()
+        self.assertEqual(
+            sum(
+                not call.kwargs.get("resume", False)
+                for call in self.client.retry_candidate_checks.call_args_list
+            ),
+            1,
+        )
 
     def test_recovery_lineage_cannot_start_another_same_sha_retry(self) -> None:
         self.record = self.record.model_copy(
@@ -224,6 +235,70 @@ class CandidateCheckRetryTests(TestCase):
         result = self.recover()
         self.assertEqual(result["reason_code"], "candidate_failure_isolated")
         self.client.retry_candidate_checks.assert_not_called()
+
+    def test_preparation_failure_preserves_the_unused_retry(self) -> None:
+        self.client.prepare_candidate_check_retry.side_effect = MergeTrainGitHubError(
+            "read failed", status_code=503
+        )
+        before = self.store.list_merge_train_batch_candidate_records()
+        result = self.recover()
+        self.assertEqual(result["reason_code"], "candidate_check_retry_unavailable")
+        self.assertEqual(self.store.list_merge_train_batch_candidate_records(), before)
+        self.client.retry_candidate_checks.assert_not_called()
+        self.client.add_pull_request_label.assert_not_called()
+
+    def test_inconclusive_reserved_retry_names_its_pending_state(self) -> None:
+        self.recover()
+        self.record = next(
+            record
+            for record in self.store.list_merge_train_batch_candidate_records(status="active")
+            if record.candidate.check_rerun_attempts
+        )
+        self.client.read_candidate_check_failures.return_value = replace(
+            TEST_FAILURE, checks_pending=True
+        )
+        result = self.recover()
+        self.assertEqual(result["reason_code"], "candidate_checks_retry_pending")
+        self.client.add_pull_request_label.assert_not_called()
+
+    def test_delayed_restart_restores_absent_ref_before_reading_failure_evidence(self) -> None:
+        self.recover()
+        self.record = next(
+            record
+            for record in self.store.list_merge_train_batch_candidate_records(status="active")
+            if record.candidate.check_rerun_attempts
+        )
+        transport = Mock()
+        ref: dict[str, str | None] = {"sha": None}
+
+        def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
+            if method == "GET" and "/branches/" in path:
+                if ref["sha"] is None:
+                    raise MergeTrainGitHubError("absent", status_code=404)
+                return {"commit": {"sha": ref["sha"]}}
+            if method == "POST" and path.endswith("/git/refs"):
+                assert body is not None
+                ref["sha"] = str(body["sha"])
+                return {}
+            raise AssertionError(f"Unexpected write: {method} {path}")
+
+        transport.request.side_effect = request
+        publisher = GitHubMergeTrainClient(transport=transport)
+        self.client.retry_candidate_checks.side_effect = publisher.retry_candidate_checks
+        for failure in (
+            replace(TEST_FAILURE, checks_pending=True),
+            replace(TEST_FAILURE, checks_disagree=True),
+            TEST_FAILURE,
+        ):
+            with self.subTest(failure=failure):
+                ref["sha"] = None
+                self.client.read_candidate_check_failures.return_value = failure
+                self.client.candidate_check_retry_finished.side_effect = MergeTrainGitHubError(
+                    "history unavailable", status_code=503
+                )
+                self.recover(recorded_at="2026-10-10T13:00:00Z")
+                self.assertEqual(ref["sha"], self.record.candidate.candidate_sha)
+        self.client.add_pull_request_label.assert_not_called()
 
 
 class CandidateCheckRetryProviderTests(TestCase):
@@ -296,6 +371,13 @@ class CandidateCheckRetryProviderTests(TestCase):
             {"ref": self.candidate.candidate_ref, "sha": self.candidate.candidate_sha},
         )
         self.assertEqual(checkpoint.call_count, len(writes))
+
+    def test_prepared_retry_has_no_prerequisite_reads_before_its_first_write(self) -> None:
+        publish = self.client.prepare_candidate_check_retry(candidate=self.candidate)
+        self.transport.reset_mock()
+        publish(Mock())
+        self.assertEqual(self.transport.request.call_args_list[0].kwargs["method"], "DELETE")
+        self.assertEqual(self.ref_sha, self.candidate.candidate_sha)
 
     def test_moved_or_noncanonical_ref_is_never_overwritten(self) -> None:
         for moved in (False, True):
@@ -422,7 +504,16 @@ class CandidateCheckRetryProviderTests(TestCase):
             patch(
                 "control_plane.merge_train_github._list_check_runs",
                 return_value={
-                    "check_runs": [check],
+                    "check_runs": [
+                        check,
+                        {
+                            **check,
+                            "id": 72,
+                            "conclusion": "success",
+                            "check_suite": {"id": 20},
+                            "details_url": f"https://github.com/{self.candidate.repository}/actions/runs/42/job/72",
+                        },
+                    ],
                     "actions_observation_error": "actions_read_not_granted",
                 },
             ),
@@ -436,6 +527,29 @@ class CandidateCheckRetryProviderTests(TestCase):
         self.assertTrue(failures.conclusive)
         self.assertEqual(failures.retry_runs, ())
         self.assertEqual(failures.check_names, ("ci-gate",))
+        self.assertFalse(failures.checks_disagree)
+
+    def test_transient_run_read_is_unavailable_instead_of_skipping_retry(self) -> None:
+        check = {
+            "id": 71,
+            "head_sha": self.candidate.candidate_sha,
+            "app": {"id": 19, "slug": "github-actions"},
+            "check_suite": {"id": 10},
+            "details_url": f"https://github.com/{self.candidate.repository}/actions/runs/41/job/71",
+            "status": "completed",
+            "conclusion": "failure",
+        }
+        for error in (
+            MergeTrainGitHubError("temporary", status_code=503),
+            MergeTrainGitHubError("transport unavailable"),
+            MergeTrainGitHubError("quota", status_code=403, rate_limited=True),
+        ):
+            with self.subTest(error=error):
+                self.transport.request.side_effect = error
+                with self.assertRaises(MergeTrainGitHubError):
+                    self.client._candidate_check_retry_runs(
+                        candidate=self.candidate, checks=[check]
+                    )
 
     def test_disagreement_requires_success_with_matching_app_and_sha(self) -> None:
         failed: dict[str, Any] = {

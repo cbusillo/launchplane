@@ -1957,13 +1957,18 @@ Controller actions have these retry/stop semantics:
   once on the same candidate SHA by deleting and recreating only its canonical
   train ref at that exact SHA. It never force-resets a moved ref or requests
   Actions write. Each write rechecks the controller lease. The original execution
-  IDs/attempts and `check_rerun_requested_at` are persisted first, reserving the
-  retry for this queue/base across restarts. A replacement already carrying
+  IDs/attempts and `check_rerun_requested_at` are persisted after prerequisite
+  reads and before publication, reserving the retry for this queue/base across
+  restarts. Read failures leave that budget unused. A crash after reservation
+  but before deletion conservatively retains the reservation: an existing ref
+  cannot prove whether publication happened before a reply was lost.
+  A replacement already carrying
   check, infrastructure or generated-body retry lineage gets no additional retry;
   infrastructure-only failures keep their existing rebuild budget.
   Dry-run reports `candidate_checks_retry_requested` without consuming it.
-  Restart restores an absent ref with a create-only request; it never deletes
-  an already restored ref again. Fresh workflow inventory must prove a newer
+  Restart restores an absent ref with a create-only request before reading
+  check evidence, even after the wait deadline; it never deletes an already
+  restored ref again. Fresh workflow inventory must prove a newer
   completed execution before repeat failures enter isolation. After ten minutes
   without that proof, `candidate_check_retry_unavailable` preserves the hold
   rather than waiting indefinitely under a pending reason. Passing checks use
@@ -1973,7 +1978,9 @@ Controller actions have these retry/stop semantics:
   cannot blame a member or authorize landing. Earlier superseded attempts do
   not count as current conflicts. Admin holds are never retried or blamed.
   Missing Actions read, non-push checks and unproved execution provenance skip
-  automatic republication and retain existing failure handling. No permission
+  automatic republication and retain existing failure handling. Transient
+  Actions read failures preserve the hold without consuming the retry.
+  No permission
   is added here. The existing stall monitor names recovery waits and reports
   any open head retaining the train's blocked label for thirty minutes,
   including candidate-failure blocks. This remains visible with an empty
