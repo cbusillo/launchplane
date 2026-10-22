@@ -533,6 +533,41 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("fixture-affected-person", json.dumps(access))
                     self.assertEqual(access["rules"][0]["role_effects"][0]["state"], "lost")
                     self.assertNotIn("sensitive-value-sentinel", json.dumps(access))
+
+                async def check_redacted_reads(*, stale: bool) -> None:
+                    for identity, expected_status in (
+                        (operator, 200),
+                        (replace(_human(), role="read_only"), 403),
+                        (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
+                    ):
+                        async with lifespan_client(
+                            self._app(
+                                store=store, policy=policy, human_reader=Mock(return_value=identity)
+                            )
+                        ) as client:
+                            for path in (
+                                review_path,
+                                "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                            ):
+                                response = await client.get(path)
+                                self.assertEqual(
+                                    response.status_code, expected_status, response.text
+                                )
+                                if expected_status == 200:
+                                    data = response.json()
+                                    projected = (
+                                        data["review"] if "review" in data else data["reviews"][0]
+                                    )
+                                    self.assertEqual(projected["can_approve"], not stale)
+                                    if stale:
+                                        self.assertIn(
+                                            "privileged_operation_plan_stale",
+                                            projected["blockers"]["codes"],
+                                        )
+                                self.assertNotIn("access_policy", response.text)
+                                self.assertNotIn("fixture-affected-person", response.text)
+
+                await check_redacted_reads(stale=False)
                 revised = policy.model_copy(update={"administrator_quorum": 2})
                 digest = authz_policy_sha256(revised)
                 self.assertEqual(
@@ -551,34 +586,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     ).status,
                     "written",
                 )
-                for identity, expected_status in (
-                    (operator, 200),
-                    (replace(_human(), role="read_only"), 403),
-                    (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
-                ):
-                    async with lifespan_client(
-                        self._app(
-                            store=store, policy=policy, human_reader=Mock(return_value=identity)
-                        )
-                    ) as client:
-                        for path in (
-                            review_path,
-                            "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
-                        ):
-                            response = await client.get(path)
-                            self.assertEqual(response.status_code, expected_status, response.text)
-                            if expected_status == 200:
-                                data = response.json()
-                                projected = (
-                                    data["review"] if "review" in data else data["reviews"][0]
-                                )
-                                self.assertFalse(projected["can_approve"])
-                                self.assertIn(
-                                    "privileged_operation_plan_stale",
-                                    projected["blockers"]["codes"],
-                                )
-                            self.assertNotIn("access_policy", response.text)
-                            self.assertNotIn("fixture-affected-person", response.text)
+                await check_redacted_reads(stale=True)
                 record = store.read_privileged_operation_record(operation_id)
                 self.assertEqual(record.status, "planned")
                 self.assertIsNone(record.approval)
@@ -2967,6 +2975,22 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                                     "privileged_operation_planning_unavailable",
                                     projected["blockers"]["codes"],
                                 )
+                        if not approved:
+                            with patch(
+                                "control_plane.privileged_operation_registry.plan_managed_authz_policy_reconcile",
+                                side_effect=ValueError(
+                                    "Current eligibility evidence became unavailable"
+                                ),
+                            ):
+                                conflicting = await client.get(f"{path}/review")
+                            self.assertEqual(conflicting.status_code, 200, conflicting.text)
+                            projected = conflicting.json()["review"]
+                            self.assertFalse(projected["can_approve"])
+                            self.assertIn(
+                                "privileged_operation_plan_stale", projected["blockers"]["codes"]
+                            )
+                            self.assertEqual(projected["access_policy"]["state"], "unavailable")
+                            self.assertEqual(projected["access_policy"]["rules"], [])
                         with patch.object(store, "list_authz_policy_records", None):
                             review = await client.get(f"{path}/review")
                             listing = await client.get(
@@ -3029,6 +3053,62 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                                 "privileged_operation_planning_unavailable",
                                 historical.json()["review"]["blockers"]["codes"],
                             )
+
+    async def test_policy_storage_fault_keeps_pending_reviews_readable(self) -> None:
+        from sqlalchemy import Table
+        from sqlalchemy.exc import OperationalError
+        from control_plane.storage.postgres import LaunchplaneMergeTrainPolicyRow
+
+        for database in (False, True):
+            with self.subTest(database=database), TemporaryDirectory() as directory:
+                store = (
+                    PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                    )
+                    if database
+                    else FilesystemRecordStore(Path(directory))
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard", record_id="merge-train-policy-active"
+                )
+                store.write_merge_train_policy_record(active)
+                app = self._app(store=store, policy=_policy())
+                async with lifespan_client(app, raise_server_exceptions=False) as client:
+                    planned = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json=_merge_train_policy_plan_payload(f"storage-fault-{database}"),
+                    )
+                    self.assertEqual(planned.status_code, 200, planned.text)
+                    operation_id = planned.json()["record"]["operation_id"]
+                    original = store.read_privileged_operation_record(operation_id)
+                    expected_error: type[Exception]
+                    if isinstance(store, PostgresRecordStore):
+                        cast(Table, LaunchplaneMergeTrainPolicyRow.__table__).drop(store._engine)
+                        expected_error = OperationalError
+                    else:
+                        policy_file = next(Path(directory).rglob(f"{active.record_id}.json"))
+                        policy_file.rename(policy_file.with_suffix(".retained"))
+                        policy_file.mkdir()
+                        expected_error = IsADirectoryError
+                    with self.assertRaises(expected_error):
+                        store.list_merge_train_policy_records(status="active", limit=2)
+                    path = f"/v1/privileged-operations/plans/{operation_id}"
+                    detail = await client.get(f"{path}/review")
+                    listing = await client.get(
+                        "/v1/privileged-operations/plans",
+                        params={"descriptor_id": "managed-merge-train-policy-import"},
+                    )
+                    self.assertEqual(detail.status_code, 200, detail.text)
+                    self.assertEqual(listing.status_code, 200, listing.text)
+                    for review in (detail.json()["review"], listing.json()["reviews"][0]):
+                        self.assertFalse(review["can_approve"])
+                        self.assertIn(
+                            "privileged_operation_planning_unavailable", review["blockers"]["codes"]
+                        )
+                    self.assertEqual(store.read_privileged_operation_record(operation_id), original)
 
     async def test_approval_requires_an_explicit_github_id_selector(self) -> None:
         with (

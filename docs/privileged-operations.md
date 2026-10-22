@@ -409,8 +409,11 @@ checks and compare-and-swap refusal for stale revisions. Changing a policy
 requires preparing the remaining change for fresh review; elapsed time alone
 does not. Pending policy-plan list and detail reviews compare the saved evidence
 with the current planner evidence, using the same comparison as approval. A stale
-plan is readable with a blocker and no approval control; unavailable planning is
-shown as an error, rather than as a current plan. These reads do not expire or
+plan is readable with an explicit stale warning, a new-plan continuation, and no
+approval control. Unavailable current planning is identified separately and can
+be checked again by refreshing. Policy storage read failures leave the affected
+review unavailable instead of presenting saved evidence as current. Detailed
+access changes are withheld when current eligibility is blocked. These reads do not expire or
 cancel the plan, reconcile time-based expiry, or append events. Approved and
 terminal records retain their historical review and revoke/cancel behavior.
 

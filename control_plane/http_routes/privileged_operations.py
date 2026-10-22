@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.access_policy_review import (
     AccountReader,
     bounded_account_logins,
     build_access_policy_review,
 )
+from control_plane.contracts.access_policy_review import AccessPolicyReview
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 
 from control_plane.contracts.privileged_operation import (
@@ -517,6 +519,20 @@ def register_privileged_operation_routes(
                     )
                 ),
             )
+            blocker: (
+                Literal[
+                    "privileged_operation_plan_stale", "privileged_operation_planning_unavailable"
+                ]
+                | None
+            ) = None
+            if (
+                record.status == "planned"
+                and read_privileged_operation_descriptor(record.descriptor_id).planner is not None
+            ):
+                try:
+                    blocker = current_policy_plan_blocker(record=record, record_store=record_store)
+                except (OSError, SQLAlchemyError):
+                    blocker = "privileged_operation_planning_unavailable"
             if (
                 isinstance(identity, GitHubHumanIdentity)
                 and dependencies.policy_reader().names_administrator(identity)
@@ -525,7 +541,9 @@ def register_privileged_operation_routes(
             ):
                 review = review.model_copy(
                     update={
-                        "access_policy": build_access_policy_review(
+                        "access_policy": AccessPolicyReview(state="unavailable")
+                        if blocker is not None
+                        else build_access_policy_review(
                             record_store=record_store,
                             request=record.request,
                             evidence=record.evidence,
@@ -543,7 +561,6 @@ def register_privileged_operation_routes(
                     }
                 )
             if record.status == "planned":
-                blocker = current_policy_plan_blocker(record=record, record_store=record_store)
                 if (
                     blocker is None
                     and review.access_policy is not None

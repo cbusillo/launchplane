@@ -11,6 +11,8 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from control_plane.authz_grant_service import (
     AuthzPolicyRecordStore,
     AuthzCollectionType,
@@ -295,7 +297,7 @@ def build_access_policy_review(
             record_store=cast(AuthzPolicyRecordStore, record_store),
             request=request.reconcile_request(),
         )
-    except (LookupError, TypeError, ValueError):
+    except (LookupError, OSError, SQLAlchemyError, TypeError, ValueError):
         return AccessPolicyReview(state="unavailable")
     if diff.plan_sha256 != evidence.diff.plan_sha256:
         return AccessPolicyReview(state="unavailable")
