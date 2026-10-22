@@ -33,6 +33,7 @@ from control_plane.http_routes.support import (
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
+from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -78,6 +79,14 @@ class ProviderHoldAttentionResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     attention: ProviderHoldAttentionPage
+
+
+class OutboxInspectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    inspection: OutboxInspection
 
 
 class SecretStatusBinding(BaseModel):
@@ -462,6 +471,62 @@ def register_inventory_operation_read_routes(
     *,
     dependencies: ReadRouteDependencies,
 ) -> None:
+    def read_outbox_inspection(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+    ) -> OutboxInspectionResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot inspect Launchplane outbox deliveries.",
+            )
+        if not all(
+            callable(getattr(record_store, name, None))
+            for name in (
+                "list_outbox_delivery_records",
+                "list_public_ingress_notification_policy_records",
+                "read_public_ingress_incident_record",
+            )
+        ):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Outbox inspection requires database-backed records.",
+            )
+        try:
+            inspection = inspect_outbox(cast(OutboxInspectionStore, record_store), limit=limit)
+        except (ValueError, SQLAlchemyError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="outbox_inspection_unavailable",
+                message="Outbox inspection failed. Delivery counts and destinations remain unknown.",
+            ) from error
+        return OutboxInspectionResponse(trace_id=trace_id, inspection=inspection)
+
+    app.add_api_route(
+        "/v1/outbox/inspection",
+        read_outbox_inspection,
+        methods=["GET"],
+        response_model=OutboxInspectionResponse,
+        operation_id="read_outbox_inspection",
+        summary="Inspect pending outbox delivery kinds and destination references without sending",
+        responses={code: {"model": dependencies.error_response_model} for code in (401, 403, 503)},
+    )
+
     def read_environment_inventory(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],

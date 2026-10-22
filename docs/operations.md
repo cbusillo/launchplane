@@ -385,12 +385,42 @@ uv run launchplane service outbox-workers run \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
 
-For a bounded operational probe or smoke check, run one claim/delivery step:
+The one-step command claims work and can send a real message or dispatch a
+workflow. It is a mutation, not a diagnostic probe:
 
 ```bash
 uv run launchplane service outbox-workers run-once \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
+
+Before activating a consumer on an existing database, read
+`GET /v1/outbox/inspection` using service-context `operations.read` authority.
+This read sends nothing. It covers pending, running and reconciliation-required
+rows across every delivery kind, including inactive or orphaned aggregates,
+and current enabled notification-policy destinations. It omits message bodies
+and credential values. `limit` defaults to 1000 and may be raised to 5000;
+`complete: false` means counts and destination coverage are incomplete. The
+read is a bounded census, not a transactionally frozen activation approval.
+Destination references still need ownership verification before sending.
+Incident rows include their policy reference, event, existing GitHub issue URL
+and current incident status. Missing incidents remain `unknown`. Workflow rows
+include their queued inputs and credential context name, so a reviewer can
+distinguish dry runs from production effects. These are routing inputs, not
+credential values. Discussion reminders still need their own routing review;
+notification-policy ownership alone does not settle those effects.
+
+Queued incident deliveries whose incident is already resolved complete without
+a provider call. Their terminal outbox action and durable skipped attempt record
+say `superseded_incident_resolved`. This includes queued recovery messages.
+An existing provider-start marker remains an unknown outcome instead of being
+reported as superseded. Still-open incidents retain the existing send, lease,
+retry and completion rules.
+Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
+
+Historical provider retirement records may retain an empty target list. They
+remain skipped reconciliation evidence with `monitoring_intent_changed`, never
+a passing or failing health probe. Incident detail reads preserve that missing
+target evidence rather than inventing a replacement target.
 
 Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
 workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
@@ -435,14 +465,11 @@ crash or network ambiguity between marker persistence and run observation stays
 `reconcile_required` with `workflow_dispatch_in_doubt`; admins must not clear
 the marker to force a resend.
 
-Public-ingress monitor GitHub issue notifications are also queued when the
-record store supports the transactional outbox. Observation, incident, and
-pending notification rows commit atomically. Mixed policies queue only the
-GitHub destinations while continuing to deliver and record email and Discord
-attempts directly. Resolved-incident reconciliation verifies the issue is
-actually closed after finding the marker, covering a crash between the marker
-comment and the close request. Email and Discord notification paths remain
-direct-delivery until they are explicitly migrated.
+Public-ingress notifications use the same outbox for GitHub, email and Discord.
+Observation, incident and pending notification rows commit atomically. The
+[incident delivery contract](#lane-health-monitoring) below describes
+destination resolution, retries and uncertain sends. Only file-backed
+rehearsals deliver synchronously.
 
 ## Durable Provider Operations
 
@@ -1559,7 +1586,7 @@ and route `service:health-monitor-scheduler`; testing slot keys are namespaced
 separately. The v2 activation starts a new evidence epoch: older half-hour
 receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
-records show alert and recovery delivery.
+records show alert delivery, recovery and superseded resolved-incident deliveries.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
@@ -1794,9 +1821,10 @@ Acknowledgement suppresses reminders for the acknowledged fingerprint. A
 material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
-failure can emit the current reminder. Resolution is never silenced because
-GitHub issue sinks must be closed and other admins must see recovery. Public,
-private, and provider checks use the configured consecutive-pass recovery
+failure can emit the current reminder. Resolution remains a durable incident
+event; the outbox supersedes delivery once the incident is resolved. External
+GitHub issues are therefore not automatically closed by durable recovery
+delivery. Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2045,9 +2073,9 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
-The outbox worker sends email and Discord as well as GitHub notifications, so a
-healthy probe after recovery does not need to manufacture another resolution
-for delivery to resume. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications for
+still-open incidents. Recovery does not manufacture another notification to
+resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
@@ -2065,11 +2093,12 @@ The file-backed rehearsal path retains synchronous delivery; durable service
 recovery uses the DB-backed transition and worker.
 
 GitHub delivery bodies carry a material-event marker for exact replay and a
-stable incident marker for issue recovery. Updates, reminders, and resolutions
+stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
-opening attempt record, then comment or close the recovered issue rather than
-creating a duplicate. Do not clear provider markers or outbox rows to force a
-retry.
+opening attempt record, then comment on the recovered issue rather than
+creating a duplicate. File-backed rehearsals retain synchronous resolution
+delivery and issue closure. Durable deliveries for resolved incidents are
+superseded instead. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped

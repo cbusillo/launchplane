@@ -1555,7 +1555,8 @@ A material change clears acknowledgement and remains immediately deliverable.
 Silenced incidents preserve observations and events but suppress update and
 reminder delivery only until their required `silenced_until`; expiry reactivates
 delivery and the next unchanged failure may emit the current overdue reminder.
-Resolution is always deliverable so external issue sinks can close. A recovery
+Resolution remains recorded; durable deliveries for resolved incidents are
+superseded without contacting external sinks. A recovery
 observation resolves only after the health check's configured consecutive-pass
 threshold and writes one `resolved` event with `resolution_reason = recovered`.
 If monitoring authority makes a check ineligible, a typed reconciliation
