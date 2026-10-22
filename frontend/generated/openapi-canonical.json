@@ -27055,6 +27055,70 @@
         "title": "OriginalReviewHistoryResponse",
         "type": "object"
       },
+      "OutboxInspection": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Deliveries",
+            "type": "array"
+          },
+          "notification_policies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Notification Policies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "complete",
+          "counts",
+          "deliveries",
+          "notification_policies"
+        ],
+        "title": "OutboxInspection",
+        "type": "object"
+      },
+      "OutboxInspectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/OutboxInspection"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "inspection"
+        ],
+        "title": "OutboxInspectionResponse",
+        "type": "object"
+      },
       "OutgoingEmailQuery": {
         "additionalProperties": false,
         "properties": {
@@ -79618,6 +79682,98 @@
           }
         },
         "summary": "Read a bounded page of retained service operation attention"
+      }
+    },
+    "/v1/outbox/inspection": {
+      "get": {
+        "operationId": "read_outbox_inspection",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboxInspectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect pending outbox delivery kinds and destination references without sending"
       }
     },
     "/v1/owner-secret-inputs": {

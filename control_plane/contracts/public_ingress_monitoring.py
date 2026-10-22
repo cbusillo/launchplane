@@ -432,7 +432,9 @@ class PublicIngressObservationRecord(BaseModel):
             "tls_unsupported",
         }:
             raise ValueError("skipped public ingress observation has an unsupported failure_code")
-        if not self.targets:
+        if not self.targets and not (
+            self.check_kind == "provider" and self.purpose == "reconciliation"
+        ):
             raise ValueError("public ingress observation requires at least one target")
         if self.material_fingerprint is not None:
             expected_fingerprint = public_ingress_material_fingerprint_sha256(
