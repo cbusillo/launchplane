@@ -52,6 +52,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from tests.support.disposable_lanes import record_safety
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 from tests.test_service import create_launchplane_fastapi_test_app
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation
@@ -707,6 +709,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.store.write_product_profile_record(
             profile.model_copy(update={"driver_id": "generic-web"})
         )
+        record_safety(self.store, self.expected.product, self.expected.context, "testing")
 
     def test_generic_web_restarts_current_artifact_and_replays_without_another_effect(self) -> None:
         self.use_generic_web()
@@ -722,11 +725,17 @@ class ServiceRestartTests(unittest.TestCase):
     def test_generic_web_rechecks_reviewed_configuration_under_release_exclusion(self) -> None:
         self.use_generic_web()
         self.review()
+        with patch.object(self.store, "serialize_preview_refresh") as serialize:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.expected.product
+            ):
+                pass
+        deploy_lock = serialize.call_args.kwargs["preview_id"]
 
         @contextmanager
         def release_finishes(**kwargs: object) -> Iterator[None]:
-            self.assertFalse(kwargs["shared"])
-            self.provider.config["Mounts"].append({"Name": "replacement-volume"})
+            if kwargs["preview_id"] == deploy_lock and not kwargs["shared"]:
+                self.provider.config["Mounts"].append({"Name": "replacement-volume"})
             yield
 
         with patch.object(self.store, "serialize_preview_refresh", side_effect=release_finishes):

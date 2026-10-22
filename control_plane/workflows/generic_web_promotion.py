@@ -269,6 +269,34 @@ def execute_generic_web_prod_promotion(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> GenericWebProdPromotionResult:
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+    with serialize_generic_web_product_operation(
+        record_store=record_store, product=request.product
+    ):
+        return _execute_generic_web_prod_promotion_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deployment_record_id,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
+
+
+def _execute_generic_web_prod_promotion_unserialized(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+) -> GenericWebProdPromotionResult:
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
         record_store=record_store,
         request=request,

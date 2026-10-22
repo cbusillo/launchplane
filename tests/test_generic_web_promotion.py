@@ -3,8 +3,8 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.contracts.record_failures import record_failure_summary
 import unittest
-from contextlib import nullcontext
-from collections.abc import Callable
+from contextlib import nullcontext, contextmanager
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -398,25 +398,47 @@ class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         store.write_qualified_testing_inventory(_testing_inventory())
+        held: list[str] = []
+
+        @contextmanager
+        def serialize(**kwargs: object) -> Iterator[None]:
+            held.append(str(kwargs["preview_id"]))
+            try:
+                yield
+            finally:
+                held.pop()
+
+        def source_health(*args: object, **kwargs: object) -> None:
+            self.assertTrue(held)
+
+        def destination_health(*args: object, **kwargs: object) -> HealthcheckPass:
+            self.assertTrue(held)
+            return HealthcheckPass(payload={"runtime_identity": _runtime_identity_payload()})
+
+        write_inventory = store.write_environment_inventory
+
+        def publish_inventory(record: EnvironmentInventory) -> None:
+            self.assertTrue(held)
+            write_inventory(record)
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
         with (
+            patch.object(store, "serialize_preview_refresh", side_effect=serialize, create=True),
+            patch.object(store, "write_environment_inventory", side_effect=publish_inventory),
             patch(
                 "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
                 side_effect=fake_deploy,
             ),
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
-                return_value=None,
+                side_effect=source_health,
             ) as healthcheck,
             patch(
                 "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
-                return_value=HealthcheckPass(
-                    payload={"runtime_identity": _runtime_identity_payload()}
-                ),
+                side_effect=destination_health,
             ) as identity_healthcheck,
         ):
             result = execute_generic_web_prod_promotion(

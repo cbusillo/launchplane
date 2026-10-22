@@ -17,15 +17,18 @@ scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) 
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
 
-The active Odoo or generic-web product lane must have agreeing provider/Compose records and a
+The active Odoo product lane must have agreeing provider/Compose records and a
 settled current deployment with a runtime identity and immutable artifact
 manifest. Production also requires recorded acceptance of that exact artifact
-and source commit. Other drivers and application targets are refused. Odoo uses
+and source commit. The same requirements apply to generic-web Compose lanes.
+Other drivers and application targets are refused. Odoo uses
 the lane reservation respected by release enqueues, workers and synchronous
 releases. Generic-web holds its existing product serializer exclusively through
 the final inspection, restart and verification, excluding deploy, promotion,
 rollback and retirement operations. Both drivers use the existing endpoint;
 the historical `odoo` route segment does not restrict it to Odoo products.
+Generic-web waits for its product serializer, then rechecks the reviewed plan;
+Odoo refuses when its lane reservation is held.
 
 Container selection requires inspected project and service labels and exactly
 one non-one-off container. Name matches alone never authorize a restart. The
@@ -38,9 +41,9 @@ These checks also apply to generic-web dependency services. A database container
 without the recorded application runtime identity, immutable artifact image or
 container health check is refused. Merely sharing the Compose project does not
 qualify it. This action does not install missing evidence, change a health check,
-or start an unqualified dependency as a workaround. Qualify every service in an
-ordered recovery independently; a successful database restart must precede any
-dependent application restart.
+or start an unqualified dependency as a workaround. Typical database containers
+cannot qualify through this action. A dependent application restart does not
+recover its database.
 
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
