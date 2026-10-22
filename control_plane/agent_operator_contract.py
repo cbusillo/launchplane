@@ -37,6 +37,7 @@ from control_plane.openapi_export import (
 )
 from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
 from control_plane.odoo_website_settings import ODOO_WEBSITE_SETTINGS_ROUTE
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 SCHEMA_VERSION = 1
@@ -74,7 +75,6 @@ _SCHEMA_KEYS = frozenset(
     }
 )
 _SEMANTICALLY_UNORDERED_LIST_KEYS = frozenset({"enum", "required"})
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_PATTERN = re.compile(r"^(unknown|[0-9a-f]{40}|[0-9a-f]{64})$")
 _UNSAFE_STRING_PATTERNS = (
     re.compile(r"https?://", re.IGNORECASE),
@@ -99,6 +99,24 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/health-history",
+        "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
     OperationSpec(
         "GET",
         DISCUSSION_TOPICS_ROUTE,
@@ -325,7 +343,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         LEGACY_PREVIEW_RECONCILIATION_ROUTE,
-        "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         ("agent_helper", "service_api"),
         ("inspect", "plan", "apply"),
         "plan_and_apply",
@@ -760,7 +778,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
     if artifact["normalization_version"] != NORMALIZATION_VERSION:
         raise AgentOperatorContractError("Unsupported normalization_version")
     digest = artifact["semantic_digest_sha256"]
-    if not isinstance(digest, str) or not _SHA256_PATTERN.fullmatch(digest):
+    if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
         raise AgentOperatorContractError("Invalid semantic_digest_sha256")
     provenance = artifact["provenance"]
     if not isinstance(provenance, Mapping):
@@ -836,7 +854,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
         if not operation["identity_dependencies"]:
             raise AgentOperatorContractError("Operation has no identity dependencies")
         fingerprint = operation["schema_fingerprint_sha256"]
-        if not isinstance(fingerprint, str) or not _SHA256_PATTERN.fullmatch(fingerprint):
+        if not isinstance(fingerprint, str) or not SHA256_PATTERN.fullmatch(fingerprint):
             raise AgentOperatorContractError("Invalid operation fingerprint")
     if seen_operations != expected_operations:
         raise AgentOperatorContractError("Operation allow-list is incomplete")

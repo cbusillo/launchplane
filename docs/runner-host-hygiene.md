@@ -85,7 +85,7 @@ owns the fail-closed Buildx minimum policy.
 Evaluate a saved observation without touching the host:
 
 ```bash
-uv run launchplane work-graph runner-host-hygiene-report \
+uv run launchplane runner-host-hygiene-report \
   --observation-file runner-host-observation.json \
   --minimum-free-disk-bytes 10737418240 \
   --maximum-docker-reclaimable-bytes 21474836480 \
@@ -100,7 +100,7 @@ images, or restart runners.
 Admins can provide a policy JSON instead of CLI flags:
 
 ```bash
-uv run launchplane work-graph runner-host-hygiene-report \
+uv run launchplane runner-host-hygiene-report \
   --observation-file runner-host-observation.json \
   --policy-file runner-host-policy.json
 ```
@@ -111,7 +111,7 @@ Apply planning records the safety boundary a future host adapter must satisfy,
 but it still does not execute cleanup:
 
 ```bash
-uv run launchplane work-graph runner-host-hygiene-apply-plan \
+uv run launchplane runner-host-hygiene-apply-plan \
   --action prune_docker_cache \
   --host-name chris-testing \
   --mutate \
@@ -622,7 +622,7 @@ Before a real host mutation adapter is implemented, admins can review the
 privileged execution boundary against a ready apply plan:
 
 ```bash
-uv run launchplane work-graph runner-host-hygiene-adapter-boundary-plan \
+uv run launchplane runner-host-hygiene-adapter-boundary-plan \
   --adapter-type remote_host_executor \
   --host-name chris-testing \
   --execution-lane chris-testing-ops-gate \
@@ -762,7 +762,7 @@ owns the non-shared target basis and last-used retention semantics.
 Evaluate the existing private audit artifact without contacting a host:
 
 ```bash
-uv run launchplane work-graph runner-host-hygiene-qualify \
+uv run launchplane runner-host-hygiene-qualify \
   --audit-file /private/evidence/runner-host-hygiene-audit.json \
   --require-qualified
 ```

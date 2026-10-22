@@ -46,6 +46,7 @@ from control_plane.odoo_testing_restore import (
     generation_snapshot_matches,
     read_current_testing_generation,
 )
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_drill_usage import (
     read_drill_recent_signins,
     testing_drill_environment,
@@ -257,6 +258,8 @@ def collect_drill_admission(
         raise DrillSkipped("new_testing_copy_already_serving") from error
     except NativeSourceAuthorizationDenied:
         raise
+    except NativeProgramFailed as error:
+        raise DrillSkipped(error.code) from None
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
     if decision.protected:

@@ -10,9 +10,11 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
@@ -23,8 +25,8 @@ from control_plane.lane_movement import (
     require_forward_build,
 )
 
-from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -56,6 +58,8 @@ from control_plane.dokploy.api import (
     DokployScheduleExecutionFailed,
     is_transient_dokploy_error,
 )
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -217,7 +221,11 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_slug,
     serialize_generic_web_preview_operation,
 )
-from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
+from control_plane.workflows.launchplane import (
+    PreviewMutationRecordStore,
+    find_preview_record,
+    launchplane_github_token,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewApplyInputsRequest,
@@ -533,7 +541,28 @@ def reconcile_testing_target(
 
         lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
         delivery_digest = testing_input_authority(record_store, profile, lane)
-        if delivery_digest:
+        try:
+            target = record_store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+        except FileNotFoundError:
+            target = None
+            try:
+                provider_target = cast(
+                    _TestingLaneAuthorityStore, record_store
+                ).read_provider_target_record(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+            except FileNotFoundError:
+                provider_target = None
+            if (
+                provider_target is not None
+                and provider_target.provider_id == "dokploy"
+                and provider_target.provider_target_type == "application"
+            ):
+                plan.update(action="wait", reason="testing_runtime_unverified")
+                return ReconcileOutcome(plan)
+        if target is not None and target.target_type == "application":
             try:
                 deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
                     _current_testing_deployment_id(record_store=record_store, lane=lane)
@@ -543,9 +572,72 @@ def reconcile_testing_target(
             if (
                 deployed is None
                 or deployed.deploy.status != "pass"
-                or deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+                or (
+                    delivery_digest
+                    and deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+                )
             ):
                 plan.update(action="deploy", reason="testing_runtime_inputs_missing")
+            else:
+                from control_plane.dokploy.application_runtime import (
+                    application_runtime_drift_fingerprint,
+                    application_runtime_matches,
+                )
+                from control_plane.contracts.deploy_reference import provider_image_reference
+                from control_plane.workflows.generic_web_deploy_provider import (
+                    GenericWebTestingApplicationRuntimeProvider,
+                )
+
+                matches, drift = False, ""
+                if control_plane_root is not None:
+                    provider = (
+                        default_generic_web_deploy_provider(
+                            record_store=record_store, control_plane_root=control_plane_root
+                        )
+                        if testing_hooks.generic_web_deploy_provider is None
+                        else testing_hooks.generic_web_deploy_provider()
+                    )
+                    if isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+                        try:
+                            binding = cast(
+                                _TestingLaneAuthorityStore, record_store
+                            ).read_dokploy_target_id_record(
+                                context_name=lane.context, instance_name=lane.instance
+                            )
+                            runtime = provider.observe_testing_application_runtime(
+                                control_plane_root=control_plane_root,
+                                target_id=binding.target_id,
+                            )
+                            testing_envelope = _generic_web_testing_deploy_request(profile, desired)
+                            provider_reference = provider_image_reference(
+                                artifact_id=testing_envelope.deploy.artifact_id,
+                                deploy_reference=testing_envelope.deploy.deploy_reference,
+                            )
+                            if runtime.application_id != binding.target_id:
+                                raise ValueError("Runtime observation belongs to another target.")
+                            matches = application_runtime_matches(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                            drift = application_runtime_drift_fingerprint(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                        except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+                            matches, drift = False, ""
+                if not matches:
+                    if not drift:
+                        plan.update(action="wait", reason="testing_runtime_unverified")
+                        return ReconcileOutcome(plan)
+                    plan.update(
+                        action="deploy",
+                        reason="testing_runtime_drift",
+                        testing_runtime_drift_sha256=drift,
+                    )
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -770,6 +862,17 @@ def reconcile_testing_target(
     return ReconcileOutcome(plan)
 
 
+def _generic_web_testing_deploy_request(
+    profile: LaunchplaneProductProfileRecord, desired: VerifiedGenericWebBuild
+) -> GenericWebDeployEnvelope:
+    return event_testing_deploy_request(
+        product=profile.product,
+        image_reference=desired.image_reference,
+        source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
+    )
+
+
 def _deploy_generic_web_testing(
     *,
     record_store: ProductReconcileStore,
@@ -814,12 +917,7 @@ def _deploy_generic_web_testing(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
-    envelope = event_testing_deploy_request(
-        product=profile.product,
-        image_reference=desired.image_reference,
-        source_commit=desired.manifest.source_commit,
-        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
-    )
+    envelope = _generic_web_testing_deploy_request(profile, desired)
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.
@@ -835,6 +933,7 @@ def _deploy_generic_web_testing(
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
             + (f":inputs-{delivery_digest}" if delivery_digest else "")
+            + (":runtime-repair" if plan.get("testing_runtime_drift_sha256") else "")
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
@@ -876,6 +975,7 @@ def _deploy_generic_web_testing(
             deploy_provider=provider,
             retain_event_request=True,
             post_deploy_authority_digest=authority,
+            complete_inert_inventory_refusal=True,
         )
         execution_lock = (
             record_store.testing_replacement_execution_lock(
@@ -1662,6 +1762,16 @@ def _plan_testing_target(
     )
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
+        if isinstance(desired, VerifiedGenericWebBuild):
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if deployed.post_deploy_update.status == "pending":
+                    plan.update(action="deploy", reason="testing_qualification_pending")
     else:
         if current_artifact_id and not current_commit:
             plan.update(action="none", reason="current_source_unverified", held=True)
@@ -1924,6 +2034,11 @@ def reconcile_preview_target(
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )
         outcome = _preview_failure(plan, code)
+    if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+        plan.pop("last_failed_error_code", None)
+        plan.pop("last_failed_error_summary", None)
+        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
+        return ReconcileOutcome(plan)
     if (
         plan["action"] == "destroy"
         and outcome.error
@@ -1940,38 +2055,39 @@ def reconcile_preview_target(
 
 
 def _preview_cleanup_guard(
-    store: ProductReconcileStore, profile: LaunchplaneProductProfileRecord, number: int
+    store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
         DisposableLaneStore,
-        require_disposable_lane,
+        resolve_disposable_preview,
+        require_lane_target_ownership,
     )
+
+    from control_plane.workflows.preview_resource_destroy import PreviewTargetOwnershipStore
 
     if store.read_product_profile_record(profile.product) != profile:
         raise ProductReconcileError(
             "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
         )
     instance = profile.preview.slug_template.format(number=number)
-    evidence = cast(DisposableLaneStore, store).read_disposable_lane_safety(
-        profile.product, profile.preview.context, instance
-    )
-    for condition, value, required in (
-        ("usage", evidence.usage if evidence else "unknown", "unused"),
-        ("data", evidence.data if evidence else "unknown", "reproducible"),
-    ):
-        if value != required:
-            raise ProductReconcileError(
-                f"Preview cleanup held: {condition} is {value}.",
-                code=f"preview_cleanup_{condition}_{value}",
-            )
     try:
-        require_disposable_lane(
+        resolve_disposable_preview(
             cast(DisposableLaneStore, store),
-            product=profile.product,
+            profile,
+            profile.preview.context,
+            instance,
+        )
+        target_store = cast(PreviewTargetOwnershipStore, store)
+        require_lane_target_ownership(
+            (
+                *target_store.list_dokploy_target_id_records(),
+                *target_store.list_physical_provider_target_records(),
+            ),
             context=profile.preview.context,
             instance=instance,
-            preview_cleanup=True,
         )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
@@ -2273,6 +2389,10 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
+        if str(driver_result.get("error_message") or "").startswith(
+            f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
+        ):
+            plan["preview_result_error_code"] = PREVIEW_CLEANUP_SAFETY_UNKNOWN
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"
@@ -2389,6 +2509,8 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+        return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
@@ -2659,6 +2781,37 @@ def reconcile_product_request(
             {"target": request.target_kind, "action": "none", "reason": "product_has_no_runtime"}
         )
     identity = product_repository_identity(record_store, profile)
+    if request.target_kind == "preview" and (
+        not profile.preview.enabled or not profile.preview.context.strip()
+    ):
+        assert request.pull_request_number is not None
+        lifecycle_previews = record_store.list_preview_records(
+            anchor_repo=_preview_anchor_repo(profile),
+            anchor_pr_number=request.pull_request_number,
+        )
+        if not any(
+            preview.state not in _ENDED_PREVIEW_STATES for preview in lifecycle_previews
+        ) and not _has_preview_reservation(record_store, profile, request.pull_request_number):
+            with _repository_read_transport(profile, control_plane_root) as reader:
+                pull_request = _object(
+                    reader.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls/{request.pull_request_number}"
+                    ),
+                    "pull request",
+                )
+            state = pull_request.get("state")
+            if state not in {"open", "closed"}:
+                raise ProductReconcileError("Pull request state is unavailable.")
+            return ReconcileOutcome(
+                {
+                    "target": "preview",
+                    "action": "none",
+                    "pull_request_number": request.pull_request_number,
+                    "reason": "preview_not_configured"
+                    if state == "open"
+                    else "pull_request_not_open",
+                }
+            )
     transport = transport_factory(record_store, profile)
     if request.target_kind == "testing":
         return reconcile_testing_target(
@@ -2681,6 +2834,26 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+
+
+def _has_preview_reservation(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+) -> bool:
+    from control_plane.preview_reservation_recovery import (
+        held_preview_reservations,
+        original_preview_intent,
+    )
+
+    for reservation in held_preview_reservations(record_store, product=profile.product):
+        try:
+            original = original_preview_intent(reservation, profile=profile, store=record_store)
+        except ValueError:
+            return True
+        if original.issued_plan.plan_request.pr_number == pull_request_number:
+            return True
+    return False
 
 
 def run_product_reconcile_once(
@@ -2739,6 +2912,8 @@ def run_product_reconcile_once(
     if request.target_kind == "preview" and outcome.error:
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
+            *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",
@@ -2915,7 +3090,9 @@ def reconcile_reservation_scope(product: str) -> str:
 def request_product_reconcile_sweep(
     record_store: ProductReconcileStore,
     now: str,
-    transport_factory: TransportFactory = resolve_build_provenance_transport,
+    transport_factory: TransportFactory | None = None,
+    *,
+    control_plane_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Request every mapped product's testing target, live preview and open PR.
 
@@ -2932,9 +3109,8 @@ def request_product_reconcile_sweep(
             or not _has_repository_identity(profile, inventory_records, profiles)
         ):
             continue
-        if not any(lane.instance == "testing" for lane in profile.lanes):
-            continue
-        targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
+        if any(lane.instance == "testing" for lane in profile.lanes):
+            targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
@@ -2952,18 +3128,15 @@ def request_product_reconcile_sweep(
                     pull_request_number=original.issued_plan.plan_request.pr_number,
                 )
             )
-        preview_context = profile.preview.context.strip()
-        if not preview_context:
-            continue
-        for number in _open_pull_requests(record_store, profile, transport_factory):
+        for number in _open_pull_requests(
+            record_store, profile, transport_factory, control_plane_root
+        ):
             targets.append(
                 ProductReconcileTarget(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(
-            context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        )
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
@@ -3026,30 +3199,61 @@ def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
 def _open_pull_requests(
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
-    transport_factory: TransportFactory,
+    transport_factory: TransportFactory | None,
+    control_plane_root: Path | None,
 ) -> tuple[int, ...]:
     """The product's open PRs, drafts included; an unreadable list only skips this product."""
-    if not profile.preview.enabled:
-        return ()
     numbers: list[int] = []
     try:
-        transport = transport_factory(record_store, profile)
-        for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
-            pulls = _list(
-                transport.get_json(
-                    f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+        with (
+            nullcontext(transport_factory(record_store, profile))
+            if transport_factory is not None
+            else _repository_read_transport(profile, control_plane_root)
+        ) as transport:
+            for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
+                pulls = _list(
+                    transport.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+                    )
                 )
-            )
-            numbers.extend(
-                pull["number"]
-                for pull in pulls
-                if isinstance(pull, dict) and isinstance(pull.get("number"), int)
-            )
-            if len(pulls) < 100:
-                break
-    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError) as error:
-        _LOGGER.warning("Sweep could not list %s's open pull requests: %s", profile.product, error)
+                numbers.extend(
+                    pull["number"]
+                    for pull in pulls
+                    if isinstance(pull, dict) and isinstance(pull.get("number"), int)
+                )
+                if len(pulls) < 100:
+                    break
+    except (
+        BuildProvenanceError,
+        ProductReconcileError,
+        click.ClickException,
+        OSError,
+        ValueError,
+    ) as error:
+        _LOGGER.warning(
+            "Sweep could not list %s's open pull requests (%s).",
+            profile.product,
+            type(error).__name__,
+        )
     return tuple(numbers)
+
+
+@contextmanager
+def _repository_read_transport(
+    profile: LaunchplaneProductProfileRecord, control_plane_root: Path | None
+) -> Iterator[BuildProvenanceTransport]:
+    if control_plane_root is None:
+        raise ProductReconcileError("Repository reads require the service control-plane root.")
+    with launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name="",
+        repository=profile.repository,
+        purpose="repository_read",
+        report_failure=True,
+    ) as token:
+        if not token:
+            raise ProductReconcileError("Delivery App repository-read credential is unavailable.")
+        yield GitHubBuildProvenanceTransport(token=token)
 
 
 def _has_repository_identity(

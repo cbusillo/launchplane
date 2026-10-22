@@ -52,6 +52,46 @@ def _capture_module_update_runs(
 
 
 class OdooPostDeployWorkflowTests(unittest.TestCase):
+    def test_local_schedule_size_cause_survives_earlier_acknowledged_effect(self) -> None:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+        from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
+        from control_plane.workflows.odoo_stable_target_replacement import _deploy_step_failure
+
+        def runner(**kwargs: object) -> dict[str, str]:
+            cast(Callable[[str], None], kwargs["before_provider_mutation"])(
+                "post_deploy_target_update"
+            )
+            dokploy_api.validate_dokploy_schedule_script(
+                {
+                    "script": "x" * dokploy_api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES,
+                }
+            )
+            self.fail("Oversized transport must refuse")
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=self._source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                return_value=("fixture", "fixture"),
+            ),
+            patch.object(dokploy_post_deploy, "run_compose_post_deploy_update", side_effect=runner),
+        ):
+            with self.assertRaises(ScheduleMaterializationTooLarge) as caught:
+                execute_odoo_post_deploy(
+                    control_plane_root=Path(directory),
+                    record_store=FilesystemRecordStore(state_dir=Path(directory) / "state"),
+                    request=OdooPostDeployRequest(context="opw", instance="testing"),
+                    hold_uncertain_effects=True,
+                )
+            failure = _deploy_step_failure(caught.exception)
+            self.assertEqual(failure.code, caught.exception.code)
+            self.assertEqual(_unexpected_error_code(caught.exception), failure.code)
+            self.assertEqual(failure.description, str(caught.exception))
+
     def test_pretrigger_history_failure_after_upsert_is_determinate(self) -> None:
         def runner(**kwargs: object) -> dict[str, str]:
             checkpoint = cast(Callable[[str], None], kwargs["before_provider_mutation"])

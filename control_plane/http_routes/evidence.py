@@ -27,7 +27,10 @@ from control_plane.contracts.runner_host_hygiene import (
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditIdentityConflict,
+    RunnerLaneRegistrationAuditRecord,
+)
 from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
@@ -52,6 +55,7 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_generation_evidence,
 )
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.legacy_preview_completion import LegacyPreviewRetirementConflict
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -711,6 +715,13 @@ def register_evidence_write_routes(
                     )
                 ).items()
             }
+        except LegacyPreviewRetirementConflict as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_retirement_conflict",
+                message=str(error),
+            ) from error
         except click.ClickException as error:
             raise dependencies.http_error(
                 status_code=400,
@@ -815,6 +826,13 @@ def register_evidence_write_routes(
                     )
                 ).items()
             }
+        except LegacyPreviewRetirementConflict as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_retirement_conflict",
+                message=str(error),
+            ) from error
         except click.ClickException as error:
             raise dependencies.http_error(
                 status_code=400,
@@ -995,9 +1013,17 @@ def register_evidence_write_routes(
                 message=str(error),
             ) from error
 
-        evidence_store.write_runner_lane_registration_audit_record(
-            runner_lane_registration_request.audit
-        )
+        try:
+            evidence_store.write_runner_lane_registration_audit_record(
+                runner_lane_registration_request.audit
+            )
+        except RunnerLaneRegistrationAuditIdentityConflict as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="runner_lane_audit_identity_conflict",
+                message=str(error),
+            ) from error
         records = {
             "runner_lane_registration_audit_record_key": (
                 runner_lane_registration_request.audit.audit_record_key

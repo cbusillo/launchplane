@@ -23,6 +23,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.preview_resource_destroy import (
+    PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
 )
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -196,21 +197,6 @@ class VeriReelPreviewInventoryRequest(BaseModel):
         return self
 
 
-class VeriReelPreviewInventoryItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    applicationId: str
-    applicationName: str
-    previewSlug: str
-
-
-class VeriReelPreviewInventoryResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    previews: tuple[VeriReelPreviewInventoryItem, ...]
-
-
 class _DatabaseParts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -229,14 +215,6 @@ def _preview_application_name(
     preview_slug: str, prefix: str = PREVIEW_APP_PREFIX, suffix: str = "-app"
 ) -> str:
     return f"{_preview_app_name(preview_slug, prefix)}{suffix}"
-
-
-def _preview_slug_from_application_name(application_name: str) -> str:
-    prefix = f"{PREVIEW_APP_PREFIX}-"
-    suffix = "-app"
-    if not application_name.startswith(prefix) or not application_name.endswith(suffix):
-        return ""
-    return application_name[len(prefix) : -len(suffix)]
 
 
 def _preview_database_identifiers(
@@ -523,43 +501,6 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
                 )
             return {**application, "applicationId": application_id}
     return None
-
-
-def execute_verireel_preview_inventory(
-    *,
-    control_plane_root: Path,
-    request: VeriReelPreviewInventoryRequest,
-) -> VeriReelPreviewInventoryResult:
-    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-    raw_projects = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/project.all",
-    )
-    preview_items: list[VeriReelPreviewInventoryItem] = []
-    for application in dokploy_api.iter_dokploy_applications(raw_projects):
-        application_name = str(application.get("name") or "").strip()
-        preview_slug = _preview_slug_from_application_name(application_name)
-        if not preview_slug:
-            continue
-        application_id = str(
-            application.get("applicationId") or application.get("id") or ""
-        ).strip()
-        if not application_id:
-            raise click.ClickException(
-                "Dokploy project inventory has incomplete application identity."
-            )
-        preview_items.append(
-            VeriReelPreviewInventoryItem(
-                applicationId=application_id,
-                applicationName=application_name,
-                previewSlug=preview_slug,
-            )
-        )
-    return VeriReelPreviewInventoryResult(
-        context=request.context,
-        previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
-    )
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:
@@ -1459,6 +1400,7 @@ def execute_verireel_preview_destroy(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewDestroyRequest,
+    record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewDestroyResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1529,12 +1471,25 @@ def execute_verireel_preview_destroy(
     cleanup_errors: list[str] = []
     if application_id:
         destroy_result = destroy_dokploy_preview_resource(
+            record_store=record_store,
+            context=profile.preview.context if profile is not None else request.context,
+            instance=request.preview_slug,
             host=host,
             token=token,
             resource_type="application",
             resource_id=application_id,
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
+        if cleanup_errors and cleanup_errors[0].startswith(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"):
+            return VeriReelPreviewDestroyResult(
+                destroy_status="fail",
+                destroy_started_at=started_at,
+                destroy_finished_at=utc_now_timestamp(),
+                application_name=application_name,
+                application_id=application_id,
+                preview_url=preview_url,
+                error_message=cleanup_errors[0],
+            )
     try:
         _run_application_command_with_retries(
             host=host,

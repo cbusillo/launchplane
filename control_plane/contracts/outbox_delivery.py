@@ -5,6 +5,7 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 OutboxDeliveryKind = Literal[
@@ -12,6 +13,7 @@ OutboxDeliveryKind = Literal[
     "operator_authorization_recovery_alert",
     "public_ingress_notification",
     "release_digest",
+    "discussion_reminder",
 ]
 OutboxDeliveryState = Literal[
     "pending",
@@ -49,17 +51,15 @@ class OutboxDeliveryRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OutboxDeliveryRecord":
-        self.delivery_id = _required_text(self.delivery_id, "outbox delivery requires delivery_id")
-        self.aggregate_type = _required_text(
+        self.delivery_id = require_text(self.delivery_id, "outbox delivery requires delivery_id")
+        self.aggregate_type = require_text(
             self.aggregate_type, "outbox delivery requires aggregate_type"
         )
-        self.aggregate_id = _required_text(
-            self.aggregate_id, "outbox delivery requires aggregate_id"
-        )
-        self.dedupe_key = _required_text(self.dedupe_key, "outbox delivery requires dedupe_key")
-        self.created_at = _required_text(self.created_at, "outbox delivery requires created_at")
-        self.updated_at = _required_text(self.updated_at, "outbox delivery requires updated_at")
-        self.next_attempt_at = _required_text(
+        self.aggregate_id = require_text(self.aggregate_id, "outbox delivery requires aggregate_id")
+        self.dedupe_key = require_text(self.dedupe_key, "outbox delivery requires dedupe_key")
+        self.created_at = require_text(self.created_at, "outbox delivery requires created_at")
+        self.updated_at = require_text(self.updated_at, "outbox delivery requires updated_at")
+        self.next_attempt_at = require_text(
             self.next_attempt_at, "outbox delivery requires next_attempt_at"
         )
         self.lease_owner = self.lease_owner.strip()
@@ -126,13 +126,6 @@ def retry_outbox_delivery(
             "lease_expires_at": "",
         }
     )
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _record_token(value: str) -> str:

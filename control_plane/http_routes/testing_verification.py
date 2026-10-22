@@ -9,6 +9,7 @@ from fastapi import Depends, Header, Path
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_routes.mutation_support import (
@@ -164,6 +165,14 @@ def register_testing_verification_routes(
                 403,
                 "authorization_denied",
                 "The existing provider transport refused complete_testing_verification. Preserve the trace and original request; do not change identity or credentials.",
+            )
+        except NativeProgramFailed as error:
+            refuse(
+                409,
+                error.code,
+                "Testing copy predicate "
+                + error.code
+                + ". Preserve the original generation, deployment, plan and key. Never restore again to repair public verification.",
             )
         except (
             ValueError,

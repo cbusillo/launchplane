@@ -907,7 +907,6 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-lane-registration-executor",
                     "--repository",
                     "cbusillo/odoo-tenant-cm-website",
@@ -955,7 +954,6 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-lane-registration-executor",
                     "--repository",
                     "cbusillo/odoo-tenant-cm-website",

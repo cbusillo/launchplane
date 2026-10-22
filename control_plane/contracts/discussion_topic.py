@@ -24,8 +24,8 @@ class DiscussionTopicInput(BaseModel):
     @classmethod
     def neutral_title(cls, value: str) -> str:
         value = value.strip()
-        if not value.startswith("Decide: ") or not value.removeprefix("Decide: ").strip():
-            raise ValueError("Use a neutral title beginning with 'Decide: '.")
+        if not value:
+            raise ValueError("Topic titles cannot be blank.")
         if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
             raise ValueError("Topic titles must be one plain-text line.")
         return value

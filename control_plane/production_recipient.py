@@ -18,6 +18,12 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
 )
 from control_plane.dokploy import api, compose, source
+from control_plane.dokploy.network_capacity import (
+    BridgeNetworkCapacityRefused,
+    compose_bridge_network_requirement,
+    require_bridge_network_capacity,
+)
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.generic_web_deploy_http import (
     GenericWebDeployProductMismatchError,
     resolve_generic_web_deploy_lane,
@@ -936,6 +942,14 @@ class ProductionRecipientAdapter:
                     for row in api.fetch_dokploy_projects(host=host, token=token)
                 ):
                     raise ValueError("A preparation namespace already exists without custody.")
+                require_bridge_network_capacity(
+                    host=host,
+                    token=token,
+                    server_id=record.request.destination_server_id,
+                    required_networks=compose_bridge_network_requirement(
+                        json.loads(record.compose_source)
+                    ),
+                )
                 self.store.write_production_recipient(
                     expected=existing.model_dump(mode="json") if existing else None,
                     replacement=record.model_dump(mode="json"),
@@ -1100,7 +1114,11 @@ class ProductionRecipientAdapter:
         except Exception as error:
             if not started:
                 raise ProviderMutationRejectedError(
-                    ValueError("Production preparation refused before provider effects.")
+                    error
+                    if isinstance(
+                        error, (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied)
+                    )
+                    else ValueError("Production preparation refused before provider effects.")
                 ) from error
             raise ProviderMutationUnknownError(
                 "Keep the original key and both recipients; outcome requires reconciliation."

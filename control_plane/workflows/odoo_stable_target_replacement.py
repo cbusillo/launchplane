@@ -68,6 +68,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
 )
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.odoo_runtime_environment import (
     LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
     merge_required_odoo_addons_path,
@@ -1247,7 +1248,7 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
         )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
-    if isinstance(error, OdooFreshTestingIntentRefusedError):
+    if isinstance(error, (OdooFreshTestingIntentRefusedError, ScheduleMaterializationTooLarge)):
         code = error.code
     elif isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
@@ -3064,6 +3065,7 @@ def execute_odoo_stable_target_replacement_apply(
     except (
         OdooTargetReplacementStageError,
         OdooFreshTestingIntentRefusedError,
+        ScheduleMaterializationTooLarge,
         DurableOperationAuthorizationDeniedError,
     ) as error:
         _write_failed_deployment(

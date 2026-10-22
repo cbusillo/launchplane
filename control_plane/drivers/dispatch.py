@@ -40,14 +40,6 @@ def _validate_driver_envelope_product(product: str, *, label: str) -> None:
         raise ValueError(f"{label} requires product.")
 
 
-class ProductDriverMismatchError(ValueError):
-    pass
-
-
-class DriverRouteDependencyNotFoundError(ValueError):
-    pass
-
-
 def _repo_token(value: str) -> str:
     normalized = value.strip().replace("_", "-")
     normalized = "-".join(filter(None, re.split(r"[^A-Za-z0-9]+", normalized)))

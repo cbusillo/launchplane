@@ -668,7 +668,6 @@ class RunnerHostHygieneCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-report",
                     "--observation-file",
                     observation_file.as_posix(),
@@ -716,7 +715,6 @@ class RunnerHostHygieneCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-report",
                     "--observation-file",
                     observation_file.as_posix(),
@@ -741,7 +739,6 @@ class RunnerHostHygieneCliTests(unittest.TestCase):
     def test_executor_requires_github_token_configuration_for_idle_bindings(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             arguments = [
-                "work-graph",
                 "runner-host-hygiene-executor",
                 "--host-name",
                 "runner-host",
@@ -1780,7 +1777,6 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-apply-plan",
                     "--action",
                     "prune_docker_cache",
@@ -1822,7 +1818,6 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-apply-plan",
                     "--action",
                     "prune_docker_cache",
@@ -1893,7 +1888,6 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-apply-plan",
                     "--action",
                     "prune_generated_run_cache",
@@ -1940,7 +1934,6 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-apply-plan",
                     "--action",
                     "prune_dangling_images",
@@ -1976,7 +1969,6 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-host-hygiene-adapter-boundary-plan",
                     "--adapter-type",
                     "github_actions_runner",

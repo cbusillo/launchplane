@@ -389,6 +389,79 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assert_original_fences()
         await self.resume_and_complete_original_worker()
 
+    async def test_worker_size_refusal_holds_custody_until_explicit_original_resume(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+
+        pending = self.held.model_copy(
+            update={"status": "pending", "phase": "created", "error_code": "", "error_message": ""}
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(pending)
+        now = datetime.now(UTC)
+        claimed = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="size-refused-worker",
+            claimed_at=now.isoformat(),
+            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        assert claimed is not None
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=claimed.operation_id
+        )
+        assert original is not None
+        allocation = self.store.read_testing_candidate(self.worker.fixture.candidate.namespace)
+        assert allocation is not None
+        refusal = ScheduleMaterializationTooLarge()
+        with patch.object(service.NativeTestingRebuildExecution, "run", side_effect=refusal) as run:
+            self.assertTrue(
+                worker._execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=self.worker.root,
+                    operation=claimed,
+                    lease_owner=claimed.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        run.assert_called_once()
+        self.held = self.store.read_odoo_stable_target_replacement_operation_record(
+            claimed.operation_id
+        )
+        self.assertEqual(self.held.status, "reconciliation_required")
+        self.assertEqual(self.held.error_code, refusal.code)
+        self.assertEqual(self.held.phase, claimed.phase)
+        for value in (
+            self.held.finished_at,
+            self.held.lease_owner,
+            self.held.lease_expires_at,
+            self.held.heartbeat_at,
+        ):
+            self.assertFalse(value)
+        retained = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=claimed.operation_id
+        )
+        assert retained is not None
+        self.assertEqual(retained.state, "reconcile_required")
+        self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+        self.assertEqual(retained.provider_effect_started_at, original.provider_effect_started_at)
+        self.assertEqual(self.store.read_testing_candidate(allocation.namespace), allocation)
+        self.assertIsNone(
+            self.store.claim_next_odoo_stable_target_replacement_operation_record(
+                lease_owner="automatic-retry",
+                claimed_at=now.isoformat(),
+                lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+            )
+        )
+        self.payload = {
+            "expected_updated_at": self.held.updated_at,
+            "expected_attempt": self.held.attempt,
+        }
+        self.assertEqual(self.worker.effects, ["switch-new"])
+        await self.resume_and_complete_original_worker()
+        final = self.store.read_testing_candidate(allocation.namespace)
+        assert final is not None
+        self.assertEqual(final.compose_id, allocation.compose_id)
+
     async def resume_and_complete_original_worker(self) -> None:
         from datetime import timedelta
         from control_plane.workflows import odoo_stable_operation_worker as worker

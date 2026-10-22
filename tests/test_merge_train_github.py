@@ -20,6 +20,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_ref
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_id
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
 from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
@@ -1539,6 +1540,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
                         _protected_branch_with_checks("ci-gate"),
+                        [],
                         _combined_status(),
                         {
                             "check_runs": [
@@ -1555,20 +1557,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     candidate=candidate, failed_check_names=("ci-gate",)
                 )
                 self.assertEqual(status, expected)
-                self.assertEqual(
-                    [request.path for request in transport.requests],
-                    [
-                        f"/repos/{candidate.repository}/branches/{candidate.base_branch}",
-                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/status?per_page=100&page=1",
-                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/check-runs?per_page=100&page=1",
-                    ],
-                )
                 self.assertTrue(all(request.method == "GET" for request in transport.requests))
 
     def test_base_missing_required_check_is_not_treated_as_green(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks(),
+                [],
                 _combined_status(),
                 {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
             )
@@ -1577,13 +1572,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             GitHubMergeTrainClient(transport=transport).read_base_check_status(
                 candidate=_batch_candidate(), failed_check_names=("ci-gate",)
             ),
-            "unknown",
+            "pending",
         )
 
-    def test_same_failed_nonrequired_check_on_base_prevents_blame(self) -> None:
+    def test_optional_failed_base_leaf_does_not_override_required_success(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1597,7 +1593,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             GitHubMergeTrainClient(transport=transport).read_base_check_status(
                 candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
             ),
-            "fail",
+            "pass",
         )
 
     def test_unrelated_base_only_checks_do_not_stop_isolation(self) -> None:
@@ -1606,10 +1602,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
                         _protected_branch_with_checks("ci-gate"),
+                        [],
                         _combined_status(),
                         {
                             "check_runs": [
                                 _required_check_run("ci-gate", "completed", "success"),
+                                _required_check_run("test_shard (0)", "completed", "success"),
                                 _required_check_run("deploy", status, conclusion),
                             ]
                         },
@@ -1622,13 +1620,23 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "pass",
                 )
 
-    def test_base_commit_status_only_stops_blame_when_implicated(self) -> None:
+    def test_base_commit_status_stops_blame_for_a_required_identity(self) -> None:
         for context, expected in (("external/gate", "fail"), ("deploy", "pass")):
             with self.subTest(context=context):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
-                        _protected_branch_with_checks("ci-gate"),
-                        {"statuses": [{"context": context, "state": "failure"}]},
+                        _protected_branch_with_checks("ci-gate", "external/gate", app_id=None),
+                        [],
+                        {
+                            "statuses": [
+                                {"context": context, "state": "failure"},
+                                *(
+                                    [{"context": "external/gate", "state": "success"}]
+                                    if context != "external/gate"
+                                    else []
+                                ),
+                            ]
+                        },
                         {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
                     )
                 )
@@ -1643,6 +1651,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 {"statuses": []},
                 {"check_runs": []},
             )
@@ -1651,7 +1660,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             GitHubMergeTrainClient(transport=transport).read_base_check_status(
                 candidate=_batch_candidate(), failed_check_names=("ci-gate",)
             ),
-            "unknown",
+            "pending",
         )
 
     def test_base_failure_comparison_uses_provider_names_instead_of_display_names(self) -> None:
@@ -1677,11 +1686,23 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     statuses = _combined_status()
                     if source == "check_run":
                         runs.append(_required_check_run(base_name, "completed", "failure"))
+                        if base_name != candidate_name:
+                            runs.append(_required_check_run(candidate_name, "completed", "success"))
                     else:
-                        statuses = {"statuses": [{"context": base_name, "state": "failure"}]}
+                        statuses = {
+                            "statuses": [
+                                {"context": base_name, "state": "failure"},
+                                *(
+                                    [{"context": candidate_name, "state": "success"}]
+                                    if base_name != candidate_name
+                                    else []
+                                ),
+                            ]
+                        }
                     transport = RecordingMergeTrainGitHubTransport(
                         responses=(
-                            _protected_branch_with_checks("ci-gate"),
+                            _protected_branch_with_checks("ci-gate", candidate_name, app_id=None),
+                            [],
                             statuses,
                             {"check_runs": runs},
                         )
@@ -1701,6 +1722,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks(),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1717,14 +1739,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate.status, "passed")
         self.assertEqual(observed_candidate.required_checks_status, "pass")
-        self.assertEqual(
-            [request.path for request in transport.requests],
-            [
-                "/repos/example/merge-train-repo/branches/main",
-                "/repos/example/merge-train-repo/commits/candidate-sha/status?per_page=100&page=1",
-                "/repos/example/merge-train-repo/commits/candidate-sha/check-runs?per_page=100&page=1",
-            ],
-        )
 
     def test_observe_batch_candidate_checks_leaves_pending_candidate_unlandable(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -1733,6 +1747,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks(),
+                [],
                 _combined_status(state="pending"),
                 {
                     "check_runs": [
@@ -1751,12 +1766,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(observed_candidate.required_checks_status, "pending")
 
     def test_observe_batch_candidate_checks_requires_every_protected_check(self) -> None:
+        missing = "missing-security-check"
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _protected_branch_with_checks(),
+                _protected_branch_with_checks("ci-gate", missing),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1770,21 +1787,46 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(
-            MergeTrainGitHubError,
-            r"missing required check evidence: security-gate \(app_id=15368\)",
-        ):
-            GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
-                candidate=candidate
+        observed = GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
+            candidate=candidate
+        )
+        self.assertEqual(observed.required_checks_status, "pending")
+        self.assertEqual(observed.status, "ready_for_checks")
+        self.assertIn(missing, observed.required_checks_observation_error)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            record = build_merge_train_batch_candidate_record(
+                candidate=observed, source="test", updated_at=observed.updated_at
+            )
+            store.write_merge_train_batch_candidate_record(record)
+            (reloaded,) = store.list_merge_train_batch_candidate_records(
+                repository=observed.repository
+            )
+            baseline = build_merge_train_batch_candidate_record(
+                candidate=observed.model_copy(update={"required_checks_observation_error": ""}),
+                source=record.source,
+                updated_at=record.updated_at,
+            )
+            self.assertEqual(reloaded.model_dump(mode="json"), baseline.model_dump(mode="json"))
+            self.assertNotIn(
+                "required_checks_observation_error", reloaded.candidate.model_dump(mode="json")
+            )
+            self.assertIn(
+                missing, observed.model_dump(mode="json")["required_checks_observation_error"]
             )
 
     def test_observe_batch_candidate_checks_accepts_unpinned_commit_status(self) -> None:
         candidate = _batch_candidate().model_copy(
-            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+            update={
+                "candidate_sha": "candidate-sha",
+                "status": "ready_for_checks",
+                "required_checks_observation_error": "previous missing check",
+            }
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
                 {"check_runs": []},
             )
@@ -1796,6 +1838,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate.status, "passed")
         self.assertEqual(observed_candidate.required_checks_status, "pass")
+        self.assertFalse(observed_candidate.required_checks_observation_error)
 
     def test_observe_batch_candidate_checks_uses_latest_duplicate_commit_status(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -1804,6 +1847,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(
                     statuses=(
                         {"context": "ci-status", "state": "success"},
@@ -1833,11 +1877,20 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
                         _protected_branch_with_checks(),
+                        [],
                         _combined_status(),
                         {
                             "check_runs": [
-                                {**_required_check_run("ci-gate", "completed", later), "id": 2},
-                                {**_required_check_run("ci-gate", "completed", earlier), "id": 1},
+                                {
+                                    **_required_check_run("ci-gate", "completed", later),
+                                    "id": 2,
+                                    "check_suite": {"id": 10},
+                                },
+                                {
+                                    **_required_check_run("ci-gate", "completed", earlier),
+                                    "id": 1,
+                                    "check_suite": {"id": 10},
+                                },
                                 _required_check_run("security-gate", "completed", "success"),
                             ]
                         },
@@ -1888,6 +1941,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
                         _protected_branch_with_checks(),
+                        [],
                         _combined_status(),
                         {"check_runs": checks},
                     )
@@ -1899,19 +1953,37 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_superseded_actions_execution_does_not_veto_current_checks(self) -> None:
         from control_plane.merge_train_github import _required_checks_status
+        from control_plane.tenant_admission_controller import (
+            TenantAdmissionRequiredTechnicalCheck,
+            read_technical_checks_for_requirements,
+        )
 
-        for consumer in ("head", "candidate"):
+        for consumer in ("head", "candidate", "base", "admission"):
             for change in (
                 "replacement",
                 "different_workflow",
                 "different_event",
+                "different_branch",
+                "different_repository",
+                "different_pull_target",
                 "unknown",
                 "running",
                 "rerun",
+                "completed_rerun",
                 "metadata_incomplete",
                 "metadata_unavailable",
                 "suite_mismatch",
+                "check_suite_missing",
+                "check_id_missing",
                 "old_failed",
+                "old_timed_out",
+                "old_action_required",
+                "old_stale",
+                "old_startup_failure",
+                "new_failed",
+                "new_stale",
+                "new_startup_failure",
+                "skipped_replacement",
                 "canonical_case",
                 "pending_non_actions",
             ):
@@ -1946,6 +2018,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         current["workflow_id"] = 8
                     elif change == "different_event":
                         current["event"] = "push"
+                    elif change == "different_branch":
+                        current["head_branch"] = "work/independent"
+                    elif change == "different_repository":
+                        current["head_repository"] = {"id": 99}
+                    elif change == "different_pull_target":
+                        current["pull_requests"] = [
+                            {"number": 15, "base": {"ref": "main", "repo": {"id": 9}}}
+                        ]
                     elif change == "unknown":
                         old.pop("workflow_id")
                     elif change == "running":
@@ -1953,25 +2033,48 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         current["conclusion"] = None
                     elif change == "rerun":
                         old["run_attempt"] = 2
+                        old["status"] = "queued"
+                        old["conclusion"] = None
+                        old["run_started_at"] = "2026-01-01T10:02:00Z"
+                    elif change == "completed_rerun":
+                        old["run_attempt"] = 2
                         old["run_started_at"] = "2026-01-01T10:02:00Z"
                     elif change == "suite_mismatch":
                         old["check_suite_id"] = 30
-                    elif change == "old_failed":
+                    elif change.startswith("old_"):
+                        old["conclusion"] = "failure" if change == "old_failed" else change[4:]
+                    elif change.startswith("new_"):
+                        old["conclusion"] = "success"
+                        current["conclusion"] = "failure" if change == "new_failed" else change[4:]
+                    elif change == "skipped_replacement":
                         old["conclusion"] = "failure"
+                        current["conclusion"] = "skipped"
                     checks = [
                         {
-                            **_required_check_run("security-gate", "completed", result),
+                            **_required_check_run(
+                                "security-gate",
+                                str(execution["status"]),
+                                cast(str | None, execution["conclusion"]),
+                            ),
                             "app": {"id": 15368, "slug": "github-actions"},
                             "id": job,
                             "head_sha": head,
                             "check_suite": {"id": suite},
                             "details_url": f"https://github.com/example/tool/actions/runs/{run}/job/{job}",
                         }
-                        for run, job, suite, result in (
-                            (11, 101, 10, "failure"),
-                            (12, 102, 20, "success"),
+                        for run, job, suite, execution in (
+                            (11, 101, 10, old),
+                            (12, 102, 20, current),
                         )
                     ]
+                    if change == "check_suite_missing":
+                        for check in checks:
+                            check.pop("check_suite")
+                    elif change == "check_id_missing":
+                        checks[0]["conclusion"] = "success"
+                        checks[1]["conclusion"] = "failure"
+                        checks[1]["check_suite"] = checks[0]["check_suite"]
+                        checks[1].pop("id")
                     if change == "canonical_case":
                         for check in checks:
                             check["details_url"] = str(check["details_url"]).replace(
@@ -1979,15 +2082,21 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                     elif change == "pending_non_actions":
                         checks.append(
-                            _required_check_run("external-job", "queued", None, app_id=99)
+                            {
+                                **_required_check_run("external-job", "queued", None, app_id=99),
+                                "head_sha": head,
+                            }
                         )
-                    responses = (
+                    required_names = ["security-gate"]
+                    if change == "pending_non_actions":
+                        required_names.append("external-job")
+                    responses: tuple[object, ...] = (
                         *(
                             ()
-                            if consumer == "head"
-                            else (_protected_branch_with_checks("security-gate"),)
+                            if consumer == "admission"
+                            else (_protected_branch_with_checks(*required_names, app_id=None), [])
                         ),
-                        _combined_status(statuses=()),
+                        {**_combined_status(statuses=()), "sha": head},
                         {"check_runs": checks},
                         MergeTrainGitHubError("workflow evidence unavailable", status_code=403)
                         if change == "metadata_unavailable"
@@ -1997,12 +2106,40 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         },
                     )
                     transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                    status: str
                     if consumer == "head":
                         status = _required_checks_status(
                             transport=transport,
                             repository_path="example/tool",
+                            base_branch="main",
                             encoded_head_sha=head,
                         )
+                    elif consumer == "base":
+                        status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                            candidate=_batch_candidate().model_copy(
+                                update={"repository": "example/tool", "base_sha": head}
+                            ),
+                            failed_check_names=("security-gate", "external-job")
+                            if change == "pending_non_actions"
+                            else ("security-gate",),
+                        )
+                    elif consumer == "admission":
+                        required_names = ["security-gate"]
+                        if change == "pending_non_actions":
+                            required_names.append("external-job")
+                        status = read_technical_checks_for_requirements(
+                            transport=transport,
+                            merge_client=GitHubMergeTrainClient(transport=transport),
+                            repository="example/tool",
+                            base_sha="base-sha",
+                            head_sha=head,
+                            evaluated_at="2026-01-01T10:03:00Z",
+                            strict=False,
+                            required_checks=tuple(
+                                TenantAdmissionRequiredTechnicalCheck(name=name)
+                                for name in required_names
+                            ),
+                        ).status
                     else:
                         candidate = _batch_candidate().model_copy(
                             update={
@@ -2018,9 +2155,22 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                             .required_checks_status
                         )
-                    if change in {"replacement", "canonical_case"}:
+                    if consumer == "base" and change == "skipped_replacement":
+                        self.assertEqual(status, "unknown")
+                    elif change in {
+                        "replacement",
+                        "canonical_case",
+                        "old_failed",
+                        "old_timed_out",
+                        "old_action_required",
+                        "old_stale",
+                        "old_startup_failure",
+                        "skipped_replacement",
+                    }:
                         self.assertEqual(status, "pass")
-                    elif change == "pending_non_actions":
+                    elif change.startswith("new_") or change == "completed_rerun":
+                        self.assertEqual(status, "fail")
+                    elif change in {"pending_non_actions", "running", "rerun"}:
                         self.assertEqual(status, "pending")
                     else:
                         self.assertNotEqual(status, "pass")
@@ -2119,6 +2269,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(
                     statuses=(
                         {"context": "ci-status", "state": "pending"},
@@ -2143,6 +2294,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate", app_id=-1),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -2166,6 +2318,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-status", include_checks=False),
+                [],
                 _combined_status(),
                 {"check_runs": []},
             )
@@ -2185,6 +2338,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 _combined_status(),
                 {"check_runs": [_required_check_run("ci-gate", "completed", "failure")]},
             )
@@ -2229,13 +2383,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         }
                     },
                 },
+                [],
             )
         )
 
-        with self.assertRaisesRegex(
-            MergeTrainGitHubError,
-            "requires at least one protected-branch status check",
-        ):
+        with self.assertRaises(MergeTrainGitHubError):
             GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
                 candidate=candidate
             )
@@ -2286,7 +2438,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         for publisher, conclusion, expected in (
             (15368, "success", "pass"),
             (15368, "failure", "fail"),
-            (99999, "success", None),
+            (99999, "success", "pending"),
         ):
             with self.subTest(publisher=publisher, conclusion=conclusion):
                 transport = RecordingMergeTrainGitHubTransport(
@@ -2304,12 +2456,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     )
                 )
                 client = GitHubMergeTrainClient(transport=transport)
-                if expected is None:
-                    with self.assertRaisesRegex(MergeTrainGitHubError, "missing required check"):
-                        client.observe_batch_candidate_checks(candidate=candidate)
-                else:
-                    observed = client.observe_batch_candidate_checks(candidate=candidate)
-                    self.assertEqual(observed.required_checks_status, expected)
+                observed = client.observe_batch_candidate_checks(candidate=candidate)
+                self.assertEqual(observed.required_checks_status, expected)
 
     def test_ruleset_check_discovery_refuses_incomplete_or_malformed_evidence(self) -> None:
         from control_plane.merge_train_github import _required_branch_checks
@@ -2390,6 +2538,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -2399,13 +2548,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(
-            MergeTrainGitHubError,
-            r"missing required check evidence: ci-gate \(app_id=15368\)",
-        ):
-            GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
-                candidate=candidate
-            )
+        observed = GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
+            candidate=candidate
+        )
+        self.assertEqual(observed.required_checks_status, "pending")
+        self.assertEqual(observed.status, "ready_for_checks")
 
     def test_observe_batch_candidate_checks_excludes_launchplane_advisory_runs(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -2414,6 +2561,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         baseline_transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 _combined_status(),
                 {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
             )
@@ -2421,6 +2569,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks("ci-gate"),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -2454,6 +2603,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         baseline_transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks(),
+                [],
                 _combined_status(),
                 {
                     "check_runs": [
@@ -2466,6 +2616,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _protected_branch_with_checks(),
+                [],
                 {
                     "state": "failure",
                     "total_count": 2,
@@ -3585,6 +3736,28 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ((rejection.model_copy(update={"head_sha": "old-head"}),), "pass", False),
             ((rejection.model_copy(update={"owner_github_id": "902"}),), "pass", False),
             ((rejection.model_copy(update={"product": "another-site"}),), "pass", False),
+            (
+                (rejection.model_copy(update={"repository": "cbusillo/another-site"}),),
+                "pass",
+                False,
+            ),
+            ((rejection.model_copy(update={"pull_request_number": 43}),), "pass", False),
+            (
+                (
+                    rejection.model_copy(update={"owner_github_id": "902", "decision": "accepted"}),
+                    rejection,
+                ),
+                "fail",
+                True,
+            ),
+            (
+                (
+                    rejection.model_copy(update={"owner_github_id": "902"}),
+                    rejection.model_copy(update={"decision": "accepted"}),
+                ),
+                "pass",
+                False,
+            ),
             ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
             ((), "pass", False),
         )
@@ -3604,8 +3777,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                             pull,
                             {"permission": "admin"},
                             _label_events(),
+                            _protected_branch_with_checks("ci-status", app_id=None),
+                            [],
                             _combined_status(),
-                            {"check_runs": [_check_run("completed", "success")]},
+                            {
+                                "check_runs": [
+                                    _required_check_run("ci-status", "completed", "success")
+                                ]
+                            },
                             _conversation_rule(),
                             [],
                         )
@@ -3652,8 +3831,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         pull_request,
                         {"permission": "admin"},
                         _label_events(),
+                        _protected_branch_with_checks("ci-status", app_id=None),
+                        [],
                         _combined_status(),
-                        {"check_runs": [_check_run("completed", "success")]},
+                        {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                         _conversation_rule(),
                         [],
                         {"base_commit": {"sha": "base-main-current"}, "status": status},
@@ -3693,8 +3874,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 pull_request,
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],
                 {"base_commit": {"sha": "other-base"}, "status": "diverged"},
@@ -3729,8 +3912,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                                 pull,
                                 {"permission": "admin"},
                                 _label_events(),
+                                _protected_branch_with_checks("ci-status", app_id=None),
+                                [],
                                 _combined_status(statuses=()),
-                                {"check_runs": [_check_run("completed", conclusion)]},
+                                {
+                                    "check_runs": [
+                                        _required_check_run("ci-status", "completed", conclusion)
+                                    ]
+                                },
                                 _conversation_rule(),
                                 [],
                             )
@@ -3809,10 +3998,17 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         pull,
                         {"permission": "admin"},
                         _label_events(),
+                        _protected_branch_with_checks("ci-status", app_id=None),
+                        [],
                         _combined_status(
                             statuses=({"context": "launchplane/owner-review", "state": "failure"},)
                         ),
-                        {"check_runs": [_check_run("completed", "success"), *checks]},
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-status", "completed", "success"),
+                                *checks,
+                            ]
+                        },
                         _conversation_rule(),
                         [],
                     )
@@ -3919,12 +4115,16 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(42, mergeable=True),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -3954,26 +4154,37 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertFalse(pull_request.branch_update_required)
         self.assertEqual(snapshot.pull_requests[1].number, 43)
         self.assertEqual(snapshot.pull_requests[1].base_ref, "feature-root")
+        self.assertEqual(snapshot.pull_requests[1].required_checks_status, "pass")
         self.assertEqual(snapshot.base_sha, "base-main-current")
-        self.assertEqual(
-            [request.path for request in transport.requests],
-            [
-                "/repos/cbusillo/sellyouroutboard/branches/main",
-                "/repos/cbusillo/sellyouroutboard/pulls?state=open&sort=created&direction=asc&per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/pulls/42",
-                "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
-                "/repos/cbusillo/sellyouroutboard/issues/42/events?per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/commits/head-42/status?per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/pulls/43",
-                "/repos/cbusillo/sellyouroutboard/issues/43/events?per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
-                "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
-                "/graphql",
-                "/repos/cbusillo/sellyouroutboard/rules/branches/main?per_page=100&page=1",
-            ],
+        self.assertFalse(
+            any("/branches/feature-root" in request.path for request in transport.requests)
         )
         self.assertNotIn("/pulls/44", "\n".join(request.path for request in transport.requests))
+
+    def test_single_stacked_child_uses_configured_train_required_checks(self) -> None:
+        child = _github_pull_request(
+            43, base_ref="feature-root", head_ref="feature-child", author_association="OWNER"
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                child,
+                _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
+                _combined_status(),
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                _conversation_rule(),
+                [],
+            )
+        )
+        snapshot = GitHubMergeTrainSnapshotReader(
+            transport=transport, repository_policy=build_test_merge_train_policy().policies[0]
+        ).read_pull_request_snapshot(repository="cbusillo/sellyouroutboard", pull_request_number=43)
+        self.assertEqual(snapshot.base_ref, "feature-root")
+        self.assertEqual(snapshot.required_checks_status, "pass")
+        self.assertFalse(
+            any(request.path.endswith("/branches/feature-root") for request in transport.requests)
+        )
 
     def test_snapshot_reader_downgrades_missing_collaborator_permission_to_unknown(
         self,
@@ -3985,8 +4196,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(15, author_association="CONTRIBUTOR"),
                 MergeTrainGitHubError("permission not found", status_code=404),
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4071,8 +4284,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     responses.append(timeline)
                 responses.extend(
                     [
+                        _protected_branch_with_checks("ci-status", app_id=None),
+                        [],
                         _combined_status(),
-                        {"check_runs": [_check_run("completed", "success")]},
+                        {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                         _conversation_rule(),
                         [],  # no active branch rules
                     ]
@@ -4095,6 +4310,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(16),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("check-100", app_id=None),
+                [],
                 _combined_status(),
                 {
                     "total_count": 101,
@@ -4133,6 +4350,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(17),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("late-failing-status", app_id=None),
+                [],
                 {
                     "state": "pending",
                     "total_count": 101,
@@ -4151,7 +4370,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         }
                     ],
                 },
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4180,8 +4399,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     _github_pull_request(number),
                     *([{"permission": "admin"}] if number == 1 else []),
                     _label_events(),
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
                     _combined_status(),
-                    {"check_runs": [_check_run("completed", "success")]},
+                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 ]
             )
         responses.extend([_conversation_rule(), []])
@@ -4202,8 +4423,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(12, author_association="OWNER")],
                 _github_pull_request(12, author_association="OWNER"),
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4224,8 +4447,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(13, mergeable=None, mergeable_state="behind"),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("queued", None)]},
+                {"check_runs": [_required_check_run("ci-status", "queued", None)]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4255,8 +4480,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(14),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(statuses=()),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4276,6 +4503,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_pull_request(14),
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-gate", app_id=None),
+                [],
                 _combined_status(statuses=()),
                 {
                     "check_runs": [
@@ -4313,8 +4542,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     ("labeled", "ready-to-merge", 77, "client-agent[bot]"),
                 ),
                 {"permission": "write"},
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )
@@ -4355,8 +4586,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         _github_pull_request(19),
                         {"permission": "admin"},
                         [event],
+                        _protected_branch_with_checks("ci-status", app_id=None),
+                        [],
                         _combined_status(),
-                        {"check_runs": [_check_run("completed", "success")]},
+                        {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                         _conversation_rule(),
                         [],  # no active branch rules
                     )
@@ -4395,7 +4628,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 if "/rules/branches/" in path:
                     return list(branch_rules)
                 if path.endswith("/branches/main"):
-                    return _github_branch()
+                    return _github_branch() | _protected_branch_with_checks(
+                        "ci-status", app_id=None
+                    )
                 if "/pulls?" in path:
                     return [_github_pull_request(20), _github_pull_request(21)]
                 if "/pulls/" in path:
@@ -4406,7 +4641,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     return _label_events()
                 if "/status?" in path:
                     return _combined_status()
-                return {"check_runs": [_check_run("completed", "success")]}
+                return {"check_runs": [_required_check_run("ci-status", "completed", "success")]}
 
         snapshot = GitHubMergeTrainSnapshotReader(transport=Transport()).read_merge_train_snapshot(
             repository="cbusillo/sellyouroutboard", base_branch="main"
@@ -4453,7 +4688,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         snapshot, _ = self._read_with_conversations(
             rule=_conversation_rule(None),
             branch_rules=(
-                {"type": "required_status_checks", "parameters": {}},
+                {"type": "required_status_checks", "parameters": {"required_status_checks": []}},
                 {"type": "pull_request", "parameters": {"required_review_thread_resolution": True}},
             ),
             threads={

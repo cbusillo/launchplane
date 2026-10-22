@@ -2,7 +2,7 @@
 title: Restart One Lane Service
 ---
 
-The Odoo service restart action resets one existing Compose service on the lane's
+The service restart action resets one existing Odoo or generic-web Compose service on the lane's
 current artifact. It calls Dokploy's [container restart API](https://docs.dokploy.com/docs/api/docker),
 never pull, build, deploy, config, env, database repair, or volume replacement.
 The [direction stop boundaries](../DIRECTION.md#stop-boundaries) still govern
@@ -12,17 +12,41 @@ or hotfix authority.
 ## Supported lane and identity
 
 `POST /v1/drivers/odoo/service-restart` accepts product, context, instance, service,
-reason and mode (`dry-run`, `apply` or read-only `reconcile`). Only an authenticated admin session or
-scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) may call it. It uses existing
+reason and mode (`dry-run`, `apply` or read-only `reconcile`). An authenticated admin session or
+scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) may call it with existing
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
+
+The service-authenticated Director `local_operator` can also restart an eligible
+testing service under standing direction without a write grant. Immediately
+before the restart checkpoint, under the release lane reservation, it must pass
+the existing [disposable-lane qualification](disposable-lanes.md): current bound
+reproducible and production-isolated evidence, protected-use checks, no staff-testing hold,
+and no target alias. This qualification applies even with an explicit grant.
+Inspect or collect current evidence through `/v1/disposable-lanes/observations`
+before a fresh apply; missing or expired resource/custody evidence returns
+`disposable_lane_safety_unknown`. Completed replay and
+original-request reconciliation remain observational when that eligibility
+changes. Production and other scoped callers keep their policy checks;
+terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
 settled current deployment with a runtime identity and immutable artifact
 manifest. Production also requires recorded acceptance of that exact artifact
-and source commit. Other drivers and application targets are refused: the
-supported Compose path uses the Odoo lane reservation already respected by
-release enqueues, workers and synchronous releases.
+and source commit. The same requirements apply to generic-web Compose lanes.
+Other drivers and application targets are refused. Odoo uses
+the lane reservation respected by release enqueues, workers and synchronous
+releases. Generic-web holds its existing product serializer exclusively through
+the final inspection, restart and verification, excluding deploy, promotion,
+and rollback. Application-target retirement is outside this Compose-only action.
+Both drivers use the existing endpoint;
+the historical `odoo` route segment does not restrict it to Odoo products.
+Generic-web waits for its product serializer, then rechecks the reviewed plan;
+Odoo refuses when its lane reservation is held.
+A nested release step refuses a lost serializer transaction, including an
+automatic rollback. Preserve the original receipt for supported reconciliation;
+do not assume a rollback ran or reacquire authority to overwrite a potentially
+newer deployment.
 
 Container selection requires inspected project and service labels and exactly
 one non-one-off container. Name matches alone never authorize a restart. The
@@ -31,6 +55,14 @@ image, a valid timezone-aware start time and a container health check. Missing o
 without a restart. `web` additionally verifies the lane's HTTP runtime identity
 after restart and requires that endpoint before the restart; other named services verify their own container health and identity.
 
+These checks also apply to generic-web dependency services. A database container
+without the recorded application runtime identity, immutable artifact image or
+container health check is refused. Merely sharing the Compose project does not
+qualify it. This action does not install missing evidence, change a health check,
+or start an unqualified dependency as a workaround. Typical database containers
+cannot qualify through this action. A dependent application restart does not
+recover its database.
+
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
 and release ownership, durably checkpoints the exact container restart, and sends
@@ -38,7 +70,7 @@ one POST. It verifies a later start time, unchanged container/image/configuratio
 runtime identity, and health. A failed verification remains a failed receipt.
 Verification retries unavailable inventory and transient provider reads within
 its bounded window; identity changes fail verification and never cause another
-restart. Authorization uses the current policy, including live revocations.
+restart. Policy-authorized callers use the current policy, including live revocations.
 
 ## Product Ops
 

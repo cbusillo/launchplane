@@ -306,3 +306,12 @@
     flex-wrap: wrap;
   }
 }
+
+.topics-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+.topics-toolbar > p { margin-right: auto; }
+.topics-list { display: grid; gap: 1rem; list-style: none; padding: 0; margin: 0; }
+.topics-list h2 { font-size: 1.15rem; overflow-wrap: anywhere; }
+.topics-added { color: var(--muted); font-size: 0.875rem; }
+.topics-page { overflow-wrap: anywhere; }
+
+.topics-list a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 3px; }

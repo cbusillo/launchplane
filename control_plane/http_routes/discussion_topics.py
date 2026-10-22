@@ -23,6 +23,7 @@ from control_plane.service_auth import (
     director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.product_review import viewer_is_product_owner
 
 ROUTE = "/v1/products/{product}/discussion-topics"
 Product = Annotated[str, Path(min_length=1, max_length=128, pattern=r"^\S+$")]
@@ -32,6 +33,8 @@ class DiscussionTopicsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["ok"] = "ok"
     trace_id: str
+    product: str
+    display_name: str
     topics: tuple[DiscussionTopicRecord, ...]
 
 
@@ -57,11 +60,27 @@ def register_discussion_topic_routes(
             or isinstance(identity, GitHubHumanIdentity)
             and identity.role == "admin"
         )
-        if (write and not principal_can_write) or not dependencies.authorization_allows(
-            identity=identity,
-            action="discussion_topic.write" if write else "product_profile.read",
-            product=product,
-            context=LAUNCHPLANE_SERVICE_CONTEXT,
+        client_read = False
+        if (
+            not write
+            and isinstance(identity, GitHubHumanIdentity)
+            and isinstance(store, PostgresRecordStore)
+        ):
+            try:
+                profile = store.read_product_profile_record(product)
+                client_read = profile.lifecycle_state == "active" and viewer_is_product_owner(
+                    profile=profile, identity=identity
+                )
+            except FileNotFoundError:
+                pass
+        if (write and not principal_can_write) or not (
+            client_read
+            or dependencies.authorization_allows(
+                identity=identity,
+                action="discussion_topic.write" if write else "product_profile.read",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -97,6 +116,8 @@ def register_discussion_topic_routes(
         database = require_store(store, identity, product, trace, write=False)
         return DiscussionTopicsResponse(
             trace_id=trace,
+            product=product,
+            display_name=database.read_product_profile_record(product).display_name,
             topics=database.list_discussion_topics(product, include_closed=include_closed),
         )
 

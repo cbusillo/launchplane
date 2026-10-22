@@ -161,7 +161,6 @@ def _decide_feedback(
         request.target_kind == "preview"
         and request.pull_request_number is not None
         and owner_review_status is not None
-        and plan.get("action") != "destroy"
         and plan.get("reason") != "pull_request_not_open"
     ):
         try:

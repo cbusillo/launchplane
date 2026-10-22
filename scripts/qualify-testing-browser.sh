@@ -89,14 +89,25 @@ run_interruptible docker run --rm --cidfile "$fixture_dir/probe.cid" --network "
     --env LAUNCHPLANE_BROWSER_CREDENTIAL_FIXTURE=control-plane-only \
     --entrypoint /app/.venv/bin/python "$image" -c '
 from playwright.sync_api import sync_playwright
-from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+from control_plane.workflows.generic_web_deploy import GenericWebPostDeployGuard
+from control_plane.workflows.verireel_testing_post_deploy import (
+    _TestingPageExchanges,
+    launch_testing_browser,
+)
 from control_plane.odoo_walkthrough_browser import require_safe_browser_control
 with sync_playwright() as playwright:
     browser = launch_testing_browser(playwright.chromium)
     try:
         page = browser.new_page()
         heading = "Isolated testing browser"
-        page.set_content(f"<h1>{heading}</h1>")
+        guard = GenericWebPostDeployGuard()
+        exchanges = _TestingPageExchanges(page, "https://testing.invalid", guard)
+        page.route("https://testing.invalid/sign-up", lambda route: route.fulfill(
+            status=200, body=f"<h1>{heading}</h1>"))
+        response = page.goto("https://testing.invalid/sign-up", wait_until="load")
+        assert response is not None
+        exchanges.finish_response(response)
+        assert guard.exchanges and all(guard.exchanges.values())
         assert page.locator("h1").inner_text() == heading
         page.set_content("""<input id="business" name="name">
             <input id="private-password" type="password">

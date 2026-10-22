@@ -35,6 +35,14 @@ class ProductionRecipientTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -261,6 +269,27 @@ class ProductionRecipientTests(unittest.TestCase):
         )
         self.assertEqual(self.provider["old-recipient"]["env"], "OLD_VALUE=preserve")
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_operation()
+            self.assertEqual(self.effects, [])
+            self.assertIsNone(custody(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(
+            self.capacity_read.call_args.kwargs["server_id"], self.body.destination_server_id
+        )
 
     def test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete(self) -> None:
         first = self.run_operation()

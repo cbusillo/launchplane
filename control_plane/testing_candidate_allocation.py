@@ -74,8 +74,14 @@ def observe_candidate_storage(
         require_candidate_target_custody(store, allocation)
 
     checkpoint()
-    lease.checkpoint_effect("independent_storage_readback")
-    _run_candidate_storage(root, store, allocation, "readback", checkpoint)
+    _run_candidate_storage(
+        root,
+        store,
+        allocation,
+        "readback",
+        checkpoint,
+        lambda _phase: lease.checkpoint_effect("independent_storage_readback"),
+    )
     checkpoint()
     updated = allocation.model_copy(
         update={"resources_binding_sha256": candidate_resources(allocation).binding_sha256}
@@ -90,6 +96,7 @@ def _run_candidate_storage(
     record: TestingCandidateAllocation,
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
+    before_provider_mutation: Callable[[str], None],
 ) -> None:
     run_resource_schedule(
         root=root,
@@ -97,6 +104,7 @@ def _run_candidate_storage(
         resources=candidate_resources(record),
         mode=mode,
         checkpoint=checkpoint,
+        before_provider_mutation=before_provider_mutation,
         candidate_target=DokployTargetDefinition(
             context=record.context,
             instance="testing",
@@ -206,7 +214,12 @@ def prepare_candidate_storage(
         # turn storage qualification into a deployment of the existing lane.
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported candidate storage operation.")
-        _run_candidate_storage(root, store, record, mode, checkpoint)
+
+        def before_dispatch(_phase: str) -> None:
+            save(effect="storage")
+            lease.checkpoint_effect("independent_storage")
+
+        _run_candidate_storage(root, store, record, mode, checkpoint, before_dispatch)
 
     if record.effect == "storage":
         try:
@@ -217,8 +230,6 @@ def prepare_candidate_storage(
         else:
             save(resources_binding_sha256=resources.binding_sha256)
             return record
-    save(effect="storage")
-    lease.checkpoint_effect("independent_storage")
     run("prepare")
     save(resources_binding_sha256=resources.binding_sha256)
     return record

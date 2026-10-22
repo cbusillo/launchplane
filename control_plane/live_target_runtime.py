@@ -74,6 +74,20 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     no_cache: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, gt=0)
     requalify_literal_keys: tuple[str, ...] = ()
+    selected_keys: tuple[str, ...] | None = None
+
+    @field_validator("selected_keys")
+    @classmethod
+    def _validate_selected_keys(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if (
+            not value
+            or len(set(value)) != len(value)
+            or any(re.fullmatch(r"[A-Za-z0-9_.-]+", key) is None for key in value)
+        ):
+            raise ValueError("Select nonempty, unique managed runtime key names.")
+        return tuple(sorted(value))
 
     @field_validator("requalify_literal_keys")
     @classmethod
@@ -101,6 +115,16 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
             raise ValueError("Live target runtime apply requires context.")
         if not self.instance:
             raise ValueError("Live target runtime apply requires instance.")
+        if self.selected_keys is not None and (
+            self.separation_only
+            or self.deploy
+            or self.no_cache
+            or self.deploy_timeout_seconds is not None
+            or set(self.requalify_literal_keys) - set(self.selected_keys)
+        ):
+            raise ValueError(
+                "Selected runtime sync cannot deploy, stage separation or qualify unselected keys."
+            )
         if self.separation_only and (
             self.instance != "testing"
             or self.deploy
@@ -565,42 +589,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     return summary
 
 
-def require_product_profile_runtime_keys(
-    *,
-    record_store: LiveTargetRuntimeProfileStore,
-    product_name: str,
-    context_name: str,
-    instance_name: str,
-    allow_owned_preview: bool = False,
-) -> set[str]:
-    profile = record_store.read_product_profile_record(product_name)
-    lane = next(
-        (
-            candidate
-            for candidate in profile.lanes
-            if candidate.context == context_name and candidate.instance == instance_name
-        ),
-        None,
-    )
-    if lane is None and not (
-        allow_owned_preview
-        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
-    ):
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
-            code="product_lane_not_found",
-        )
-    allowed_keys = _declared_runtime_keys(
-        profile=profile, context_name=context_name, instance_name=instance_name
-    )
-    if not allowed_keys:
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
-            code="runtime_environment_empty",
-        )
-    return allowed_keys
-
-
 def _declared_runtime_keys(
     *, profile: LaunchplaneProductProfileRecord, context_name: str, instance_name: str
 ) -> set[str]:
@@ -840,6 +828,7 @@ def apply_live_target_runtime_environment(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     allow_owned_preview: bool = False,
     requalify_literal_keys: Iterable[str] = (),
+    selected_keys: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -864,12 +853,26 @@ def apply_live_target_runtime_environment(
         raise LiveTargetRuntimeError(str(error), code="runtime_environment_unavailable") from error
     desired_env_map = site_environment.values
     literal_keys = set(requalify_literal_keys)
+    if selected_keys is not None:
+        if (
+            not selected_keys
+            or len(set(selected_keys)) != len(selected_keys)
+            or set(selected_keys) - desired_env_map.keys()
+            or deploy
+            or no_cache
+            or deploy_timeout_seconds is not None
+        ):
+            raise LiveTargetRuntimeError(
+                "Selected runtime sync requires existing, non-retired managed keys and deployment disabled.",
+                code="runtime_key_selection_invalid",
+            )
+        desired_env_map = {key: desired_env_map[key] for key in sorted(selected_keys)}
     if literal_keys - desired_env_map.keys():
         raise LiveTargetRuntimeError(
             "Literal qualification requires names present in the managed runtime inputs.",
             code="compose_literal_keys_invalid",
         )
-    retired_keys = set(site_environment.retired_keys)
+    retired_keys = set(site_environment.retired_keys) if selected_keys is None else set()
     if not desired_env_map:
         raise LiveTargetRuntimeError(
             f"No Launchplane runtime environment values resolved for {context_name}/{instance_name}.",
@@ -968,7 +971,7 @@ def apply_live_target_runtime_environment(
             code="retained_database_credential_changed",
         )
     provider_env_platform_credentials = provider_env_platform_credential_report(
-        live_env_map=live_env_map, retired_keys=retired_keys
+        live_env_map=live_env_map, retired_keys=site_environment.retired_keys
     )
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,
@@ -1162,6 +1165,7 @@ def apply_live_target_runtime_environment(
         "mode": "apply" if apply_changes else "dry-run",
         "context": context_name,
         "instance": instance_name,
+        "selected_keys": sorted(selected_keys) if selected_keys is not None else None,
         "tracked_target": {
             "target_id": target_definition.target_id,
             "target_type": target_definition.target_type,

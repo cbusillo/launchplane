@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -20,7 +21,13 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
 )
 from control_plane.dokploy import api, source
-from control_plane.npmplus import NpmplusCertificate, NpmplusProxyHost, NpmplusProxyHostPayload
+from control_plane.npmplus import (
+    NpmplusAccessList,
+    NpmplusCertificate,
+    NpmplusProxyHost,
+    NpmplusProxyHostPayload,
+)
+from control_plane.outbound_http import probe_public_tls
 from control_plane.odoo_testing_restore import generation_binding, read_current_testing_generation
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -44,6 +51,16 @@ ROUTE = TESTING_PUBLIC_INGRESS_ROUTE
 _AUDIT_PREFIX = "testing-public-ingress-"
 
 
+class TestingIngressPrerequisiteError(ValueError):
+    """A fixed public prerequisite code, with no provider configuration in the message."""
+
+    def __init__(
+        self, code: Literal["testing_edge_template_incompatible", "testing_edge_tls_unverified"]
+    ) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 def _marker(digest: str) -> str:
     # A generated comment survives the provider's API; NPMplus discards legacy meta.
     return "# launchplane testing public ingress " + digest + "\n"
@@ -64,6 +81,8 @@ class TestingPublicIngressClient(Protocol):
     def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]: ...
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate: ...
+
+    def get_access_list(self, access_list_id: int) -> NpmplusAccessList: ...
 
     def list_other_host_domains(self) -> tuple[str, ...]: ...
 
@@ -223,13 +242,20 @@ class TestingPublicIngressAdapter:
     ) -> bool:
         if not template.advanced_config:
             return True
+        return self._audited_template(template, binding) and template.advanced_config == _marker(
+            str(binding.ingress.provider_evidence["audit_record"]).removeprefix(_AUDIT_PREFIX)
+        )
+
+    def _audited_template(
+        self, template: NpmplusProxyHost, binding: EnvironmentRouteBindingRecord
+    ) -> bool:
         record_id = binding.ingress.provider_evidence.get("audit_record", "")
         if not isinstance(record_id, str) or not record_id.startswith(_AUDIT_PREFIX):
             return False
         digest = record_id.removeprefix(_AUDIT_PREFIX)
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             return False
-        if template.advanced_config != _marker(digest):
+        if not template.advanced_config.startswith(_marker(digest)):
             return False
         audit = self.store.read_ingress_route_audit_record(record_id)
         return (
@@ -244,6 +270,45 @@ class TestingPublicIngressAdapter:
             and bool(audit.testing_authority_sha256)
             and audit.provider_host_id == template.id
             and audit.provider_route_sha256 == canonical_json_sha256(_host_payload(template))
+        )
+
+    def _protected_config(
+        self, template: NpmplusProxyHost, binding: EnvironmentRouteBindingRecord
+    ) -> str:
+        config = template.advanced_config
+        if self._audited_template(template, binding):
+            digest = str(binding.ingress.provider_evidence["audit_record"]).removeprefix(
+                _AUDIT_PREFIX
+            )
+            config = config.removeprefix(_marker(digest))
+        return config
+
+    def _protected_template(
+        self, template: NpmplusProxyHost, binding: EnvironmentRouteBindingRecord
+    ) -> bool:
+        # These two existing Odoo exceptions have hostname-independent semantics.
+        # No other directive, location, literal Host or alternate destination is replayed.
+        if not template.access_list_id or template.forward_scheme not in {"http", "https"}:
+            return False
+        upstream = f"{template.forward_scheme}://{template.forward_host}:{template.forward_port}$request_uri"
+        directives = (
+            "auth_basic off;",
+            "satisfy any;",
+            "allow all;",
+            f"proxy_pass {upstream};",
+            "proxy_set_header Host $host;",
+            "proxy_set_header X-Real-IP $remote_addr;",
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "proxy_set_header X-Forwarded-Proto $scheme;",
+        )
+        body = r"\s*".join(re.escape(token) for token in directives)
+        block = rf"\s*location\s+\^~\s+(/web/image/|/shopify/webhook)\s*\{{\s*{body}\s*\}}\s*"
+        config = self._protected_config(template, binding)
+        matches = tuple(re.finditer(block, config))
+        return (
+            len(matches) == 2
+            and {match[1] for match in matches} == {"/web/image/", "/shopify/webhook"}
+            and "".join(match[0] for match in matches) == config
         )
 
     def _plan(
@@ -272,12 +337,19 @@ class TestingPublicIngressAdapter:
             or not template.ssl_forced
             or (template.forward_host, template.forward_port, template.forward_scheme)
             != (endpoint.upstream_host, endpoint.upstream_port, endpoint.upstream_scheme)
-            or not self._clean_template(template, binding)
             or template.locations
-            or template.access_list_id
             or template.npmplus_auth_request != "none"
         ):
-            raise ValueError("The existing edge route cannot safely template public testing.")
+            raise TestingIngressPrerequisiteError("testing_edge_template_incompatible")
+        clean = not template.access_list_id and self._clean_template(template, binding)
+        protected = self._protected_template(template, binding)
+        if not clean and not protected:
+            raise TestingIngressPrerequisiteError("testing_edge_template_incompatible")
+        if protected:
+            access = self.client.get_access_list(template.access_list_id)
+            if access.id != template.access_list_id:
+                raise TestingIngressPrerequisiteError("testing_edge_template_incompatible")
+            material["access_list"] = access.model_dump(mode="json")
         certificate = self.client.get_certificate(template.certificate_id)
         if (
             certificate.id != template.certificate_id
@@ -290,7 +362,7 @@ class TestingPublicIngressAdapter:
                 **_host_payload(template),
                 "domain_names": (generation.domain_host,),
                 "meta": {},
-                "advanced_config": "",
+                "advanced_config": self._protected_config(template, binding) if protected else "",
             }
         )
         material.update(
@@ -299,8 +371,9 @@ class TestingPublicIngressAdapter:
             desired=desired.model_dump(mode="json"),
         )
         plan_sha = canonical_json_sha256(material)
-        desired.advanced_config = _marker(
-            self.request.reviewed_plan_sha256 if custody else plan_sha
+        desired.advanced_config = (
+            _marker(self.request.reviewed_plan_sha256 if custody else plan_sha)
+            + desired.advanced_config
         )
         # Validate current provider wire compatibility before crossing the effect checkpoint.
         desired.to_api_payload()
@@ -361,6 +434,7 @@ class TestingPublicIngressAdapter:
             "generation_preserved": True,
             "copy_preserved": True,
             "public_health_verified": False,
+            "public_tls_verified": applied,
         }
 
     def _audit(
@@ -455,7 +529,7 @@ class TestingPublicIngressAdapter:
         ]
         if len(matches) != 1 or (
             matches[0].domain_names != (generation.domain_host,)
-            or matches[0].advanced_config != _marker(self.request.reviewed_plan_sha256)
+            or not matches[0].advanced_config.startswith(_marker(self.request.reviewed_plan_sha256))
             or not matches[0].enabled
             or not matches[0].ssl_forced
             or tuple(d.domain_name for d in binding.domains) != (generation.domain_host,)
@@ -463,6 +537,11 @@ class TestingPublicIngressAdapter:
             raise ValueError("The testing edge route and binding are not verified.")
         endpoint = self.store.read_edge_endpoint_record(binding.ingress.endpoint_key)
         current = self.client.get_proxy_host(matches[0].id, public_only=True)
+        if (
+            current.access_list_id
+            and self.client.get_access_list(current.access_list_id).id != current.access_list_id
+        ):
+            raise TestingIngressPrerequisiteError("testing_edge_template_incompatible")
         audit = self.store.read_ingress_route_audit_record(
             "testing-public-ingress-" + self.request.reviewed_plan_sha256
         )
@@ -490,10 +569,15 @@ class TestingPublicIngressAdapter:
         ):
             raise ValueError("The testing edge destination changed.")
         cert = self.client.get_certificate(int(current.certificate_id))
-        if not _certificate_current(cert) or not any(
-            _covers(name, generation.domain_host) for name in cert.domain_names
+        if (
+            cert.id != current.certificate_id
+            or not _certificate_current(cert)
+            or not any(_covers(name, generation.domain_host) for name in cert.domain_names)
         ):
             raise ValueError("The testing edge certificate changed.")
+        tls = probe_public_tls(generation.domain_host, timeout_seconds=15)
+        if tls.status not in {"valid", "expiring"}:
+            raise TestingIngressPrerequisiteError("testing_edge_tls_unverified")
         return self._result(self.request.reviewed_plan_sha256, applied=True)
 
     def _run(self, provider_key: str, checkpoint: Callable[[], None], *, create: bool) -> None:
@@ -581,6 +665,7 @@ class TestingPublicIngressAdapter:
                     checkpoint,
                     create=True,
                 )
+                result = self.readback()
         except (
             ValueError,
             FileNotFoundError,
@@ -593,14 +678,16 @@ class TestingPublicIngressAdapter:
                     "Testing edge outcome requires original-key observation."
                 ) from None
             raise ProviderMutationRejectedError(
-                ValueError("Testing public ingress is unverified.")
+                error
+                if isinstance(error, TestingIngressPrerequisiteError)
+                else ValueError("Testing public ingress is unverified.")
             ) from error
         return ProviderMutationOutcome(
             response_status_code=202,
             response_payload=provider_operation_response_payload(
                 trace_id=self.trace_id,
                 records={},
-                result=self.readback(),
+                result=result,
             ),
         )
 
@@ -609,7 +696,18 @@ class TestingPublicIngressAdapter:
     ) -> ProviderObservation:
         try:
             try:
+                audit = self.store.read_ingress_route_audit_record(
+                    _AUDIT_PREFIX + self.request.reviewed_plan_sha256
+                )
+                if audit.idempotency_key != provider_operation_key:
+                    return (
+                        ProviderObservation("unknown")
+                        if provider_effect_phase
+                        else ProviderObservation("absent", retry_safe=True)
+                    )
                 result = self.readback()
+            except TestingIngressPrerequisiteError:
+                return ProviderObservation("unknown")
             except (ValueError, FileNotFoundError):
                 if not provider_effect_phase:
                     return ProviderObservation("absent", retry_safe=True)

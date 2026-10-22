@@ -54,6 +54,61 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_odoo_shopify_identity",
+        "path": "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "purpose": "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "266176fbfbe415872876cd0a3f5f1a20395e99f1e10eea8aefefb4f8338da2ac",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_product_environment_health_history",
+        "path": "/v1/products/{product}/environments/{environment}/health-history",
+        "purpose": "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "29adc4075f38325d0f365026f8223fb1cd7a27fad6f9e112b8714fa39447f914",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_owner_review_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "list_discussion_topics",
         "path": "/v1/products/{product}/discussion-topics",
         "purpose": "Read a product's discussion topics within existing product-profile read access.",
@@ -66,7 +121,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "caa53d068bd6fa0bf6af9f0ae8c7d810c18f8bff008acd96a7e1ccaf2856309f",
+        "schema_fingerprint_sha256": "2cc149a0f8aa3e692be39f9a8ff7275e808ad1e0da4ee6d5dbb426896392e6e6",
         "supported_surfaces": [
           "service_api"
         ]
@@ -482,7 +537,7 @@
           "expected_binding_sha256",
           "expected_observation_sha256"
         ],
-        "schema_fingerprint_sha256": "08c156407604b4c48a65eb9f97abd8eda48cac03628cd23df288eb9cb441d043",
+        "schema_fingerprint_sha256": "9f597f2977189b213c7e5ac9c74a17e6de16008407a3e568f7e538adc1674eb3",
         "supported_surfaces": [
           "service_api"
         ]
@@ -773,7 +828,7 @@
         ],
         "operation_id": "reconcile_legacy_generic_web_preview",
         "path": "/v1/previews/legacy-generic-web/reconciliation",
-        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         "response_statuses": [
           "202",
           "400",
@@ -967,8 +1022,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d66b794ffbb1d141f1498de9df705c40e8af4687"
+    "source_commit_sha": "1bff35e124b994550ab339d46a866be0ada96389"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "809c3c0d62f7c03198d41c67ddb3a4e0f91a8470329a371f0fc6c4218d01f857"
+  "semantic_digest_sha256": "2a748f510fb23b242268c8fe736734576bd7fe2a87f6d60f0a92186f240dcf17"
 }

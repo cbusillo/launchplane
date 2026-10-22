@@ -431,16 +431,6 @@ def configured_local_operator_identity(
         return None
 
 
-def read_bearer_token(authorization_header: str) -> str:
-    header = authorization_header.strip()
-    if not header:
-        raise PermissionError("Authorization header is required.")
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise PermissionError("Authorization header must use Bearer token format.")
-    return token.strip()
-
-
 def bearer_identity_from_token(
     *, token: str, config: BearerIdentityConfig
 ) -> TerminalAgentIdentity | LocalOperatorIdentity | LocalAdminIdentity | None:
@@ -860,7 +850,6 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     if normalized_action in {
         "agent_write_intent.plan",
         "authz_diagnostic.evaluate",
-        "work_graph.rank",
     } or (normalized_action.endswith(".read")):
         return "read"
     if (
@@ -1469,37 +1458,6 @@ def authz_policy_allows_immutable_github_id_administration(
     *, policy: LaunchplaneAuthzPolicy, github_id: int
 ) -> bool:
     return github_id > 0 and github_id in strict_immutable_github_human_administrator_ids(policy)
-
-
-def matching_github_human_policy_rules(
-    *,
-    policy: LaunchplaneAuthzPolicy,
-    identity: GitHubHumanIdentity,
-    action: str,
-    product: str,
-    context: str,
-    target: AuthorizationTarget | None = None,
-    managed_only: bool = False,
-) -> tuple[GitHubHumanPolicyRule, ...]:
-    resolved_target = target or AuthorizationTarget(scope="context")
-    if identity.role == "owner":
-        return ()
-    if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
-        return ()
-    return tuple(
-        rule
-        for rule in policy.github_humans
-        if (not managed_only or rule.managed_set_id is not None)
-        and (not managed_only or rule.managed_rule_id is not None)
-        and rule.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=resolved_target,
-            schema_version=policy.schema_version,
-        )
-    )
 
 
 def migrate_authz_policy_to_schema_v2(

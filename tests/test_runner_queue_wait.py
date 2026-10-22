@@ -206,7 +206,6 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-queue-wait",
                     "--repository",
                     "cbusillo/repo",
@@ -224,7 +223,7 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "runner-queue-wait", "--repository", "cbusillo/repo"],
+                ["runner-queue-wait", "--repository", "cbusillo/repo"],
             )
 
         self.assertNotEqual(result.exit_code, 0)

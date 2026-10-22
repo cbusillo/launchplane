@@ -24,6 +24,7 @@ import {
 import { EnvironmentActionsView } from "./EnvironmentActions";
 import { EnvironmentDiagnostics } from "./EnvironmentDiagnostics";
 import { EnvironmentIncidents } from "./EnvironmentIncidents";
+import { HostNetworkCapacity } from "./HostNetworkCapacity";
 import {
   ManagedSecretsView,
   RuntimeSettingsView,
@@ -60,6 +61,7 @@ import {
 } from "./router";
 import { safeExternalUrl } from "./url";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
+import { TestingHoldPanel } from "./TestingHoldPanel";
 
 import type {
   ProductEnvironmentConfigStatus,
@@ -89,6 +91,7 @@ export function ProductEnvironmentRoute({
   view: EnvironmentView;
 }) {
   const [retryToken, setRetryToken] = useState(0);
+  const [capacityAvailable, setCapacityAvailable] = useState(false);
   const [evidenceRefreshToken, setEvidenceRefreshToken] = useState(0);
   const [detailResource, setDetailResource] = useState<
     ResourceState<ProductEnvironmentDetail>
@@ -117,6 +120,7 @@ export function ProductEnvironmentRoute({
     let active = true;
     const controller = new AbortController();
     const sameEnvironment = detailLoadedKey.current === resourceKey;
+    if (!sameEnvironment) setCapacityAvailable(false);
     setDetailResource((current) => ({
       ...current,
       status: "loading",
@@ -156,6 +160,7 @@ export function ProductEnvironmentRoute({
           return;
         }
         detailLoadedKey.current = resourceKey;
+        setCapacityAvailable(response.host_network_capacity_available ?? false);
         setDetailResource(readyResource(response.environment));
       } catch (error) {
         if (!active || controller.signal.aborted) {
@@ -360,6 +365,7 @@ export function ProductEnvironmentRoute({
   };
   return (
     <EnvironmentPage
+      capacityAvailable={capacityAvailable}
       configResource={configResource}
       detail={expireEnvironmentEvidence(detailResource.data)}
       productOverview={productOverview}
@@ -377,6 +383,7 @@ export function ProductEnvironmentRoute({
 }
 
 function EnvironmentPage({
+  capacityAvailable,
   configResource,
   detail,
   productOverview,
@@ -390,6 +397,7 @@ function EnvironmentPage({
   readinessRefreshToken,
   view,
 }: {
+  capacityAvailable: boolean;
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
   detail: ProductEnvironmentDetail;
   productOverview: ProductSiteOverview | null;
@@ -480,7 +488,11 @@ function EnvironmentPage({
       />
 
       {view === "overview" ? (
-        <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} />
+        <>
+          {detail.environment === "testing" ? <TestingHoldPanel detail={detail} fixtureMode={Boolean(fixtureMode)}
+            refreshToken={readinessRefreshToken} onRefresh={onConfigApplied} /> : null}
+          <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} capacityAvailable={capacityAvailable} />
+        </>
       ) : null}
       {view === "actions" ? (
         <EnvironmentActionsView
@@ -519,9 +531,11 @@ function EnvironmentPage({
 function EnvironmentOverview({
   detail,
   fixtureMode,
+  capacityAvailable,
 }: {
   detail: ProductEnvironmentDetail;
   fixtureMode: DevFixtureMode;
+  capacityAvailable: boolean;
 }) {
   const tlsDomains = detail.topology.observed.tls_domains;
   const observedPlacement = detail.topology.observed.placement;
@@ -621,7 +635,7 @@ function EnvironmentOverview({
       <div className="environment-evidence-grid">
         <IngressEvidence detail={detail} />
         <TlsEvidence detail={detail} tlsDomains={tlsDomains} />
-        <PlacementEvidence detail={detail} />
+        <PlacementEvidence detail={detail} capacityAvailable={capacityAvailable} fixtureMode={fixtureMode} />
       </div>
 
       <EnvironmentIncidents
@@ -802,7 +816,7 @@ function TlsEvidence({
   );
 }
 
-function PlacementEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
+function PlacementEvidence({ detail, capacityAvailable, fixtureMode }: { detail: ProductEnvironmentDetail; capacityAvailable: boolean; fixtureMode: DevFixtureMode }) {
   const observedPlacement = detail.topology.observed.placement;
   const expected = observedPlacement.expected_runtime_identity;
   const observed = observedPlacement.observed_runtime_identity;
@@ -829,6 +843,7 @@ function PlacementEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label="Expected artifact" value={expected?.artifact_id || "Not recorded"} mono />
         <EvidenceFact label="Observed artifact" value={observed?.artifact_id || "Not recorded"} mono />
       </dl>
+      <HostNetworkCapacity key={`${detail.product}:${detail.environment}`} product={detail.product} environment={detail.environment} available={capacityAvailable} fixtureMode={fixtureMode} />
     </section>
   );
 }

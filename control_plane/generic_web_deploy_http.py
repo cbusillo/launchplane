@@ -15,6 +15,7 @@ from control_plane.drivers.generic_web_dispatch import (
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
+    GenericWebDeploymentPublisher,
     execute_generic_web_deploy,
     product_profile_uses_generic_web_base,
 )
@@ -22,12 +23,19 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
     GenericWebResolvedDeployTarget,
 )
+from control_plane.workflows.generic_web_execution import ExecutionRecorder
+from control_plane.service_auth import (
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+    director_agent_identity,
+)
 
 
 GENERIC_WEB_DEPLOY_ROUTE = _GENERIC_WEB_DEPLOY_ROUTE.route_path
 
 __all__ = [
     "GENERIC_WEB_DEPLOY_ROUTE",
+    "director_agent_can_deploy_testing",
     "GenericWebDeployEnvelope",
     "GenericWebDeployProductMismatchError",
     "GenericWebDeployRouteDependencyError",
@@ -43,6 +51,17 @@ class GenericWebDeployProductMismatchError(ValueError):
 
 class GenericWebDeployRouteDependencyError(ValueError):
     pass
+
+
+def director_agent_can_deploy_testing(
+    identity: LaunchplaneIdentity, lane: ProductLaneProfile
+) -> bool:
+    return (
+        isinstance(identity, LocalOperatorIdentity)
+        and director_agent_identity(identity)
+        and lane.instance == "testing"
+        and lane.generic_web_cutover is None
+    )
 
 
 def resolve_generic_web_deploy_lane(
@@ -88,7 +107,11 @@ def execute_generic_web_deploy_result(
     before_failure_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -100,6 +123,8 @@ def execute_generic_web_deploy_result(
             profile, instance=lane.instance
         ),
         post_deploy_authority_digest=post_deploy_authority_digest,
+        execution_recorder=execution_recorder,
+        publish_deployment=publish_deployment,
         deploy_provider=deploy_provider,
         resolved_deploy_target=resolved_deploy_target,
         provider_operation_title=provider_operation_title,
@@ -109,6 +134,8 @@ def execute_generic_web_deploy_result(
         before_failure_records_commit=before_failure_records_commit,
         recorded_artifact=recorded_artifact,
         proved_pre_image_retry=proved_pre_image_retry,
+        proved_no_effect_retry=proved_no_effect_retry,
+        established_testing_predecessor=established_testing_predecessor,
     )
     result = _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
     return {"deployment_record_id": driver_result.deployment_record_id}, result

@@ -73,11 +73,21 @@ class DiscussionTopicTests(unittest.TestCase):
         self.assertTrue(all(record == added[0] for record in added))
         self.assertTrue(all(record == closed[0] for record in closed))
 
-    def test_rejects_private_context_fields_unsafe_links_and_non_neutral_titles(self) -> None:
+    def test_accepts_neutral_question_without_a_required_prefix(self) -> None:
+        topic = DiscussionTopicInput(
+            title="  Should we keep the contact links?  ",
+            issue_url=self.topic.issue_url,
+        )
+        self.assertEqual(topic.title, "Should we keep the contact links?")
+        self.assertEqual(
+            self.store.add_discussion_topic("site-a", "question", topic).title, topic.title
+        )
+
+    def test_rejects_private_context_fields_unsafe_links_and_non_plain_titles(self) -> None:
         for changes in (
             {"private_reason": "private context"},
             {"title": ""},
-            {"title": "Contact links"},
+            {"title": "   "},
             {"title": "Decide: Contact\nlinks"},
             {"issue_url": "javascript:alert(1)"},
             {"issue_url": "https://user:password@example.test/issue/7"},

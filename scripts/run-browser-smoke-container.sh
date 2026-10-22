@@ -7,13 +7,23 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 node_executable="$(realpath -- "$(command -v node)")"
 host_network_namespace="$(readlink /proc/self/ns/net)"
 container_id=""
+package_manager_directory=""
 cleanup() {
   if [[ -n "$container_id" ]]; then
     docker rm --force "$container_id" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$package_manager_directory" ]]; then
+    rm -rf -- "$package_manager_directory"
+  fi
 }
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM
+
+package_manager_directory="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/browser-pnpm.XXXXXX")"
+(
+  cd "$repo_root/frontend"
+  corepack pack --output "$package_manager_directory/corepack.tgz"
+)
 
 # Use this job's actual identity so the next non-container job can clean its
 # workspace. No Docker socket, host network or host browser cache is mounted.
@@ -21,14 +31,17 @@ container_id="$(docker create --init --shm-size=1g \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$repo_root,target=/work" \
   --mount "type=bind,source=$node_executable,target=/usr/local/bin/node,readonly" \
+  --mount "type=bind,source=$package_manager_directory,target=/opt/browser-pnpm,readonly" \
   --workdir /work \
   --env CI=true --env HOME=/tmp/browser-home \
+  --env COREPACK_ENABLE_NETWORK=0 \
   --env BROWSER_SMOKE_SHARD \
   --env PATH=/usr/local/bin:/usr/bin:/bin \
   --env "BROWSER_SMOKE_HOST_NETNS=$host_network_namespace" \
   "$BROWSER_SMOKE_IMAGE" bash -euc '
     mkdir -p "$HOME/bin"
     corepack enable --install-directory "$HOME/bin"
+    corepack install --global --cache-only /opt/browser-pnpm/corepack.tgz
     export PATH="$HOME/bin:$PATH"
     namespace="$(readlink /proc/self/ns/net)"
     if [[ "$namespace" == "$BROWSER_SMOKE_HOST_NETNS" ]]; then

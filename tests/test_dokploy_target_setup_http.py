@@ -19,6 +19,51 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
 class DokployTargetSetupHttpTests(unittest.TestCase):
+    def test_fresh_lane_capacity_refusal_is_typed_and_never_creates(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        for failure, status, code in (
+            (
+                BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+                409,
+                "host_bridge_network_capacity_short",
+            ),
+            (
+                BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable"),
+                409,
+                "host_bridge_network_capacity_unavailable",
+            ),
+            (NativeSourceAuthorizationDenied("fixture denial"), 403, "authorization_denied"),
+        ):
+            with (
+                self.subTest(code=code),
+                patch(
+                    "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                    side_effect=failure,
+                ),
+                patch(
+                    "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup"
+                ) as mutate,
+            ):
+                actual, payload = self._invoke_with_lane_setup_grant(
+                    {
+                        "mode": "apply",
+                        "operation": "create-compose",
+                        "context": "synthetic-context",
+                        "instance": "testing",
+                        "target_name": "fresh-lane",
+                        "project_name": "Fresh",
+                        "server_id": "selected-host",
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Create a fresh testing lane",
+                    },
+                    owners=("synthetic-product",),
+                )
+                self.assertEqual(actual, status, payload)
+                self.assertEqual(payload["error"]["code"], code)
+                mutate.assert_not_called()
+
     def test_repair_domain_authority_endpoint_applies_domain_only_change(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -293,6 +338,9 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
                 tuple[int, dict[str, Any]],
                 invoke_setup(
                     app,
+                    headers={"Idempotency-Key": "fixture-create"}
+                    if request.get("mode") == "apply"
+                    else {},
                     payload={
                         "schema_version": 1,
                         "mode": "dry-run",

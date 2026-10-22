@@ -20,6 +20,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
     MergeTrainStructuralSubject,
 )
+from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train import DEPENDENCY_HEAD_HOLD_REASONS, MergeTrainDryRunResult
 
 
@@ -46,9 +47,7 @@ class MergeTrainBatchEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_entry(self) -> "MergeTrainBatchEntry":
-        self.head_sha = _normalize_required_value(
-            self.head_sha, "merge train batch entry requires head_sha"
-        )
+        self.head_sha = require_text(self.head_sha, "merge train batch entry requires head_sha")
         self.head_tree_sha = self.head_tree_sha.strip()
         self.affected_subjects = tuple(
             sorted(set(self.affected_subjects), key=lambda item: (item.product, item.system))
@@ -84,9 +83,7 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_held_out_entry(self) -> "MergeTrainBatchHeldOutEntry":
-        self.head_sha = _normalize_required_value(
-            self.head_sha, "merge train held-out entry requires head_sha"
-        )
+        self.head_sha = require_text(self.head_sha, "merge train held-out entry requires head_sha")
         self.probe_base_sha = self.probe_base_sha.strip()
         if self.probe_base_sha and len(self.conflicts_with) != len(self.conflicts_with_head_shas):
             raise ValueError("conflict probe lineage requires every preceding head")
@@ -159,6 +156,7 @@ class MergeTrainBatchCandidate(BaseModel):
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     head_check_reuse: MergeTrainHeadCheckReuse | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -167,33 +165,29 @@ class MergeTrainBatchCandidate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_candidate(self) -> "MergeTrainBatchCandidate":
-        self.batch_id = _normalize_required_value(
-            self.batch_id, "merge train batch candidate requires batch_id"
-        )
+        self.batch_id = require_text(self.batch_id, "merge train batch candidate requires batch_id")
         self.repository = _normalize_repository(self.repository)
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train batch candidate requires base_branch"
         )
-        self.base_sha = _normalize_required_value(
-            self.base_sha, "merge train batch candidate requires base_sha"
-        )
-        self.policy_key = _normalize_required_value(
+        self.base_sha = require_text(self.base_sha, "merge train batch candidate requires base_sha")
+        self.policy_key = require_text(
             self.policy_key, "merge train batch candidate requires policy_key"
         )
-        self.policy_sha256 = _normalize_required_value(
+        self.policy_sha256 = require_text(
             self.policy_sha256,
             "merge train batch candidate requires policy_sha256",
         )
-        self.candidate_ref = _normalize_required_value(
+        self.candidate_ref = require_text(
             self.candidate_ref, "merge train batch candidate requires candidate_ref"
         )
         self.candidate_sha = self.candidate_sha.strip()
         self.candidate_tree_sha = self.candidate_tree_sha.strip()
         self.candidate_sha256 = self.candidate_sha256.strip().lower()
-        self.created_at = _normalize_required_value(
+        self.created_at = require_text(
             self.created_at, "merge train batch candidate requires created_at"
         )
-        self.updated_at = _normalize_required_value(
+        self.updated_at = require_text(
             self.updated_at, "merge train batch candidate requires updated_at"
         )
         self.entries = _normalize_entries(self.entries)
@@ -290,12 +284,12 @@ class MergeTrainBatchLandingEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_landing_entry(self) -> "MergeTrainBatchLandingEntry":
-        self.expected_head_sha = _normalize_required_value(
+        self.expected_head_sha = require_text(
             self.expected_head_sha,
             "merge train batch landing entry requires expected_head_sha",
         )
         self.expected_head_tree_sha = self.expected_head_tree_sha.strip()
-        self.expected_base_sha = _normalize_required_value(
+        self.expected_base_sha = require_text(
             self.expected_base_sha,
             "merge train batch landing entry requires expected_base_sha",
         )
@@ -367,33 +361,31 @@ class MergeTrainBatchLandingPlan(BaseModel):
 
     @model_validator(mode="after")
     def _validate_plan(self) -> "MergeTrainBatchLandingPlan":
-        self.plan_id = _normalize_required_value(
-            self.plan_id, "merge train batch landing plan requires plan_id"
-        )
-        self.batch_id = _normalize_required_value(
+        self.plan_id = require_text(self.plan_id, "merge train batch landing plan requires plan_id")
+        self.batch_id = require_text(
             self.batch_id, "merge train batch landing plan requires batch_id"
         )
         self.repository = _normalize_repository(self.repository)
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train batch landing plan requires base_branch"
         )
-        self.candidate_ref = _normalize_required_value(
+        self.candidate_ref = require_text(
             self.candidate_ref, "merge train batch landing plan requires candidate_ref"
         )
-        self.candidate_sha = _normalize_required_value(
+        self.candidate_sha = require_text(
             self.candidate_sha, "merge train batch landing plan requires candidate_sha"
         )
         self.candidate_tree_sha = self.candidate_tree_sha.strip()
         self.candidate_sha256 = self.candidate_sha256.strip().lower()
         self.structural_provenance_sha256 = self.structural_provenance_sha256.strip().lower()
-        self.policy_key = _normalize_required_value(
+        self.policy_key = require_text(
             self.policy_key, "merge train batch landing plan requires policy_key"
         )
-        self.policy_sha256 = _normalize_required_value(
+        self.policy_sha256 = require_text(
             self.policy_sha256,
             "merge train batch landing plan requires policy_sha256",
         )
-        self.created_at = _normalize_required_value(
+        self.created_at = require_text(
             self.created_at, "merge train batch landing plan requires created_at"
         )
         if not self.entries:
@@ -464,13 +456,13 @@ class MergeTrainBatchCandidateRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchCandidateRecord":
-        self.record_id = _normalize_required_value(
+        self.record_id = require_text(
             self.record_id, "merge train batch candidate record requires record_id"
         )
-        self.source = _normalize_required_value(
+        self.source = require_text(
             self.source, "merge train batch candidate record requires source"
         )
-        self.updated_at = _normalize_required_value(
+        self.updated_at = require_text(
             self.updated_at,
             "merge train batch candidate record requires updated_at",
         )
@@ -494,13 +486,13 @@ class MergeTrainBatchLandingPlanRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchLandingPlanRecord":
-        self.record_id = _normalize_required_value(
+        self.record_id = require_text(
             self.record_id, "merge train batch landing plan record requires record_id"
         )
-        self.source = _normalize_required_value(
+        self.source = require_text(
             self.source, "merge train batch landing plan record requires source"
         )
-        self.updated_at = _normalize_required_value(
+        self.updated_at = require_text(
             self.updated_at,
             "merge train batch landing plan record requires updated_at",
         )
@@ -612,7 +604,7 @@ def build_merge_train_batch_candidate(
         )
     if not entries:
         raise ValueError("merge train batch candidate requires at least one eligible PR")
-    normalized_base_sha = _normalize_required_value(
+    normalized_base_sha = require_text(
         base_sha, "merge train batch candidate builder requires base_sha"
     )
     if ordinary_job_binding is None:
@@ -689,7 +681,7 @@ def build_merge_train_batch_candidate_record(
         ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
-        candidate=candidate,
+        candidate=candidate.model_copy(update={"required_checks_observation_error": ""}),
     )
     return MergeTrainBatchCandidateRecord.model_validate(
         {
@@ -755,17 +747,15 @@ def build_merge_train_batch_id(
     *, repository: str, base_branch: str, base_sha: str, entry_head_shas: tuple[str, ...]
 ) -> str:
     normalized_repository = _normalize_repository(repository).replace("/", "-")
-    normalized_base_branch = _normalize_required_value(
+    normalized_base_branch = require_text(
         base_branch, "merge train batch id requires base_branch"
     ).replace("/", "-")
     digest = hashlib.sha256(
         json.dumps(
             {
-                "base_sha": _normalize_required_value(
-                    base_sha, "merge train batch id requires base_sha"
-                ),
+                "base_sha": require_text(base_sha, "merge train batch id requires base_sha"),
                 "entry_head_shas": [
-                    _normalize_required_value(sha, "merge train batch id requires head sha")
+                    require_text(sha, "merge train batch id requires head sha")
                     for sha in entry_head_shas
                 ],
             },
@@ -780,10 +770,10 @@ def build_merge_train_batch_candidate_ref(
     *, repository: str, base_branch: str, batch_id: str
 ) -> str:
     owner, name = _normalize_repository(repository).split("/", maxsplit=1)
-    normalized_base_branch = _normalize_required_value(
+    normalized_base_branch = require_text(
         base_branch, "merge train batch candidate ref requires base_branch"
     ).replace("/", "-")
-    normalized_batch_id = _normalize_required_value(
+    normalized_batch_id = require_text(
         batch_id, "merge train batch candidate ref requires batch_id"
     )
     return f"refs/heads/launchplane/train/{owner}/{name}/{normalized_base_branch}/{normalized_batch_id}"
@@ -911,19 +901,10 @@ def _normalize_entries(
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required_value(
-        repository, "merge train batch requires repository"
-    ).lower()
+    normalized = require_text(repository, "merge train batch requires repository").lower()
     if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("merge train batch repository must be owner/name")
     return normalized
-
-
-def _normalize_required_value(value: str, error_message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(error_message)
-    return normalized_value
 
 
 def build_ordinary_merge_train_candidate_ref(

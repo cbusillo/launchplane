@@ -293,7 +293,6 @@ class HygieneQualificationTests(unittest.TestCase):
             self.assertTrue(qualified["qualified"])
             self.assertFalse(qualified["maintenance_completed"])
             args = [
-                "work-graph",
                 "runner-host-hygiene-qualify",
                 "--audit-file",
                 str(artifact),
@@ -530,7 +529,7 @@ class HygieneQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             summary, bad = Path(root) / "summary.md", Path(root) / "bad.json"
             bad.write_text('{"private-host": "private-secret",')
-            args = ["work-graph", "runner-host-hygiene-qualify", "--summary-file", str(summary)]
+            args = ["runner-host-hygiene-qualify", "--summary-file", str(summary)]
             for extra in ([], ["--audit-file", str(bad)]):
                 response = CliRunner().invoke(main, [*args, *extra])
                 self.assertEqual(response.exit_code, 0, response.output)
@@ -831,7 +830,6 @@ class HygieneQualificationTests(unittest.TestCase):
                 response = CliRunner().invoke(
                     main,
                     [
-                        "work-graph",
                         "runner-host-hygiene-qualify",
                         "--audit-file",
                         str(artifact),

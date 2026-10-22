@@ -617,19 +617,25 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.assertEqual(self.current(), self.fixture.before)
 
     def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
         self.operation = self.operation.model_copy(
             update={"operation_id": "fresh-transient-capture"}
         )
         self.capture.side_effect = self.capture_function
+        cause = NativeProgramFailed(
+            "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+        )
         with patch.object(
             DokployTestingRouteTransport,
             "read",
-            side_effect=NativeSourceUnavailable("fixture unavailable"),
+            side_effect=cause,
         ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
+            with self.assertRaises(service.NativeTestingRebuildPending) as caught:
                 self.execute()
+            self.assertIn(cause.code, str(caught.exception))
+            self.assertNotIn("private-value", str(caught.exception))
         self.capture.assert_called_once()
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
@@ -719,6 +725,32 @@ class NativeTestingWorkerTests(unittest.TestCase):
         secrets = self.store.list_secret_records()
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass")
+        reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert reservation is not None
+        capsule = self.store.read_provider_target_origin(reservation)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                self.intent.profile.product,
+                self.operation.context,
+                "testing",
+                self.intent.old.target_id,
+            ),
+        )
+        self.assertEqual(
+            self.store.read_original_mutation_intent(reservation),
+            self.intent.model_dump(mode="json"),
+        )
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.assertEqual(
             tuple(item.domain_name for item in self.current().binding.domains),
@@ -2174,6 +2206,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     ) -> None:
         import logging
         from contextlib import nullcontext
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
         )
@@ -2208,11 +2241,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             post_deploy_status="pass",
             health_status="pass",
         )
-        for response in (
-            success,
-            service.NativeTestingRebuildPending("fixture observation pending"),
-            RuntimeError("Fixture execution lock lost after dispatch"),
-            KeyError("Fixture malformed frame after dispatch"),
+        for response, effects_started in (
+            (success, False),
+            (service.NativeTestingRebuildPending("fixture observation pending"), True),
+            (RuntimeError("Fixture execution lock lost after dispatch"), True),
+            (KeyError("Fixture malformed frame after dispatch"), True),
+            (ScheduleMaterializationTooLarge(), True),
+            (ScheduleMaterializationTooLarge(), False),
         ):
             with (
                 self.subTest(pending=isinstance(response, Exception)),
@@ -2231,7 +2266,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
-                    return_value=isinstance(response, Exception),
+                    return_value=effects_started,
                 ),
                 patch.object(
                     self.store,
@@ -2255,6 +2290,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execute.assert_called_once()
             legacy.assert_not_called()
             terminal = complete.call_args.kwargs["record"]
+            if isinstance(response, ScheduleMaterializationTooLarge):
+                self.assertEqual(
+                    terminal.status, "reconciliation_required" if effects_started else "fail"
+                )
+                self.assertEqual(terminal.error_code, response.code)
+                self.assertEqual(bool(terminal.finished_at), not effects_started)
+                continue
             self.assertEqual(
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"
             )
@@ -2496,6 +2538,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
+        previous_reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert previous_reservation is not None
         authorization = durable_operation_authorization_payload(
             action="odoo_target_replacement_apply.execute",
             managed_rule_id="native-testing-fixture",
@@ -2531,7 +2579,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     )
                     assert original is not None
                     self.assertGreater(original.attempt, 1)
-                    self.assertFalse(original.provider_effect_started_at)
+                    self.assertEqual(
+                        original.provider_effect_started_at,
+                        previous_reservation.provider_effect_started_at,
+                    )
                     raise denial
 
             return service.execute_native_testing_rebuild(**{**kwargs, "authorize": checkpoint})
@@ -2617,9 +2668,82 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
 
+    def test_failed_restore_diagnostic_survives_original_worker_recovery(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        candidate = self.fixture.candidate
+        assert candidate.application is not None
+        restoring = candidate.model_copy(
+            update={
+                "application": candidate.application.model_copy(
+                    update={"phase": "restoring", "prepared": None}
+                )
+            }
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = restoring.model_dump(mode="json", exclude_none=True)
+        history = self.fixture.fixture.restore_deployments
+        history[0].update(
+            status="error",
+            logs=[],
+        )
+        original_prepare = service.NativeTestingRebuildExecution.prepare
+        plans: list[Any] = []
+        effects = list(self.fixture.fixture.effects)
+
+        def prepare(executor: Any, plan: Any) -> Any:
+            plans.append(plan)
+            return original_prepare(executor, plan)
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", prepare),
+            patch.object(
+                api,
+                "fetch_dokploy_deployment_logs",
+                side_effect=[
+                    post_deploy.OdooPostDeployReadbackFailure("private unavailable", evidence={}),
+                    [
+                        f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+                        "readback_failure_kind=refused",
+                        "private attachment detail",
+                    ],
+                ],
+            ),
+            patch.object(api, "dokploy_request", side_effect=self.fixture.fixture.configure),
+            patch.object(
+                api, "list_deployments_for_target", return_value=self.fixture.fixture.deployments
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.error_code, "candidate_preparation_failed")
+        checkpoint = RecordTestingRebuildStore(self.store).load(plans[0])
+        diagnostic = f"{ReadbackPredicate.ATTACHMENTS}_refused"
+        self.assertIn(diagnostic, checkpoint.preparation_failure_evidence)
+        retained = self.store.read_testing_candidate(candidate.namespace)
+        assert retained is not None and retained.application is not None
+        self.assertEqual(retained.application.phase, "abandoned")
+        self.assertIn(diagnostic, retained.application.abandonment_evidence)
+        self.assertEqual(
+            checkpoint.preparation_failure_evidence, retained.application.abandonment_evidence
+        )
+        self.assertNotIn("private", checkpoint.preparation_failure_evidence)
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.fixture.fixture.effects, effects)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
     def test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving(self) -> None:
         from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import (
+            NativeProgramFailed,
+            NativeSourceUnavailable,
+        )
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
         from control_plane.testing_candidate_application import (
             CandidatePrivateReadinessFailed,
             CandidateObservationUnavailable,
@@ -2627,6 +2751,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
         original_readiness = service.NativeTestingRebuildExecution.readiness
+        cause = NativeProgramFailed(
+            "private-value", predicate=ReadbackPredicate.PORTS, kind="refused"
+        )
         plans: list[Any] = []
 
         def readiness(executor: Any, plan: Any) -> Any:
@@ -2637,12 +2764,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
             patch.object(
                 service,
                 "candidate_private_readiness",
-                side_effect=CandidatePrivateReadinessFailed("fixture credential mismatch"),
+                side_effect=CandidatePrivateReadinessFailed(
+                    "fixture credential mismatch", native_failure=cause
+                ),
             ),
             patch.object(service.NativeTestingRebuildExecution, "readiness", readiness),
         ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
+            with self.assertRaises(service.NativeTestingRebuildPending) as pending:
                 self.execute()
+            self.assertIn(cause.code, str(pending.exception))
             checkpoint = RecordTestingRebuildStore(self.store)
             record = checkpoint.load(plans[0])
             self.assertIsNotNone(record.private_readiness_failed_at)
@@ -2681,6 +2811,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 ):
                     self.assertEqual(
                         self.execute().error_code, "candidate_private_readiness_failed"
+                    )
+                    self.assertIn(
+                        cause.code, checkpoint.load(plans[0]).preparation_failure_evidence
                     )
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)

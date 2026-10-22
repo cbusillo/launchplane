@@ -2227,6 +2227,18 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
             source_git_ref=TESTING_SOURCE_REF,
             updated_at=now,
         )
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing_inventory.context,
+                instance="testing",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="application",
+                target_id="app-testing",
+                display_name=testing_inventory.deploy.target_name,
+                updated_at=now,
+            )
+        )
         store.write_environment_inventory(testing_inventory)
         store.write_deployment_record(
             DeploymentRecord(

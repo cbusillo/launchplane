@@ -15,6 +15,7 @@ GenericWebDeployRecoveryAction = Literal[
     "adopt_observed",
     "retry_original_operation",
     "close_out_observed",
+    "settle_testing_failure",
     "hold_unknown",
 ]
 GenericWebDeployRecoveryProviderOutcome = Literal[

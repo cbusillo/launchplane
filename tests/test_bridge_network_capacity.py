@@ -15,12 +15,23 @@ from control_plane.dokploy.network_capacity import (
     BRIDGE_NETWORK_CAPACITY_MARGIN,
     BridgeNetworkCapacityRefused,
     calculate_capacity,
+    compose_bridge_network_requirement,
     read_bridge_network_capacity,
     require_bridge_network_capacity,
 )
 
 
 class BridgeCapacityTests(unittest.TestCase):
+    def test_known_compose_needs_default_and_each_declared_private_bridge(self) -> None:
+        self.assertEqual(compose_bridge_network_requirement({}), 1)
+        self.assertEqual(compose_bridge_network_requirement({"networks": {"default": {}}}), 1)
+        self.assertEqual(
+            compose_bridge_network_requirement(
+                {"networks": {"data": {}, "private": {"internal": True}}}
+            ),
+            3,
+        )
+
     def test_capacity_counts_subnets_and_route_overlap_once(self) -> None:
         pools: list[dict[str, object]] = [{"Base": "172.22.0.0/22", "Size": 24}]
         observation = calculate_capacity(

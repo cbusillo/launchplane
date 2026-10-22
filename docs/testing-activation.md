@@ -3,10 +3,231 @@ title: Independent generic-web testing activation
 ---
 
 `POST /v1/products/{product}/testing-activation` consumes the original caller's
-completed independent-storage preparation receipt. It creates a new empty
+completed independent-storage preparation receipt. The legacy Compose request creates a new empty
 project, environment and Compose recipient on the original placement. It never
 starts, updates, stops or deletes the old recipient, changes production, creates
 credentials, settles historical deployment effects or deploys an application.
+
+## Conventional application recipients
+
+An explicit `application` specification on both resource preparation and
+activation selects the conventional Dokploy application continuation. It keeps
+the retained application, its unresolved execution and its data unchanged. The
+service creates a fresh application ID rather than claiming the old commands,
+maintenance or verifier have stopped. The strict provider/executor exclusion
+read continues to report the unresolved original. Create-only admission uses
+that exact held original's custody and execution lock. Native direct callers
+retain their real caller scope and key: their exact operation-derived deployment
+and original-execution receipt bind custody alongside the event-owned family.
+An original still needs the same physical runtime and isolation proof; this does
+not claim that its remote work stopped. Create-only admission does not weaken the
+ordinary deploy fence.
+
+Use `scripts/stage-testing-separation.py resources-dry-run` and
+`resources-apply` with `--application-file <private-specification.json>` for
+preparation. Put that identical object in the activation request's `application`
+field, then use `scripts/activate-generic-web-testing.py --request-file ...`
+through the installed admin transport. Keep both reviews and original keys.
+
+The reviewed specification supplies the profile's actual `runtime_port` and
+`health_path`, the existing provider network name and one explicit state shape:
+
+- `none` allocates no volume or state service.
+- `volume` allocates one qualified fresh local volume at the reviewed safe
+  application data path.
+
+Independent PostgreSQL recipient/bootstrap and resource-derived connection URLs
+are deferred to [#4290](https://github.com/cbusillo/launchplane/issues/4290).
+Those request variants refuse before provider effects; existing Odoo/Compose
+PostgreSQL and control-plane PostgreSQL storage remain unchanged.
+
+`local_credentials` names every existing delivered application-local binding
+that must be replaced, with its required `urlsafe`, `base64` or `hex` encoding.
+The reviewed request supplies generation authority for these local values; it
+does not require the older profile generation flag. An applicable `owner_input`
+requirement refuses local generation.
+
+Prospective application-local runtime values are
+encrypted under the original operation's state purpose. They are not delivered
+by the canonical runtime resolver before publication. Target publication and
+installation of the application-local runtime bindings commit atomically under
+the current original execution lease. Existing resolver precedence lets the new
+managed testing binding override an older plain same-key setting without
+deleting shared configuration used by other lanes. Every carried credential must have existing
+read-only-source sharing evidence; an external writable database, bot token or
+other shared writable capability requires its own independent provider resource.
+Random generation cannot create a new external account.
+
+Before fresh creation, the fixed inspector attributes the retained application's
+actual service/tasks/containers to its captured original deployment or exact
+captured predecessor. It refuses a Docker socket mount, inherited platform
+credentials or missing attribution. Inspecting a currently clean application
+record is not historical execution proof. Missing historical evidence remains
+unknown and keeps the original key and hold.
+
+An addressed original may be unhealthy, exited or awaiting a replacement task.
+Its current service template must still positively identify an admitted original
+image and deployment, attach to the proxy's actual network, and uniquely own the
+service-name backend. The first positive route admission saves the service ID,
+full canonical TaskTemplate digest and runtime identity before capability or
+candidate effects. Every later old-role read and native forward/inverse dispatch
+rechecks that witness; a recreated service or changed template cannot become the
+original. Task replacement between complete observations is allowed; changing
+inventory during a snapshot remains unknown and uses the same key to retry.
+
+The retained inspector checks prospective immutable TaskSpec environment and
+mounts even when no ContainerID exists, including a rejected task. It also checks
+all extant service-labelled containers for capability and mount hazards, and
+requires actual image evidence for attributed task/container branches. This is
+captured-input capability proof, not proof that execution never started or
+ceased. Node-local container inventory is accepted only after a complete, stable
+manager-side node enumeration positively establishes one local Swarm node, with
+any supplied task NodeID agreeing. Multi-node, unavailable or changing scope
+requires additional inventory evidence and remains unknown; it never treats a
+remote container as removed. Existing Compose paths do not require this Swarm
+scope proof.
+
+The candidate still needs an exact running task/container, actual immutable image,
+private readiness and the selected edge identity before publication. After
+publication, ordinary private monitoring proves the canonical selected file and
+applied route without depending on the superseded original's continued physical
+existence. Unpublished route work and inverse recovery retain the original
+service/template and native writer custody. Monitoring does not release the
+original unknown operation or its hold.
+
+The new application's image, registry settings, mounts, effective runtime
+environment, single Swarm task and private runtime identity are read back.
+
+For addressed lanes, the existing native route journal and writer fence retain
+the public host while switching only after private readiness. The first
+application cutover admits only the physically read, domain-bound Dokploy
+application file and its matching applied `@file` routers. Foreign file routers
+are not adopted. The legacy Compose wrapper retains its Docker route behavior. The exact
+retained file identity and later owned route template remain in original
+operation custody. A lost writer reply must settle that original native journal;
+it never permits a second blind route publication.
+
+A completed original forward exclusion selects recovery rather than another
+forward attempt. Recovery can also close the exact original child when positive
+observation proves no route publication started, including a returned busy
+writer. It never starts another forward attempt to finish a refused plan. Apply
+proves the original route through its exact inverse and, when the original
+candidate job is
+terminal, retains an honest `publication_refused` result with all resources
+intact. Correcting that candidate
+does not reopen the terminal plan. Continue with a fresh reviewed preparation and
+activation key. Staff use, unknown writer outcomes and unknown or foreign
+candidate jobs retain their existing custody instead of inventing completion.
+
+A first cutover can restore the original route without creating an owned route
+file. A fresh generation can then qualify the current initial domain, application
+file, legacy routers and backend directly. This requires a complete positive
+physical observation; an absent or unreadable file is not a fallback for a
+published predecessor's recorded route custody.
+
+Once an original route intent exists, its passing private result remains the
+admission evidence for that route. Re-entry does not overwrite it when a candidate
+later dies. Actual new forward dispatch still proves the current candidate, and
+post-switch edge identity and health still qualify publication or select recovery.
+
+Private and public health establish process/build identity readiness. They do
+not establish product qualification or substitute for declared migration,
+maintenance, verification or recurring-schedule activation. Those run through
+the ordinary deployment after explicit activation-backed hold lift. A health
+endpoint that requires initialized schema must have a supported fresh-resource
+startup path; this action does not invent migration commands or run reset to
+make readiness pass. The activation's image record retains pending product
+health and no passing product inventory is fabricated.
+
+Application progress is stored in the **real original activation intent** and
+its existing provider receipt. Repeat generations use distinct preparation and
+original operation keys while preserving all prior completed custody. Unknown
+creates or deployment replies recover only through exact positive original
+identity/job readback; absence is not permission to repeat. Final target,
+runtime-binding and custody publication is one transaction, including lease,
+predecessor inventory/deployment and route-authority checks. Failed publication
+leaves the old canonical target and runtime delivery intact and reuses the
+original staged credential versions. Application storage names bind the actual
+original preparation operation as well as its reviewed authority. A new
+preparation key therefore allocates independent resources after a refused
+candidate; replaying the original key keeps its original resources. Legacy
+Compose allocation names retain their existing contract.
+
+A refusal before the first provider checkpoint releases that unused activation
+reservation, so a fresh review and key can proceed. After the fixed read-only
+retained-capability inspection, a refusal before recipient creation instead
+completes a negative original receipt while preserving that inspection's schedule
+custody. An exactly attributed failed private application deployment
+can also complete negatively while retaining its recipient, credentials and
+volumes. Neither outcome says that a running process stopped or that old unknown
+work became terminal. A terminal original private job can also be retained after
+a permanent authority correction, without requiring a passing private-health
+result. Before any image deployment, exact answered placement, mount or
+configuration markers can instead prove an unused private recipient. These
+markers remain bound to durably admitted progress and complete empty
+deployment history; staged local credentials do not authorize deployment. This
+bounded path covers stateless and local-volume recipients, reports that no
+deployment was requested, and preserves every allocated resource.
+Guards and the current-lease effect checkpoint precede the durable may-dispatch
+phase and actual dispatch. An admitted unanswered create, mount or deploy remains
+unknown even when a later readonly inspection changes the latest checkpoint.
+Absolute configuration writes can replay only against the positively owned,
+unused recipient. Unsettled create, mount or host-program outcomes remain unknown. A stable
+original task/container with the expected image, environment and state may prove
+a failed task, HTTP error or health-identity mismatch. Empty task inventory,
+startup pending, transport failures and unreadable responses prove no failure.
+Missing, foreign, duplicate or running deployment evidence keeps the negative
+receipt pending.
+
+If addressed routing changed before canonical publication refused, apply first
+records its restoration decision, settles the original forward writer, and uses
+a separate original inverse writer to restore the captured predecessor. The old
+executor lock, serving-target authority, route file, runtime identity and native
+writer custody remain required. A verified public HTTP failure or identity
+mismatch after the original forward switch also selects this recovery. Generic
+publication errors, pending health and lost replies continue observation on the
+original key. A newer serving target or foreign route pauses
+recovery instead of restoring over a correction. An interrupted inverse resumes
+only that inverse under the original activation key. A completed inverse can
+supply the exact restored route template to another generation without qualifying
+the refused activation for lifecycle or hold lifting. The inverse keeps its own
+immutable original intent across proxy restarts; each physical attempt still
+uses the native fence. Candidate job custody is checked for the final negative
+receipt after restoring the owned route.
+
+These completed negative outcomes return `outcome: refused`, `applied: false`
+and `separation_verified: false` from apply, receipt and readback. The supported
+client saves that result truthfully. Keep its evidence and retained resources;
+review a new independent preparation and activation key to continue. Corrected
+configuration and staff-use records stay unchanged. Recorded staff use pauses
+both forward changes and route recovery, including an already selected inverse,
+until an explicit reviewed clear. Its expiry does not clear that protection.
+Public readiness observation and
+publication freshness use the same database clock.
+
+Private HTTP checks send one bounded request through the existing proxy's numeric
+TCP client and parse the complete response without following redirects. The
+selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
+the emitted program against that actual binary for healthy, redirect, HTTP
+failure, malformed, truncated and wrong-identity responses. Set the existing
+`LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
+locally. Its Swarm topology remains a finite fixture; it is no live-lane proof.
+
+The exact completed activation permits an ordinary forward deployment to start
+with a fresh lifecycle baseline on the new application. It skips only the
+captured predecessor inventory/deployment, clears inherited prior-artifact and
+rollback inputs, and preserves same-target retry and explicit rollback checks.
+The old unresolved execution remains fenced on its old application. A plain
+repoint supplies none of this proof. Same-artifact event reconciliation must
+also qualify the current target; activation does not turn predecessor inventory
+into current product qualification.
+
+Use the existing `stage-testing-separation.py lift-dry-run` and `lift-apply`
+with this completed activation's plan digest and the unchanged interlock's
+actual purpose. The same caller must still own the hold. No application
+activation step itself clears the hold or marks the old original terminal.
+
+## Legacy Compose continuation
 
 The authenticated Director agent uses `scripts/activate-generic-web-testing.py`
 with the installed `launchplane-write-action.py` helper. Keep its request and evidence files private,
@@ -145,3 +366,33 @@ and original allocation/key while addressing that check, then plan again.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
+
+Private same-address application activation uses the original private endpoint,
+edge receipt, certificate, access list and exact provider origin. It moves only
+the existing native HTTP route; the old provider domain and edge payload stay
+unchanged. The canonical private recipient has no copied domain or managed public
+route binding. Ordinary private monitoring verifies the original receipt and
+unbroken completed activation lineage, then independently reads the actual winning
+native route. The next generation reuses that same original route template.
+Disable, newer edge receipts and changed endpoint/certificate/access-list/server
+authority retain their protection; activation never re-enables an edge.
+
+Old port, root path and complete file/applied authority are admitted read-only
+before candidate mutations and rechecked before switching. A proven contradiction
+before any route writer can retain an exactly closed private candidate negatively;
+unavailable transport and possibly dispatched writers keep the original key.
+Readiness is observed within a bounded window with the canonical identity parser.
+Warm-up and replacement tasks can become healthy on the original key. Redirects,
+transport/framing/JSON errors and nonmapping bodies stay unknown; a final stable
+attributed failure is recovery-only under the original receipt. No fixture or
+source receipt substitutes for actual private TLS, authenticated WSS and product
+qualification after delivery.
+
+A predecessor health response is diagnostic and never requires repairing the old
+unknown recipient before independent recovery. Physical route, task and ownership
+custody remain mandatory. The candidate must independently pass private readiness
+and exact identity at the unchanged edge. When the predecessor was unqualified,
+a nonqualifying edge response alone leaves the original key pending; a later
+passing response can finish without replaying the physical route write. Proven
+candidate failure or authority drift still uses the existing exact inverse, which
+restores the original route without calling the original application healthy.

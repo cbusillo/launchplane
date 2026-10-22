@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -1036,7 +1037,9 @@ def run_odoo_stable_operation_worker_loop(
                 last_sweep_at = monotonic()
                 try:
                     request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                        cast(ProductReconcileStore, record_store),
+                        _utc_now_timestamp(),
+                        control_plane_root=control_plane_root_path,
                     )
                 except Exception:
                     logging.exception("Product reconcile sweep failed.")
@@ -2382,9 +2385,9 @@ def _execute_target_replacement_with_checkpoint(
                 ),
             }
         )
-    except DurableOperationAuthorizationDeniedError as error:
+    except (DurableOperationAuthorizationDeniedError, ScheduleMaterializationTooLarge) as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
+            "Odoo stable target replacement operation %s was refused at a provider boundary: %s",
             operation.operation_id,
             error,
         )

@@ -360,7 +360,7 @@ jobs:
             audit_artifact_file="$RUNNER_TEMP/"
             audit_artifact_file+="runner-host-hygiene-audit-evidence-${artifact_suffix}.json"
 
-            uv run launchplane work-graph runner-host-hygiene-executor \
+            uv run launchplane runner-host-hygiene-executor \
               --action "$action" \
               --host-name "$RUNNER_HOST_NAME" \
               --execution-lane "$RUNNER_EXECUTION_LANE" \
@@ -536,7 +536,7 @@ jobs:
               artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix.json")
             done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
           fi
-          uv run launchplane work-graph runner-host-hygiene-qualify \
+          uv run launchplane runner-host-hygiene-qualify \
             "${artifact_args[@]}" --report-only \
             --summary-file "$GITHUB_STEP_SUMMARY"
 

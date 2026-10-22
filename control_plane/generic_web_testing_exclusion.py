@@ -51,6 +51,30 @@ def _bind(
     DokployTargetIdRecord,
     ProviderTargetRecord,
 ]:
+    bindings = bind_testing_recipient(store, product, context, instance)
+    profile, target, _target_id, _provider = bindings
+    lane = next(
+        item for item in profile.lanes if (item.context, item.instance) == (context, instance)
+    )
+    if (
+        generic_web_post_deploy_executor_for_profile(profile, instance=instance) is not None
+        or lane.generic_web_extensions.configured
+    ):
+        raise TestingExclusionRefused("testing_exclusion_effect_family_unsupported")
+    if target.target_type != "compose":
+        raise TestingExclusionRefused("testing_exclusion_target_mismatch")
+    return bindings
+
+
+def bind_testing_recipient(
+    store: PostgresRecordStore, product: str, context: str, instance: str
+) -> tuple[
+    LaunchplaneProductProfileRecord,
+    DokployTargetRecord,
+    DokployTargetIdRecord,
+    ProviderTargetRecord,
+]:
+    """Resolve physical ownership without claiming remote work has ceased."""
     if instance != "testing":
         raise TestingExclusionRefused("testing_exclusion_not_testing")
     profile = resolve_product_config_profile(
@@ -61,18 +85,12 @@ def _bind(
     )
     if lane.context != context:
         raise TestingExclusionRefused("testing_exclusion_lane_mismatch")
-    if (
-        generic_web_post_deploy_executor_for_profile(profile, instance=instance) is not None
-        or lane.generic_web_extensions.configured
-    ):
-        raise TestingExclusionRefused("testing_exclusion_effect_family_unsupported")
     target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
     target_id = store.read_dokploy_target_id_record(context_name=context, instance_name=instance)
     provider = store.read_provider_target_record(context_name=context, instance_name=instance)
     if (
-        target.target_type != "compose"
-        or provider.provider_id != "dokploy"
-        or provider.target_category != "compose"
+        provider.provider_id != "dokploy"
+        or provider.target_category != target.target_type
         or target_id.target_id != provider.target_id
     ):
         raise TestingExclusionRefused("testing_exclusion_target_mismatch")
@@ -87,6 +105,161 @@ def _bind(
     ):
         raise TestingExclusionRefused("testing_exclusion_shared_target")
     return profile, target, target_id, provider
+
+
+def _recorded_native_application_custody(
+    store: PostgresRecordStore,
+    row: LaunchplaneIdempotencyRecord,
+    *,
+    product: str,
+    context: str,
+) -> bool:
+    """Recognize one real native original; physical isolation is proved separately."""
+    from control_plane.provider_operations import build_provider_operation_key
+    from control_plane.workflows.generic_web_application_snapshot import (
+        generic_web_provider_deployment_record_id,
+        recorded_application_lifecycle,
+    )
+    from control_plane.workflows.generic_web_execution import execution_receipt
+
+    snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
+    if snapshot.product != product or snapshot.original_event_deploy is not None:
+        return False
+    operation = build_provider_operation_key(
+        scope=row.scope,
+        route_path=row.route_path,
+        idempotency_key=row.idempotency_key,
+        request_fingerprint=row.request_fingerprint,
+        reconciliation_key=row.reconciliation_key,
+    )
+    record_id = generic_web_provider_deployment_record_id(
+        operation, context=context, instance="testing"
+    )
+    try:
+        record = store.read_deployment_record(record_id)
+        if execution_receipt(record) is None:
+            return False
+        lifecycle = recorded_application_lifecycle(record)
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return False
+    resolved = record.resolved_target
+    if (
+        record.record_id != record_id
+        or (record.context, record.instance) != (context, "testing")
+        or record.artifact_identity is None
+        or not record.artifact_identity.artifact_id
+        or resolved is None
+        or (resolved.target_type, resolved.target_id, resolved.target_name)
+        != (snapshot.target_type, snapshot.target_id, snapshot.target_name)
+        or record.deploy.provider_id != snapshot.provider_id
+        or record.deploy.target_category != "application"
+        or record.deploy.provider_target_type != snapshot.provider_target_type
+    ):
+        return False
+    deployed = record.deployed_target
+    if deployed is not None and (
+        deployed.provider_id,
+        deployed.target_category,
+        deployed.provider_target_type,
+        deployed.target_id,
+    ) != (snapshot.provider_id, "application", snapshot.provider_target_type, snapshot.target_id):
+        return False
+    identity = record.runtime_identity
+    if identity is not None and (
+        identity.product,
+        identity.context,
+        identity.instance,
+        identity.deployment_record_id,
+        identity.artifact_id,
+        identity.source_git_ref,
+    ) != (
+        product,
+        context,
+        "testing",
+        record.record_id,
+        record.artifact_identity.artifact_id,
+        record.source_git_ref,
+    ):
+        return False
+    if lifecycle is not None and (
+        lifecycle.product,
+        lifecycle.provider_id,
+        lifecycle.target_id,
+    ) != (product, snapshot.provider_id, snapshot.target_id):
+        return False
+    return True
+
+
+def require_retained_application_custody(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    check: Callable[[], None],
+) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+    """Admit fresh allocation only; every old remote effect remains unknown."""
+    from control_plane.product_reconcile import reconcile_reservation_scope, RECONCILE_SOURCE
+
+    profile, target, target_id, provider = bind_testing_recipient(
+        store, product, context, "testing"
+    )
+    if not profile.is_active or target.target_type != "application":
+        raise TestingExclusionRefused("testing_exclusion_target_mismatch")
+    key = generic_web_provider_target_key(
+        provider_id=provider.provider_id,
+        context=context,
+        instance="testing",
+        target_type="application",
+        target_id=target_id.target_id,
+    )
+    reservations = _target_reservations(
+        store, product=product, context=context, target_key=key, target_id=target_id.target_id
+    )
+    if not reservations:
+        raise TestingExclusionRefused("reservation_fence_absent")
+    prefix = f"{RECONCILE_SOURCE}:{product}:{context}:testing:"
+    check()
+    current = []
+    for row in reservations:
+        if row.provider_target_key != key:
+            from control_plane.testing_activation import retained_fence_is_separated
+
+            if not retained_fence_is_separated(store, row):
+                raise TestingExclusionRefused("execution_ownership_unproved")
+            continue
+        current.append(row)
+        lookup = store.lookup_existing_mutation_reservation(
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+        )
+        snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
+        if (
+            row.state != "reconcile_required"
+            or row.route_path != GENERIC_WEB_DEPLOY_ROUTE
+            or row.provider_target_key != key
+            or (snapshot.context, snapshot.instance, snapshot.target_type, snapshot.target_id)
+            != (context, "testing", "application", target_id.target_id)
+            or snapshot.provider_id != provider.provider_id
+            or snapshot.product not in {"", product}
+            or lookup.record != row
+            or not row.lease_expires_at
+            or parse_launchplane_mutation_timestamp(row.lease_expires_at, field_name="lease")
+            >= parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="now")
+        ):
+            raise TestingExclusionRefused("execution_ownership_unproved")
+        event_original = row.scope == reconcile_reservation_scope(
+            product
+        ) and row.idempotency_key.startswith(prefix)
+        direct_original = row.scope != reconcile_reservation_scope(
+            product
+        ) and _recorded_native_application_custody(store, row, product=product, context=context)
+        if not event_original and not direct_original:
+            raise TestingExclusionRefused("execution_ownership_unproved")
+    if not current:
+        raise TestingExclusionRefused("reservation_fence_absent")
+    check()
+    return tuple(current)
 
 
 def _digest(records: tuple[BaseModel, ...]) -> str:

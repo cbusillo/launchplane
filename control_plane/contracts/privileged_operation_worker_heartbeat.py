@@ -6,6 +6,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 PRIVILEGED_OPERATION_WORKER_KIND = "privileged-operation"
@@ -14,7 +15,6 @@ PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS = 60
 PRIVILEGED_OPERATION_WORKER_HEARTBEAT_MIN_FRESHNESS_SECONDS = 120
 PRIVILEGED_OPERATION_WORKER_HEARTBEAT_MAX_FRESHNESS_SECONDS = 900
 
-_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
 
 
@@ -58,7 +58,7 @@ class PrivilegedOperationWorkerHeartbeatRecord(BaseModel):
     @classmethod
     def _validate_sha256(cls, value: str) -> str:
         normalized_value = value.strip().lower()
-        if not _SHA256_PATTERN.fullmatch(normalized_value):
+        if not SHA256_PATTERN.fullmatch(normalized_value):
             raise ValueError("privileged-operation worker identity must be a sha256 digest")
         return normalized_value
 

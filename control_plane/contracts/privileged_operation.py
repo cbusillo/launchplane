@@ -37,6 +37,7 @@ from control_plane.contracts.backup_policy_proposal import (
     BackupPolicyExecutionEvidence,
     BackupPolicyProposalSummary,
 )
+from control_plane.contracts.record_fields import normalize_sha256, required_token
 
 
 PRIVILEGED_SECRET_OPERATION_PLAN_ACTION = "privileged_secret_operation.plan"
@@ -96,7 +97,6 @@ PrivilegedOperationEventAction = Literal[
 PrivilegedOperationEventWriteStatus = Literal["written", "replayed"]
 PrivilegedOperationSourceKind = Literal["agent_api", "browser_api", "system"]
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_EVENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _OPERATION_ID_PATTERN = re.compile(r"^privileged-operation-[0-9a-f]{32}$")
 
@@ -109,29 +109,15 @@ class PrivilegedOperationTransitionError(ValueError):
     pass
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
-def _sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return normalized
-
-
 def normalize_privileged_operation_source_event_id(value: str) -> str:
-    normalized = _required_token(value, "source_event_id")
+    normalized = required_token(value, "source_event_id")
     if _SOURCE_EVENT_ID_PATTERN.fullmatch(normalized) is None:
         raise ValueError("Privileged-operation source_event_id is not canonical")
     return normalized
 
 
 def _timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -154,7 +140,7 @@ class PrivilegedOperationActor(BaseModel):
 
     @model_validator(mode="after")
     def _validate_actor(self) -> "PrivilegedOperationActor":
-        object.__setattr__(self, "login", _required_token(self.login, "login"))
+        object.__setattr__(self, "login", required_token(self.login, "login"))
         if self.identity_type == "github_human":
             if self.github_id < 1:
                 raise ValueError("GitHub-human privileged-operation actors require github_id")
@@ -175,7 +161,7 @@ class PrivilegedOperationAgentActor(BaseModel):
         object.__setattr__(
             self,
             "principal_sha256",
-            _sha256(self.principal_sha256, "principal_sha256"),
+            normalize_sha256(self.principal_sha256, "principal_sha256"),
         )
         return self
 
@@ -190,7 +176,7 @@ class PrivilegedOperationLocalOperatorActor(BaseModel):
     @field_validator("principal_sha256")
     @classmethod
     def _validate_principal(cls, value: str) -> str:
-        return _sha256(value, "principal_sha256")
+        return normalize_sha256(value, "principal_sha256")
 
 
 PrivilegedOperationRequester: TypeAlias = (
@@ -209,11 +195,11 @@ class ManagedSecretReencryptionPlanInput(BaseModel):
     def _validate_input(self) -> "ManagedSecretReencryptionPlanInput":
         if self.schema_version != 1:
             raise ValueError("Unsupported managed-secret re-encryption plan input schema version.")
-        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "reason", required_token(self.reason, "reason"))
         object.__setattr__(
             self,
             "source_label",
-            _required_token(self.source_label, "source_label"),
+            required_token(self.source_label, "source_label"),
         )
         return self
 
@@ -237,18 +223,18 @@ class ManagedSecretReencryptionHumanEvidence(BaseModel):
     def _validate_evidence(self) -> "ManagedSecretReencryptionHumanEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported managed-secret re-encryption evidence schema version.")
-        object.__setattr__(self, "plan_digest", _sha256(self.plan_digest, "plan_digest"))
+        object.__setattr__(self, "plan_digest", normalize_sha256(self.plan_digest, "plan_digest"))
         object.__setattr__(
             self,
             "active_key_id",
-            _required_token(self.active_key_id, "active_key_id"),
+            required_token(self.active_key_id, "active_key_id"),
         )
         blocked = tuple(
-            _required_token(key_id, "retirement_blocked_key_ids")
+            required_token(key_id, "retirement_blocked_key_ids")
             for key_id in self.retirement_blocked_key_ids
         )
         ready = tuple(
-            _required_token(key_id, "retirement_ready_key_ids")
+            required_token(key_id, "retirement_ready_key_ids")
             for key_id in self.retirement_ready_key_ids
         )
         if len(set(blocked)) != len(blocked) or len(set(ready)) != len(ready):
@@ -294,7 +280,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             raise ValueError("Unsupported managed authz policy proposal schema version.")
         if self.schema_migration == "migrate_v2_to_v3" and self.desired_policy.schema_version != 3:
             raise ValueError("migrate_v2_to_v3 requires desired policy schema version 3.")
-        reason = _required_token(self.reason, "reason")
+        reason = required_token(self.reason, "reason")
         related_issue = self.related_issue.strip()
         reconcile_request = AuthzManagedPolicyReconcileEnvelope(
             schema_version=2,
@@ -396,19 +382,21 @@ class ManagedOrdinaryAgentPolicyPreparationContext(BaseModel):
             "expected_merge_policy_record_id",
         ):
             object.__setattr__(
-                self, field_name, _required_token(getattr(self, field_name), field_name)
+                self, field_name, required_token(getattr(self, field_name), field_name)
             )
         for field_name in (
             "expected_policy_sha256",
             "expected_inventory_sha256",
             "expected_merge_policy_sha256",
         ):
-            object.__setattr__(self, field_name, _sha256(getattr(self, field_name), field_name))
+            object.__setattr__(
+                self, field_name, normalize_sha256(getattr(self, field_name), field_name)
+            )
         object.__setattr__(
-            self, "managed_set_id", _required_token(self.managed_set_id, "managed_set_id")
+            self, "managed_set_id", required_token(self.managed_set_id, "managed_set_id")
         )
         object.__setattr__(
-            self, "managed_rule_id", _required_token(self.managed_rule_id, "managed_rule_id")
+            self, "managed_rule_id", required_token(self.managed_rule_id, "managed_rule_id")
         )
         return self
 
@@ -425,7 +413,7 @@ class ManagedAuthzPolicySetHumanEvidence(BaseModel):
     def _validate_evidence(self) -> "ManagedAuthzPolicySetHumanEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported managed authz policy evidence schema version.")
-        object.__setattr__(self, "plan_digest", _sha256(self.plan_digest, "plan_digest"))
+        object.__setattr__(self, "plan_digest", normalize_sha256(self.plan_digest, "plan_digest"))
         if self.plan_digest != self.diff.plan_sha256:
             raise ValueError("Managed authz policy evidence must bind the exact plan digest.")
         blocked = bool(
@@ -457,7 +445,7 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
         if self.record.status != "active":
             raise ValueError("Merge-train policy import candidate record must be active.")
         normalize_merge_train_policy_timestamp(self.record.updated_at)
-        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "reason", required_token(self.reason, "reason"))
         object.__setattr__(self, "related_issue", self.related_issue.strip())
         return self
 
@@ -529,19 +517,19 @@ class ManagedMergeTrainPolicyPreparationContext(BaseModel):
         object.__setattr__(
             self,
             "expected_active_record_id",
-            _required_token(self.expected_active_record_id, "expected_active_record_id"),
+            required_token(self.expected_active_record_id, "expected_active_record_id"),
         )
         object.__setattr__(
             self,
             "expected_active_policy_sha256",
-            _sha256(self.expected_active_policy_sha256, "expected_active_policy_sha256"),
+            normalize_sha256(self.expected_active_policy_sha256, "expected_active_policy_sha256"),
         )
         object.__setattr__(
             self,
             "expected_active_updated_at",
             normalize_merge_train_policy_timestamp(self.expected_active_updated_at),
         )
-        expected_key = _required_token(self.target_policy_key, "target_policy_key")
+        expected_key = required_token(self.target_policy_key, "target_policy_key")
         object.__setattr__(self, "target_policy_key", expected_key)
         return self
 
@@ -581,13 +569,13 @@ class ManagedMergeTrainPolicyImportHumanEvidence(BaseModel):
             raise ValueError("Unsupported merge-train policy import evidence schema version.")
         for field_name in ("plan_digest", "active_policy_sha256", "candidate_policy_sha256"):
             object.__setattr__(
-                self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+                self, field_name, normalize_sha256(str(getattr(self, field_name)), field_name)
             )
         for field_name in ("active_record_id", "candidate_record_id"):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self, "active_updated_at", _timestamp(self.active_updated_at, "active_updated_at")
@@ -600,7 +588,7 @@ class ManagedMergeTrainPolicyImportHumanEvidence(BaseModel):
         ):
             policy_keys = tuple(
                 sorted(
-                    _required_token(policy_key, field_name)
+                    required_token(policy_key, field_name)
                     for policy_key in getattr(self, field_name)
                 )
             )
@@ -667,7 +655,7 @@ class PrivilegedOperationApproval(BaseModel):
             "policy_sha256",
         ):
             object.__setattr__(
-                self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+                self, field_name, normalize_sha256(str(getattr(self, field_name)), field_name)
             )
         for field_name in (
             "policy_record_id",
@@ -679,7 +667,7 @@ class PrivilegedOperationApproval(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if self.expires_at:
             object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
@@ -705,7 +693,9 @@ class PrivilegedOperationExecutionEvidence(BaseModel):
     def _validate_execution_evidence(self) -> "PrivilegedOperationExecutionEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged-operation execution evidence schema version.")
-        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        object.__setattr__(
+            self, "result_digest", normalize_sha256(self.result_digest, "result_digest")
+        )
         failure_code = self.failure_code.strip()
         object.__setattr__(self, "failure_code", failure_code)
         if self.result_status == "ok" and (failure_code or self.reconciliation_required):
@@ -737,7 +727,9 @@ class ManagedAuthzPolicySetExecutionEvidence(BaseModel):
     def _validate_execution_evidence(self) -> "ManagedAuthzPolicySetExecutionEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported managed authz policy execution evidence schema version.")
-        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        object.__setattr__(
+            self, "result_digest", normalize_sha256(self.result_digest, "result_digest")
+        )
         failure_code = self.failure_code.strip()
         object.__setattr__(self, "failure_code", failure_code)
         if self.result_status == "ok":
@@ -753,9 +745,9 @@ class ManagedAuthzPolicySetExecutionEvidence(BaseModel):
             ):
                 value = str(getattr(self, field_name))
                 normalized = (
-                    _sha256(value, field_name)
+                    normalize_sha256(value, field_name)
                     if field_name.endswith("sha256")
-                    else _required_token(value, field_name)
+                    else required_token(value, field_name)
                 )
                 object.__setattr__(self, field_name, normalized)
             if self.previous_revision < 1 or self.resulting_revision < 1:
@@ -788,7 +780,9 @@ class ManagedMergeTrainPolicyImportExecutionEvidence(BaseModel):
     def _validate_execution_evidence(self) -> "ManagedMergeTrainPolicyImportExecutionEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported merge-train policy execution evidence schema version.")
-        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        object.__setattr__(
+            self, "result_digest", normalize_sha256(self.result_digest, "result_digest")
+        )
         failure_code = self.failure_code.strip()
         object.__setattr__(self, "failure_code", failure_code)
         if self.result_status == "ok":
@@ -807,25 +801,25 @@ class ManagedMergeTrainPolicyImportExecutionEvidence(BaseModel):
                 object.__setattr__(
                     self,
                     field_name,
-                    _required_token(str(getattr(self, field_name)), field_name),
+                    required_token(str(getattr(self, field_name)), field_name),
                 )
             for field_name in (
                 "previous_policy_sha256",
                 "resulting_policy_sha256",
             ):
                 object.__setattr__(
-                    self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+                    self, field_name, normalize_sha256(str(getattr(self, field_name)), field_name)
                 )
             if self.changed:
                 object.__setattr__(
                     self,
                     "superseded_record_id",
-                    _required_token(self.superseded_record_id, "superseded_record_id"),
+                    required_token(self.superseded_record_id, "superseded_record_id"),
                 )
                 object.__setattr__(
                     self,
                     "superseded_policy_sha256",
-                    _sha256(self.superseded_policy_sha256, "superseded_policy_sha256"),
+                    normalize_sha256(self.superseded_policy_sha256, "superseded_policy_sha256"),
                 )
             else:
                 if self.superseded_record_id or self.superseded_policy_sha256:
@@ -890,7 +884,7 @@ class PrivilegedOperationRecord(BaseModel):
             raise ValueError("Unsupported privileged-operation record schema version.")
         if self.descriptor_version != 1:
             raise ValueError("Unsupported privileged-operation descriptor version.")
-        operation_id = _required_token(self.operation_id, "operation_id")
+        operation_id = required_token(self.operation_id, "operation_id")
         if _OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
             raise ValueError("Privileged-operation operation_id is not canonical")
         object.__setattr__(self, "operation_id", operation_id)
@@ -1005,11 +999,13 @@ class PrivilegedOperationRecord(BaseModel):
                 )
         else:
             raise ValueError("Unknown privileged-operation descriptor")
-        object.__setattr__(self, "request_digest", _sha256(self.request_digest, "request_digest"))
+        object.__setattr__(
+            self, "request_digest", normalize_sha256(self.request_digest, "request_digest")
+        )
         object.__setattr__(
             self,
             "evidence_digest",
-            _sha256(self.evidence_digest, "evidence_digest"),
+            normalize_sha256(self.evidence_digest, "evidence_digest"),
         )
         if self.request_digest not in privileged_operation_request_digest_candidates(self.request):
             raise ValueError("Privileged-operation request_digest does not match request")
@@ -1133,7 +1129,7 @@ class PrivilegedOperationEventRecord(BaseModel):
     def _validate_event(self) -> "PrivilegedOperationEventRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged-operation event schema version.")
-        operation_id = _required_token(self.operation_id, "operation_id")
+        operation_id = required_token(self.operation_id, "operation_id")
         if _OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
             raise ValueError("Privileged-operation event operation_id is not canonical")
         object.__setattr__(self, "operation_id", operation_id)
@@ -1145,7 +1141,7 @@ class PrivilegedOperationEventRecord(BaseModel):
         object.__setattr__(
             self,
             "resulting_record_digest",
-            _sha256(self.resulting_record_digest, "resulting_record_digest"),
+            normalize_sha256(self.resulting_record_digest, "resulting_record_digest"),
         )
         if self.action == "planned":
             expected_source_kind = (
@@ -1181,7 +1177,7 @@ class PrivilegedOperationEventRecord(BaseModel):
             source_event_id=self.source_event_id,
         )
         if self.event_id:
-            event_id = _required_token(self.event_id, "event_id")
+            event_id = required_token(self.event_id, "event_id")
             if event_id != computed_event_id:
                 raise ValueError("Privileged-operation event_id does not match event payload")
             object.__setattr__(self, "event_id", event_id)
@@ -1377,7 +1373,7 @@ class PrivilegedOperationSemanticReviewDigest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_digest(self) -> "PrivilegedOperationSemanticReviewDigest":
-        object.__setattr__(self, "sha256", _sha256(self.sha256, "sha256"))
+        object.__setattr__(self, "sha256", normalize_sha256(self.sha256, "sha256"))
         return self
 
 
@@ -1455,7 +1451,7 @@ class PrivilegedOperationSemanticReviewChange(BaseModel):
 
     @model_validator(mode="after")
     def _validate_change(self) -> "PrivilegedOperationSemanticReviewChange":
-        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        object.__setattr__(self, "summary", required_token(self.summary, "summary"))
         metric_kinds = tuple(metric.kind for metric in self.metrics)
         if len(set(metric_kinds)) != len(metric_kinds):
             raise ValueError("Privileged-operation semantic review metric kinds must be unique")
@@ -1476,7 +1472,7 @@ class PrivilegedOperationSemanticReviewBlastRadius(BaseModel):
 
     @model_validator(mode="after")
     def _validate_blast_radius(self) -> "PrivilegedOperationSemanticReviewBlastRadius":
-        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        object.__setattr__(self, "summary", required_token(self.summary, "summary"))
         return self
 
 
@@ -1488,7 +1484,7 @@ class PrivilegedOperationSemanticReviewRollback(BaseModel):
 
     @model_validator(mode="after")
     def _validate_rollback(self) -> "PrivilegedOperationSemanticReviewRollback":
-        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        object.__setattr__(self, "summary", required_token(self.summary, "summary"))
         return self
 
 
@@ -1531,12 +1527,12 @@ class PrivilegedOperationSemanticReviewActivityEntry(BaseModel):
         object.__setattr__(
             self,
             "event_id",
-            _required_token(self.event_id, "event_id"),
+            required_token(self.event_id, "event_id"),
         )
         object.__setattr__(
             self,
             "resulting_record_digest",
-            _sha256(self.resulting_record_digest, "resulting_record_digest"),
+            normalize_sha256(self.resulting_record_digest, "resulting_record_digest"),
         )
         return self
 
@@ -1576,7 +1572,7 @@ class PrivilegedOperationSemanticReview(BaseModel):
     def _validate_review(self) -> "PrivilegedOperationSemanticReview":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged-operation semantic review version.")
-        operation_id = _required_token(self.operation_id, "operation_id")
+        operation_id = required_token(self.operation_id, "operation_id")
         if _OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
             raise ValueError("Privileged-operation semantic review operation_id is not canonical")
         object.__setattr__(self, "operation_id", operation_id)
@@ -1831,8 +1827,8 @@ def local_operator_principal_sha256(*, subject: str, token_label: str) -> str:
     return _digest_payload(
         [
             "launchplane-local-operator-privileged-operation-v1",
-            _required_token(subject, "subject"),
-            _required_token(token_label, "token_label"),
+            required_token(subject, "subject"),
+            required_token(token_label, "token_label"),
         ]
     )
 
@@ -1841,8 +1837,8 @@ def terminal_agent_principal_sha256(*, subject: str, token_label: str) -> str:
     return _digest_payload(
         [
             "launchplane-terminal-agent-privileged-operation-v1",
-            _required_token(subject, "subject"),
-            _required_token(token_label, "token_label"),
+            required_token(subject, "subject"),
+            required_token(token_label, "token_label"),
         ]
     )
 
