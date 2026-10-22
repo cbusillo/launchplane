@@ -54,6 +54,34 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_odoo_shopify_identity",
+        "path": "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "purpose": "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "5290b6ea2d74d1a24ba08bb03319c4d0dd4cb7d3a5a823c6e31dc8b6133a30dc",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "read_product_environment_health_history",
         "path": "/v1/products/{product}/environments/{environment}/health-history",
         "purpose": "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
@@ -994,8 +1022,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d4564440c357620a3f3eb4bfa8db70c7c3194de7"
+    "source_commit_sha": "d18a0eb35595ab5bd5636733250cce3f06fe81b1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "95f6249d975f890e6f0eebc50eec929301e80d564a8aa57c9185d96f79258dd8"
+  "semantic_digest_sha256": "c38f0d649e1815fadd1647578f6ea113458125b5bf46f623a010be182e38aa9b"
 }
