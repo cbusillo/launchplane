@@ -357,6 +357,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
             item["State"]["Status"] = "exited"
         expected = [item["Id"] for item in self.containers]
         removed = self.containers.pop()
+        self.containers[0]["State"]["Status"] = "dead"
         extra = {"allow_unavailable": True, "container_ids": expected}
         frame, commands = self.run_host(mode="removal-readback", extra=extra)
         self.assertEqual(frame["availability"], "stopped")

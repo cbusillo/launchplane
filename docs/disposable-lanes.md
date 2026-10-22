@@ -162,7 +162,7 @@ from current stopped/absent state. Incidental Docker lifecycle timestamps do not
 invalidate an unchanged stopped copy. Container removal accepts only the admitted
 IDs in complete current inventory, refuses running or replacement members, and
 uses Docker removal without force or volume deletion. Interrupted removal reads
-back those same IDs and finishes only their stopped leftovers; absent members
+back those same IDs and finishes only their stopped or dead leftovers; absent members
 need no repeated removal. Preparation resumes with the observed absent original,
 while preserving the original ingress preimage and metadata for health rollback.
 

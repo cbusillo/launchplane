@@ -222,7 +222,7 @@ try:
         states={item['State']['Status'] for item in containers if item['Id'] in own}
         if not own.issubset(set(expected)) or states.intersection({'running','restarting','paused'}):
             result={'type':'complete','availability':'changed'}
-        elif not states.issubset({'exited','created'}):
+        elif not states.issubset({'exited','created','dead'}):
             raise ValueError('Old testing container state is unverified')
         elif spec['mode']=='remove':
             for identifier in sorted(own):
