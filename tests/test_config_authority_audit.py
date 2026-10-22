@@ -1098,9 +1098,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                             {
                                 "autoReplaceStringTemplate": (
                                     "API_BASE_URL=https://api.production.example.com"
-                                )
+                                ),
+                                "matchStrings": [
+                                    '"registryUrl": "https://registry.production.example.com"'
+                                ],
                             }
                         ],
+                        "registryAliases": {
+                            "registry.description": "https://registry.production.example.com"
+                        },
                         "postUpgradeTasks": {
                             "commands": ["curl https://deploy.production.example.com"]
                         },
@@ -1127,6 +1133,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "packageRules[0].matchPackageNames[1]": "repo_metadata_ergonomics",
                 "packageRules[1].replacementNameTemplate": "",
                 "customManagers[0].autoReplaceStringTemplate": "",
+                "customManagers[0].matchStrings[0]": "",
+                "registryAliases.registry.description": "",
                 "postUpgradeTasks.commands[0]": "",
                 "env.API_BASE_URL": "",
                 "registryUrls[0]": "",

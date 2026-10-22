@@ -32,7 +32,10 @@ ALLOW_REASON_THIN_CONNECTOR_INPUT = "thin_connector_input"
 ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
-RENOVATE_METADATA_FIELDS = frozenset(("$schema", "extends", "description"))
+RENOVATE_METADATA_KEY_PATTERN = re.compile(
+    r"\$schema|extends\[\d+]|(?:packageRules\[\d+]\.)?description"
+    r"|packageRules\[\d+]\.match(?:PackageNames|DepNames|Datasources|Managers|FileNames|UpdateTypes)\[\d+]"
+)
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
@@ -4239,8 +4242,7 @@ def _is_renovate_config_path(path: str) -> bool:
 
 
 def _is_renovate_metadata_key(key: str) -> bool:
-    field = re.sub(r"\[\d+]", "", key).rsplit(".", 1)[-1]
-    return field in RENOVATE_METADATA_FIELDS or field.startswith("match")
+    return RENOVATE_METADATA_KEY_PATTERN.fullmatch(key) is not None
 
 
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:
