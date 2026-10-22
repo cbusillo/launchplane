@@ -61,6 +61,7 @@ def observe_stall(
     blocked: tuple[str, ...] = (),
     orphaned_lease: bool = False,
     recovered_failure: bool = False,
+    wait_reason: str = "",
 ) -> MergeTrainStallObservation:
     changed = progress_key != previous.progress_key
     since = now if changed or not previous.progress_since else previous.progress_since
@@ -69,10 +70,17 @@ def observe_stall(
     reasons: list[str] = []
     if busy and _age(now, since) >= STALL_SECONDS:
         reasons.append("controller_unchanged")
+        if wait_reason in {
+            "candidate_checks_retry_pending",
+            "candidate_check_retry_unavailable",
+            "candidate_checks_disagree",
+            "candidate_checks_admin_hold",
+        }:
+            reasons.append(wait_reason)
     if any(_age(now, started) >= STALL_SECONDS for started in ready_since.values()):
         reasons.append("ready_change_not_moving")
     if any(_age(now, started) >= STALL_SECONDS for started in blocked_since.values()):
-        reasons.append("candidate_failure_block_persisted")
+        reasons.append("blocked_change_not_moving")
     signals: list[str] = []
     if orphaned_lease:
         signals.append("lease_without_live_heartbeat")
@@ -211,7 +219,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
                 for key, since in sorted(observation.ready_since.items())
             )
             lines.extend(
-                f"  - Candidate-failure blocked change `{key}` since {since}."
+                f"  - Train-blocked change `{key}` since {since}."
                 for key, since in sorted(observation.blocked_since.items())
             )
     if not any(item.reasons for item in record.observations.values()):
@@ -330,31 +338,7 @@ def run_stall_monitor_pass(
                         if target.blocked_label.casefold()
                         in {label.casefold() for label in pr.labels}
                     }
-                    blocked = tuple(
-                        sorted(
-                            {
-                                f"{entry.pull_request_number}:{entry.head_sha}"
-                                for candidate in (
-                                    getattr(store, "list_merge_train_batch_candidate_records")(
-                                        repository=repository,
-                                        base_branch=target.base_branch,
-                                        status="superseded",
-                                    )
-                                    if blocked_heads
-                                    else ()
-                                )
-                                if candidate.block_intent is not None
-                                and candidate.source.startswith("service:controller:")
-                                and candidate.candidate.policy_key == target.policy_key
-                                and (
-                                    candidate.block_intent.label_write_succeeded
-                                    or candidate.block_intent.applied_label_event_id is not None
-                                )
-                                for entry in candidate.candidate.entries
-                                if (entry.pull_request_number, entry.head_sha) in blocked_heads
-                            }
-                        )
-                    )
+                    blocked = tuple(sorted(f"{number}:{head}" for number, head in blocked_heads))
                     previous = previous.model_copy(
                         update={
                             "ready_since": {
@@ -389,6 +373,9 @@ def run_stall_monitor_pass(
                             and _age(observed_at, state.lease_expires_at) >= 0
                         ),
                         recovered_failure=recovered,
+                        wait_reason=str(
+                            getattr(getattr(state, "last_result", None), "reason_code", "")
+                        ),
                     ).model_copy(update={"queue_suspended": release_held})
                 current_reasons = {
                     base: item.reasons for base, item in observations.items() if item.reasons

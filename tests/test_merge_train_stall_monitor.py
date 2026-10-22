@@ -37,6 +37,11 @@ def _time(seconds: int) -> str:
 
 
 class StallObservationTests(TestCase):
+    def test_stalled_check_recovery_names_the_controller_wait(self) -> None:
+        first = self.observe(MergeTrainStallObservation(), 0)
+        stalled = self.observe(first, STALL_SECONDS, wait_reason="candidate_checks_disagree")
+        self.assertIn("candidate_checks_disagree", stalled.reasons)
+
     def test_candidate_block_clock_survives_unrelated_progress_and_clears_with_block(self) -> None:
         initial = self.observe(
             MergeTrainStallObservation(), 0, blocked=("7:head",), ready=(), busy=False
@@ -49,9 +54,9 @@ class StallObservationTests(TestCase):
             busy=False,
             progress_key="different-base-and-candidate",
         )
-        self.assertIn("candidate_failure_block_persisted", moved.reasons)
+        self.assertIn("blocked_change_not_moving", moved.reasons)
         cleared = self.observe(moved, STALL_SECONDS + 300, blocked=(), ready=(), busy=False)
-        self.assertNotIn("candidate_failure_block_persisted", cleared.reasons)
+        self.assertNotIn("blocked_change_not_moving", cleared.reasons)
         self.assertFalse(cleared.blocked_since)
 
     @staticmethod
@@ -167,7 +172,7 @@ class StallMonitorTests(TestCase):
                 )
             reporter.publish.assert_called_once()
             body = reporter.publish.call_args.args[1]
-            self.assertIn("candidate_failure_block_persisted", body)
+            self.assertIn("blocked_change_not_moving", body)
             self.assertIn(f"{entry.pull_request_number}:{entry.head_sha}", body)
             reporter.notify.assert_called_once()
             client.read_merge_train_snapshot.return_value = snapshot.model_copy(

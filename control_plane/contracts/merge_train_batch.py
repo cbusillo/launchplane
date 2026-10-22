@@ -156,6 +156,7 @@ class MergeTrainBatchCandidate(BaseModel):
     check_rerun_attempts: dict[int, int] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
+    check_rerun_requested_at: str = Field(default="", exclude_if=lambda value: not value)
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"

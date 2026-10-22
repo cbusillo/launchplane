@@ -1191,10 +1191,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             repository_path=repository_path,
             encoded_head_sha=encoded_sha,
             required_checks=tuple((check.name, check.app_id) for check in requirements),
-            include_history=True,
         )
         check_runs = check_payload["check_runs"]
-        history = cast(list[object], check_payload.get("check_runs_history", check_runs))
         statuses = _list_commit_statuses(
             transport=self.transport,
             repository_path=repository_path,
@@ -1270,8 +1268,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         return replace(
             failures,
-            checks_pending=failures.checks_pending
-            or bool(check_payload.get("actions_observation_error")),
             attribution_requirements=tuple(
                 requirement for requirement, state in verdict.blocking if state == "fail"
             ),
@@ -1296,8 +1292,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         passed, repository_path=repository_path, head_sha=encoded_sha
                     )
                     is not None
-                    for item in history
-                    for passed in (_json_object(item, "GitHub check run history"),)
+                    for passed in normalized_runs
                 )
                 for failed in normalized_runs
             ),
@@ -1319,9 +1314,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             run_id, suite_id = identity
             if run_id in runs:
                 continue
-            run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+            try:
+                run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+            except MergeTrainGitHubError:
+                return ()
             if (
-                run.get("check_suite_id") != suite_id
+                run.get("event") != "push"
+                or run.get("check_suite_id") != suite_id
                 or run.get("status") != "completed"
                 or run.get("conclusion") not in {"failure", "timed_out"}
             ):
@@ -1358,30 +1357,97 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         return run
 
-    def retry_candidate_checks(self, *, candidate: MergeTrainBatchCandidate) -> None:
-        runs = [
-            (run_id, attempt, self._candidate_check_retry_run(candidate=candidate, run_id=run_id))
-            for run_id, attempt in candidate.check_rerun_attempts.items()
-        ]
-        if not runs or any(
-            run.get("run_attempt") != attempt
-            or run.get("status") != "completed"
-            or run.get("conclusion") not in {"failure", "timed_out"}
-            for _, attempt, run in runs
-        ):
-            raise MergeTrainGitHubError("Candidate check execution changed before retry.")
-        for run_id, _, _ in runs:
+    def retry_candidate_checks(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        before_write: Callable[[], object],
+        resume: bool = False,
+    ) -> None:
+        expected_ref = build_merge_train_batch_candidate_ref(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            batch_id=candidate.batch_id,
+        )
+        if not candidate.check_rerun_attempts or candidate.candidate_ref != expected_ref:
+            raise MergeTrainGitHubError(
+                "Candidate check retry requires its recorded canonical ref."
+            )
+        if not resume:
+            for run_id, attempt in candidate.check_rerun_attempts.items():
+                run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+                if (
+                    run.get("event") != "push"
+                    or run.get("run_attempt") != attempt
+                    or run.get("status") != "completed"
+                    or run.get("conclusion") not in {"failure", "timed_out"}
+                ):
+                    raise MergeTrainGitHubError("Candidate check execution changed before retry.")
+        repository_path = _repository_path(candidate.repository)
+        try:
+            observed = _base_branch_sha(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=_branch_name_from_ref(candidate.candidate_ref),
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 404:
+                raise
+            observed = None
+        if observed is not None and observed != candidate.candidate_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Candidate ref moved before check retry.", status_code=409
+            )
+        if observed is not None:
+            if resume:
+                return
+            before_write()
+            self._delete_reference_if_present(
+                repository_path=repository_path, reference=candidate.candidate_ref
+            )
+        before_write()
+        try:
             self.transport.request(
                 method="POST",
-                path=f"/repos/{_repository_path(candidate.repository)}/actions/runs/{run_id}/rerun-failed-jobs",
+                path=f"/repos/{repository_path}/git/refs",
+                body={"ref": candidate.candidate_ref, "sha": candidate.candidate_sha},
             )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+        _verify_candidate_publication(
+            transport=self.transport,
+            repository_path=repository_path,
+            candidate_ref=candidate.candidate_ref,
+            expected_sha=candidate.candidate_sha,
+        )
 
     def candidate_check_retry_finished(self, *, candidate: MergeTrainBatchCandidate) -> bool:
+        from github_plan_status.workflow_runs import (
+            current_workflow_runs,
+            workflow_execution_identity,
+        )
+
+        runs = _read_actions_workflow_inventory(
+            transport=self.transport,
+            repository_path=_repository_path(candidate.repository),
+            head_sha=candidate.candidate_sha,
+        )
+        if runs is None:
+            return False
+        current = current_workflow_runs(runs, candidate.candidate_sha)["current"]
         for run_id, attempt in candidate.check_rerun_attempts.items():
-            run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
-            if cast(int, run["run_attempt"]) <= attempt or run.get("status") != "completed":
+            original = next((run for run in runs if run.get("id") == run_id), None)
+            if original is None or (identity := workflow_execution_identity(original)) is None:
                 return False
-        return bool(candidate.check_rerun_attempts)
+            if not any(
+                workflow_execution_identity(run) == identity
+                and run.get("status") == "completed"
+                and (run.get("id") != run_id or cast(int, run["run_attempt"]) > attempt)
+                for run in current
+            ):
+                return False
+        return True
 
     def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
@@ -5955,16 +6021,12 @@ def _list_check_runs(
     repository_path: str,
     encoded_head_sha: str,
     required_checks: tuple[tuple[str, int | None], ...] | None = None,
-    include_history: bool = False,
 ) -> dict[str, object]:
     check_runs: list[object] = []
     page = 1
     total_count: int | None = None
     while True:
-        parameters = {"per_page": "100", "page": str(page)}
-        if include_history:
-            parameters["filter"] = "all"
-        query = urlencode(parameters)
+        query = urlencode({"per_page": "100", "page": str(page)})
         payload = _json_object(
             transport.request(
                 method="GET",
@@ -6006,7 +6068,6 @@ def _list_check_runs(
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
         "check_runs": latest,
-        **({"check_runs_history": check_runs} if include_history else {}),
         "actions_observation_error": observation_error,
     }
 
