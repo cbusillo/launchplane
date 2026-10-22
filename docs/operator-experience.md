@@ -23,6 +23,20 @@ record browser. The first screen should show products, their stable
 environments, release and exact-change state, current operational state, and the
 next safe action.
 
+Environment summaries and details warn when configured managed credentials
+for a known integration are stored for that exact non-production lane without
+that integration's allowance. Context-scoped and global credentials are outside
+this lane inventory. The warning uses binding metadata and target policy only;
+it does not prove runtime delivery or connectivity, and shows no credential
+values. Disabled bindings and production lanes do not produce this warning.
+Runtime key families share the credential-safety marker catalog, so mail and
+payment provider names count too. Each matching custom policy marker is checked
+independently and produces the same generic classification advisory unless its
+normalized name has an allowance. A marker that cannot name an allowance stays
+unmatched. This advisory does not block operations or grant access.
+Launchplane's own testing-state, diagnostic and walkthrough
+credentials are not external integration credentials.
+
 ## Primary User And Job
 
 The primary user is an admin who may also be a developer, but who is acting
