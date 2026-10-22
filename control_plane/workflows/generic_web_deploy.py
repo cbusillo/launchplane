@@ -1678,6 +1678,7 @@ def _prove_untitled_deployment_effect(
             ),
             expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
             expected_deployment_record_id=deployment_record_id,
+            expected_provider_reference=resolved_deploy_target.ship_request.deploy_reference,
         )
     except (FileNotFoundError, ValueError) as error:
         raise click.ClickException(

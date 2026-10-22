@@ -907,8 +907,28 @@ failed health checks are retained as failures. Older interrupted rollback record
 without the saved target evidence remain held. Successful recovery settles the
 existing accepted release step; the release worker can continue any remaining
 steps under that decision's normal acceptance and hold checks.
-The current Dokploy runtime observer proves compose targets only; application
-targets remain held until their provider supports the same exact runtime proof.
+The Dokploy observer supports Compose and Docker-backed application targets.
+Compose retains exact configured immutable-image proof and its existing sidecar
+rules. An application separately proves its saved provider tag against the
+original deployment reference, its service image, and an inspected immutable
+RepoDigest for every attributed running container. Several RepoDigests for one
+container remain one container. The existing application reader must establish
+complete process convergence and a settled rollout; an absent rollout status
+qualifies only an initial service. Recovery requires the exact operation's
+deployment identity on both the service and every container. Tag agreement or
+healthy HTTP identity alone is insufficient.
+
+Application observation checks the target's exact identity, placement, Docker
+source mode and configured image before and after the runtime read. It retains
+only image, deployment and convergence proof, without environment values or
+unrelated task diagnostics. Apply observes again and requires the reviewed
+evidence to remain current. Automatic rollback uses the effective durable
+deployment's recorded provider reference; a rollback drill uses its captured,
+fingerprint-bound plan rather than a later manual plan. Missing references,
+changed configuration, mixed images or deployment identities, pending tasks and
+unsettled/paused rollouts remain held. This source capability supplies neither
+volume recovery nor permission to retry an uncertain deployment or perform a
+live recovery operation.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

@@ -28,7 +28,11 @@ from control_plane.storage.postgres import (
     LaunchplaneProviderTargetRow,
 )
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
-from control_plane.workflows.generic_web_deploy_provider import GenericWebRuntimeArtifactObservation
+from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
+    GenericWebRuntimeArtifactObservation,
+)
+from tests.support.application_runtime import ApplicationRuntimeTransport
 from control_plane.workflows import generic_web_promotion as promotion_workflow
 from tests import test_generic_web_client_release as fixtures
 from tests.test_generic_web_deploy_recovery import _create_recovery_app, _OPERATOR_TOKEN
@@ -77,6 +81,23 @@ class PromotionRecoveryTests(unittest.TestCase):
             store=self.store,
             actions=("product_environment.read", "generic_web_prod_promotion.execute"),
             contexts=(self.case.context,),
+        )
+        testing = self.store.read_environment_inventory(
+            context_name=self.case.context, instance_name="testing"
+        )
+        identity = testing.runtime_identity
+        assert identity is not None
+        identity = identity.model_copy(
+            update={
+                "image_reference": self.case.profile.image.repository
+                + ":sha-"
+                + testing.source_git_ref
+            }
+        )
+        source = self.store.read_deployment_record(testing.deployment_record_id)
+        self.store.write_deployment_record(source.model_copy(update={"runtime_identity": identity}))
+        self.store.write_environment_inventory(
+            testing.model_copy(update={"runtime_identity": identity})
         )
         self.decision = self.case.accept()
         self.initial_inventory = self.store.read_environment_inventory(
@@ -161,6 +182,21 @@ class PromotionRecoveryTests(unittest.TestCase):
             self.store.list_environment_inventory(),
         )
 
+    def application_transport(self) -> ApplicationRuntimeTransport:
+        identity = self.provider.running
+        assert identity is not None
+        transport = ApplicationRuntimeTransport(
+            application_id=self.case.target.target_id, identity=identity
+        )
+        self.enterContext(transport.reads())
+        self.enterContext(
+            patch(
+                "control_plane.generic_web_promotion_recovery.default_generic_web_deploy_provider",
+                return_value=DokployGenericWebDeployProvider(),
+            )
+        )
+        return transport
+
     def test_read_and_dry_run_are_redacted_and_write_nothing(self) -> None:
         self.interrupt_completion()
         before = self.snapshot()
@@ -183,6 +219,7 @@ class PromotionRecoveryTests(unittest.TestCase):
 
     def test_adopts_terminal_promotion_once_without_provider_effect(self) -> None:
         self.interrupt_completion()
+        self.application_transport()
         plan = self.dry_run()
         effects = list(self.provider.deployed_artifacts)
         status, applied = self.apply(plan)
@@ -236,6 +273,7 @@ class PromotionRecoveryTests(unittest.TestCase):
     def test_adopts_unknown_drill_once_and_continues_the_accepted_release(self) -> None:
         self.prepare_drill()
         self.interrupt_completion()
+        self.application_transport()
         effects = list(self.provider.deployed_artifacts)
         before = self.snapshot()
         self.assertEqual(self.request()[0], 200)
@@ -307,6 +345,7 @@ class PromotionRecoveryTests(unittest.TestCase):
 
         self.prepare_drill()
         self.interrupt_completion()
+        self.application_transport()
         self.store.write_generic_web_rollback_plan_record(
             build_generic_web_rollback_plan(
                 record_store=self.store,
@@ -362,12 +401,69 @@ class PromotionRecoveryTests(unittest.TestCase):
 
     def test_adopts_verified_rollback_and_preserves_failed_release(self) -> None:
         self.interrupt_completion(rollback=True)
+        transport = self.application_transport()
+        previous = self.initial_inventory.runtime_identity
+        assert previous is not None
+        self.assertEqual(transport.target["dockerImage"], previous.image_reference)
+        effects = list(self.provider.deployed_artifacts)
         plan = self.dry_run()
         self.assertEqual(plan["proposed_action"], "adopt_rollback")
         self.assertEqual(self.apply(plan)[0], 202)
         result = self.reservation().response_payload["result"]
         self.assertEqual((result["promotion_status"], result["rollback_status"]), ("fail", "pass"))
+        self.assertEqual(self.provider.deployed_artifacts, effects)
         self.assertEqual(self.case.advance(), ())
+
+    def refuse_changed_application_runtime(self, field: str) -> None:
+        self.interrupt_completion()
+        transport = self.application_transport()
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "adopt_promotion")
+        before = self.snapshot()
+        effects = list(self.provider.deployed_artifacts)
+        if field == "provider_reference":
+            transport.target["dockerImage"] = (
+                self.case.profile.image.repository + ":sha-" + "e" * 40
+            )
+        elif field == "image":
+            transport.image["RepoDigests"] = [
+                self.case.profile.image.repository + "@sha256:" + "e" * 64
+            ]
+        elif field == "deployment":
+            environment = ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=another-deployment"]
+            transport.service["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"] = environment
+            transport.container["Config"]["Env"] = environment
+        elif field == "service_reference":
+            identity = self.provider.running
+            assert identity is not None
+            transport.service["Spec"]["TaskTemplate"]["ContainerSpec"]["Image"] = (
+                identity.artifact_id
+            )
+        else:
+            raise AssertionError("Unsupported runtime change.")
+        self.assertEqual(self.apply(plan)[0], 409)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.reservation().state, "reconcile_required")
+        fresh = self.dry_run()
+        self.assertEqual(
+            fresh["proposed_action"],
+            "adopt_promotion" if field == "service_reference" else "hold_unknown",
+        )
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+
+    def test_application_recovery_rechecks_saved_provider_reference(self) -> None:
+        self.refuse_changed_application_runtime("provider_reference")
+
+    def test_application_recovery_rechecks_actual_immutable_image(self) -> None:
+        self.refuse_changed_application_runtime("image")
+
+    def test_application_recovery_rechecks_original_deployment_identity(self) -> None:
+        self.refuse_changed_application_runtime("deployment")
+
+    def test_application_recovery_requires_fresh_review_for_changed_qualified_evidence(
+        self,
+    ) -> None:
+        self.refuse_changed_application_runtime("service_reference")
 
     def test_changed_runtime_identity_or_health_stays_held(self) -> None:
         self.interrupt_completion()

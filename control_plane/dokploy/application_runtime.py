@@ -154,7 +154,9 @@ def application_runtime_matches(
 ) -> bool:
     return (
         observed.ready
-        and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
+        and application_service_image_matches(
+            observed.service_image, artifact_reference, provider_reference
+        )
         and observed.service_deployment_record_id == deployment_record_id
         and all(
             any(application_immutable_image_matches(image, artifact_reference) for image in images)
@@ -179,7 +181,9 @@ def application_immutable_image_matches(image: str, artifact_reference: str) -> 
     )
 
 
-def _service_image_matches(image: str, artifact_reference: str, provider_reference: str) -> bool:
+def application_service_image_matches(
+    image: str, artifact_reference: str, provider_reference: str
+) -> bool:
     if "@" in image:
         return application_immutable_image_matches(image, artifact_reference)
     return (
@@ -199,7 +203,7 @@ def application_runtime_attempt_observed(
     """An inspected task binds this attempt even after its service rolls back."""
     return observed.task_evidence_complete and any(
         task.deployment_record_id == deployment_record_id
-        and _service_image_matches(task.image, artifact_reference, provider_reference)
+        and application_service_image_matches(task.image, artifact_reference, provider_reference)
         for task in observed.tasks
     )
 
@@ -218,7 +222,9 @@ def application_runtime_settled_spec_matches(
         and observed.rollout_settled
         and observed.rollout_state in {"", "completed"}
         and observed.service_deployment_record_id == deployment_record_id
-        and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
+        and application_service_image_matches(
+            observed.service_image, artifact_reference, provider_reference
+        )
     )
 
 
@@ -233,7 +239,9 @@ def application_runtime_drift_fingerprint(
     if not observed.rollout_settled:
         return ""
     if (
-        _service_image_matches(observed.service_image, artifact_reference, provider_reference)
+        application_service_image_matches(
+            observed.service_image, artifact_reference, provider_reference
+        )
         and observed.service_deployment_record_id == deployment_record_id
     ):
         return ""
