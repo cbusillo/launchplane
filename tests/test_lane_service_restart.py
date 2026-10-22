@@ -49,11 +49,11 @@ from control_plane.service_auth import (
 )
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.support.disposable_lanes import record_safety
-from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 from tests.test_service import create_launchplane_fastapi_test_app
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation

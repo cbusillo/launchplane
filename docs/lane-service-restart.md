@@ -25,10 +25,15 @@ Other drivers and application targets are refused. Odoo uses
 the lane reservation respected by release enqueues, workers and synchronous
 releases. Generic-web holds its existing product serializer exclusively through
 the final inspection, restart and verification, excluding deploy, promotion,
-rollback and retirement operations. Both drivers use the existing endpoint;
+and rollback. Application-target retirement is outside this Compose-only action.
+Both drivers use the existing endpoint;
 the historical `odoo` route segment does not restrict it to Odoo products.
 Generic-web waits for its product serializer, then rechecks the reviewed plan;
 Odoo refuses when its lane reservation is held.
+A nested release step refuses a lost serializer transaction, including an
+automatic rollback. Preserve the original receipt for supported reconciliation;
+do not assume a rollback ran or reacquire authority to overwrite a potentially
+newer deployment.
 
 Container selection requires inspected project and service labels and exactly
 one non-one-off container. Name matches alone never authorize a restart. The
