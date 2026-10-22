@@ -499,12 +499,14 @@ def rehearsal_storage_capacity(spec, root, containers, action):
     database=budget['database_bytes']; filestore=budget['filestore_bytes']
     # Free space already excludes every completed phase's working/recovery
     # copies. Charge only this phase's new allocations, including transients.
-    working=2 if action in {'execute','simulate-final'} else 0
+    working=3 if action=='rebuild-final' else 2 if action in {'execute','simulate-final'} else 0
     host=database+filestore+budget['staging_bytes']
     if action=='execute':
         # Raw dump + tar + extracted filestore remain until upgrade succeeds,
         # overlapping the sanitized source snapshot and both working copies.
         host+=database+2*filestore
+    elif action=='rebuild-final':
+        host=filestore+budget['staging_bytes']
     elif action=='simulate-final':
         # Restoring the retained source extracts on the host and copies its
         # dump into the database container, not the runner's writable layer.
@@ -516,7 +518,7 @@ def rehearsal_storage_capacity(spec, root, containers, action):
         containers,{**budget,'database_bytes':working*database,'filestore_bytes':working*filestore},
         runner_staging_bytes=database if action=='execute' else 0,
         host_staging_bytes=host,
-        database_staging_bytes=database if action=='simulate-final' else 0)
+        database_staging_bytes=database if action in {'simulate-final','rebuild-final'} else 0)
 
 
 def refusal_receipt(spec, root, code):
@@ -525,6 +527,8 @@ def refusal_receipt(spec, root, code):
     if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
+        'rehearsal_rebuild_capacity_insufficient':'rebuild-capacity',
+        'rehearsal_rebuild_precheck_refused':'rebuild-precheck',
         'rehearsal_precheck_refused':'precheck'}[code]
     return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
 
@@ -559,7 +563,7 @@ def emit_refusal(spec,root,code):
 
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_rebuild_precheck_refused','rehearsal_precheck_refused'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -744,7 +748,7 @@ def observe(spec, root, receipt, lock_held=False):
     result=json.loads(receipt.read_text())
     if result['intent_sha256']!=record['intent_sha256']:
         raise RuntimeError('Another rehearsal owns this receipt')
-    states=['planned','prepared','upgraded','switched','verified','retired']
+    states=['planned','prepared','upgraded','rebuilding','switched','verified','retired']
     historical=states.index(record['state'])>states.index(result['state'])
     observed_state=record['state'] if historical else result['state']
     database,image=current({**spec,'record':{**record,'state':observed_state}})
@@ -759,6 +763,78 @@ def observe(spec, root, receipt, lock_held=False):
     return
 
 
+def prepare_runtime(spec,root,database):
+    compose(spec,root,image=spec['source_image'],database=database)
+    deadline=time.monotonic()+120
+    while True:
+        try:
+            containers=inspection(spec,database,spec['source_image'])
+            sql(containers,'SELECT 1')
+            break
+        except Exception:
+            if time.monotonic()>deadline: raise
+            time.sleep(1)
+    docker('stop',containers['web'][0])
+    docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
+    return containers
+
+
+class RebuildPrecheckRefused(RuntimeError):
+    pass
+
+
+def prepared_rebuild_runtime(spec,root,database):
+    generation=spec['record']['abandoned_validations'][-1]['attempt_sha256']
+    if not re.fullmatch(r'[a-f0-9]{64}',generation):
+        raise RuntimeError('Rebuild generation is unverified')
+    receipt=root/('rebuild-prepared-'+generation+'.json')
+    marker=receipt.with_suffix('.started')
+    pending=receipt.with_suffix('.pending')
+    expected={key:spec[key] for key in ('record_binding_sha256','resources_binding_sha256')}
+    expected.update(intent_sha256=spec['record']['intent_sha256'],generation=generation)
+    for path in root.glob('rebuild-final-*.started'):
+        if path.is_symlink() or not path.with_suffix('.json').is_file():
+            raise RuntimeError('Uncertain FINAL restoration retains its custody')
+    if receipt.is_symlink() or marker.is_symlink() or pending.exists() or pending.is_symlink():
+        raise RuntimeError('Rebuild preparation custody is unverified')
+    if receipt.exists():
+        try:
+            metadata=receipt.stat()
+            if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+                    or metadata.st_size>4096 or json.loads(receipt.read_text())!=expected):
+                raise RuntimeError('Rebuild preparation binding is unverified')
+            containers=inspection(spec,database,spec['source_image'])
+            if (containers['web'][1].get('State',{}).get('Running') is not False
+                    or any(item[1].get('ExecIDs') for item in containers.values())):
+                raise RuntimeError('Prepared rebuild runtime is active')
+            sql(containers,'SELECT 1')
+        except Exception as error:
+            raise RebuildPrecheckRefused('Rebuild reuse precheck refused') from error
+        return containers
+    if marker.exists():
+        raise RuntimeError('Uncertain rebuild preparation retains its custody')
+    marker.touch(mode=0o600)
+    containers=prepare_runtime(spec,root,database)
+    save(receipt,expected)
+    return containers
+
+
+def upgrade_final(spec,root,containers):
+    names=database_names(spec)
+    clone(spec,containers,names['final_source'],names['final_upgrade'])
+    compose(spec,root,image=spec['target_image'],database=names['final_upgrade'])
+    containers=inspection(spec,names['final_upgrade'],spec['target_image'])
+    docker('stop',containers['web'][0])
+    sql(containers,'ALTER DATABASE "'+names['final_upgrade']+'" SET default_transaction_read_only=off')
+    upgrade_started=time.monotonic()
+    copy_runner(spec,containers,names['final_upgrade'],fresh=False)
+    spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
+    switch_started=time.monotonic()
+    before_web(spec,containers,names['final_upgrade'])
+    private_health(spec,containers)
+    spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
+
+
 def main():
     global COMMAND_FAILURE_CONTEXT
     COMMAND_FAILURE_CONTEXT=None
@@ -771,9 +847,11 @@ def main():
     if root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Rehearsal custody path is aliased')
     action=spec['action']
-    if action=='retire-incomplete':
+    if action in {'retire-incomplete','abandon-validation'}:
         incomplete_retirement(spec,root)
         return
+    if action=='rebuild-final':
+        action+='-'+spec['attempt_sha256']
     if action=='validate-business':
         # Each original operation has its own effect marker and receipt. A
         # later reviewed attempt cannot replay or adopt an earlier attempt.
@@ -815,23 +893,40 @@ def main():
         names=database_names(spec)
         action=spec['action']
         database,image=current(spec)
-        if action=='prepare':
-            (root/(action+'.started')).touch(mode=0o600)
-            compose(spec,root,image=spec['source_image'],database=names['source'])
-            deadline=time.monotonic()+120
-            while True:
+        if action in {'prepare','rebuild-final'}:
+            if action=='rebuild-final':
                 try:
-                    containers=inspection(spec,names['source'],spec['source_image'])
-                    sql(containers,'SELECT 1')
-                    break
+                    if not preserved_rehearsal_abandonment(record):
+                        raise RuntimeError('A current preserving abandonment is required')
+                    validate_snapshots(spec,root,{},record['copies'],retired=True)
                 except Exception:
-                    if time.monotonic()>deadline: raise
-                    time.sleep(1)
-            docker('stop',containers['web'][0])
-            # Prove both the native SQL-before-registry boundary and the source
-            # modules exist before reading any business data.
-            docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
-            state='prepared'; copies=[]
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+            selected=names['final_upgrade'] if action=='rebuild-final' else names['source']
+            if action=='prepare':
+                (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
+                containers=prepare_runtime(spec,root,selected)
+                state='prepared'; copies=[]
+            else:
+                try:
+                    containers=prepared_rebuild_runtime(spec,root,selected)
+                except RebuildPrecheckRefused:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                try:
+                    capacity=rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
+                except Exception:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                if not capacity:
+                    emit_refusal(spec,root,'rehearsal_rebuild_capacity_insufficient')
+                    return
+                (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
+                for role in ('source','final_source'):
+                    restore_preserved_snapshot(spec,root,containers,names[role],names[role])
+                    sql(containers,'ALTER DATABASE "'+names[role]+'" SET default_transaction_read_only=on')
+                upgrade_final(spec,root,containers)
+                state='switched'; copies=list(record['copies'])
         else:
             code=''
             try:
@@ -876,20 +971,9 @@ def main():
                 restore_preserved_snapshot(spec,root,containers,names['source'],names['final_source'])
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=off')
                 copies.append(snapshot(spec,root,containers,names['final_source']))
-                clone(spec,containers,names['final_source'],names['final_upgrade'])
                 spec['phase_elapsed']['final-capture-simulation']=time.monotonic()-started
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=on')
-                compose(spec,root,image=spec['target_image'],database=names['final_upgrade'])
-                containers=inspection(spec,names['final_upgrade'],spec['target_image'])
-                docker('stop',containers['web'][0])
-                sql(containers,'ALTER DATABASE "'+names['final_upgrade']+'" SET default_transaction_read_only=off')
-                upgrade_started=time.monotonic()
-                copy_runner(spec,containers,names['final_upgrade'],fresh=False)
-                spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
-                switch_started=time.monotonic()
-                before_web(spec,containers,names['final_upgrade'])
-                private_health(spec,containers)
-                spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
+                upgrade_final(spec,root,containers)
                 state='switched'
             elif action=='validate-business':
                 validation=business_validation(spec,containers)
