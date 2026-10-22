@@ -8,6 +8,66 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Native generic-web testing deployment
+
+The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
+Director agent's `local_operator` transport for an active product's exact testing
+lane without a per-product deploy grant. This alternative does not extend the
+mixed production/testing action's policy or other callers' permissions. Explicitly
+authorized administrators retain their existing manual-deployment authority,
+including deliberate deployments during a testing hold.
+
+New standing deployments consume the existing bound, unexpired disposable-lane
+qualification for data custody and production isolation. The existing usage
+rule protects actual use and staff holds; unknown occupancy alone does not
+require an assertion that nobody uses the lane. The service rechecks the current
+profile, lane and safety facts at the first durable provider-effect checkpoint.
+During that live execution, evidence capture, completion and protective rollback
+remain available after facts change. A reacquired execution must qualify again
+before another forward dispatch; inert protective settlement retains its original
+authority. Completed replay and read-only
+original observation do not require fresh execution qualification. An unresolved
+original continues to fence another key or caller.
+
+Every application-testing execution without a recorded provider effect compares
+its captured inventory baseline before proceeding and again at the first-effect
+authority checkpoint. This applies to fresh and same-key operations, with or
+without lifecycle declarations. Same-key lifecycle retries also retain their
+captured declarations and schedule baseline. A changed baseline returns
+`409 testing_deploy_baseline_changed` before effects. Start a fresh operation;
+the old original and its immutable receipt stay recorded. Unchanged-baseline
+same-key retries remain supported. Originals that already have effects retain
+their existing recovery and protective-settlement behavior.
+
+Before releasing a proved no-effect lifecycle refusal, the service records
+`not_started` under its current original lease and record comparison. An empty
+receipt or ordinary evidence correction cannot create that proof; failed
+publication keeps the reconciliation fence. Failure-only evidence publication
+preserves the original reason without creating a provider-effect checkpoint.
+
+A fresh native standing operation retains established lifecycle ownership and
+protective holds, preserves foreign prepared intent for its original recovery,
+and captures its own current schedule baseline. It does not treat another
+operation's prepared declarations as ownership. Live original reservations still
+fence another key or caller. Existing held fix-forward, proved pre-image recovery
+and inverse rollback retain their separate authority.
+Recovery dry-run/apply still require their existing explicit policy;
+[own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)
+is separate source work. Completed native replay and existing observation
+permissions are unchanged.
+
+Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
+an authorization denial. Use the existing disposable-lane observations `inspect`
+and `collect` routes below to review its current binding and authoritative facts.
+The generic collector currently supplies protective holds and target-alias facts;
+positive custody and resource qualification comes from the supported Odoo
+generation inspector. A conventional application without those facts needs the
+authoritative application custody/isolation collector prerequisite
+[#4372](https://github.com/cbusillo/launchplane/issues/4372), related to the broader
+[#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
+saved environment inputs and a failed health check cannot fill that gap. Native
+deployment has no service dry-run mode; preparation is not execution proof.
+
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing

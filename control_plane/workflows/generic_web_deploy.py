@@ -523,6 +523,8 @@ def execute_generic_web_deploy(
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -646,6 +648,8 @@ def execute_generic_web_deploy(
             recorded_artifact=recorded_artifact,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
+            proved_no_effect_retry=proved_no_effect_retry,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -673,6 +677,8 @@ def _execute_generic_web_deploy_unserialized(
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -978,6 +984,8 @@ def _execute_generic_web_deploy_unserialized(
             extensions=resolved_lane.generic_web_extensions,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
+            proved_no_effect_retry=proved_no_effect_retry,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -993,7 +1001,9 @@ def _execute_generic_web_deploy_unserialized(
             effect_started=mark_provider_effect_started,
         )
         if application_lifecycle is not None:
-            application_lifecycle.capture()
+            application_lifecycle.capture(
+                require_unchanged_baseline=proved_no_effect_retry,
+            )
             if hasattr(application_lifecycle, "execution_recorder"):
                 application_lifecycle.execution_recorder = execution_recorder
         if application_lifecycle is not None or execution_recorder is not None:

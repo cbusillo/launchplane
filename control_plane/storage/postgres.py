@@ -5929,6 +5929,12 @@ class PostgresRecordStore(HumanSessionStore):
                                 DeploymentRecord.model_validate(existing.payload),
                                 DeploymentRecord.model_validate(row.payload),
                             )
+                    self._require_generic_web_no_effect_lifecycle_transition(
+                        DeploymentRecord.model_validate(existing.payload)
+                        if existing is not None
+                        else None,
+                        DeploymentRecord.model_validate(row.payload),
+                    )
                 session.merge(row)
             session.commit()
 
@@ -6001,6 +6007,92 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             raise ValueError("Original execution facts have a different operation.")
 
+    @staticmethod
+    def _has_no_effect_lifecycle_state(record: DeploymentRecord | None) -> bool:
+        from control_plane.workflows.generic_web_application_snapshot import (
+            APPLICATION_LIFECYCLE_EVIDENCE_KEY,
+        )
+
+        if record is None:
+            return False
+        text = record.post_deploy_update.evidence.get(APPLICATION_LIFECYCLE_EVIDENCE_KEY)
+        if not text:
+            return False
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(value, dict) and value.get("state") == "not_started"
+
+    @staticmethod
+    def _require_generic_web_no_effect_lifecycle_transition(
+        previous: DeploymentRecord | None,
+        current: DeploymentRecord,
+        *,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
+        inventory: EnvironmentInventory | None = None,
+    ) -> None:
+        if not (
+            PostgresRecordStore._has_no_effect_lifecycle_state(previous)
+            or PostgresRecordStore._has_no_effect_lifecycle_state(current)
+        ):
+            return
+        from control_plane.workflows.generic_web_application_snapshot import (
+            recorded_application_lifecycle,
+        )
+        from control_plane.workflows.generic_web_execution import execution_receipt
+        from control_plane.workflows.generic_web_deploy import (
+            GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
+        )
+
+        old = recorded_application_lifecycle(previous) if previous is not None else None
+        new = recorded_application_lifecycle(current)
+        was_inert = old is not None and old.state == "not_started"
+        is_inert = new is not None and new.state == "not_started"
+        if not was_inert and not is_inert:
+            return
+        receipt = execution_receipt(current)
+        if (
+            current.instance != "testing"
+            or current.deploy.status not in {"pending", "fail"}
+            or current.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            or receipt is None
+            or receipt.entries
+            or receipt.settled_image_deployment_id
+            or new is None
+            or new.mode != "deploy"
+            or inventory is not None
+        ):
+            raise ValueError("Not-started lifecycle evidence contains effect or publication facts.")
+        if reservation is not None and (
+            reservation.provider_effect_phase or reservation.provider_effect_started_at
+        ):
+            raise ValueError("Not-started lifecycle evidence requires a no-effect execution.")
+        if was_inert == is_inert:
+            return
+        if reservation is None or previous is None or old is None or new is None:
+            raise ValueError(
+                "Not-started lifecycle transitions require checked original publication."
+            )
+        if (is_inert and old.state != "prepared") or (was_inert and new.state != "prepared"):
+            raise ValueError("Not-started lifecycle transition has a different original state.")
+        if current.deploy.status != "pending":
+            raise ValueError("Not-started lifecycle transitions require a pending original.")
+        expected = previous.model_copy(
+            update={
+                "post_deploy_update": previous.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {
+                            **previous.post_deploy_update.evidence,
+                            **old.model_copy(update={"state": new.state}).evidence(),
+                        }
+                    }
+                )
+            }
+        )
+        if is_inert and current != expected:
+            raise ValueError("No-effect retirement changed its original deployment evidence.")
+
     def advance_generic_web_execution_receipt(self, *, record_id: str, receipt_json: str) -> None:
         """Merge only original execution facts, retaining concurrent evidence corrections."""
         from control_plane.workflows.generic_web_execution import (
@@ -6043,9 +6135,11 @@ class PostgresRecordStore(HumanSessionStore):
                     }
                 }
             )
-            row.payload = self._payload_dict(
-                record.model_copy(update={"post_deploy_update": update})
+            updated = record.model_copy(update={"post_deploy_update": update})
+            self._require_generic_web_no_effect_lifecycle_transition(
+                record, updated, reservation=reservation
             )
+            row.payload = self._payload_dict(updated)
             session.commit()
 
     def publish_generic_web_testing_result(
@@ -6076,7 +6170,7 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
-            self.require_current_provider_execution(session, reservation)
+            current_reservation = self.require_current_provider_execution(session, reservation)
             authority_checkpoint = getattr(
                 self._provider_evidence_context, "authority_checkpoint", None
             )
@@ -6130,6 +6224,9 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError("Original execution facts cannot be removed.")
                 assert stored is not None
                 require_execution_record_extension(stored, deployment)
+            self._require_generic_web_no_effect_lifecycle_transition(
+                stored, deployment, reservation=current_reservation, inventory=inventory
+            )
             if deployment != stored:
                 self._invalidate_testing_non_use_in_session(session, context=deployment.context)
                 session.merge(

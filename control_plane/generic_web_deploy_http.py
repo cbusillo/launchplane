@@ -90,6 +90,8 @@ def execute_generic_web_deploy_result(
     before_failure_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     post_deploy_authority_digest: str = "",
     execution_recorder: ExecutionRecorder | None = None,
     publish_deployment: GenericWebDeploymentPublisher | None = None,
@@ -115,6 +117,8 @@ def execute_generic_web_deploy_result(
         before_failure_records_commit=before_failure_records_commit,
         recorded_artifact=recorded_artifact,
         proved_pre_image_retry=proved_pre_image_retry,
+        proved_no_effect_retry=proved_no_effect_retry,
+        established_testing_predecessor=established_testing_predecessor,
     )
     result = _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
     return {"deployment_record_id": driver_result.deployment_record_id}, result
