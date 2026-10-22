@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 
+from control_plane.config_authority_audit import WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES
 from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
 from control_plane.workflows.launchplane_self_deploy import _RETIRED_WORK_GRAPH_ENV_KEYS
@@ -101,17 +102,24 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                             "DOCKER_STATUS": str(docker_status),
                         },
                         directory,
-                        expression_values={"${{ secrets.GITHUB_TOKEN }}": token},
+                        expression_values={
+                            expression: token
+                            for expression in WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES[
+                                ".github/workflows/deploy-launchplane.yml"
+                            ]["DEFAULT_GITHUB_TOKEN"]
+                        },
                     )
                     if not token:
                         self.assertNotEqual(result.returncode, 0)
                         self.assertFalse((directory / "docker-args").exists())
                         continue
                     self.assertEqual(result.returncode, docker_status, result.stderr)
-                    self.assertEqual(
-                        (directory / "docker-args").read_text().splitlines(),
-                        ["login", "ghcr.io", "--username", actor, "--password-stdin"],
-                    )
+                    arguments = (directory / "docker-args").read_text().splitlines()
+                    self.assertEqual(arguments[0], "login")
+                    self.assertIn("ghcr.io", arguments)
+                    self.assertIn("--password-stdin", arguments)
+                    self.assertEqual(arguments[arguments.index("--username") + 1], actor)
+                    self.assertNotIn(token, arguments)
                     self.assertEqual((directory / "docker-password").read_text(), token)
                     self.assertNotIn(token, result.stdout + result.stderr)
 
