@@ -147,13 +147,21 @@ Generic-web deploy recovery dry runs authorize the instance-scoped
 compatibility alternative. The authenticated Director agent inherits this inert
 plan permission. Both the current lane and the stored original lane must pass
 authorization; exact request, reference, reservation and target checks remain.
-Apply retains `generic_web_deploy.execute` for production, foreign originals and
+Apply retains `generic_web_deploy.execute` for production, foreign caller originals and
 other identities. The authenticated service-marked Director `local_operator`
 may instead recover its own exact native testing original on the current owned
 lane. The stored caller scope, original route, key, fingerprint, product,
 context and captured target must agree; a current target or caller ownership
 claim alone cannot establish ownership. This route-local alternative does not
 classify the mixed execute action as standing permission.
+The same service-marked Director `local_operator` may use an exact event reference
+to abandon an eligible reconcile-owned testing original and replay that completed
+abandonment. This path admits only `abandon_testing_original`, after read-only
+inspection and before any write branch. This inspection reads the same evidence
+as the already-permitted inert dry run. It does not grant retry, adoption,
+settlement, close-out or foreign-caller recovery authority. Existing testing-only,
+no-cutover, hold, protection, target/reference/digest, execution exclusion and
+journal-custody checks remain required; the original provider history stays unknown.
 Adoption, terminal settlement and completed replay retain their existing proof
 requirements without renewed disposable qualification. New forward retry work
 requires fresh disposable-lane facts and rechecks them at effect admission;
