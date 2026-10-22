@@ -167,11 +167,10 @@ test("an approved operation offers revocation rather than pending-plan cancellat
 });
 
 for (const status of ["planned", "approved"]) {
-  test(`a read-only browser session has no ${status} operation controls`, async ({ page }) => {
+  test(`a read-only browser session retains ${status} review actions without cancellation`, async ({ page }) => {
     const state = await fixture(page, { readOnly: true, status });
     await expect(page.locator(".privileged-operation-status")).toHaveText(status);
-    await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Revoke approval", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: status === "planned" ? "Approve plan" : "Revoke approval", exact: true })).toBeEnabled();
     await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
     await expect(page.getByLabel("Reason for cancellation")).toHaveCount(0);
     expect(state.mutations).toEqual([]);

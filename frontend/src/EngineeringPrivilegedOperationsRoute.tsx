@@ -899,7 +899,7 @@ function PrivilegedOperationPlanCard({
         </section>
       ) : null}
 
-      {admin && !cancelled && (review.can_approve || review.can_revoke) ? (
+      {!cancelled && (review.can_approve || review.can_revoke) ? (
         <div className="privileged-operation-actions">
           {review.can_approve ? (
             <button type="button" disabled={pendingMutation || cancelEventId.current !== null || (isAgentPolicyProposal && !proposalMatches)} onClick={() => void mutate("approve")}>
