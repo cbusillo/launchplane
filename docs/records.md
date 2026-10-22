@@ -950,6 +950,16 @@ authority. Repository mappings retain its real product id and classification;
 ambiguous active repositories are named in `ambiguous_repositories` and omitted
 from the mapping, including its work-request fallback. Other entries stay available.
 
+Before reviewing a registration, confirm that the canonical repository has one
+current tracked [repository-inventory record](#repository-inventory) and that the
+configured [Delivery App](operations.md#github-delivery-identity) already has the
+required read capabilities for that repository. Planning and apply use this
+repository-scoped credential to verify the Client's GitHub identity. Inventory
+records do not install the App or grant access. Missing inventory or unavailable
+installation credentials stops registration; use the existing
+[repository-inventory administration](operations.md#repository-inventory) and
+Delivery App procedures rather than another credential source.
+
 In Product Ops, a signed-in admin opens **Register a Director product**, enters
 its key, name, repository and Client GitHub identity, and explicitly confirms
 that the Client is the Director. **Review registration** writes nothing;

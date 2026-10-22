@@ -13726,6 +13726,15 @@ def create_launchplane_fastapi_app(
         try:
             profile = LaunchplaneProductProfileRecord.model_validate(raw_payload)
         except ValidationError as error:
+            for validation_error in error.errors():
+                domain_error = validation_error.get("ctx", {}).get("error")
+                if isinstance(domain_error, NonruntimeClientUnsupportedError):
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code=domain_error.code,
+                        message=str(domain_error),
+                    ) from error
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,

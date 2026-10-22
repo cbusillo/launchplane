@@ -18,7 +18,7 @@ for (const outcome of ["saved", "lost-reply", "storage-failure", "readback-failu
     });
     await page.route("**/v1/product-onboarding/apply", async route => {
       const body = route.request().postDataJSON();
-      const planned = { ...body.manifest, lifecycle_state: "active", lanes: [], updated_at: "2026-10-22T12:00:00Z", source: "fixture" };
+      const planned = { ...body.manifest, owner: { ...body.manifest.owner, github_login: "director" }, lifecycle_state: "active", lanes: [], updated_at: "2026-10-22T12:00:00Z", source: "fixture" };
       if (body.mode === "apply") {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
         profile = planned;
@@ -98,7 +98,7 @@ async function fillRegistration(page: Page): Promise<void> {
   await page.getByLabel("Product key", { exact: true }).fill("desktop-tool");
   await page.getByLabel("Product name", { exact: true }).fill("Desktop tool");
   await page.getByLabel("Repository", { exact: true }).fill("example/desktop-tool");
-  await page.getByLabel("Client GitHub login", { exact: true }).fill("director");
+  await page.getByLabel("Client GitHub login", { exact: true }).fill(" @DiReCtOr ");
   await page.getByLabel("Client GitHub ID", { exact: true }).fill("1234");
   await page.getByLabel("The recorded Client is the Director and accepts this product under standing direction.").check();
 }

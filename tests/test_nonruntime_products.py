@@ -46,6 +46,10 @@ from control_plane.workflows.generic_web_deploy import (
     resolve_generic_web_profile_lane,
 )
 from control_plane.product_promotion_http import resolve_product_promotion_target
+from control_plane.product_owner_setting import (
+    ProductOwnerIdentity,
+    updated_product_owner_profile,
+)
 from control_plane.release_invitation import publish_release_invitation
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.product_onboarding import product_onboarding_manifest_plan_sha256
@@ -498,6 +502,47 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.json()["error"]["message"], str(domain_error))
             self.assertEqual(store.list_product_profile_records(), ())
+
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            retired = LaunchplaneProductProfileRecord.model_validate(
+                {**inert_profile().model_dump(mode="json"), "lifecycle_state": "retired"}
+            )
+            profile = updated_product_owner_profile(
+                profile=retired,
+                resolved_owner=ProductOwnerIdentity(github_login="other-client", github_id="5678"),
+                updated_at=retired.updated_at,
+            )
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(identity()),
+                authz_policy=_product_config_policy(
+                    action="product_profile.write", product=profile.product, context="launchplane"
+                ),
+                record_store_factory=lambda: store,
+            )
+            payload = profile.model_dump(mode="json")
+            for changes, status in (({}, 202), ({"lifecycle_state": "active"}, 400)):
+                with self.subTest(changes=changes):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-profiles",
+                        headers={"Authorization": "Bearer valid-token"},
+                        payload={**payload, **changes},
+                    )
+                    self.assertEqual(response.status_code, status, response.text)
+                    if changes:
+                        self.assertEqual(
+                            response.json()["error"]["code"], NonruntimeClientUnsupportedError.code
+                        )
+                        self.assertEqual(response.json()["error"]["message"], str(domain_error))
+                    self.assertEqual(store.read_product_profile_record(profile.product), profile)
 
     async def test_expected_config_cannot_poison_nonruntime_profile_inventory(self) -> None:
         with _database_app(LaunchplaneAuthzPolicy(), director_agent=True) as (store, _, app):
