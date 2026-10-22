@@ -185,7 +185,9 @@ schema fixtures, bootstrap wiring, and explicitly allowed thin connector
 mechanics are reported with allow reasons instead of blocking the default gate.
 Repository review metadata such as CODEOWNERS and `.github/github.json`
 `reviewPolicy` fields is classified as repository ergonomics rather than
-runtime authority. Shell-local filesystem paths such as
+runtime authority. So is a root or `.github/` `renovate.json`: its schema
+URL, shared preset references and package names configure dependency updates,
+not runtime authority. Shell-local filesystem paths such as
 `/var/run/docker.sock` and `/dev/null` are not interpreted as GitHub
 owner/repository identities, while package scripts using explicit local paths
 such as `./node_modules/.bin/...` are not treated as repository authority.

@@ -1076,6 +1076,40 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(by_key["launchplane.lanes.testing.url"]["allow_reason"], "")
         self.assertEqual(by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], "")
 
+    def test_renovate_config_is_repo_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            (root / "renovate.json").write_text(
+                json.dumps(
+                    {
+                        "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+                        "extends": ["github>example-owner/shared-config//renovate/default"],
+                        "packageRules": [
+                            {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        renovate_findings = [
+            finding for finding in _findings(payload) if finding["path"] == "renovate.json"
+        ]
+        self.assertEqual(
+            {finding["key"] for finding in renovate_findings},
+            {"$schema", "extends[0]", "packageRules[0].matchPackageNames[1]"},
+        )
+        self.assertTrue(
+            all(
+                finding["allow_reason"] == "repo_metadata_ergonomics"
+                for finding in renovate_findings
+            )
+        )
+
     def test_codeowners_and_local_filesystem_paths_are_repo_mechanics(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
