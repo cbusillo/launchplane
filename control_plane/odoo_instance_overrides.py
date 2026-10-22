@@ -15,7 +15,10 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_target_owner_products,
+)
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployAddonSetting
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployConfigParameter
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
@@ -154,9 +157,7 @@ def production_shopify_store_keys(
         return ()
     protected: list[str] = []
     for candidate in profiles:
-        if not any(
-            lane.context == context and lane.instance == instance for lane in candidate.lanes
-        ):
+        if not product_target_owner_products((candidate,), context=context, instance=instance):
             continue
         for lane in candidate.lanes:
             if not odoo_instance_is_production(lane.instance):
@@ -164,7 +165,10 @@ def production_shopify_store_keys(
             try:
                 record = cast(
                     OdooInstanceOverrideRecord,
-                    read_override(context_name=lane.context, instance_name=lane.instance),
+                    read_override(
+                        context_name=lane.context.strip().lower(),
+                        instance_name=lane.instance.strip(),
+                    ),
                 )
             except FileNotFoundError:
                 continue

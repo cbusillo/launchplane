@@ -165,6 +165,58 @@ def _request(**kwargs: object) -> OdooAddonSettingsApplyRequest:
 
 
 class OdooAddonSettingsPlanTests(unittest.TestCase):
+    def test_apply_refuses_production_store_with_padded_stored_lane_names(self) -> None:
+        for instance, padding in (
+            ("testing", {"context": " CM\t"}),
+            ("testing", {"instance": " testing\n"}),
+            ("prod", {"context": " CM\t"}),
+            ("prod", {"instance": " prod\n"}),
+        ):
+            with (
+                self.subTest(instance=instance, padding=padding),
+                TemporaryDirectory() as directory,
+            ):
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                _seed_lane(store, protected_keys=())
+                profile = store.read_product_profile_record(_PRODUCT)
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane.model_copy(update=padding)
+                                if lane.instance == instance
+                                else lane
+                                for lane in profile.lanes
+                            )
+                        }
+                    )
+                )
+                plan, _, replacement = build_odoo_addon_settings_plan(
+                    record_store=store, request=_request()
+                )
+                production = _existing_record("prod").model_copy(
+                    update={
+                        "addon_settings": tuple(
+                            setting
+                            for setting in replacement.addon_settings
+                            if setting.setting == "shop_url_key"
+                        )
+                    }
+                )
+                store.write_odoo_instance_override_record(production)
+                with self.assertRaises(ClickException):
+                    build_post_deploy_environment(replacement, record_store=store)
+                with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                    apply_odoo_addon_settings_plan(
+                        record_store=store,
+                        request=_request(mode="apply", reviewed_plan_sha256=plan.plan_sha256),
+                    )
+                self.assertEqual(raised.exception.code, "protected_store_key")
+                with self.assertRaises(FileNotFoundError):
+                    store.read_odoo_instance_override_record(
+                        context_name=_CONTEXT, instance_name="testing"
+                    )
+
     def test_apply_refuses_retained_production_store_parameter_without_writing(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
