@@ -66,9 +66,12 @@ def _seed_lane(
     write_target: bool = True,
     integration: str = "runtime_environment",
 ) -> None:
-    store.write_product_profile_record(
-        LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane())
-    )
+    try:
+        store.read_product_profile_record(_PRODUCT)
+    except FileNotFoundError:
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane())
+        )
     if write_target:
         store.write_dokploy_target_record(
             DokployTargetRecord(
