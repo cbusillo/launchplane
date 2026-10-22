@@ -15,7 +15,7 @@ import io
 import json
 import os
 import unittest
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1946,6 +1946,231 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         return payload, triggered
+
+    def test_inert_inventory_correction_gets_one_reconcile_successor(self) -> None:
+        self.check_inert_inventory_correction()
+
+    def test_inert_inventory_correction_preserves_lifecycle_before_successor(self) -> None:
+        self.check_inert_inventory_correction(lifecycle=True)
+
+    def test_inert_inventory_completion_failure_keeps_original_fence(self) -> None:
+        self.check_inert_inventory_correction(completion_failure=True)
+
+    def test_unknown_inventory_successor_stays_fenced_after_another_correction(self) -> None:
+        self.check_inert_inventory_correction(unknown_successor=True)
+
+    def check_inert_inventory_correction(
+        self,
+        *,
+        lifecycle: bool = False,
+        completion_failure: bool = False,
+        unknown_successor: bool = False,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
+        from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+        from control_plane.workflows.generic_web_execution import evidence_digest, execution_receipt
+
+        payload, triggered = self.application_input_provider()
+        schedule = self.application_input_schedule() if lifecycle else None
+        self.github.add_run(10, OLDER)
+        self.request()
+        self.reconcile()
+        previous_schedule_calls = (
+            list(cast(Any, api.upsert_dokploy_application_schedule).call_args_list)
+            if lifecycle
+            else []
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        corrected = inventory.model_copy(
+            update={
+                "post_deploy_update": inventory.post_deploy_update.model_copy(
+                    update={"detail": "Independently corrected inventory evidence"}
+                )
+            }
+        )
+        previous_ids = {record.record_id for record in self.store.list_deployment_records()}
+        previous_payload = dict(payload)
+        previous_triggers = list(triggered)
+        previous_provider_calls = list(cast(Any, api.dokploy_request).call_args_list)
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def correct_before_checkpoint(**arguments: Any) -> Any:
+            with closing(
+                PostgresRecordStore(
+                    database_url=getattr(self, "database_url", "")
+                    or sqlite_database_url(self.root / "lp.sqlite3")
+                )
+            ) as writer:
+                writer.write_environment_inventory(corrected)
+            return checkpoint(**arguments)
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with (
+            patch.object(
+                self.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=correct_before_checkpoint,
+            ),
+            (
+                patch.object(
+                    self.store,
+                    "complete_mutation_reservation",
+                    side_effect=RuntimeError("Completion unavailable"),
+                )
+                if completion_failure
+                else nullcontext()
+            ),
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed", refused.last_plan)
+        self.assertEqual(payload, previous_payload)
+        self.assertEqual(triggered, previous_triggers)
+        self.assertEqual(cast(Any, api.dokploy_request).call_args_list, previous_provider_calls)
+        (original,) = (
+            record
+            for record in self.store.list_deployment_records()
+            if record.record_id not in previous_ids
+        )
+        receipt = execution_receipt(original)
+        assert receipt is not None
+        self.assertEqual(receipt.entries, ())
+        self.assertEqual(
+            receipt.inventory_baseline_digest, evidence_digest(inventory.model_dump(mode="json"))
+        )
+        self.assertEqual(
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing"),
+            corrected,
+        )
+        if schedule is not None:
+            self.assertEqual(self.input_schedule, schedule)
+            self.assertEqual(
+                cast(Any, api.upsert_dokploy_application_schedule).call_args_list,
+                previous_schedule_calls,
+            )
+        if completion_failure:
+            (held_original,) = self.store.list_held_provider_target_reservations()
+            original_key = held_original.idempotency_key
+        else:
+            original_key = cast(str, refused.last_plan["deploy_idempotency_key"])
+        completed = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=original_key,
+        )
+        assert completed is not None
+        if completion_failure:
+            self.assertFalse(testing_attempt_was_settled(completed))
+            self.assertEqual(
+                [row.record_id for row in self.store.list_held_provider_target_reservations()],
+                [completed.record_id],
+            )
+            for _ in range(2):
+                self.request()
+                repeated = self.run_once()
+                self.assertNotEqual(repeated.state, "done")
+                self.assertEqual(
+                    [row.record_id for row in self.store.list_held_provider_target_reservations()],
+                    [completed.record_id],
+                )
+                self.assertEqual(triggered, previous_triggers)
+                self.assertEqual(payload, previous_payload)
+                self.assertEqual(
+                    cast(Any, api.dokploy_request).call_args_list, previous_provider_calls
+                )
+                self.assertEqual(
+                    execution_receipt(self.store.read_deployment_record(original.record_id)),
+                    receipt,
+                )
+                self.assertEqual(
+                    self.store.read_environment_inventory(
+                        context_name="cm", instance_name="testing"
+                    ),
+                    corrected,
+                )
+            return
+        self.assertTrue(testing_attempt_was_settled(completed))
+        result = GenericWebDeployResult.model_validate(completed.response_payload["result"])
+        self.assertEqual(result.deployment_record_id, original.record_id)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.request()
+        if unknown_successor:
+            with patch.object(
+                api,
+                "wait_for_target_deployment",
+                side_effect=ProviderMutationUnknownError("Lost successor dispatch outcome"),
+            ):
+                self.assertEqual(self.run_once().state, "failed")
+            (held,) = self.store.list_held_provider_target_reservations()
+            self.assertNotEqual(held.idempotency_key, completed.idempotency_key)
+            self.assertTrue(held.provider_effect_started_at)
+            self.assertEqual(len(triggered), len(previous_triggers) + 1)
+            unknown_payload = dict(payload)
+            unknown_calls = list(cast(Any, api.dokploy_request).call_args_list)
+            later_correction = corrected.model_copy(
+                update={
+                    "post_deploy_update": corrected.post_deploy_update.model_copy(
+                        update={"detail": "Another independent evidence correction"}
+                    )
+                }
+            )
+            self.store.write_environment_inventory(later_correction)
+            self.request()
+            with patch.object(
+                self.application_inputs_provider,
+                "observe_artifact_deploy",
+                return_value=GenericWebProviderDeploymentObservation(outcome="unknown"),
+            ):
+                self.assertNotEqual(self.run_once().state, "done")
+            (retained,) = self.store.list_held_provider_target_reservations()
+            self.assertEqual(retained.record_id, held.record_id)
+            self.assertEqual(retained.idempotency_key, held.idempotency_key)
+            self.assertEqual(retained.provider_effect_phase, held.provider_effect_phase)
+            self.assertEqual(len(triggered), len(previous_triggers) + 1)
+            self.assertEqual(payload, unknown_payload)
+            self.assertEqual(cast(Any, api.dokploy_request).call_args_list, unknown_calls)
+            self.assertEqual(
+                execution_receipt(self.store.read_deployment_record(original.record_id)), receipt
+            )
+            return
+        successor = self.run_once()
+        self.assertEqual(successor.state, "done", successor.last_error)
+        self.assertNotEqual(
+            successor.last_plan["deploy_idempotency_key"],
+            refused.last_plan["deploy_idempotency_key"],
+        )
+        self.assertEqual(len(triggered), len(previous_triggers) + 1)
+        successor_record = self.store.read_deployment_record(
+            cast(str, successor.last_plan["deployment_record_id"])
+        )
+        successor_receipt = execution_receipt(successor_record)
+        assert successor_receipt is not None
+        self.assertEqual(
+            successor_receipt.inventory_baseline_digest,
+            evidence_digest(corrected.model_dump(mode="json")),
+        )
+        self.assertEqual(
+            execution_receipt(self.store.read_deployment_record(original.record_id)), receipt
+        )
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name="cm", instance_name="testing"
+            ).source_git_ref,
+            DEPLOYABLE,
+        )
+        successful_provider_calls = list(cast(Any, api.dokploy_request).call_args_list)
+        successful_payload = dict(payload)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        self.assertEqual(len(triggered), len(previous_triggers) + 1)
+        self.assertEqual(payload, successful_payload)
+        self.assertEqual(cast(Any, api.dokploy_request).call_args_list, successful_provider_calls)
 
     def prepare_application_runtime_test(self) -> list[str]:
         _payload, triggered = self.application_input_provider()
