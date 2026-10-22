@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 import inspect
 import json
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_CODE
 from control_plane.dokploy import native_copy_stream
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.storage.factory import resolve_database_url
@@ -14,7 +16,29 @@ PREVIEW_MEMORY_FLOORS_KEY = "LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS"
 
 
 class PreviewMemoryCapacityRefused(ValueError):
-    pass
+    code = PREVIEW_MEMORY_FAILURE_CODE
+
+    def __init__(
+        self, message: str, *, floor: int | None = None, headroom: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.floor = floor
+        self.headroom = headroom
+
+    def plan_values(self) -> dict[str, object]:
+        return {
+            "preview_memory_floor_bytes": self.floor,
+            "preview_memory_headroom_bytes": self.headroom,
+        }
+
+
+def preview_memory_failure_details(plan: Mapping[str, object]) -> str:
+    floor = plan.get("preview_memory_floor_bytes")
+    headroom = plan.get("preview_memory_headroom_bytes")
+    if type(floor) is not int or floor <= 0:
+        return " Configured floor unavailable; current headroom unavailable."
+    current = f"{headroom} bytes" if type(headroom) is int and headroom >= 0 else "unavailable"
+    return f" Floor: {floor} bytes; current headroom: {current}."
 
 
 def observe_memory_headroom(proc_root: Path, cgroup_root: Path) -> int:
@@ -157,9 +181,12 @@ def require_preview_host_memory_capacity(
         headroom = read_host_memory_headroom(host=host, token=token, server_id=server_id)
     except PreviewMemoryCapacityRefused:
         raise PreviewMemoryCapacityRefused(
-            f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom unavailable."
+            f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom unavailable.",
+            floor=floor,
         ) from None
     if headroom < floor:
         raise PreviewMemoryCapacityRefused(
-            f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom {headroom} bytes. Retry when headroom recovers."
+            f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom {headroom} bytes. Retry when headroom recovers.",
+            floor=floor,
+            headroom=headroom,
         )

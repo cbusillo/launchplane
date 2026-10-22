@@ -11,6 +11,7 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Protocol, cast
 
 import click
+from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -1032,6 +1033,10 @@ def build_generic_web_write_route_handlers(
                         except asyncio.CancelledError:
                             continue
                     records, result = refresh_task.result()
+            except PreviewMemoryCapacityRefused as error:
+                raise dependencies.http_error(
+                    status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+                ) from None
             except (ValueError, click.ClickException) as error:
                 raise dependencies.http_error(
                     status_code=400,

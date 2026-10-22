@@ -4850,6 +4850,14 @@ class GenericWebHttpTests(unittest.TestCase):
                 refresh.assert_called_once()
 
     def test_generic_web_preview_refresh_retry_runs_again_after_blocked_result(self) -> None:
+        self._assert_preview_refresh_retries(memory_refusal=False)
+
+    def test_preview_memory_refusal_is_clear_and_same_key_can_retry(self) -> None:
+        self._assert_preview_refresh_retries(memory_refusal=True)
+
+    def _assert_preview_refresh_retries(self, *, memory_refusal: bool) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -4913,7 +4921,11 @@ class GenericWebHttpTests(unittest.TestCase):
                         "application_id": "",
                         "preview_url": "https://pr-42.example.test",
                         "error_message": "Generic web preview readiness blocked refresh.",
-                    },
+                    }
+                    if not memory_refusal
+                    else PreviewMemoryCapacityRefused(
+                        "Floor 5000 bytes; current headroom 4999 bytes"
+                    ),
                     {
                         "refresh_status": "pass",
                         "refresh_started_at": "2026-05-03T15:06:00Z",
@@ -4942,8 +4954,12 @@ class GenericWebHttpTests(unittest.TestCase):
                     headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
                 )
 
-        self.assertEqual(first_status_code, 202)
-        self.assertEqual(first_payload["result"]["refresh_status"], "blocked")
+        self.assertEqual(first_status_code, 409 if memory_refusal else 202)
+        if memory_refusal:
+            self.assertIn("5000", first_payload["error"]["message"])
+            self.assertIn("4999", first_payload["error"]["message"])
+        else:
+            self.assertEqual(first_payload["result"]["refresh_status"], "blocked")
         self.assertEqual(second_status_code, 202)
         self.assertEqual(second_payload["result"]["refresh_status"], "pass")
         self.assertNotIn("replayed", second_payload)

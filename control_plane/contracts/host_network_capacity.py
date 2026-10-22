@@ -10,6 +10,12 @@ HOST_BRIDGE_NETWORK_FAILURE_MESSAGES = {
 }
 
 
+PREVIEW_MEMORY_FAILURE_CODE = "preview_memory_admission_refused"
+PREVIEW_MEMORY_FAILURE_MESSAGES = {
+    PREVIEW_MEMORY_FAILURE_CODE: "New preview admission was refused because execution-host memory could not meet or verify its configured floor.",
+}
+
+
 class BridgeNetworkCapacity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

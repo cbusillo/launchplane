@@ -1627,7 +1627,7 @@ def _execute_generic_web_preview_refresh_unserialized(
         lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
-    except (click.ClickException, memory_capacity.PreviewMemoryCapacityRefused) as exc:
+    except click.ClickException as exc:
         rollback_errors: list[str] = []
         if created_domain_id:
             try:
