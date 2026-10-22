@@ -835,6 +835,51 @@ class RehearsalScenario(unittest.TestCase):
             comparison_limit, post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS
         )
 
+    def test_rendered_rehearsal_services_resolve_product_settings_from_the_shared_environment(
+        self,
+    ) -> None:
+        import yaml
+        from pydantic import BaseModel, Field, SecretStr
+
+        class ProductSettings(BaseModel):
+            database_host: str = Field(alias="ODOO_DB_HOST")
+            database_name: str = Field(alias="ODOO_DB_NAME")
+            database_user: str = Field(alias="ODOO_DB_USER")
+            database_password: SecretStr = Field(alias="ODOO_DB_PASSWORD")
+            platform_instance: str = Field(alias="PLATFORM_INSTANCE")
+            filestore_path: Path = Field(alias="ODOO_FILESTORE_PATH")
+
+        spec = rehearsal_host_spec(
+            self.record.model_copy(update={"compose_id": "own-compose"}),
+            "validate-business",
+            "apply",
+            self.source,
+            self.shape,
+            {"ODOO_DB_PASSWORD": "fixture-password"},
+        )
+        database = self.identifier.replace("-", "_") + "_final_upgrade"
+        supplied = {**cast(dict[str, str], spec["environment"]), "ODOO_DB_NAME": database}
+        for compose in cast(dict[str, str], spec["compose"]).values():
+            services = yaml.safe_load(compose)["services"]
+            for name, service in services.items():
+                if name == "database":
+                    continue
+                environment = {}
+                for key, value in service["environment"].items():
+                    match = re.fullmatch(r"\$\{(\w+)(?::[-?](.*))?\}", str(value))
+                    environment[key] = supplied.get(match[1], match[2] or "") if match else value
+                with self.subTest(service=name):
+                    settings = ProductSettings.model_validate(environment)
+                    self.assertEqual(settings.database_host, "database")
+                    self.assertEqual(settings.database_name, database)
+                    self.assertEqual(settings.platform_instance, "rehearsal")
+                    data_mount = next(
+                        volume.split(":")[1]
+                        for volume in service["volumes"]
+                        if volume.split(":")[0] == "odoo_data"
+                    )
+                    self.assertEqual(settings.filestore_path, Path(data_mount) / "filestore")
+
     def test_artifact_from_another_product_cannot_receive_copied_data(self) -> None:
         assert self.manifests[1].source_build is not None
         changed = self.manifests[1].model_copy(

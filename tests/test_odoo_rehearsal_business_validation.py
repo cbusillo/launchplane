@@ -576,6 +576,7 @@ class BusinessValidationHostTests(unittest.TestCase):
                 + b"\n"
             )
 
+        self.native_product_command = self.host["product_command"]
         self.host["product_command"] = product_command
 
     def test_native_entrypoint_retains_original_receipt_and_never_replays_a_lost_reply(
@@ -760,17 +761,45 @@ class BusinessValidationHostTests(unittest.TestCase):
             self.assertTrue(observed["custody"]["effect_started"])
             self.assertNotIn("copied customer", str(observed))
 
-    def test_failed_noisy_or_hung_product_does_not_expose_output_or_hold_host_forever(self) -> None:
+    def test_failed_product_retains_redacted_stderr_under_original_custody(self) -> None:
+        import sys
+
+        self.spec["environment"] = {"ODOO_DB_PASSWORD": "fixture-private-password"}
+
+        def fail(arguments: list[str], *, stdin: bytes | None = None) -> bytes:
+            script = (
+                "import sys; print('copied customer'); sys.stderr.write('x' * 200000 + '\\n'); "
+                "print('ValidationError: ODOO_FILESTORE_PATH is required; "
+                "fixture-private-password; TOKEN=fixture-token', file=sys.stderr); "
+                "print('DETAIL: copied row', file=sys.stderr); sys.exit(9)"
+            )
+            return cast(bytes, self.native_product_command([sys.executable, "-c", script]))
+
+        with patch.dict(self.host, {"product_command": fail}):
+            with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                self.fixture.run_host(self.spec)
+        observed = self.fixture.run_host({**self.spec, "mode": "observe", "inspect_capture": True})
+        diagnostic = observed["child_failure"]
+        self.assertIn("ValidationError: ODOO_FILESTORE_PATH is required", diagnostic["error_text"])
+        self.assertEqual(diagnostic["exit_status"], 9)
+        self.assertEqual(diagnostic["step"], "business_validation")
+        self.assertEqual(diagnostic["attempt_sha256"], self.spec["attempt_sha256"])
+        for private in (
+            "copied customer",
+            "copied row",
+            "fixture-private-password",
+            "fixture-token",
+        ):
+            self.assertNotIn(private, diagnostic["error_text"])
+        self.assertFalse(observed["completed"])
+
+    def test_noisy_or_hung_product_does_not_hold_host_forever(self) -> None:
         import sys
 
         helper = rehearsal_tests.RehearsalHostSafetyTests()
         helper.setUp()
         self.addCleanup(helper.doCleanups)
         cases: tuple[tuple[str, dict[str, int]], ...] = (
-            (
-                "import sys; print('copied customer'); print('private traceback', file=sys.stderr); sys.exit(9)",
-                {},
-            ),
             (
                 "print('copied customer' * "
                 + str(helper.host["PRODUCT_COMMAND_OUTPUT_MAX_BYTES"])
@@ -789,7 +818,14 @@ class BusinessValidationHostTests(unittest.TestCase):
             self.assertNotIn("copied customer", str(failure.exception.diagnostic))
             self.assertNotIn("private traceback", str(failure.exception.diagnostic))
         self.assertEqual(
-            helper.host["product_command"]([sys.executable, "-c", "print('receipt')"]), b"receipt\n"
+            helper.host["product_command"](
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('trace', file=sys.stderr); print('receipt')",
+                ]
+            ),
+            b"receipt\n",
         )
 
 
