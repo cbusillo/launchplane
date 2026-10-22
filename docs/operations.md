@@ -861,12 +861,53 @@ truthful historical original result while leaving that inventory unchanged.
 Automatic observation is read-only and can adopt only an already saved qualified
 result with matching durable inventory; adoption compares both again in the
 reservation transaction. Other scopes retain direct reviewed-evidence adoption.
+`abandon_testing_original` is a separate, explicit testing-only disposition for
+an exact held event-reconciler original. It requires a `reconcile_required`
+reservation after a post-deploy checkpoint, one unfinished final in-process
+product verifier, terminal preceding provider effects, and the exact original
+successful image deployment. The original lifecycle must retain its prepared
+or held deployment baseline. Production, another lane's target, a staff or
+staging hold, recorded protected use/data/resources, an active worker, unknown
+schedule work, missing receipts or changed evidence refuse abandonment.
+
+Apply holds the product serializer, the original target's execution lock and
+the existing testing authority guard. It rechecks the review and atomically
+completes only the original reservation with a failure receipt. The archive
+contains the original journal and deployment verbatim, `original_outcome:
+unknown`, and possible fixture residue. It changes no provider resource,
+deployment, inventory, lifecycle or execution evidence; it invents no terminal
+fact for the verifier. It neither restores nor enables schedules. The ordinary
+testing reconciler can then deploy its recorded current main, carry the
+captured lifecycle baseline forward and run normal product qualification.
+An equal desired key receives the existing deterministic successor key.
+
+This rebuild keeps the existing testing database. It does not erase or reseed
+data, allocate an independent PostgreSQL recipient, qualify the failed image,
+or promote production. Independent application allocation continues to use
+[testing separation and activation](testing-activation.md); its PostgreSQL
+prerequisite remains separate.
+
+Use `scripts/abandon-generic-web-testing.py` with the installed operator
+transport, an outside-checkout request containing `product`, `instance:
+testing`, the fresh service-owned `recovery_reference`, and `reason`, and a new
+private evidence path. Run `dry-run`, review its proposed action, then `apply
+--reviewed-dry-run` and `readback` with the same request and evidence files.
+The script binds the review to the request and configured service. Apply
+automatically reads the completed original back; explicit readback calls only
+the dry-run endpoint and never applies. A lost apply response retains the
+request and review. Its retained reference reads only that immutable
+abandonment, even after another deployment starts; a missing held reference
+alone never proves completion. The installed generic recovery apply helper
+does not yet admit this new action, so use this repository client from the
+deployed source revision.
+
 `settle_testing_failure` requires attributable terminal execution and runs only
 the original schedule hold before publishing truthful failure. Its HTTP 202
 recovery envelope preserves the original failed HTTP 502 result and replays
 without effects. An unqualified healthy image retains its separate image fact;
 settlement never creates a successful lane projection. Missing execution proof
-stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+stays `hold_unknown` outside the explicit testing abandonment above, even if
+cleanup is the last saved phase. Receiptless legacy
 `records_commit` alone does not prove image-only work: a current configuration
 without an executor does not establish what the original required. Such originals
 need attributable terminal proof. Where the provider cannot supply it,

@@ -946,12 +946,14 @@ class OriginalExecutionTests(unittest.TestCase):
 
 
 class ExecutionRecoveryTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+            database_url=self.database_url or f"sqlite+pysqlite:///{self.root / 'records.db'}"
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()

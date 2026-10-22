@@ -154,6 +154,7 @@ class _GenericWebDeployRecoveryInspection:
     adapter: GenericWebDeployProviderMutationAdapter | None = None
     provider_inspection: Any | None = None
     standing_testing_permission: bool = False
+    abandonment_evidence: dict[str, Any] | None = None
 
     @property
     def recovery_digest(self) -> str:
@@ -179,9 +180,19 @@ class _GenericWebDeployRecoveryInspection:
             payload["legacy_correlation"] = self.legacy_correlation_digest_evidence
         if self.runtime_close_out_evidence is not None:
             payload["runtime_close_out"] = self.runtime_close_out_evidence.model_dump(mode="json")
+        if self.abandonment_evidence is not None:
+            payload["testing_abandonment"] = self.abandonment_evidence
         return payload
 
     def dry_run_response(self) -> GenericWebDeployRecoveryDryRunResponse:
+        metadata = _stored_recovery_metadata(self.reservation)
+        digest = (
+            metadata[0]
+            if self.reservation.state == "completed"
+            and metadata is not None
+            and metadata[1] == "abandon_testing_original"
+            else self.recovery_digest
+        )
         return GenericWebDeployRecoveryDryRunResponse(
             product=self.product,
             context=self.context,
@@ -203,7 +214,7 @@ class _GenericWebDeployRecoveryInspection:
             provider_status=self.provider_status,
             retry_safe=self.retry_safe,
             proposed_action=self.proposed_action,
-            recovery_digest=self.recovery_digest,
+            recovery_digest=digest,
         )
 
 
@@ -306,6 +317,7 @@ def _stored_recovery_metadata(
             | "retry_original_operation"
             | "close_out_observed"
             | "settle_testing_failure"
+            | "abandon_testing_original"
             | "hold_unknown"
         ):
             return digest, action
@@ -433,6 +445,112 @@ def _apply_runtime_close_out(
             message="Generic web deploy recovery reservation changed before close-out.",
         )
     return _apply_response(trace_id=trace_id, inspection=inspection, reservation=close_out.record)
+
+
+def _apply_testing_abandonment(
+    *,
+    trace_id: str,
+    inspection: _GenericWebDeployRecoveryInspection,
+    store: PostgresRecordStore,
+    dependencies: GenericWebDeployRecoveryDependencies,
+) -> GenericWebDeployRecoveryApplyResponse:
+    from control_plane.generic_web_testing_abandonment import inspect_testing_abandonment
+    from control_plane.generic_web_testing_exclusion import bind_testing_recipient
+    from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
+    from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+    adapter = inspection.adapter
+    assert adapter is not None
+    original = inspection.reservation
+    with (
+        serialize_generic_web_product_operation(
+            record_store=store, product=inspection.product, exclusive=True
+        ),
+        store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(original.provider_target_key)
+        ) as check,
+    ):
+        if check is None:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="execution_lock_busy",
+                message="The original testing worker still holds execution.",
+            )
+        try:
+            with store.serialize_disposable_testing_resources() as check_authority:
+                check()
+                check_authority()
+                current = inspect_testing_abandonment(
+                    store, adapter, original, inspection.provider_operation_key
+                )
+                if current is None or current != inspection.abandonment_evidence:
+                    raise ValueError("Testing abandonment evidence changed.")
+                from control_plane.contracts.deployment_record import DeploymentRecord
+
+                record = DeploymentRecord.model_validate(current["deployment"])
+                bindings = bind_testing_recipient(
+                    store, inspection.product, inspection.context, "testing"
+                )
+                result = GenericWebDeployResult(
+                    deployment_record_id=record.record_id,
+                    deploy_status="fail",
+                    deploy_started_at=record.deploy.started_at,
+                    deploy_finished_at=inspection.observed_at,
+                    product=inspection.product,
+                    context=inspection.context,
+                    instance="testing",
+                    target_name=bindings[1].target_name,
+                    target_id=bindings[2].target_id,
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
+                    post_deploy_status="fail",
+                    error_message="Testing verification was abandoned with its original outcome unknown.",
+                )
+                payload = provider_operation_response_payload(
+                    trace_id=trace_id,
+                    records={"deployment_record_id": record.record_id},
+                    result=result.model_dump(mode="json"),
+                )
+                payload["recovery"] = _recovery_metadata(inspection)
+                payload["testing_settlement"] = TESTING_ORIGINAL_ABANDONED
+                payload["abandonment"] = {
+                    "original": original.model_dump(mode="json"),
+                    "deployment": current["deployment"],
+                    "original_outcome": "unknown",
+                    "possible_fixture_residue": True,
+                    "recovery_reference": EventDeployRecoveryCoordinates(
+                        original, inspection.request.original_deploy, inspection.context
+                    ).reference,
+                }
+                check()
+                check_authority()
+                adopted = store.adopt_reconciled_mutation(
+                    reservation=original,
+                    response_status_code=409,
+                    response_trace_id=trace_id,
+                    response_payload=payload,
+                    expected_binding_evidence=(*bindings, record),
+                )
+                if (
+                    adopted.status not in {"adopted", "replayed"}
+                    or adopted.record is None
+                    or _stored_recovery_metadata(adopted.record)
+                    != (inspection.recovery_digest, "abandon_testing_original")
+                ):
+                    raise ValueError("The original testing reservation changed.")
+                return _apply_response(
+                    trace_id=trace_id, inspection=inspection, reservation=adopted.record
+                )
+        except (ValueError, RuntimeError) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_abandonment_refused",
+                message="Testing abandonment requires unchanged authority and execution exclusion.",
+            ) from error
 
 
 def _transition_expired_running_recovery(
@@ -636,6 +754,7 @@ async def _inspect_generic_web_deploy_recovery(
     legacy_snapshot_without_product = False
     retain_event_request = False
     runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
+    abandonment_evidence: dict[str, Any] | None = None
 
     if reservation.state == "completed":
         stored_result = reservation.response_payload.get("result")
@@ -939,6 +1058,16 @@ async def _inspect_generic_web_deploy_recovery(
                 )
                 if runtime_close_out_evidence is not None:
                     proposed_action = "close_out_observed"
+            if proposed_action == "hold_unknown":
+                from control_plane.generic_web_testing_abandonment import (
+                    inspect_testing_abandonment,
+                )
+
+                abandonment_evidence = inspect_testing_abandonment(
+                    record_store, adapter, reservation, provider_operation_key
+                )
+                if abandonment_evidence is not None:
+                    proposed_action = "abandon_testing_original"
 
     return _GenericWebDeployRecoveryInspection(
         request=recovery_request,
@@ -965,6 +1094,7 @@ async def _inspect_generic_web_deploy_recovery(
         provider_inspection=provider_inspection,
         standing_testing_permission=own_testing_original
         and not (requested_authorized and stored_authorized),
+        abandonment_evidence=abandonment_evidence,
     )
 
 
@@ -1118,6 +1248,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             "retry_original_operation",
             "close_out_observed",
             "settle_testing_failure",
+            "abandon_testing_original",
         }:
             raise dependencies.http_error(
                 status_code=409,
@@ -1127,6 +1258,13 @@ def build_generic_web_deploy_recovery_apply_handler(
             )
         if inspection.adapter is None:
             raise RuntimeError("Generic web deploy recovery apply requires an adapter.")
+        if inspection.proposed_action == "abandon_testing_original":
+            return _apply_testing_abandonment(
+                trace_id=trace_id,
+                inspection=inspection,
+                store=record_store,
+                dependencies=dependencies,
+            )
         if (
             inspection.proposed_action == "retry_original_operation"
             and not inspection.adapter.testing_settlement_pending
@@ -1306,6 +1444,7 @@ def _resolve_reference_request(
         dependencies=dependencies,
         trace_id=trace_id,
         apply=apply,
+        recovery_reference=recovery_request.recovery_reference,
     )
     if coordinates.reference != recovery_request.recovery_reference:
         raise dependencies.http_error(
@@ -1333,6 +1472,7 @@ def authorized_event_deploy_coordinates(
     dependencies: GenericWebDeployRecoveryDependencies,
     trace_id: str,
     apply: bool,
+    recovery_reference: str = "",
 ) -> EventDeployRecoveryCoordinates:
     admin = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
         isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
@@ -1374,6 +1514,7 @@ def authorized_event_deploy_coordinates(
             product=product,
             context=lane.context,
             fingerprint=dependencies.idempotency_request_fingerprint,
+            recovery_reference=recovery_reference,
         )
     except FileNotFoundError as error:
         raise dependencies.http_error(
