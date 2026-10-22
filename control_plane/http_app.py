@@ -7416,7 +7416,12 @@ def create_launchplane_fastapi_app(
             return response
         except (BridgeNetworkCapacityRefused, PreviewMemoryCapacityRefused) as error:
             raise _launchplane_http_error(
-                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.public_message()
+                if isinstance(error, PreviewMemoryCapacityRefused)
+                else str(error),
             ) from None
         except NativeSourceAuthorizationDenied:
             raise _launchplane_http_error(

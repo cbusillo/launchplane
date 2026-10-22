@@ -1035,7 +1035,10 @@ def build_generic_web_write_route_handlers(
                     records, result = refresh_task.result()
             except PreviewMemoryCapacityRefused as error:
                 raise dependencies.http_error(
-                    status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=error.code,
+                    message=error.public_message(),
                 ) from None
             except (ValueError, click.ClickException) as error:
                 raise dependencies.http_error(

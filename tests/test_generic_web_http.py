@@ -4924,7 +4924,9 @@ class GenericWebHttpTests(unittest.TestCase):
                     }
                     if not memory_refusal
                     else PreviewMemoryCapacityRefused(
-                        "Floor 5000 bytes; current headroom 4999 bytes"
+                        "private-host-marker Floor 5000 bytes; current headroom 4999 bytes",
+                        floor=5000,
+                        headroom=4999,
                     ),
                     {
                         "refresh_status": "pass",
@@ -4956,6 +4958,7 @@ class GenericWebHttpTests(unittest.TestCase):
 
         self.assertEqual(first_status_code, 409 if memory_refusal else 202)
         if memory_refusal:
+            self.assertNotIn("private-host-marker", first_payload["error"]["message"])
             self.assertIn("5000", first_payload["error"]["message"])
             self.assertIn("4999", first_payload["error"]["message"])
         else:

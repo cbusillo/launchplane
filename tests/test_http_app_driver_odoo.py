@@ -291,7 +291,9 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 store=store, identity=identity, payload=payload
             )
             refusal = PreviewMemoryCapacityRefused(
-                "Floor 5000 bytes; current headroom 4999 bytes", floor=5000, headroom=4999
+                "private-host-marker Floor 5000 bytes; current headroom 4999 bytes",
+                floor=5000,
+                headroom=4999,
             )
             with patch(
                 "control_plane.http_app.execute_odoo_preview_apply_result",
@@ -321,7 +323,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(refused.status_code, 409)
             self.assertEqual(refused.json()["error"]["code"], refusal.code)
-            self.assertEqual(refused.json()["error"]["message"], str(refusal))
+            message = refused.json()["error"]["message"]
+            self.assertNotIn("private-host-marker", message)
+            self.assertIn("5000", message)
+            self.assertIn("4999", message)
             self.assertEqual(retried.status_code, 202)
             self.assertEqual(retried.json()["result"]["status"], "pass")
             self.assertEqual(execute.call_count, 2)

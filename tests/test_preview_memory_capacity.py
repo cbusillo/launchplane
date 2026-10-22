@@ -30,7 +30,9 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
             (proc / "self").mkdir(parents=True)
             (cgroup / "worker").mkdir(parents=True)
             (proc / "self/cgroup").write_text("0::/worker\n")
-            (proc / "meminfo").write_text("MemAvailable: 100 kB\n")
+            (proc / "meminfo").write_text(
+                "MemTotal: 100 kB\nMemAvailable: 100 kB\nMemFree: 100 kB\n"
+            )
             (cgroup / "memory.max").write_text("24000")
             (cgroup / "memory.current").write_text("20000")
             (cgroup / "worker/memory.max").write_text("max")
@@ -47,25 +49,35 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                     exec(memory_capacity.MEMORY_CAPACITY_PROGRAM, {})
                 return dict(json.loads(output.getvalue().removeprefix("frame:")))
 
+            self.assertEqual(run_program()["type"], "failed")
+            (proc / "self/mountinfo").write_text(
+                f"1 0 0:1 /proc/meminfo {proc / 'meminfo'} rw - fuse.lxcfs lxcfs rw\n"
+            )
             self.assertEqual(run_program(), {"type": "complete", "result": 4000})
             (cgroup / "worker/memory.max").write_text("3000")
             self.assertEqual(run_program()["result"], 2000)
-            (proc / "meminfo").write_text("MemAvailable: 1 kB\n")
+            (proc / "meminfo").write_text("MemTotal: 100 kB\nMemAvailable: 1 kB\nMemFree: 100 kB\n")
             self.assertEqual(run_program()["result"], 1024)
             (cgroup / "memory.current").unlink()
             self.assertEqual(run_program()["type"], "failed")
             (cgroup / "memory.current").write_text("20000")
-            (cgroup / "memory.max").write_text("max")
+            (cgroup / "memory.max").write_text("64000")
             (cgroup / "worker/memory.max").write_text("max")
             (proc / "meminfo").write_text("MemTotal: 24 kB\nMemAvailable: 100 kB\nMemFree: 4 kB\n")
             (proc / "self/mountinfo").write_text(
                 f"1 0 0:1 /proc/meminfo {proc / 'meminfo'} rw - fuse.lxcfs lxcfs rw\n"
             )
             self.assertEqual(run_program()["result"], 4096)
+            (cgroup / "memory.max").write_text("max")
+            self.assertEqual(run_program()["result"], 4096)
             (proc / "self/mountinfo").write_text("")
             self.assertEqual(run_program()["type"], "failed")
             (cgroup / "memory.max").unlink()
             (cgroup / "memory.current").unlink()
+            self.assertEqual(run_program()["type"], "failed")
+            (cgroup / "cgroup.controllers").write_text("cpu io")
+            self.assertEqual(run_program()["type"], "failed")
+            (cgroup / "cgroup.controllers").write_text("cpu io memory")
             self.assertEqual(run_program()["result"], 100 * 1024)
 
     def test_service_record_floor_controls_selected_host_and_boundary(self) -> None:
@@ -78,7 +90,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 RuntimeEnvironmentRecord(
                     scope="context",
                     context="launchplane",
-                    env={memory_capacity.PREVIEW_MEMORY_FLOORS_KEY: '{"host-a": 5000}'},
+                    env={memory_capacity.PREVIEW_MEMORY_FLOORS_SETTING: '{"host-a": 5000}'},
                     updated_at="2026-10-22T13:00:00Z",
                 )
             )
@@ -118,7 +130,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 RuntimeEnvironmentRecord(
                     scope="context",
                     context="launchplane",
-                    env={memory_capacity.PREVIEW_MEMORY_FLOORS_KEY: raw},
+                    env={memory_capacity.PREVIEW_MEMORY_FLOORS_SETTING: raw},
                     updated_at="fixture",
                 ),
             )

@@ -7,12 +7,13 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_CODE
+from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.dokploy import native_copy_stream
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 
-PREVIEW_MEMORY_FLOORS_KEY = "LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS"
+PREVIEW_MEMORY_FLOORS_SETTING = "LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS"
 
 
 class PreviewMemoryCapacityRefused(ValueError):
@@ -30,6 +31,11 @@ class PreviewMemoryCapacityRefused(ValueError):
             "preview_memory_floor_bytes": self.floor,
             "preview_memory_headroom_bytes": self.headroom,
         }
+
+    def public_message(self) -> str:
+        return record_failure_summary(self.code) + preview_memory_failure_details(
+            self.plan_values()
+        )
 
 
 def preview_memory_failure_details(plan: Mapping[str, object]) -> str:
@@ -62,7 +68,9 @@ def observe_memory_headroom(proc_root: Path, cgroup_root: Path) -> int:
         limit_file = directory / "memory.max"
         usage_file = directory / "memory.current"
         if directory == cgroup_root and not limit_file.exists() and not usage_file.exists():
-            return available
+            if "memory" in (directory / "cgroup.controllers").read_text().split():
+                return available
+            raise ValueError("Effective host memory limit is unavailable.")
         maximum = limit_file.read_text().strip()
         current = int(usage_file.read_text())
         if current < 0:
@@ -73,22 +81,21 @@ def observe_memory_headroom(proc_root: Path, cgroup_root: Path) -> int:
                 raise ValueError("Memory limit is invalid.")
             available = min(available, max(0, limit - current))
         if directory == cgroup_root:
-            if maximum == "max":
-                mounts = [
-                    line.split(" - ", 1)
-                    for line in (proc_root / "self/mountinfo").read_text().splitlines()
-                ]
-                virtual_memory = any(
-                    len(parts) == 2
-                    and parts[0].split()[4] == str(proc_root / "meminfo")
-                    and parts[1].split()[0] == "fuse.lxcfs"
-                    for parts in mounts
-                )
-                total = memory.get("MemTotal", 0)
-                free = memory.get("MemFree", -1)
-                if not virtual_memory or total <= 0 or not 0 <= free <= total:
-                    raise ValueError("Effective host memory limit is unavailable.")
-                available = min(available, free, max(0, total - current))
+            mounts = [
+                line.split(" - ", 1)
+                for line in (proc_root / "self/mountinfo").read_text().splitlines()
+            ]
+            virtual_memory = any(
+                len(parts) == 2
+                and parts[0].split()[4] == str(proc_root / "meminfo")
+                and parts[1].split()[0] == "fuse.lxcfs"
+                for parts in mounts
+            )
+            total = memory.get("MemTotal", 0)
+            free = memory.get("MemFree", -1)
+            if not virtual_memory or total <= 0 or not 0 <= free <= total:
+                raise ValueError("Effective host memory limit is unavailable.")
+            available = min(available, free, max(0, total - current))
             return available
         directory = directory.parent
 
@@ -157,7 +164,7 @@ def require_preview_host_memory_capacity(
         ]
         if len(selected) > 1:
             raise ValueError("Service memory policy is ambiguous.")
-        raw = selected[0].env.get(PREVIEW_MEMORY_FLOORS_KEY, "{}") if selected else "{}"
+        raw = selected[0].env.get(PREVIEW_MEMORY_FLOORS_SETTING, "{}") if selected else "{}"
         if not isinstance(raw, str):
             raise ValueError("Invalid memory floors.")
         floors = json.loads(raw)
