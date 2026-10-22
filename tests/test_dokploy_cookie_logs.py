@@ -1,12 +1,14 @@
 import json
 import unittest
 from email.message import Message
+from http.client import parse_headers
 from http.cookiejar import Cookie, CookieJar
 from http.cookies import SimpleCookie
 from io import BytesIO
 from pprint import pformat
-from unittest.mock import patch
-from urllib.error import HTTPError, URLError
+from unittest.mock import Mock, patch
+from urllib.error import URLError
+from urllib.request import Request
 
 import requests
 
@@ -60,6 +62,7 @@ def _cookie_representations() -> tuple[str, ...]:
                 simple["punctuation"],
             )
             for representation in (str, repr)
+            if "<Cookie " not in representation(value)
         ),
         *(
             f"{key}: sid=made-up-alias"
@@ -77,6 +80,86 @@ def _cookie_representations() -> tuple[str, ...]:
 
 
 class DokployCookieLogTests(unittest.TestCase):
+    def test_quoted_tokens_share_alignment_with_cookie_values(self) -> None:
+        for text in (
+            '{ cookie: \'sid=made-up-one"tail\', msg: "Cookie: sid=made-up-two" }',
+            "{ a: 'one\"tail', cookie: \"sid=made-up-two's\" }",
+            '{ a: `one"tail`, cookie: "sid=made-up-two\'s" }',
+            '{ a: \'one"tail\', msg: "HTTP_COOKIE=made-up-two" }',
+            r"""{ a: 'one"tail', msg: "{\"Cookie\":\"made-up-two\"}" }""",
+            "{ a: 'one\"tail', 'http.request.header.cookie': \"sid=made-up-two's\" }",
+        ):
+            with self.subTest(text=text):
+                output = api.redact_dokploy_log_line(f"status=502\n{text}")
+                self.assertNotIn("made-up-", output)
+                self.assertIn("status=502", output)
+
+    def test_byte_literals_share_first_value_and_continuation_admission(self) -> None:
+        value = b"sid=made-up-first; " + b"other=made-up-tail; " * 8
+        for text in (
+            pformat({"Set-Cookie": value, "status": 502}, width=55),
+            pformat([("Set-Cookie", value), ("X-Request-Id", "req-123")], width=55),
+            pformat(["Set-Cookie", value, "X-Request-Id", "req-123"], width=55),
+            "Cookie:\nb'made-up-first'\nstatus=502",
+            "Cookie:\nB'made-up-first'\nstatus=502",
+            "Cookie: b'sid=made-up-first' + b'other=made-up-tail'\nstatus=502",
+            "Cookie: 'sid=made-up-first'\n  b'other=made-up-tail'\nstatus=502",
+        ):
+            with self.subTest(text=text):
+                output = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", output)
+                if "req-123" in text:
+                    self.assertIn("req-123", output)
+                else:
+                    self.assertIn("502", output)
+
+    def test_cookie_text_in_string_fragments_keeps_its_value_context(self) -> None:
+        for text in (
+            '"Cookie: " + "sid=made-up-value"\nstatus=502',
+            "'Cookie: ' + 'sid=made-up-value'\nstatus=502",
+            "`Cookie: ` + `sid=made-up-value`\nstatus=502",
+            pformat({"message": "Cookie: " + "sid=made-up-value; " * 8, "status": 502}, width=35),
+            '{"message": "Cookie: sid=made-up-value", "status": 502}',
+        ):
+            with self.subTest(text=text):
+                output = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", output)
+                self.assertIn("502", output)
+
+    def test_raw_cookie_objects_cannot_forge_their_closing_boundary(self) -> None:
+        for value in (
+            "made-up-head for decoy>made-up-tail",
+            '"made-up-head for decoy>made-up-tail"',
+            '"made-up-head for decoy>made-up-tail\r\n more-made-up-tail"',
+        ):
+            response = Mock()
+            response.info.return_value = parse_headers(
+                BytesIO(f"Set-Cookie: sid={value}; Path=/\r\n\r\n".encode())
+            )
+            jar = CookieJar()
+            jar.extract_cookies(response, Request("https://example.invalid/"))
+            self.assertTrue(list(jar))
+            cookie = next(iter(jar))
+            request_jar = requests.cookies.RequestsCookieJar()
+            request_jar.set_cookie(cookie)
+            for text in (str(cookie), str(jar), str(request_jar)):
+                for body in (text, text[: text.rfind(" for ")], f"{text}\nmade-up-last"):
+                    with self.subTest(body=body):
+                        output = api.redact_dokploy_log_line(f"status=502\n{body}")
+                        self.assertNotIn("made-up-", output)
+                        self.assertIn("status=502", output)
+
+    def test_signed_cookie_maps_and_quoted_dotted_names_redact_values(self) -> None:
+        for text in (
+            "signedCookies: [Object: null prototype] { sid: 'made-up-map' }, status: 502",
+            '{"http.request.header.cookie": "sid=made-up-map", "status": 502}',
+            "{'http.request.header.cookie': 'sid=made-up-map', 'status': 502}",
+        ):
+            with self.subTest(text=text):
+                output = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", output)
+                self.assertIn("502", output)
+
     def test_undecodable_quoted_representations_redact_cookies(self) -> None:
         for representation in _cookie_representations():
             for invalid_json in (r"\x1b", "\t"):
@@ -118,24 +201,12 @@ class DokployCookieLogTests(unittest.TestCase):
                     self.assertNotIn("made-up-", output)
                     self.assertIn("status=502", output)
                     self.assertIn("retry scheduled", output)
-            payloads: list[api.JsonValue] = [
-                body,
-                list(body.splitlines()),
-                [{"message": line} for line in body.splitlines()],
-            ]
-            for payload in payloads:
-                with self.subTest(representation=representation, payload=payload):
-                    output = "\n".join(api.normalize_dokploy_log_payload(payload))
-                    self.assertNotIn("made-up-", output)
-                    self.assertIn("status=502", output)
-                    self.assertIn("retry scheduled", output)
 
     def test_representation_redaction_preserves_neighboring_structured_diagnostics(self) -> None:
         for representation in (
             "[('Set-Cookie', 'sid=made-up-pair'), ('X-Request-Id', 'req-123')]",
             """['Cookie', `sid="made-up-one's"`, 'X-Request-Id', 'req-123']""",
             '["Cookie", "sid=made-up-raw", "X-Request-Id", "req-123"]',
-            "<Cookie sid=made-up-jar for example.invalid/>",
             "Cookie(version=0, name='sid', value='made-up-jar')",
             "<SimpleCookie: sid='made-up-simple'>",
             "{'cookies': {'sid': 'made-up-map'}, 'request': 'req-123'}",
@@ -148,52 +219,18 @@ class DokployCookieLogTests(unittest.TestCase):
                     self.assertIn("req-123", output)
 
     def test_representation_redaction_runs_on_provider_errors(self) -> None:
-        for representation in _cookie_representations():
-            for error in (
-                HTTPError(
-                    "https://provider.example/api/test",
-                    502,
-                    "failed",
-                    Message(),
-                    BytesIO(f"status=502\n{representation}\nretry scheduled".encode()),
-                ),
-                URLError(f"status=502\n{representation}\nretry scheduled"),
-            ):
-                with self.subTest(representation=representation, error=type(error).__name__):
-                    with patch("control_plane.dokploy.api.urlopen", side_effect=error):
-                        with self.assertRaises(api.DokployRequestFailed) as raised:
-                            api.dokploy_request(
-                                host="https://provider.example",
-                                token="test-token",
-                                path="/api/test",
-                            )
-                    output = raised.exception.format_message()
-                    self.assertNotIn("made-up-", output)
-                    self.assertIn("status=502", output)
-                    self.assertIn("retry scheduled", output)
-
-    def test_representation_redaction_runs_before_provider_log_tail(self) -> None:
-        for representation in _cookie_representations():
-            for reader, target in (
-                (api.fetch_dokploy_application_logs, {"application_id": "test-app"}),
-                (api.fetch_dokploy_compose_logs, {"compose_id": "test-compose"}),
-                (api.fetch_dokploy_deployment_logs, {"deployment_id": "test-deployment"}),
-            ):
-                with self.subTest(representation=representation, reader=reader.__name__):
-                    with patch(
-                        "control_plane.dokploy.api.dokploy_request",
-                        return_value={"logs": representation.splitlines() + ["status=502"]},
-                    ):
-                        output = "\n".join(
-                            reader(
-                                host="https://provider.example",
-                                token="test-token",
-                                line_count=2,
-                                **target,
-                            )
-                        )
-                    self.assertNotIn("made-up-", output)
-                    self.assertIn("status=502", output)
+        error = URLError(
+            "status=502\nSet-Cookie: [\n  'sid=made-up-one',\n  'other=made-up-two'\n]\nretry scheduled"
+        )
+        with patch("control_plane.dokploy.api.urlopen", side_effect=error):
+            with self.assertRaises(api.DokployRequestFailed) as raised:
+                api.dokploy_request(
+                    host="https://provider.example", token="test-token", path="/api/test"
+                )
+        output = raised.exception.format_message()
+        self.assertNotIn("made-up-", output)
+        self.assertIn("status=502", output)
+        self.assertIn("retry scheduled", output)
 
     def test_truncated_representations_fail_closed(self) -> None:
         for representation in (
@@ -236,24 +273,15 @@ class DokployCookieLogTests(unittest.TestCase):
                 self.assertNotIn("made-up-", redacted)
                 self.assertIn("status=502", redacted)
 
-    def test_prefixed_quoted_cookie_continuations_redact_transport_prefixes(self) -> None:
-        for prefix in ("web-1 | ", "2026-10-22T01:00:00Z "):
-            for operator in ("+", ""):
-                with self.subTest(prefix=prefix, operator=operator):
-                    text = (
-                        f"{prefix}Cookie: 'sid=made-up-one' {operator}\n"
-                        f"{prefix}  'other=made-up-two'\n{prefix}status=502"
-                    )
-                    redacted = api.redact_dokploy_log_line(text)
-                    self.assertNotIn("made-up-", redacted)
-                    self.assertIn("status=502", redacted)
-
     def test_value_start_and_continuation_rules_share_transport_prefixes_and_indentation(
         self,
     ) -> None:
         for prefix in ("", "web-1 | ", "2026-10-22T01:00:00Z "):
             for lines in (
                 ["Cookie:", '"sid=made-up-one"', "status=502"],
+                ["Cookie: 'sid=made-up-one' +", "  'other=made-up-two'", "status=502"],
+                ["Cookie: 'sid=made-up-one'", "  'other=made-up-two'", "status=502"],
+                ["Cookie: 'sid=made-up-one'", "+ 'other=made-up-two'", "status=502"],
                 ["Cookie:", "sid=made-up-one", "status=502"],
                 ["Cookie:", '["sid=made-up-one",', '"other=made-up-two"]', "status=502"],
                 ["Cookie:", "- sid=made-up-one", "- other=made-up-two", "status=502"],

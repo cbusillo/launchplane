@@ -62,21 +62,13 @@ _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
     rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
-_COOKIE_LOG_NAME_PATTERN = r"(?:HTTP_COOKIE|(?:set-)?cookie(?:s|2)?)"
+_COOKIE_LOG_NAME_PATTERN = r"(?:HTTP_COOKIE|signedCookies|(?:set-)?cookie(?:s|2)?)"
 _COOKIE_LOG_TOKEN_PATTERN = re.compile(
-    rf"""(?i)(?<![\w-])(?:b?["']{_COOKIE_LOG_NAME_PATTERN}["'][ \t]*[=:,][ \t]*"""
-    rf"|{_COOKIE_LOG_NAME_PATTERN}[ \t]*[=:][ \t]*"
+    rf"""(?i)(?<![\w-])(?:b?["'`](?:[\w-]+\.)*{_COOKIE_LOG_NAME_PATTERN}["'`][ \t]*[=:,][ \t]*"""
+    rf"""|{_COOKIE_LOG_NAME_PATTERN}(?:[ \t]*[=:]|\\*["'`][ \t]*[=:,])[ \t]*"""
+    rf"""|(?P<escaped>\\+["'](?:[\w-]+\.)*{_COOKIE_LOG_NAME_PATTERN}\\+["'][ \t]*[=:,][ \t]*)"""
     r"""|(?P<object><(?:Cookie|SimpleCookie|Morsel)(?=[ \t:>])|Cookie(?=\()))"""
-    r'|(?P<string>"(?:\\.|[^"\\\r\n])*")'
-)
-_ESCAPED_COOKIE_LOG_KEY_PATTERN = re.compile(
-    rf"""(?<![\w-])\\+["']{_COOKIE_LOG_NAME_PATTERN}\\+["'][ \t]*[=:,][ \t]*""",
-    re.IGNORECASE,
-)
-_COOKIE_OBJECT_END_PATTERN = re.compile(r"[ \t]for[ \t][^\r\n]*?>")
-_JSON_OR_ESCAPED_COOKIE_PATTERN = re.compile(
-    r'"(?:\\.|[^"\\\r\n])*"|(?P<key>' + _ESCAPED_COOKIE_LOG_KEY_PATTERN.pattern + r")[^\r\n]*",
-    re.IGNORECASE,
+    r"""|(?P<string>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`)"""
 )
 _LOG_LINE_PREFIX_PATTERN = re.compile(
     r"(?:[A-Za-z0-9][\w.-]*[ \t]+\| )?"
@@ -565,9 +557,16 @@ def _line_body(text: str, line_start: int) -> tuple[int, int]:
         return indentation.end(), indentation.end() - body_start
 
 
+def _literal_start(text: str, start: int) -> int:
+    if text[start : start + 1] in {"b", "B"} and text[start + 1 : start + 2] in {'"', "'"}:
+        return start + 1
+    return start
+
+
 def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
     if newline := _LOG_NEWLINE_PATTERN.match(text, start):
         start, indent = _line_body(text, newline.end())
+        start = _literal_start(text, start)
         if (
             text[start : start + 1] not in {'"', "'", "`", "[", "{", "("}
             and indent <= key_indent
@@ -575,8 +574,7 @@ def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
             and not text.startswith("- ", start)
         ):
             return None
-    if text[start : start + 1] in {"b", "B"} and text[start + 1 : start + 2] in {'"', "'"}:
-        start += 1
+    start = _literal_start(text, start)
     return start if start < len(text) else None
 
 
@@ -584,22 +582,10 @@ def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
     closing = {"<": ">", "[": "]", "{": "}", "(": ")", '"': '"', "'": "'", "`": "`"}
     if start >= len(text):
         return start
-    if text[start] not in closing:
-        newline = _LOG_NEWLINE_PATTERN.search(text, start)
-        end = newline.start() if newline else len(text)
-        list_indent = _line_body(text, text.rfind("\n", 0, start) + 1)[1]
-        is_list = text.startswith("- ", start)
-        while newline:
-            body_start, indent = _line_body(text, newline.end())
-            list_item = is_list and indent == list_indent and text.startswith("- ", body_start)
-            if indent <= key_indent and not list_item:
-                break
-            newline = _LOG_NEWLINE_PATTERN.search(text, body_start)
-            end = newline.start() if newline else len(text)
-        return end
     if text.startswith("<Cookie ", start):
-        end_match = _COOKIE_OBJECT_END_PATTERN.search(text, start)
-        return end_match.end() if end_match else len(text)
+        return len(text)
+    if text[start] not in closing:
+        return _unquoted_cookie_value_end(text, start, key_indent)
     stack = [(closing[text[start]], start)]
     index = start + 1
     while index < len(text):
@@ -612,8 +598,7 @@ def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
             if character == closer:
                 stack.pop()
         elif text.startswith("<Cookie ", index):
-            index = _cookie_value_end(text, index, key_indent)
-            continue
+            return len(text)
         elif character in closing and (
             closer != ">"
             or character == '"'
@@ -630,67 +615,110 @@ def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
     return len(text)
 
 
-def _redact_encoded_cookie_value(match: re.Match[str]) -> str:
-    if key := match["key"]:
-        return f"{key}[redacted]"
-    raw_value = match[0]
+def _unquoted_cookie_value_end(text: str, start: int, key_indent: int) -> int:
+    newline = _LOG_NEWLINE_PATTERN.search(text, start)
+    end = newline.start() if newline else len(text)
+    list_indent = _line_body(text, text.rfind("\n", 0, start) + 1)[1]
+    is_list = text.startswith("- ", start)
+    while newline:
+        body_start, indent = _line_body(text, newline.end())
+        list_item = is_list and indent == list_indent and text.startswith("- ", body_start)
+        if indent <= key_indent and not list_item:
+            break
+        newline = _LOG_NEWLINE_PATTERN.search(text, body_start)
+        end = newline.start() if newline else len(text)
+    return end
+
+
+def _cookie_continuation_end(text: str, end: int, key_indent: int, value_opener: str) -> int:
+    continuation_openers = {'"', "'", "`"} if value_opener in {'"', "'", "`"} else {"[", "{", "("}
+    if value_opener in {'"', "'", "`", "[", "{", "("}:
+        while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
+            next_start = continuation.end()
+            if newline := _LOG_NEWLINE_PATTERN.match(text, next_start):
+                next_start, indent = _line_body(text, newline.end())
+                next_part = _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, next_start)
+                assert next_part is not None
+                if not continuation["plus"] and not next_part["plus"] and indent <= key_indent:
+                    break
+                next_start = next_part.end()
+            next_start = _literal_start(text, next_start)
+            if text[next_start : next_start + 1] not in continuation_openers:
+                break
+            continued_end = _cookie_value_end(text, next_start, key_indent)
+            if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
+                break
+            end = continued_end
+    if value_opener in {'"', "'", "`"}:
+        if tail := _COOKIE_QUOTED_TAIL_PATTERN.match(text, end):
+            end = _cookie_value_end(text, tail.start(), key_indent)
+    return end
+
+
+def _redact_cookie_string(raw_value: str) -> tuple[str, bool]:
     try:
         decoded = json.loads(raw_value)
     except json.JSONDecodeError:
-        return f'"{_redact_cookie_values(raw_value[1:-1])}"'
-    redacted = _redact_cookie_values(decoded)
-    return json.dumps(redacted) if redacted != decoded else raw_value
+        redacted, open_value = _scan_cookie_values(raw_value[1:-1])
+        return f"{raw_value[0]}{redacted}{raw_value[-1]}", open_value
+    redacted, open_value = _scan_cookie_values(decoded)
+    return (
+        json.dumps(redacted, ensure_ascii=False) if redacted != decoded else raw_value
+    ), open_value
 
 
 def _redact_cookie_values(text: str) -> str:
-    text = _JSON_OR_ESCAPED_COOKIE_PATTERN.sub(_redact_encoded_cookie_value, text)
+    return _scan_cookie_values(text)[0]
+
+
+def _scan_cookie_values(text: str) -> tuple[str, bool]:
     parts: list[str] = []
     cursor = 0
     search_start = 0
+    open_value = False
     start: int | None
     while match := _COOKIE_LOG_TOKEN_PATTERN.search(text, search_start):
         search_start = match.end()
-        if match["string"]:
-            continue
         key_indent = _line_body(text, text.rfind("\n", 0, match.start()) + 1)[1]
+        if match["string"]:
+            redacted, continued_value = _redact_cookie_string(match[0])
+            end = (
+                _cookie_continuation_end(text, match.end(), key_indent, match[0][0])
+                if continued_value
+                else match.end()
+            )
+            if end > match.end():
+                redacted = f"{redacted[:-1]}[redacted]{redacted[-1]}"
+            parts.extend((text[cursor : match.start()], redacted))
+            cursor = search_start = end
+            open_value |= continued_value and end == len(text)
+            continue
+        if match["escaped"]:
+            start = match.end()
+            end = _unquoted_cookie_value_end(text, start, key_indent)
+            parts.extend((text[cursor:start], "[redacted]"))
+            cursor = search_start = end
+            open_value |= end == len(text)
+            continue
         if match["object"]:
             start = match.start() if text[match.start()] == "<" else match.end()
         else:
             start = _cookie_value_start(text, match.end(), key_indent)
         if start is None:
+            open_value |= match.end() == len(text)
             continue
         end = _cookie_value_end(text, start, key_indent)
         value_opener = text[start : start + 1]
-        continuation_openers = (
-            {'"', "'", "`"} if value_opener in {'"', "'", "`"} else {"[", "{", "("}
-        )
-        if value_opener in {'"', "'", "`", "[", "{", "("}:
-            while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
-                next_start = continuation.end()
-                if newline := _LOG_NEWLINE_PATTERN.match(text, next_start):
-                    next_start, indent = _line_body(text, newline.end())
-                    if not continuation["plus"] and indent <= key_indent:
-                        break
-                    next_part = _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, next_start)
-                    assert next_part is not None
-                    next_start = next_part.end()
-                if text[next_start : next_start + 1] not in continuation_openers:
-                    break
-                continued_end = _cookie_value_end(text, next_start, key_indent)
-                if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
-                    break
-                end = continued_end
-        if value_opener in {'"', "'", "`"}:
-            if tail := _COOKIE_QUOTED_TAIL_PATTERN.match(text, end):
-                end = _cookie_value_end(text, tail.start(), key_indent)
+        end = _cookie_continuation_end(text, end, key_indent, value_opener)
         quote = text[start : start + 1]
         if quote not in {'"', "'", "`"} or text[end - 1 : end] != quote:
             quote = ""
         parts.extend((text[cursor:start], f"{quote}[redacted]{quote}"))
         cursor = end
         search_start = end
+        open_value |= end == len(text)
     parts.append(text[cursor:])
-    return "".join(parts)
+    return "".join(parts), open_value
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:
