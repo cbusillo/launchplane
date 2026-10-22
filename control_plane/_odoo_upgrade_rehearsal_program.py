@@ -248,7 +248,7 @@ def clone(spec,containers,source_database,destination):
         raise RuntimeError('Clone destination appeared; never overwrite a copy')
     sql(containers,'CREATE DATABASE "'+destination+'" TEMPLATE "'+source_database+'"')
     sql(containers,'ALTER DATABASE "'+destination+'" SET default_transaction_read_only=off')
-    docker('exec',containers['script-runner'][0],'cp','-a','/volumes/data/filestore/'+source_database,
+    docker('exec',containers['script-runner'][0],'cp','-a','--reflink=auto','/volumes/data/filestore/'+source_database,
         '/volumes/data/filestore/'+destination)
     stamp(spec,containers,destination)
 
