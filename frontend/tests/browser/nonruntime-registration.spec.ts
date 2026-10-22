@@ -1,15 +1,21 @@
 import { expect, test, type Page } from "./state";
 
-for (const outcome of ["saved", "lost-reply", "storage-failure"]) {
+for (const outcome of ["saved", "lost-reply", "storage-failure", "readback-failure", "readback-absent"]) {
   const lostReply = outcome === "lost-reply";
   test(`Director product registration ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=products");
     const identity = await page.evaluate(async () => (await import("/ui/src/dev-fixtures.ts")).fixtureIdentity);
     let profile: Record<string, unknown> | null = null;
+    let readStatus = outcome.startsWith("readback-") ? 503 : 200;
+    let reads = 0;
+    let plans = 0;
     const applies: Array<{ key: string; body: unknown }> = [];
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: [] } }));
-    await page.route("**/v1/product-profiles/desktop-tool", route => route.fulfill({ json: { status: "ok", trace_id: "profile", profile } }));
+    await page.route("**/v1/product-profiles/desktop-tool", route => {
+      reads += 1;
+      return route.fulfill({ status: readStatus, json: readStatus === 200 ? { status: "ok", trace_id: "profile", profile } : { error: { code: "read_failed", message: "Profile unavailable" } } });
+    });
     await page.route("**/v1/product-onboarding/apply", async route => {
       const body = route.request().postDataJSON();
       const planned = { ...body.manifest, lifecycle_state: "active", lanes: [], updated_at: "2026-10-22T12:00:00Z", source: "fixture" };
@@ -17,7 +23,7 @@ for (const outcome of ["saved", "lost-reply", "storage-failure"]) {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
         profile = planned;
         if (lostReply && applies.length === 1) { await route.abort("failed"); return; }
-      }
+      } else plans += 1;
       await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "registration", records: {}, result: { mode: body.mode, plan_sha256: "a".repeat(64), product_profile: planned } } });
     });
     await page.goto("/ui/products");
@@ -47,8 +53,40 @@ for (const outcome of ["saved", "lost-reply", "storage-failure"]) {
       await page.getByText("Register a Director product", { exact: true }).click();
       await page.getByRole("button", { name: "Retry same registration" }).click();
     }
-    await expect(panel.getByRole("status")).toContainText("Registered and read back");
-    expect(applies).toHaveLength(lostReply ? 2 : 1);
+    if (outcome.startsWith("readback-")) {
+      await expect(panel.getByRole("alert")).toBeVisible();
+      await page.reload();
+      await page.getByText("Register a Director product", { exact: true }).click();
+      await expect(panel.getByLabel("Product key", { exact: true })).toBeDisabled();
+      const read = panel.getByRole("button", { name: "Read registration", exact: true });
+      if (outcome === "readback-absent") {
+        readStatus = 404;
+        await read.click();
+        await panel.getByRole("button", { name: "Review registration again", exact: true }).click();
+        await expect(panel.getByRole("button", { name: "Register product", exact: true })).toBeDisabled();
+        const priorPlans = plans;
+        await panel.getByRole("button", { name: "Review registration", exact: true }).click();
+        await expect(panel.getByRole("button", { name: "Register product", exact: true })).toBeEnabled();
+        expect(plans).toBe(priorPlans + 1);
+      } else {
+        for (const status of [403, 503, 200]) {
+          readStatus = status;
+          const saved = profile;
+          if (status === 200) profile = { ...profile, repository: "example/different" };
+          await read.click();
+          await expect(panel.getByRole("alert")).toBeVisible();
+          await expect(read).toBeEnabled();
+          expect(applies).toHaveLength(1);
+          profile = saved;
+        }
+      }
+      readStatus = 200;
+      if (outcome === "readback-absent") await panel.getByRole("button", { name: "Register product", exact: true }).click();
+      else await read.click();
+    }
+    await expect(panel.getByRole("button", { name: "Register another product", exact: true })).toBeVisible();
+    expect(reads).toBeGreaterThan(0);
+    expect(applies).toHaveLength(lostReply || outcome === "readback-absent" ? 2 : 1);
     if (lostReply) expect(applies[1]).toEqual(applies[0]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.evaluate(() => window.scrollTo(0, 0));

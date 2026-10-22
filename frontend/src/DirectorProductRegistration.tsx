@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 
-import { applyProductOnboarding, readProductProfile } from "./api";
+import { applyProductOnboarding, LaunchplaneApiError, readProductProfile } from "./api";
 import { recoverBrowserOperationState, type BrowserOperationOptions } from "./browser-operation";
 import { isOperationBusy, InlineFormError, OperationNotice } from "./ProductConfigForms";
 import { productConfigFailureCertainty, productConfigOperationFailure, ProductConfigRecoveryStorageUnavailable } from "./product-config-operation";
@@ -51,10 +51,13 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
   const [error, setError] = useState("");
   const [verified, setVerified] = useState(false);
   const [reading, setReading] = useState(false);
+  const [recoveringReadback, setRecoveringReadback] = useState(Boolean(recovered));
+  const [absent, setAbsent] = useState(false);
   const plan = useRegistrationOperation(true);
   const apply = useRegistrationOperation(false);
   const busy = reading || isOperationBusy(plan.state) || isOperationBusy(apply.state);
-  const locked = busy || apply.state.requiresIdempotencyContinuity || apply.state.phase === "succeeded";
+  const readbackOnly = recoveringReadback && !apply.state.requiresIdempotencyContinuity;
+  const locked = busy || verified || recoveringReadback || apply.state.requiresIdempotencyContinuity || apply.state.phase === "succeeded";
   const matches = review !== null && JSON.stringify(review.draft) === JSON.stringify(draft);
 
   async function preview(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -68,7 +71,7 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
   }
 
   async function readBack(saved: Review): Promise<void> {
-    setReading(true); setError("");
+    setReading(true); setError(""); setAbsent(false);
     try {
       const profile = (await readProductProfile(saved.draft.product.trim())).profile;
       if (profile.repository.toLowerCase() !== saved.draft.repository.trim().toLowerCase() ||
@@ -78,14 +81,17 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
       }
       setVerified(true);
       sessionStorage.removeItem(storageKey);
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "The saved registration could not be read."); }
+    } catch (failure) {
+      setAbsent(failure instanceof LaunchplaneApiError && failure.statusCode === 404);
+      setError(failure instanceof Error ? failure.message : "The saved registration could not be read.");
+    }
     finally { setReading(false); }
   }
 
   async function register(): Promise<void> {
     if (!review || !matches || !confirmed) return;
     setError("");
-    if (apply.state.phase === "succeeded") { await readBack(review); return; }
+    if (readbackOnly || apply.state.phase === "succeeded") { await readBack(review); return; }
     try {
       const serialized = JSON.stringify(review);
       sessionStorage.setItem(storageKey, serialized);
@@ -97,6 +103,13 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
   function startAnother(): void {
     if (!apply.reset() || !plan.reset()) return;
     setDraft(emptyDraft); setReview(null); setConfirmed(false); setVerified(false); setError("");
+    setRecoveringReadback(false); setAbsent(false);
+  }
+
+  function reviewAgain(): void {
+    if (!absent || !apply.reset() || !plan.reset()) return;
+    sessionStorage.removeItem(storageKey);
+    setRecoveringReadback(false); setAbsent(false); setReview(null); setError("");
   }
 
   return <details className="product-config-panel">
@@ -118,11 +131,12 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
       </form>
       {matches && review ? <p>Register {review.draft.name} from {review.draft.repository}, with {review.draft.login} as the Client under standing acceptance.</p> : null}
       {error ? <InlineFormError message={error} /> : null}
+      {absent && readbackOnly ? <button className="button" type="button" disabled={busy} onClick={reviewAgain}>Review registration again</button> : null}
       <OperationNotice label="Registration preview" state={plan.state} />
       {!verified ? <OperationNotice label="Registration" state={apply.state} /> : null}
       {verified ? <div role="status"><p>Registered and read back.</p><button className="button" onClick={onRefresh}>Refresh products</button><button className="button" onClick={startAnother}>Register another product</button></div> :
         <button className="button button-primary" type="button" disabled={busy || !matches || !confirmed} onClick={() => void register()}>
-          {apply.state.requiresIdempotencyContinuity ? "Retry same registration" : apply.state.phase === "succeeded" ? "Read registration" : "Register product"}
+          {apply.state.requiresIdempotencyContinuity ? "Retry same registration" : readbackOnly || apply.state.phase === "succeeded" ? "Read registration" : "Register product"}
         </button>}
     </section>
   </details>;

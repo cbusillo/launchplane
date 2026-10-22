@@ -16,6 +16,7 @@ from control_plane.contracts.every_code_work_request import EveryCodeWorkRequest
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    NonruntimeClientUnsupportedError,
     ProductClassificationChangeError,
     ProductOwnerProfile,
 )
@@ -47,6 +48,7 @@ from control_plane.workflows.generic_web_deploy import (
 from control_plane.product_promotion_http import resolve_product_promotion_target
 from control_plane.release_invitation import publish_release_invitation
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
+from control_plane.workflows.product_onboarding import product_onboarding_manifest_plan_sha256
 from control_plane.workflows.public_ingress_monitor import discover_public_ingress_monitor_targets
 from tests.http_app_test_support import _asgi_request, _product_config_policy
 from tests.http_app_test_support import (
@@ -477,6 +479,26 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    async def test_unsupported_client_registration_explains_the_domain_refusal(self) -> None:
+        manifest = {**inert_manifest(), "release_on_acceptance": "held"}
+        with self.assertRaises(ValidationError) as invalid:
+            ProductOnboardingManifest.model_validate(manifest)
+        domain_error = invalid.exception.errors()[0]["ctx"]["error"]
+        with _database_app(LaunchplaneAuthzPolicy(), director_agent=True) as (store, _, app):
+            response = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers={"Authorization": "Bearer reader-token"},
+                payload={"product": "launchplane", "mode": "dry_run", "manifest": manifest},
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(
+                response.json()["error"]["code"], NonruntimeClientUnsupportedError.code
+            )
+            self.assertEqual(response.json()["error"]["message"], str(domain_error))
+            self.assertEqual(store.list_product_profile_records(), ())
+
     async def test_expected_config_cannot_poison_nonruntime_profile_inventory(self) -> None:
         with _database_app(LaunchplaneAuthzPolicy(), director_agent=True) as (store, _, app):
             profile = inert_profile()
@@ -711,7 +733,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             payload: dict[str, object] = {
                 "product": "launchplane",
                 "mode": "dry_run",
-                "manifest": inert_manifest(),
+                "manifest": {
+                    **inert_manifest(),
+                    "owner": {"github_login": "DiReCtOr", "github_id": "1234"},
+                },
             }
             dry = await _asgi_request(
                 app,
@@ -721,6 +746,15 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload=payload,
             )
             self.assertEqual(dry.status_code, 202, dry.text)
+            canonical_manifest = ProductOnboardingManifest.model_validate(inert_manifest())
+            self.assertEqual(
+                dry.json()["result"]["product_profile"]["owner"],
+                canonical_manifest.owner.model_dump(mode="json"),
+            )
+            self.assertEqual(
+                dry.json()["result"]["plan_sha256"],
+                product_onboarding_manifest_plan_sha256(canonical_manifest),
+            )
             self.assertEqual(store.list_product_profile_records(), ())
             apply = {
                 **payload,
@@ -775,6 +809,13 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload=apply,
             )
             self.assertEqual(accepted.status_code, 202, accepted.text)
+            self.assertEqual(
+                store.read_product_profile_record("desktop-tool").owner, canonical_manifest.owner
+            )
+            self.assertEqual(
+                accepted.json()["result"]["product_profile"]["owner"],
+                canonical_manifest.owner.model_dump(mode="json"),
+            )
             replay = await _asgi_request(
                 app,
                 "POST",

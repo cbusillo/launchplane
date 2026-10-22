@@ -721,6 +721,7 @@ from control_plane.workflows.odoo_preview_runtime import (
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    NonruntimeClientUnsupportedError,
     ProductProfileChangedError,
     ProductExpectedConfigProfile,
     ProductLaneProfile,
@@ -18541,6 +18542,15 @@ def create_launchplane_fastapi_app(
         try:
             onboarding_request = ProductOnboardingApplyEnvelope.model_validate(raw_payload)
         except ValidationError as error:
+            for validation_error in error.errors():
+                domain_error = validation_error.get("ctx", {}).get("error")
+                if isinstance(domain_error, NonruntimeClientUnsupportedError):
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code=domain_error.code,
+                        message=str(domain_error),
+                    ) from error
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -18634,7 +18644,6 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Only a signed-in admin can record the Director's standing acceptance.",
                 )
-            inert_plan_sha256 = product_onboarding_manifest_plan_sha256(onboarding_manifest)
             if onboarding_request.mode == "apply":
                 if not normalized_idempotency_key:
                     raise _launchplane_http_error(
@@ -18642,13 +18651,6 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         code="idempotency_key_required",
                         message="Non-runtime onboarding apply requires Idempotency-Key.",
-                    )
-                if onboarding_request.reviewed_plan_sha256 != inert_plan_sha256:
-                    raise _launchplane_http_error(
-                        status_code=409,
-                        trace_id=trace_id,
-                        code="product_onboarding_plan_mismatch",
-                        message="Non-runtime onboarding inputs changed; review a new dry run.",
                     )
         if onboarding_request.generic_web is not None:
             try:
@@ -18759,7 +18761,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_onboarding_manifest",
                 message=str(error),
             ) from error
-        if inert_plan_sha256:
+        if nonruntime_registration:
             resolved_owner = await run_in_threadpool(
                 resolve_profile_owner,
                 onboarding_result.product_profile,
@@ -18777,6 +18779,37 @@ def create_launchplane_fastapi_app(
                     code="client_identity_mismatch",
                     message="The Client login and GitHub ID do not match; correct the registration and review it again.",
                 )
+            canonical_owner = {
+                **onboarding_manifest.owner.model_dump(mode="json"),
+                "github_login": resolved_owner.github_login,
+                "github_id": resolved_owner.github_id,
+            }
+            onboarding_manifest = ProductOnboardingManifest.model_validate(
+                {**onboarding_manifest.model_dump(mode="json"), "owner": canonical_owner}
+            )
+            inert_plan_sha256 = product_onboarding_manifest_plan_sha256(onboarding_manifest)
+            if (
+                onboarding_request.mode == "apply"
+                and onboarding_request.reviewed_plan_sha256 != inert_plan_sha256
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_plan_mismatch",
+                    message="Non-runtime onboarding inputs changed; review a new dry run.",
+                )
+            canonical_profile = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    **onboarding_result.product_profile.model_dump(mode="json"),
+                    "owner": canonical_owner,
+                }
+            )
+            onboarding_result = onboarding_result.model_copy(
+                update={"product_profile": canonical_profile}
+            )
+            authority_bundle = authority_bundle.model_copy(
+                update={"product_profiles": (canonical_profile,)}
+            )
         result, driver_result = (
             control_plane_product_onboarding_service.build_product_onboarding_service_result(
                 onboarding_result

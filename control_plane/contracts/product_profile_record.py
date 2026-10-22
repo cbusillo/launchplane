@@ -36,6 +36,14 @@ class ProductClassificationChangeError(ValueError):
     code = "product_classification_change_blocked"
 
 
+class NonruntimeClientUnsupportedError(ValueError):
+    code = "nonruntime_client_unsupported"
+    message = "Active non-runtime products require a recorded Director Client and director_standing acceptance; other Clients are unsupported."
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
+
+
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -774,9 +782,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
             if self.is_active and (
                 not self.owner.is_set or self.release_on_acceptance != "director_standing"
             ):
-                raise ValueError(
-                    "Active non-runtime products require a recorded Director Client and director_standing acceptance; other Clients are unsupported."
-                )
+                raise NonruntimeClientUnsupportedError()
             self.driver_id = self.driver_id.strip()
             self.repository = normalize_repository(self.repository, "repository")
             if (
