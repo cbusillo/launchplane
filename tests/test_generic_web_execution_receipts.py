@@ -20,7 +20,7 @@ from control_plane.dokploy.application_runtime import (
 )
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.http_routes.mutation_support import idempotency_scope
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorIdentity
+from control_plane.service_auth import LaunchplaneAuthzPolicy, configured_local_operator_identity
 from tests.support.disposable_lanes import record_safety
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_source_qualification import (
@@ -96,6 +96,7 @@ from control_plane.workflows.generic_web_application_snapshot import (
     generic_web_provider_deployment_record_id,
 )
 from tests.test_generic_web_deploy_recovery import (
+    _recovery_bearer_config,
     _create_recovery_app,
     _generic_web_recovery_original_deploy,
     _generic_web_recovery_reservation,
@@ -2988,13 +2989,9 @@ class ExecutionRecoveryTests(unittest.TestCase):
             self.app = _create_recovery_app(
                 root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
             )
-            scope = idempotency_scope(
-                LocalOperatorIdentity(
-                    subject="local-owner-agent",
-                    token_label="local-owner-write",
-                    director_agent=True,
-                )
-            )
+            identity = configured_local_operator_identity(_recovery_bearer_config())
+            assert identity is not None
+            scope = idempotency_scope(identity)
         record_id = self.prepare(phase, ExecutionReceipt(entries=(entry,)), scope=scope)
         lane = self.profile.lanes[0]
         if own:

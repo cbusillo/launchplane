@@ -8,8 +8,14 @@ from unittest.mock import patch
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.http_routes.mutation_support import idempotency_scope
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorIdentity
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.generic_web_deploy_provider_adapter import (
+    GenericWebDeployProviderMutationAdapter,
+)
+from control_plane.service_auth import LaunchplaneAuthzPolicy, configured_local_operator_identity
+from control_plane.storage.postgres import (
+    PostgresRecordStore,
+    ExistingMutationReservationLookupResult,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
 )
@@ -21,12 +27,16 @@ from tests.test_generic_web_deploy_recovery import (
     _create_recovery_app,
     _generic_web_recovery_original_deploy,
     _generic_web_recovery_reservation,
+    _generic_web_recovery_target,
     _invoke_recovery,
     _invoke_recovery_apply,
     _RecoveryObservationProvider,
     _write_generic_web_recovery_reservation,
     _write_recovery_target_authority,
     _write_successful_retry_evidence,
+    _recovery_bearer_config,
+    _RECOVERY_APPLY_ROUTE,
+    _OPERATOR_TOKEN,
 )
 from tests.test_service import _invoke_app
 
@@ -43,9 +53,9 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         self.store.write_product_profile_record(self.profile)
         self.lane = self.profile.lanes[0]
         _write_recovery_target_authority(self.store)
-        self.identity = LocalOperatorIdentity(
-            subject="local-owner-agent", token_label="local-owner-write", director_agent=True
-        )
+        identity = configured_local_operator_identity(_recovery_bearer_config())
+        assert identity is not None
+        self.identity = identity
         self.original = _generic_web_recovery_original_deploy()
         self.app = _create_recovery_app(
             root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
@@ -59,10 +69,22 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         own: bool = True,
         outcome: Literal["present", "absent", "unknown"] = "present",
         state: Literal["running", "reconcile_required"] = "reconcile_required",
+        testing_runtime_digest: str = "",
+        phase: str = "target_update",
     ) -> None:
-        reservation = _generic_web_recovery_reservation(
-            original_deploy=self.original, idempotency_key="own-testing-original", state=state
+        target = _generic_web_recovery_target().model_copy(
+            update={"testing_runtime_digest": testing_runtime_digest}
         )
+        with patch(
+            "tests.test_generic_web_deploy_recovery._generic_web_recovery_target",
+            return_value=target,
+        ):
+            reservation = _generic_web_recovery_reservation(
+                original_deploy=self.original,
+                idempotency_key="own-testing-original",
+                state=state,
+                provider_effect_phase=phase,
+            )
         if own:
             reservation = reservation.model_copy(update={"scope": idempotency_scope(self.identity)})
         self.reservation = _write_generic_web_recovery_reservation(self.store, reservation)
@@ -124,6 +146,52 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         status, replay = self.apply(reviewed["recovery_digest"])
         self.assertEqual(status, 202, replay)
         self.assertEqual(payload["recovery_digest"], replay["recovery_digest"])
+        self.executor.assert_not_called()
+
+    def test_own_expired_original_transitions_and_fences_the_stale_worker(self) -> None:
+        self.reserve(state="running")
+        lookup = ExistingMutationReservationLookupResult(
+            status="found", record=self.reservation, observed_at=self.reservation.lease_expires_at
+        )
+        with patch.object(self.store, "lookup_existing_mutation_reservation", return_value=lookup):
+            reviewed = self.inspect()
+            self.assertEqual(reviewed["proposed_action"], "adopt_observed")
+            status, payload = self.apply(reviewed["recovery_digest"])
+        self.assertEqual(status, 202, payload)
+        saved = self.saved()
+        assert saved is not None
+        self.assertEqual(saved.state, "completed")
+        checkpoint = self.store.checkpoint_mutation_provider_effect(
+            reservation=self.reservation, effect_phase="deploy_trigger"
+        )
+        self.assertNotEqual(checkpoint.status, "updated")
+        self.assertEqual(self.saved(), saved)
+        self.executor.assert_not_called()
+
+    def test_own_pre_image_settlement_does_not_require_forward_admission(self) -> None:
+        self.reserve(
+            outcome="absent", testing_runtime_digest="1" * 64, phase="runtime_environment_update"
+        )
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.lane.context,
+            self.lane.instance,
+            data="only_copy",
+        )
+        reviewed = self.inspect()
+        self.assertEqual(reviewed["proposed_action"], "retry_original_operation")
+        with patch.object(
+            GenericWebDeployProviderMutationAdapter,
+            "require_standing_testing_retry",
+            side_effect=AssertionError("Settlement must not require forward admission."),
+        ):
+            status, payload = self.apply(reviewed["recovery_digest"])
+        self.assertEqual(status, 202, payload)
+        saved = self.saved()
+        assert saved is not None
+        self.assertEqual(saved.state, "completed")
+        self.assertEqual(saved.response_payload["result"]["deploy_status"], "fail")
         self.executor.assert_not_called()
 
     def test_foreign_original_remains_readable_but_cannot_be_applied(self) -> None:
@@ -204,7 +272,33 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         self.executor.side_effect = execute
         status, payload = self.apply(reviewed["recovery_digest"])
         self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["error"]["code"], "testing_deploy_safety_unknown")
+        self.executor.assert_called_once()
         self.assertEqual(effects, [])
+        saved = self.saved()
+        assert saved is not None
+        self.assertEqual(saved.state, "reconcile_required")
+        self.assertEqual(saved.reconciliation_key, self.reservation.reconciliation_key)
+        self.assertEqual(saved.provider_target_key, self.reservation.provider_target_key)
+
+    def test_lane_removed_during_retry_preparation_returns_the_factual_prerequisite(self) -> None:
+        self.reserve(outcome="absent")
+        record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
+        reviewed = self.inspect()
+        prepare = GenericWebDeployProviderMutationAdapter.require_standing_testing_retry
+
+        def remove_lane(adapter: GenericWebDeployProviderMutationAdapter) -> None:
+            self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+            prepare(adapter)
+
+        with patch.object(
+            GenericWebDeployProviderMutationAdapter, "require_standing_testing_retry", remove_lane
+        ):
+            status, payload = self.apply(reviewed["recovery_digest"])
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["error"]["code"], "testing_deploy_safety_unknown")
+        self.assertEqual(self.saved(), self.reservation)
+        self.executor.assert_not_called()
 
     def test_unknown_effects_keep_the_original_fenced(self) -> None:
         self.reserve(outcome="unknown")
@@ -255,6 +349,7 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         )
         status, payload = self.apply(reviewed["recovery_digest"])
         self.assertEqual(status, 403, payload)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
         self.assertEqual(self.saved(), self.reservation)
         self.executor.assert_not_called()
 
@@ -285,8 +380,8 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
             status, payload = _invoke_app(
                 self.app,
                 method="POST",
-                path="/v1/admin/generic-web/deploy-recovery/apply",
-                authorization="Bearer local-operator-token",
+                path=_RECOVERY_APPLY_ROUTE,
+                authorization=f"Bearer {_OPERATOR_TOKEN}",
                 headers={"Idempotency-Key": "production-original"},
                 payload={
                     "product": self.profile.product,
@@ -297,6 +392,7 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
                 },
             )
         self.assertEqual(status, 403, payload)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_qualified_own_retry_preserves_the_original_and_replays_once(self) -> None:
         self.reserve(outcome="absent")

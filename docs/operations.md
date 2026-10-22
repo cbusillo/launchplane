@@ -819,23 +819,16 @@ Stage 2 apply is explicit and digest-gated. Admins call
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
 inspection and requires an exact digest match before it writes anything.
 `generic_web_deploy.execute` remains the explicit authority for production,
-foreign originals and other identities. The service-marked Director agent on
-the authenticated `local_operator` transport may recover its own native testing
-original without that mixed grant. Its stored caller scope, route, key,
-fingerprint, product, context and exact captured target must agree with the
-original request and current owned testing lane. Event-reconciler originals
-have a different scope and retain their explicit apply authority. Terminal-agent
-mutation transport remains unavailable. See [authorization](authorization-authority.md).
-
-The dry-run plan action itself never admits apply. Own-original adoption,
-supported terminal settlement and completed replay use the existing evidence
-rules without renewed disposable qualification. A forward retry additionally
-requires current disposable-lane evidence, including use, custody and production
-isolation, before reacquiring the original and at actual effect admission.
-`testing_deploy_safety_unknown` names a factual prerequisite: inspect and collect
-`/v1/disposable-lanes/observations`, resolve protections, then refresh the review.
-It is not a request for a grant. Unknown original effects stay fenced and
-cannot be bypassed with another key.
+foreign originals and other identities. The authenticated Director
+`local_operator` identity's bounded own-testing-original alternative and forward-retry safety
+requirements are defined in [authorization](authorization-authority.md).
+Event-reconciler originals have a different caller scope and retain explicit
+apply authority. The dry-run plan action itself never admits apply, and
+terminal-agent mutation transport remains unavailable. A
+`testing_deploy_safety_unknown` response names a factual prerequisite: inspect
+and collect `/v1/disposable-lanes/observations`, resolve protections, then
+refresh the review. It is not a request for a grant. Unknown original effects
+stay fenced and cannot be bypassed with another key.
 
 The digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,

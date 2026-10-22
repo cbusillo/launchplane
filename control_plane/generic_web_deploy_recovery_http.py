@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -35,6 +35,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployProductMismatchError,
     GenericWebDeployRouteDependencyError,
     resolve_generic_web_deploy_lane,
+    director_agent_can_deploy_testing,
 )
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
@@ -45,6 +46,7 @@ from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import AuthorizationAllows, HttpErrorFactory
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
+    ProviderMutationRejectedError,
     ProviderObservation,
     ProviderOperationLease,
     build_provider_operation_key,
@@ -56,7 +58,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     GitHubHumanIdentity,
-    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import provider_operation_response_payload
@@ -219,6 +220,7 @@ class _GenericWebRecoveryApplyAdapter:
         self._recovery_metadata = recovery_metadata
         self._execution_inspection = execution_inspection
         self._original_reconciliation_key = original_reconciliation_key
+        self.safety_refused = False
 
     def target_key(self) -> str:
         return self._delegate.target_key()
@@ -255,16 +257,21 @@ class _GenericWebRecoveryApplyAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        outcome = (
-            self._delegate.recover_execution(
-                provider_operation_key,
-                lease,
-                self._execution_inspection,
-                settle=self._recovery_metadata.get("recovery_action") == "settle_testing_failure",
+        try:
+            outcome = (
+                self._delegate.recover_execution(
+                    provider_operation_key,
+                    lease,
+                    self._execution_inspection,
+                    settle=self._recovery_metadata.get("recovery_action")
+                    == "settle_testing_failure",
+                )
+                if self._execution_inspection is not None
+                else self._delegate.apply(provider_operation_key, lease)
             )
-            if self._execution_inspection is not None
-            else self._delegate.apply(provider_operation_key, lease)
-        )
+        except ProviderMutationRejectedError as error:
+            self.safety_refused = isinstance(error.cause, DisposableLaneSafetyUnknown)
+            raise
         response_payload = dict(outcome.response_payload)
         response_payload["recovery"] = self._recovery_metadata
         return ProviderMutationOutcome(
@@ -448,26 +455,7 @@ def _transition_expired_running_recovery(
             code="reservation_changed",
             message="Generic web deploy recovery reservation changed before apply.",
         )
-    return _GenericWebDeployRecoveryInspection(
-        request=inspection.request,
-        product=inspection.product,
-        context=inspection.context,
-        instance=inspection.instance,
-        reservation=transition.record,
-        observed_at=inspection.observed_at,
-        original_fingerprint=inspection.original_fingerprint,
-        idempotency_key=inspection.idempotency_key,
-        provider_operation_key=inspection.provider_operation_key,
-        provider_outcome=inspection.provider_outcome,
-        provider_status=inspection.provider_status,
-        retry_safe=inspection.retry_safe,
-        proposed_action=inspection.proposed_action,
-        provider_observation_payload=inspection.provider_observation_payload,
-        legacy_correlation_digest_evidence=inspection.legacy_correlation_digest_evidence,
-        runtime_close_out_evidence=inspection.runtime_close_out_evidence,
-        adapter=inspection.adapter,
-        provider_inspection=inspection.provider_inspection,
-    )
+    return replace(inspection, reservation=transition.record)
 
 
 async def _inspect_generic_web_deploy_recovery(
@@ -528,12 +516,8 @@ async def _inspect_generic_web_deploy_recovery(
             code="invalid_request",
             message="Request could not be completed.",
         ) from error
-    director_testing = (
-        allow_own_testing_original
-        and isinstance(identity, LocalOperatorIdentity)
-        and director_agent_identity(identity)
-        and lane.instance == "testing"
-        and lane.generic_web_cutover is None
+    director_testing = allow_own_testing_original and director_agent_can_deploy_testing(
+        identity, lane
     )
     requested_authorized = _recovery_authorization_allows(
         dependencies=dependencies,
@@ -1267,29 +1251,29 @@ def build_generic_web_deploy_recovery_apply_handler(
                 code="reservation_changed",
                 message="Generic web deploy recovery reservation changed before retry.",
             )
-        try:
-            result = resume_acquired_provider_operation(
-                store=record_store,
-                reservation=retry.record,
-                response_trace_id=trace_id,
-                adapter=_GenericWebRecoveryApplyAdapter(
-                    delegate=inspection.adapter,
-                    recovery_metadata=recovery_metadata,
-                    execution_inspection=action_inspection.provider_inspection
-                    if execution_recovery
-                    else None,
-                    original_reconciliation_key=action_inspection.reservation.reconciliation_key
-                    if execution_recovery
-                    else "",
-                ),
-            )
-        except DisposableLaneSafetyUnknown as error:
+        recovery_adapter = _GenericWebRecoveryApplyAdapter(
+            delegate=inspection.adapter,
+            recovery_metadata=recovery_metadata,
+            execution_inspection=action_inspection.provider_inspection
+            if execution_recovery
+            else None,
+            original_reconciliation_key=action_inspection.reservation.reconciliation_key
+            if execution_recovery
+            else "",
+        )
+        result = resume_acquired_provider_operation(
+            store=record_store,
+            reservation=retry.record,
+            response_trace_id=trace_id,
+            adapter=recovery_adapter,
+        )
+        if recovery_adapter.safety_refused:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="testing_deploy_safety_unknown",
                 message="Testing recovery safety changed before forward work. Refresh disposable-lane observations.",
-            ) from error
+            )
         if result.status in {"completed", "adopted", "replayed"} and result.record is not None:
             return _apply_response(
                 trace_id=trace_id,

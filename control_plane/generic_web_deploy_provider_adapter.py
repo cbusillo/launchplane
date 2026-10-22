@@ -383,12 +383,7 @@ class GenericWebDeployProviderMutationAdapter:
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
             if self._standing_testing_permission:
-                self._standing_binding_sha256 = resolve_disposable_observation_binding(
-                    cast(DisposableLaneStore, self._record_store),
-                    product=self._profile.product,
-                    context=self._lane.context,
-                    instance=self._lane.instance,
-                ).binding_sha256
+                self._standing_binding_sha256 = self._resolve_standing_testing_binding()
             if self._lane.generic_web_cutover is not None:
                 from control_plane.generic_web_cutover import (
                     WebCutoverAuthorityStore,
@@ -1573,14 +1568,22 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
             )
 
+    def _resolve_standing_testing_binding(self) -> str:
+        try:
+            return resolve_disposable_observation_binding(
+                cast(DisposableLaneStore, self._record_store),
+                product=self._profile.product,
+                context=self._lane.context,
+                instance=self._lane.instance,
+            ).binding_sha256
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Standing testing deployment lacks current lane qualification."
+            ) from error
+
     def require_standing_testing_retry(self) -> None:
         self._standing_testing_permission = True
-        self._standing_binding_sha256 = resolve_disposable_observation_binding(
-            cast(DisposableLaneStore, self._record_store),
-            product=self._profile.product,
-            context=self._lane.context,
-            instance=self._lane.instance,
-        ).binding_sha256
+        self._standing_binding_sha256 = self._resolve_standing_testing_binding()
         self._require_standing_testing_admission()
 
     def _require_standing_testing_admission(self) -> None:

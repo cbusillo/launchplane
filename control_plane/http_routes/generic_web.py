@@ -33,6 +33,7 @@ from control_plane.release_review import (
     require_unchanged_production_artifact,
 )
 from control_plane.generic_web_deploy_http import (
+    director_agent_can_deploy_testing,
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
@@ -136,7 +137,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
-    director_agent_identity,
 )
 from control_plane.storage.postgres import OutboxWithIdempotencyRequest, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy import (
@@ -1236,11 +1236,7 @@ def build_generic_web_write_route_handlers(
             instances=(lane.instance,),
         )
         standing_testing_permission = (
-            not explicitly_authorized
-            and isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-            and lane.instance == "testing"
-            and lane.generic_web_cutover is None
+            not explicitly_authorized and director_agent_can_deploy_testing(identity, lane)
         )
         if not explicitly_authorized and not standing_testing_permission:
             raise dependencies.http_error(
