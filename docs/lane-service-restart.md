@@ -81,6 +81,18 @@ verification proves the recovered application on its recorded artifact.
 A web restart alone does not start its Compose dependencies. This action never
 changes database credentials, configuration, health checks or volumes.
 
+Restart keeps the inspected container, image, configuration and volumes. Testing
+restarts therefore do not require a disposable-lane collection or positive data
+custody and production-isolation facts. No data is discarded and no isolation is
+changed. The lane must own its target exclusively, and staff-testing holds and
+protected usage still block apply. Reset, rebuild, retirement and target changes
+keep their own data and isolation gates.
+
+Newer deployment attempts are skipped only when their recorded failure is a
+recognized pre-provider refusal, with no attempted post-deploy work or uncertain
+provider outcome. A refusal names the blocking deployment record for inspection;
+missing or uncertain provider-effect evidence is retained.
+
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
 and release ownership, durably checkpoints the exact container restart, and sends

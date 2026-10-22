@@ -7,7 +7,7 @@ from contextlib import redirect_stderr
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dataclasses import replace
 import json
 import hashlib
@@ -376,7 +376,12 @@ class ServiceRestartTests(unittest.TestCase):
         ):
             with self.subTest(code=code, uncertain=uncertain, status=status):
                 self.record_newer_attempt(code=code, uncertain=uncertain, status=status)
-                self.assertEqual(self.invoke()[0], 409)
+                status_code, response = self.invoke()
+                self.assertEqual(status_code, 409)
+                self.assertIn(
+                    self.store.read_deployment_record("newer-attempt").record_id,
+                    response["error"]["message"],
+                )
                 self.assertEqual(self.provider.writes, [])
 
     def test_unfinished_newer_attempt_refuses_despite_sorting_after_inventory(self) -> None:
@@ -688,39 +693,61 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertTrue(self.invoke(key="standing-restart")[1]["replayed"])
         self.assertEqual(len(self.provider.writes), 1)
 
-    def test_director_restart_refuses_unsafe_or_unknown_testing_before_dispatch(self) -> None:
+    def test_stopped_restart_preserves_data_without_disposable_qualification(self) -> None:
         self.app = self.create_app(
             policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
         )
+        for service in ("database", "web", "script-runner"):
+            for facts in (
+                None,
+                {"data": "unknown", "production_resources": "unknown"},
+                {"data": "only_copy"},
+            ):
+                with self.subTest(service=service, facts=facts):
+                    self.payload.update(mode="dry-run", reviewed_plan_sha256="")
+                    self.payload["service"] = service
+                    self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "web"
+                    self.provider.config["State"].update(
+                        Running=False, StartedAt="2026-10-10T00:01:00Z"
+                    )
+                    if service == "database":
+                        self.select_stopped_database()
+                    else:
+                        self.provider.database = None
+                        self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = (
+                            service
+                        )
+                    self.store.clear_disposable_lane_safety(
+                        self.expected.product, self.expected.context, "testing"
+                    )
+                    if facts is not None:
+                        record_safety(
+                            self.store,
+                            self.expected.product,
+                            self.expected.context,
+                            "testing",
+                            **facts,
+                        )
+                    reviewed = self.review()
+                    status, response = self.invoke(key=f"preserving-{service}-{facts}")
+                    self.assertEqual(status, 200, response)
+                    self.assertEqual(response["result"]["status"], "pass")
+                    self.assertEqual(response["result"]["plan"], reviewed["result"]["plan"])
+                    self.assertEqual(
+                        response["result"]["after"]["configuration_sha256"],
+                        reviewed["result"]["plan"]["before"]["configuration_sha256"],
+                    )
+                    self.assertEqual(
+                        self.provider.writes[-1]["payload"]["containerId"],
+                        reviewed["result"]["plan"]["before"]["container_id"],
+                    )
+
+    def test_restart_refuses_recorded_positive_use_before_dispatch(self) -> None:
         self.review()
-        now = datetime.now(timezone.utc)
-        unsafe_facts: tuple[dict[str, object], ...] = (
-            {"usage": "in_use"},
-            {"data": "only_copy"},
-            {"data": "unknown"},
-            {"production_resources": "shared"},
-            {"production_resources": "unknown"},
-            {"binding_sha256": "0" * 64},
-            {
-                "observed_at": now - timedelta(minutes=2),
-                "expires_at": now - timedelta(minutes=1),
-            },
+        record_safety(
+            self.store, self.expected.product, self.expected.context, "testing", usage="in_use"
         )
-        for index, changes in enumerate(unsafe_facts):
-            with self.subTest(changes=changes):
-                record_safety(
-                    self.store, self.expected.product, self.expected.context, "testing", **changes
-                )
-                status, response = self.invoke(key=f"unsafe-restart-{index}")
-                self.assertEqual(status, 409, response)
-                self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
-                self.assertEqual(self.provider.writes, [])
-        self.store.clear_disposable_lane_safety(
-            self.expected.product, self.expected.context, "testing"
-        )
-        status, response = self.invoke(key="missing-safety")
-        self.assertEqual(status, 409, response)
-        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(self.invoke(key="protected-use")[0], 409)
         self.assertEqual(self.provider.writes, [])
 
     def test_director_grant_does_not_bypass_testing_hold_or_target_alias(self) -> None:
@@ -735,7 +762,7 @@ class ServiceRestartTests(unittest.TestCase):
         record_safety(self.store, self.expected.product, self.expected.context, "testing")
         status, response = self.invoke(key="held-restart")
         self.assertEqual(status, 409, response)
-        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(response["error"]["code"], "restart_refused")
         target.policies.staff_testing_hold = None
         self.store.write_dokploy_target_record(target)
         record_safety(self.store, self.expected.product, self.expected.context, "testing")

@@ -22,7 +22,11 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
-from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    require_lane_target_ownership,
+)
+from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -136,7 +140,9 @@ def plan_service_restart(
             in DEPLOY_BLOCKED_DESCRIPTIONS
             and attempt.runtime_source.get("provider_outcome", "") != "uncertain"
         ):
-            raise ServiceRestartRefused("A newer deployment may have changed the provider.")
+            raise ServiceRestartRefused(
+                f"A newer deployment may have changed the provider: {attempt.record_id}."
+            )
     expected = deployment.runtime_identity
     if (
         expected is None
@@ -241,7 +247,6 @@ class ServiceRestartAdapter:
         token: str,
         health_url: str,
         trace_id: str,
-        require_disposable: bool = False,
     ) -> None:
         self.store = store
         self.root = root
@@ -252,7 +257,6 @@ class ServiceRestartAdapter:
         self.token = token
         self.health_url = health_url
         self.trace_id = trace_id
-        self.require_disposable = require_disposable
 
     def target_key(self) -> str:
         # Fence the immutable recipient of the POST. An old uncertain request
@@ -416,13 +420,39 @@ class ServiceRestartAdapter:
                     raise ServiceRestartRefused(
                         "Restart identity changed; inspect and review again."
                     )
-                if self.require_disposable:
-                    require_disposable_lane(
-                        self.store,
-                        product=self.plan.product,
-                        context=self.plan.context,
-                        instance=self.plan.instance,
+                require_lane_target_ownership(
+                    (
+                        *self.store.list_dokploy_target_id_records(),
+                        *self.store.list_provider_target_records(),
+                    ),
+                    context=self.plan.context,
+                    instance=self.plan.instance,
+                    target_id=self.plan.target_id,
+                )
+                if self.plan.instance != "prod":
+                    profile = self.store.read_product_profile_record(self.plan.product)
+                    target = self.store.read_dokploy_target_record(
+                        context_name=self.plan.context, instance_name=self.plan.instance
                     )
+                    target_id = self.store.read_dokploy_target_id_record(
+                        context_name=self.plan.context, instance_name=self.plan.instance
+                    )
+                    evidence = self.store.read_disposable_lane_safety(
+                        self.plan.product, self.plan.context, self.plan.instance
+                    )
+                    if (
+                        target.policies.staff_testing_hold is not None
+                        or evaluate_lane_usage(
+                            self.store,
+                            profile=profile,
+                            target=target,
+                            target_id=target_id,
+                            instance=self.plan.instance,
+                            usage=evidence.usage if evidence else "unknown",
+                            runtime_stopped=not fresh.before.running,
+                        ).protected
+                    ):
+                        raise ServiceRestartRefused("The lane is held for testing or recorded use.")
             except DisposableLaneSafetyUnknown as error:
                 raise ProviderMutationRejectedError(error) from error
             except ServiceRestartRefused as error:
