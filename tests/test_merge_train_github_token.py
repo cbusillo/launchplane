@@ -268,7 +268,11 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             self.assertEqual(http.used, 2)
 
     def test_native_mint_supports_the_current_execution_reader(self) -> None:
-        from control_plane.merge_train_github import _check_runs_status, _list_check_runs
+        from control_plane.merge_train_github import (
+            _check_runs_status,
+            _list_check_runs,
+            _required_check_evidence_status,
+        )
 
         for installed, private in (
             (None, True),
@@ -403,7 +407,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                                 payload["actions_observation_error"], "actions_read_not_granted"
                             )
                     if installed is None:
-                        # A missing optional grant must not block healthy trains.
                         for check in checks:
                             check["conclusion"] = "success"
                         healthy = _list_check_runs(
@@ -413,12 +416,22 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                             repository_path=self.repository,
                             encoded_head_sha=head,
                         )
-                        self.assertEqual(_check_runs_status(healthy), "pass")
-                        self.assertFalse(healthy["actions_observation_error"])
-                self.assertEqual(len(actions_reads), 0 if unavailable else 2)
+                        status, _ = _required_check_evidence_status(
+                            required_checks=((str(checks[0]["name"]), None),),
+                            status_payload={"statuses": []},
+                            check_runs_payload=healthy,
+                        )
+                        self.assertEqual(status, "unknown" if unavailable else "pass")
+                        self.assertEqual(bool(healthy["actions_observation_error"]), unavailable)
+                if unavailable:
+                    self.assertFalse(actions_reads)
+                else:
+                    self.assertTrue(actions_reads)
                 if installed is not None:
                     self.assertIn("actions:read", credential.permissions)
-                    self.assertNotIn("actions:write", credential.permissions)
+                else:
+                    self.assertNotIn("actions:read", credential.permissions)
+                self.assertNotIn("actions:write", credential.permissions)
 
     def test_auth_failures_refresh_issued_token_but_quota_failures_preserve_it(self) -> None:
         for status, quota_limited in ((401, False), (403, False), (403, True)):

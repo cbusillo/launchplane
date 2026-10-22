@@ -4,12 +4,15 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     RecordingMergeTrainGitHubTransport,
     MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+    _list_check_runs,
     _required_branch_checks,
     _required_checks_status,
 )
 from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
     TenantAdmissionControllerError,
+    TenantAdmissionControllerStaleCandidateError,
     read_technical_checks_for_requirements,
 )
 from tests.test_merge_train_github import (
@@ -76,6 +79,157 @@ def _superseded_with_unrelated_running() -> tuple[list[dict[str, object]], dict[
 
 
 class GitHubRequiredCheckVerdictTests(unittest.TestCase):
+    def test_check_run_head_binding_agrees_across_readers(self) -> None:
+        for consumer in ("head", "candidate", "admission"):
+            for present, returned_head in (
+                (True, HEAD),
+                (True, "other-head"),
+                (True, False),
+                (True, None),
+                (False, None),
+            ):
+                with self.subTest(consumer=consumer, present=present, head=returned_head):
+                    check = _required_check_run("ci-gate", "completed", "success")
+                    if present:
+                        check["head_sha"] = returned_head
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            *(
+                                (_protected_branch_with_checks("ci-gate"), [])
+                                if consumer != "admission"
+                                else ()
+                            ),
+                            {**_combined_status(statuses=()), "sha": HEAD},
+                            {"check_runs": [check]},
+                        )
+                    )
+
+                    def read_status() -> str:
+                        if consumer == "head":
+                            return _required_checks_status(
+                                transport=transport,
+                                repository_path="example/tool",
+                                encoded_head_sha=HEAD,
+                                base_branch="main",
+                            )
+                        client = GitHubMergeTrainClient(transport=transport)
+                        if consumer == "candidate":
+                            return client.observe_batch_candidate_checks(
+                                candidate=_batch_candidate().model_copy(
+                                    update={"repository": "example/tool", "candidate_sha": HEAD}
+                                )
+                            ).required_checks_status
+                        return read_technical_checks_for_requirements(
+                            transport=transport,
+                            merge_client=client,
+                            repository="example/tool",
+                            base_sha="base-sha",
+                            head_sha=HEAD,
+                            evaluated_at="2026-01-01T10:03:00Z",
+                            strict=False,
+                            required_checks=(
+                                TenantAdmissionRequiredTechnicalCheck(name="ci-gate"),
+                            ),
+                        ).status
+
+                    if returned_head == HEAD or (not present and consumer != "admission"):
+                        self.assertEqual(read_status(), "pass")
+                    else:
+                        error = (
+                            TenantAdmissionControllerStaleCandidateError
+                            if consumer == "admission" and present
+                            else TenantAdmissionControllerError
+                            if consumer == "admission"
+                            else MergeTrainGitHubStaleHeadError
+                        )
+                        with self.assertRaises(error):
+                            read_status()
+
+    def test_contradictory_head_cannot_hide_in_history_or_later_pages(self) -> None:
+        wrong = {
+            **_required_check_run("ci-gate", "completed", "success"),
+            "head_sha": "other-head",
+            "check_suite": {"id": 7},
+            "id": 1,
+        }
+        current = {**wrong, "head_sha": HEAD, "id": 2}
+        for pages in (
+            ({"check_runs": [wrong, current]},),
+            (
+                {"check_runs": [{**current, "id": index + 2} for index in range(100)]},
+                {"check_runs": [wrong]},
+            ),
+        ):
+            with self.subTest(page_count=len(pages)):
+                transport = RecordingMergeTrainGitHubTransport(responses=pages)
+                with self.assertRaises(MergeTrainGitHubStaleHeadError):
+                    _list_check_runs(
+                        transport=transport, repository_path="example/tool", encoded_head_sha=HEAD
+                    )
+
+    def test_failure_diagnosis_keeps_only_related_execution_evidence(self) -> None:
+        failed_test = "tests.test_widget.WidgetTests.test_renders"
+        for case, gate_conclusion, leaf_run, leaf_suite, leaf_status, named_test, expected in (
+            ("optional_only", "success", 11, 10, "completed", False, (False, False)),
+            ("same_run_loss", "failure", 11, 10, "completed", False, (True, True)),
+            ("same_run_test", "failure", 11, 10, "completed", True, (True, False)),
+            ("unrelated_loss", "failure", 12, 20, "completed", False, (True, False)),
+            ("unrelated_pending", "failure", 12, 20, "in_progress", False, (True, False)),
+            ("different_suite", "failure", 11, 20, "completed", False, (True, False)),
+            ("different_run", "failure", 12, 10, "completed", False, (True, False)),
+        ):
+            with self.subTest(case=case):
+                checks = [
+                    _actions_check("ci-gate", 11, 101, 10, "completed", gate_conclusion),
+                    _actions_check(
+                        "leaf",
+                        leaf_run,
+                        102,
+                        leaf_suite,
+                        leaf_status,
+                        "failure" if leaf_status == "completed" else None,
+                    ),
+                ]
+                runs = [_run(11, 7, 1, 10, "completed", gate_conclusion, "2026-01-01T10:00:00Z")]
+                if leaf_run != 11:
+                    runs.append(
+                        _run(
+                            leaf_run,
+                            8,
+                            1,
+                            leaf_suite,
+                            leaf_status,
+                            "failure" if leaf_status == "completed" else None,
+                            "2026-01-01T10:00:00Z",
+                        )
+                    )
+                annotations: list[object] = []
+                if gate_conclusion == "failure":
+                    annotations.append([{"message": "Process completed with exit code 1."}])
+                annotations.append([{"message": "The runner has received a shutdown signal."}])
+                if named_test:
+                    checks.append(_actions_check("leaf2", 11, 103, 10, "completed", "failure"))
+                    annotations.append([{"title": "Failed test", "message": failed_test}])
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        [],
+                        {"check_runs": checks},
+                        {"total_count": len(runs), "workflow_runs": runs},
+                        {**_combined_status(statuses=()), "sha": HEAD},
+                        *annotations,
+                    )
+                )
+                failures = GitHubMergeTrainClient(
+                    transport=transport
+                ).read_candidate_check_failures(
+                    candidate=_batch_candidate().model_copy(
+                        update={"repository": "example/tool", "candidate_sha": HEAD}
+                    )
+                )
+                self.assertEqual((failures.conclusive, failures.infrastructure_only), expected)
+                self.assertEqual(failures.failed_tests, (failed_test,) if named_test else ())
+
     def test_admission_reads_required_commit_status_on_later_page(self) -> None:
         for state, page_sha, expected in (
             ("success", HEAD, "pass"),

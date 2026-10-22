@@ -30,6 +30,7 @@ from control_plane.merge_train_github import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
+from tests.test_merge_train_github import _protected_branch_with_checks
 
 TEST_FAILURE = CandidateCheckFailures(
     checks=(
@@ -700,6 +701,8 @@ class CandidateFailureClassificationTests(unittest.TestCase):
     def test_client_reads_annotations_for_failed_and_cancelled_runs(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _protected_branch_with_checks("test_shard (0)", "audit_policy", app_id=None),
+                [],
                 {
                     "total_count": 2,
                     "check_runs": [

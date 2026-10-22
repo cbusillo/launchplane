@@ -1134,12 +1134,30 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 for requirement in requirements
             )
 
+        normalized_runs = [
+            _json_object(item, "GitHub check run") for item in cast(list[object], check_runs)
+        ]
+        failed_required_executions = {
+            identity
+            for check in normalized_runs
+            if is_required(check, "check_run")
+            and _check_run_status(check) == "fail"
+            and (
+                identity := _actions_check_identity(
+                    check, repository_path=repository_path, head_sha=encoded_sha
+                )
+            )
+            is not None
+        }
         return classify_candidate_check_failures(
             check_runs=[
                 check
-                for item in cast(list[object], check_runs)
-                for check in (_json_object(item, "GitHub check run"),)
+                for check in normalized_runs
                 if is_required(check, "check_run")
+                or _actions_check_identity(
+                    check, repository_path=repository_path, head_sha=encoded_sha
+                )
+                in failed_required_executions
             ],
             commit_statuses=[
                 status
@@ -5652,7 +5670,20 @@ def _list_check_runs(
         raw_total_count = payload.get("total_count")
         if isinstance(raw_total_count, int):
             total_count = raw_total_count
-        check_runs.extend(raw_check_runs)
+        for item in raw_check_runs:
+            check = _json_object(item, "GitHub check run")
+            if "head_sha" in check and not is_launchplane_projected_check(
+                str(check.get("name") or "")
+            ):
+                observed_sha = check["head_sha"]
+                if (
+                    not isinstance(observed_sha, str)
+                    or observed_sha.casefold() != encoded_head_sha.casefold()
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "GitHub check run does not match the expected head."
+                    )
+            check_runs.append(check)
         if len(raw_check_runs) < 100:
             break
         page += 1

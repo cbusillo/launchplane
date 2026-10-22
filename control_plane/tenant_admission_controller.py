@@ -572,11 +572,14 @@ def read_technical_checks_for_requirements(
             "GitHub commit status response does not match the expected head."
         )
     signals = list(_technical_status_signals(status_payload))
-    check_runs_payload = _list_check_runs(
-        transport=transport,
-        repository_path=repository_path,
-        encoded_head_sha=encoded_head_sha,
-    )
+    try:
+        check_runs_payload = _list_check_runs(
+            transport=transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
+        )
+    except MergeTrainGitHubStaleHeadError as error:
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
     signals.extend(
         _technical_check_run_signals(
             cast(list[object], check_runs_payload["check_runs"]),
