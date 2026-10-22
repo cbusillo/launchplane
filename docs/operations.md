@@ -3041,7 +3041,14 @@ Conventional onboarding creates new products only.
   by key/count metadata only, and never prints plaintext env or secret values.
   Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
   then use `mode: "apply"` through an authorized workflow or admin API
-  caller. The `live-target-runtime.yml` workflow wraps this route with the
+  caller. For an exact subset, send the same nonempty `selected_keys` list in
+  dry-run, apply and readback, with deployment disabled. Selected sync delivers
+  only existing non-retired managed keys and leaves other provider values and
+  stored retirement intent unchanged. Its readback can pass while unselected
+  managed keys still drift. Use the installed caller's
+  [managed runtime sync contract](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md#managed-runtime-sync)
+  for selection flags and reviewed apply evidence.
+  The `live-target-runtime.yml` workflow wraps this route with the
   shared Launchplane request action and uploads sanitized request/response
   artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native
