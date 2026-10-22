@@ -5,6 +5,7 @@ test("a carried acceptance explains invisible follow-ups and can be replaced", {
   const decision = page.getByLabel("Recorded decision");
   const carryNote = decision.locator('[data-carry-reason="client_impact_none"]');
   await expect(carryNote).toBeVisible();
+  await expect(decision.locator(":scope > p").filter({ hasText: /still applies|applies to preview version/i })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-acceptance-invisible.png"), fullPage: true });
   await page.getByRole("textbox").fill("Please revise the feature.");
@@ -13,19 +14,36 @@ test("a carried acceptance explains invisible follow-ups and can be replaced", {
   await expect(carryNote).toHaveCount(0);
 });
 
-test("a carried acceptance applies to this preview and a new decision replaces it", async ({ page }, testInfo) => {
+test("a saved base-update carry can be replaced by a new decision", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-decision");
   const decision = page.getByLabel("Recorded decision");
-  await expect(decision).toContainText("Applies to preview version aaaaaaa");
-  await expect(decision).toContainText("Carried from version bbbbbbb");
+  await expect(decision.locator('[data-carry-reason="unchanged_patch_base_update"]')).toBeVisible();
+  await expect(decision.locator(":scope > p").filter({ hasText: /still applies|applies to preview version/i })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-acceptance-carried.png"), fullPage: true });
   await page.getByRole("textbox").fill("Please change this feature again.");
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(decision).toContainText("Changes requested");
-  await expect(decision).not.toContainText("Carried from version");
+  await expect(decision.locator("[data-carry-reason]")).toHaveCount(0);
   await expect(decision.locator("blockquote")).toHaveText("Please change this feature again.");
 });
+
+for (const scenario of ["former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"]) {
+  test(`saved carry history does not claim current acceptance: ${scenario}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
+    await page.goto(`/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=${scenario}`);
+    const decision = page.getByLabel("Recorded decision");
+    await expect(decision.locator('[data-carry-reason="client_impact_none"]')).toBeVisible();
+    await expect(decision.locator(":scope > p").filter({ hasText: /still applies|applies to preview version/i })).toHaveCount(0);
+    const accept = page.getByRole("button", { name: "Accept", exact: true });
+    if (scenario === "carried-without-preview") {
+      await expect(accept).toHaveCount(0);
+    } else {
+      await expect(accept).toBeEnabled();
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`${scenario}.png`), fullPage: true });
+  });
+}
 
 test("a saved decision with pending delivery keeps the reason available to retry", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=delivery-pending");

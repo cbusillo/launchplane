@@ -155,10 +155,9 @@ If recorded train refreshes and invisible commits are mixed between status
 publishes, neither proof covers the whole history and a new decision is needed.
 
 This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The Client sees
-a short note that later commits were marked as having no Client-visible changes
-and their acceptance still applies. The recorded Client, original acceptance
-and delivered feedback remain the source, rather than inventing a new decision.
+`client_impact` trailer value in `carried_from.commits`, in order. The recorded
+Client, original acceptance and delivered feedback remain the source, rather
+than inventing a new decision.
 The same-current-Client, delivered-feedback and unchanged-base checks below apply.
 
 The Client accepts a feature, seen on its preview. A base update or rebase may
@@ -208,6 +207,13 @@ the review page shows which version it was carried from, and the ready preview
 comment says the change is accepted rather than asking the Client again. The
 carry is checked when the status is next written: on the ready preview comment
 from the feedback route or the reconciler, and after a decision.
+
+The review page's Recorded decision card preserves saved history, including a
+former Client's decision or an older preview version. Its carry explanation
+describes the recorded version and why the acceptance was carried at that time;
+it does not establish that the acceptance applies now. The current Client can
+still record a new decision on a ready preview. The shared review projection
+checks current Client, head and base applicability separately.
 
 The maintained `codex-skills` agent watcher recognizes the Client feedback marker
 from any publisher, then verifies the complete decision and exact comment receipt
