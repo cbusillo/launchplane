@@ -13,8 +13,8 @@ through the existing service runtime-environment settings surface. No process
 environment, checked-in host list, or numeric default supplies this policy.
 An absent key or an empty object selects no protected hosts; deploying this
 source alone does not activate a floor. Unreadable records or malformed policy
-refuse new allocation. Only this service scope supplies the host policy, so product or instance
-overlays cannot lower it. Global and product records do not activate the floor
+refuse new allocation. Only this service scope supplies the host policy, so
+product or instance overlays cannot lower it. Global and product records do not activate the floor
 or distribute this policy to application runtimes.
 
 For each selected host, the existing registered-server terminal reader runs a
@@ -33,8 +33,8 @@ This follows the [kernel's cgroup accounting](https://www.kernel.org/doc/html/la
 and [LXCFS's virtualized memory view](https://github.com/lxc/lxcfs/blob/main/src/proc_fuse.c).
 The fixed probe was qualified read-only on the execution guest and compared
 with its enforced parent cap; the observed guest namespace and virtualized
-memory view are covered by fixtures. Missing or invalid observations refuse admission; a provider authorization
-denial retains its original identity. No alternate transport or credential is
+memory view are covered by fixtures. Missing or invalid observations refuse
+admission; a provider authorization denial retains its original identity. No alternate transport or credential is
 selected.
 
 At or above the floor, creation continues. Below it, the refusal names the host,
@@ -43,6 +43,12 @@ names the floor and marks headroom unavailable. A later request can retry after
 headroom recovers. Refusal precedes provider allocation and never stops or
 evicts running workloads. It does not change testing or production admission,
 host limits, swap, or preview teardown.
+
+The Odoo and generic-web HTTP APIs return `409` with error code
+`preview_memory_admission_refused` and preserve the refusal's floor and headroom
+details. An unused idempotency key remains retryable. Event-driven reconciliation
+records the same code and numeric details without exposing provider text. Its
+next attempt can retry the same verified build after headroom recovers.
 
 The initial CT106 activation should record **5 GiB (5368709120 bytes)** against
 its actual provider server ID, derived from

@@ -842,6 +842,7 @@ from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestin
 from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -7413,7 +7414,7 @@ def create_launchplane_fastapi_app(
                 records=response.records,
             )
             return response
-        except BridgeNetworkCapacityRefused as error:
+        except (BridgeNetworkCapacityRefused, PreviewMemoryCapacityRefused) as error:
             raise _launchplane_http_error(
                 status_code=409, trace_id=trace_id, code=error.code, message=str(error)
             ) from None
