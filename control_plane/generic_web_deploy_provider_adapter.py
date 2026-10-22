@@ -1830,11 +1830,7 @@ class GenericWebDeployProviderMutationAdapter:
             if self._application_testing(resolved_target)
             else None
         )
-        if recorder is not None:
-            if not isinstance(lease, ProviderEvidenceLease):
-                raise ProviderMutationUnknownError(
-                    "Original inventory requires its execution lease."
-                )
+        if recorder is not None and isinstance(lease, ProviderEvidenceLease):
             lease.assert_current()
             reservation = lease.evidence_reservation()
             if not reservation.provider_effect_phase and not reservation.provider_effect_started_at:

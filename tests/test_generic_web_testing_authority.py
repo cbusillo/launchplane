@@ -15,6 +15,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy import api
 from control_plane.workflows.generic_web_application_snapshot import (
+    APPLICATION_LIFECYCLE_EVIDENCE_KEY,
     application_snapshot_for_deploy,
     recorded_application_lifecycle,
 )
@@ -862,7 +863,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 "post_deploy_update": clean.post_deploy_update.model_copy(
                     update={
                         "evidence": {
-                            "generic_web_application_lifecycle": "malformed legacy evidence"
+                            APPLICATION_LIFECYCLE_EVIDENCE_KEY: "malformed legacy evidence"
                         }
                     }
                 )
@@ -968,7 +969,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                         "post_deploy_update": retired.post_deploy_update.model_copy(
                             update={
                                 "evidence": {
-                                    "generic_web_application_lifecycle": "malformed replacement"
+                                    APPLICATION_LIFECYCLE_EVIDENCE_KEY: "malformed replacement"
                                 }
                             }
                         )
