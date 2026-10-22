@@ -68,7 +68,8 @@ _COOKIE_LOG_TOKEN_PATTERN = re.compile(
     rf"""|{_COOKIE_LOG_NAME_PATTERN}(?:[ \t]*[=:]|\\*["'`][ \t]*[=:,])[ \t]*"""
     rf"""|(?P<escaped>\\+["'](?:[\w-]+\.)*{_COOKIE_LOG_NAME_PATTERN}\\+["'][ \t]*[=:,][ \t]*)"""
     r"""|(?P<object><(?:Cookie|SimpleCookie|Morsel)(?=[ \t:>])|Cookie(?=\()))"""
-    r"""|(?P<string>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`)"""
+    r"|(?:(?<!\w)|(?<=(?<!\w)[bB]))"
+    r"""(?P<string>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`)"""
 )
 _LOG_LINE_PREFIX_PATTERN = re.compile(
     r"(?:[A-Za-z0-9][\w.-]*[ \t]+\| )?"
@@ -77,7 +78,9 @@ _LOG_LINE_PREFIX_PATTERN = re.compile(
 _LOG_NEWLINE_PATTERN = re.compile(r"\r\n|[\r\n]")
 _LOG_INDENT_PATTERN = re.compile(r"[ \t]*")
 _COOKIE_PAIR_PATTERN = re.compile(r"[!#$%&'*+.^_`|~\w-]+=")
-_COOKIE_QUOTED_TAIL_PATTERN = re.compile(rf"[ \t]*(?:;|,?[ \t]*(?={_COOKIE_PAIR_PATTERN.pattern}))")
+_COOKIE_VALUE_TAIL_PATTERN = re.compile(
+    rf"""[^ \t\r\n,;)\]}}>]|[ \t]*(?:;|,?[ \t]*(?=["']?{_COOKIE_PAIR_PATTERN.pattern}))"""
+)
 _COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(r"[ \t]*(?P<plus>\+)?[ \t]*")
 _LOG_FIELD_DELIMITER_PATTERN = re.compile(r"[ \t]*[:=]")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
@@ -87,6 +90,7 @@ _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
 _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
 _DOKPLOY_COMPOSE_SERVICE_PATTERN = re.compile(r"^$|^[a-z0-9][a-z0-9._-]{0,127}$")
 type JsonPrimitive = str | int | float | bool | None
+type _CookieBoundary = Literal["closed", "open", "opaque"]
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type MutationObserver = Callable[[str, str, JsonObject, Callable[[], JsonValue]], JsonValue]
@@ -578,7 +582,22 @@ def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
     return start if start < len(text) else None
 
 
-def _cookie_value_end(text: str, start: int, key_indent: int) -> int:
+def _cookie_value_end(
+    text: str, start: int, key_indent: int, *, trusted_object: bool = False
+) -> tuple[int, _CookieBoundary]:
+    end = _cookie_literal_end(text, start, key_indent)
+    if trusted_object:
+        return end, "open" if end == len(text) else "closed"
+    return _cookie_region_end(text, start, end)
+
+
+def _cookie_region_end(text: str, start: int, end: int) -> tuple[int, _CookieBoundary]:
+    if text.find("<Cookie ", start, end) >= 0:
+        return len(text), "opaque"
+    return end, "open" if end == len(text) else "closed"
+
+
+def _cookie_literal_end(text: str, start: int, key_indent: int) -> int:
     closing = {"<": ">", "[": "]", "{": "}", "(": ")", '"': '"', "'": "'", "`": "`"}
     if start >= len(text):
         return start
@@ -630,7 +649,9 @@ def _unquoted_cookie_value_end(text: str, start: int, key_indent: int) -> int:
     return end
 
 
-def _cookie_continuation_end(text: str, end: int, key_indent: int, value_opener: str) -> int:
+def _cookie_continuation_end(
+    text: str, end: int, key_indent: int, value_opener: str
+) -> tuple[int, _CookieBoundary]:
     continuation_openers = {'"', "'", "`"} if value_opener in {'"', "'", "`"} else {"[", "{", "("}
     if value_opener in {'"', "'", "`", "[", "{", "("}:
         while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
@@ -645,80 +666,84 @@ def _cookie_continuation_end(text: str, end: int, key_indent: int, value_opener:
             next_start = _literal_start(text, next_start)
             if text[next_start : next_start + 1] not in continuation_openers:
                 break
-            continued_end = _cookie_value_end(text, next_start, key_indent)
+            continued_end, boundary = _cookie_value_end(text, next_start, key_indent)
+            if boundary == "opaque":
+                return continued_end, boundary
             if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
                 break
             end = continued_end
-    if value_opener in {'"', "'", "`"}:
-        if tail := _COOKIE_QUOTED_TAIL_PATTERN.match(text, end):
-            end = _cookie_value_end(text, tail.start(), key_indent)
-    return end
+    if tail := _COOKIE_VALUE_TAIL_PATTERN.match(text, end):
+        return _cookie_region_end(
+            text, tail.start(), _unquoted_cookie_value_end(text, tail.start(), key_indent)
+        )
+    return end, "open" if end == len(text) else "closed"
 
 
-def _redact_cookie_string(raw_value: str) -> tuple[str, bool]:
+def _redact_cookie_string(raw_value: str) -> tuple[str, _CookieBoundary]:
     try:
         decoded = json.loads(raw_value)
     except json.JSONDecodeError:
-        redacted, open_value = _scan_cookie_values(raw_value[1:-1])
-        return f"{raw_value[0]}{redacted}{raw_value[-1]}", open_value
-    redacted, open_value = _scan_cookie_values(decoded)
+        redacted, boundary = _scan_cookie_values(raw_value[1:-1])
+        return f"{raw_value[0]}{redacted}{raw_value[-1]}", boundary
+    redacted, boundary = _scan_cookie_values(decoded)
     return (
         json.dumps(redacted, ensure_ascii=False) if redacted != decoded else raw_value
-    ), open_value
+    ), boundary
 
 
 def _redact_cookie_values(text: str) -> str:
     return _scan_cookie_values(text)[0]
 
 
-def _scan_cookie_values(text: str) -> tuple[str, bool]:
+def _scan_cookie_values(text: str) -> tuple[str, _CookieBoundary]:
     parts: list[str] = []
     cursor = 0
     search_start = 0
-    open_value = False
+    boundary: _CookieBoundary = "closed"
     start: int | None
     while match := _COOKIE_LOG_TOKEN_PATTERN.search(text, search_start):
         search_start = match.end()
         key_indent = _line_body(text, text.rfind("\n", 0, match.start()) + 1)[1]
         if match["string"]:
-            redacted, continued_value = _redact_cookie_string(match[0])
-            end = (
-                _cookie_continuation_end(text, match.end(), key_indent, match[0][0])
-                if continued_value
-                else match.end()
-            )
+            redacted, boundary = _redact_cookie_string(match[0])
+            end = match.end()
+            if boundary == "opaque":
+                end = len(text)
+            elif boundary == "open":
+                end, boundary = _cookie_continuation_end(text, end, key_indent, match[0][0])
             if end > match.end():
                 redacted = f"{redacted[:-1]}[redacted]{redacted[-1]}"
             parts.extend((text[cursor : match.start()], redacted))
             cursor = search_start = end
-            open_value |= continued_value and end == len(text)
             continue
         if match["escaped"]:
             start = match.end()
-            end = _unquoted_cookie_value_end(text, start, key_indent)
+            end, boundary = _cookie_region_end(
+                text, start, _unquoted_cookie_value_end(text, start, key_indent)
+            )
             parts.extend((text[cursor:start], "[redacted]"))
             cursor = search_start = end
-            open_value |= end == len(text)
             continue
         if match["object"]:
             start = match.start() if text[match.start()] == "<" else match.end()
         else:
             start = _cookie_value_start(text, match.end(), key_indent)
         if start is None:
-            open_value |= match.end() == len(text)
+            boundary = "open" if match.end() == len(text) else "closed"
             continue
-        end = _cookie_value_end(text, start, key_indent)
+        trusted_object = bool(match["object"]) and match["object"].casefold() != "<cookie"
+        end, boundary = _cookie_value_end(text, start, key_indent, trusted_object=trusted_object)
         value_opener = text[start : start + 1]
-        end = _cookie_continuation_end(text, end, key_indent, value_opener)
+        if boundary != "opaque" and not trusted_object:
+            end, boundary = _cookie_continuation_end(text, end, key_indent, value_opener)
         quote = text[start : start + 1]
         if quote not in {'"', "'", "`"} or text[end - 1 : end] != quote:
             quote = ""
         parts.extend((text[cursor:start], f"{quote}[redacted]{quote}"))
         cursor = end
         search_start = end
-        open_value |= end == len(text)
     parts.append(text[cursor:])
-    return "".join(parts), open_value
+    return "".join(parts), boundary
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:

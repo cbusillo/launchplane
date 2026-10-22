@@ -2833,7 +2833,8 @@ Conventional onboarding creates new products only.
   and indented continuations; incomplete literals or containers suppress the
   remaining body. Raw `<Cookie ...>` strings also suppress the remaining body:
   their unescaped values can forge closers and arbitrary newlines, even in
-  truncated output. A quoted prefix followed by more cookie data or logfmt
+  truncated output or quoted logger wrappers. This ambiguity invalidates enclosing
+  apparent strings too; their later diagnostics may be suppressed. A quoted prefix followed by more cookie data or logfmt
   fields is likewise ambiguous and suppresses that suffix. Other secret patterns
   keep their existing per-line log behavior. Name-free dumps, other encodings,
   and continuations whose opener the provider omitted cannot be recognized.
