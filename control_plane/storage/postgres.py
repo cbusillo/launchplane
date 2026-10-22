@@ -28,6 +28,9 @@ from control_plane.contracts.provider_target_origin import (
     requires_provider_target_origin,
 )
 from urllib.parse import urlsplit
+from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
+    PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
+)
 
 from control_plane.route_binding_reconcile import (
     RouteBindingReviewSources,
@@ -6573,6 +6576,13 @@ class PostgresRecordStore(HumanSessionStore):
                 # cached before another authority writer could acquire it.
                 session.expire_all()
                 if self.database_dialect_name == "postgresql":
+                    if not session.scalar(
+                        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                        {"key": PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY},
+                    ):
+                        raise PublicHostAuthorityBusy(
+                            "Public-host schema transition is busy; retry from a fresh plan."
+                        )
                     # Keep only target/name fences over I/O. A checkpoint commits
                     # these locks, so acquire them anew before further effects.
                     fenced_target = expected_target.model_copy(
