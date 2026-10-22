@@ -402,8 +402,16 @@ def plan_product_config_authority_bundle(
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 sharing_reason=_product_config_sharing_reason(secret, actor=actor),
                 value_source=cast(SecretValueSource, secret["value_source"]),
-                copied_value_origin=copy_sources[index].value_origin
+                resolved_value_origin=copy_sources[index].value_origin
                 if index in copy_sources
+                else _provider_adoption_value_origin(
+                    cast(product_secret_copy.ProductSecretCopyStore, record_store),
+                    product=product,
+                    context=context_name,
+                    instance=instance_name,
+                    key=str(secret["binding_key"]),
+                )
+                if index in adopted_secret_values
                 else None,
                 actor=actor,
                 source_label=source_label,
@@ -711,6 +719,40 @@ def _resolve_provider_secret_adoptions(
             )
         values[index] = value
     return values
+
+
+def _provider_adoption_value_origin(
+    store: product_secret_copy.ProductSecretCopyStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    key: str,
+) -> Literal["provider"] | None:
+    profile = next(
+        (row for row in store.list_product_profile_records() if row.product == product), None
+    )
+    if profile is None:
+        return None
+    for candidate_context in {context, *profile.historical_contexts}:
+        for integration in ("runtime_environment", "retired:runtime_environment"):
+            for binding in store.list_secret_bindings(
+                integration=integration, context_name=candidate_context, limit=None
+            ):
+                if binding.binding_key != key or binding.instance not in {"", instance}:
+                    continue
+                try:
+                    record = store.read_secret_record(binding.secret_id)
+                except FileNotFoundError:
+                    continue
+                if (
+                    record.integration == "runtime_environment"
+                    and record.context == candidate_context
+                    and record.instance in {"", instance}
+                    and record.scope in {"context", "context_instance"}
+                ):
+                    return None
+    return "provider"
 
 
 def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarValue]:
@@ -1069,7 +1111,7 @@ def _plan_product_config_secret_write(
     declared_secret_class: RuntimeSecretClass | None = None,
     sharing_reason: SecretSharingReason | None = None,
     value_source: SecretValueSource | None = None,
-    copied_value_origin: SecretValueOrigin | None = None,
+    resolved_value_origin: SecretValueOrigin | None = None,
     actor: str = "",
     source_label: str = "manual",
 ) -> _ProductConfigSecretWritePlan:
@@ -1135,7 +1177,11 @@ def _plan_product_config_secret_write(
         created_by=actor,
         key_id=key_id,
         ciphertext=ciphertext,
-        value_origin=(copied_value_origin if value_source == "copy" else value_source),
+        value_origin=(
+            resolved_value_origin
+            if value_source == "copy" or value_source == "provider"
+            else value_source
+        ),
     )
     record = SecretRecord(
         secret_id=secret_id,

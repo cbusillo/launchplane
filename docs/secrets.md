@@ -935,6 +935,14 @@ product-config value write creates a new version with origin computed by the
 service; historical origin is never inferred from mutable binding metadata.
 Any required secret entry stays in that private value-writing flow, never comments
 or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.

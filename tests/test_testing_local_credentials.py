@@ -560,6 +560,76 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 report.json()["external_resources"]["failure_code"], "configuration_unavailable"
             )
 
+    async def test_provider_adoption_cannot_certify_a_retained_generated_value(self) -> None:
+        from control_plane.provider_key_adoption import LaneProviderEnv
+
+        self.assertEqual((await self.post(self.payload)).status_code, 202)
+        generated = await self.post({**self.payload, "mode": "apply"}, "history-local")
+        self.assertEqual(generated.status_code, 202, generated.text)
+        key = "DATABASE_PASSWORD"
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings(instance_name="testing")
+            if row.binding_key == key
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        version = self.store.read_secret_version(record.current_version_id)
+        value = secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+        secrets.relabel_secret_binding(
+            record_store=self.store,
+            binding_id=binding.binding_id,
+            binding_key="RENAMED_LOCAL_PASSWORD",
+        )
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "testing",
+                "secrets": [
+                    {
+                        "binding_key": key,
+                        "name": "adopted-local-password",
+                        "adopt_from_provider": True,
+                        "secret_class": "testing",
+                    }
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+            lane_provider_env_reader=lambda: LaneProviderEnv(
+                env={key: value},
+                template_defaults={},
+                recorded_keys=frozenset({"RENAMED_LOCAL_PASSWORD"}),
+            ),
+        )
+        adopted = next(
+            row
+            for row in self.store.list_secret_records(instance_name="testing")
+            if row.name == "adopted-local-password"
+        )
+        self.assertIsNone(self.store.read_secret_version(adopted.current_version_id).value_origin)
+        self.profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key=key,
+                context=self.profile.product,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        for inventory in (False, True):
+            with (
+                self.subTest(inventory=inventory),
+                patch("control_plane.discord_external_resources.request_public_http") as provider,
+            ):
+                report = await self.audit(inventory=inventory, external=True)
+            self.assertFalse(provider.called)
+            self.assertEqual(
+                report.json()["external_resources"]["failure_code"], "configuration_unavailable"
+            )
+
     async def test_external_observation_requires_known_non_generated_value_origin(self) -> None:
         self.external_fixture()
         binding = next(
