@@ -3170,6 +3170,15 @@ boolean verdicts and setting names only. Each apply key has its own schedule,
 separate from observations and ordinary data workflows, so later deployments
 cannot replace the original script or rotate its job out of shared history.
 Retain uncertain operation schedules and their logs as recovery evidence.
+Failed results always retain `readback_failed_predicate` and
+`readback_failure_kind` (`refused` or `unavailable`), plus safe setting findings,
+log availability and schedule references when observed. A stopped selected
+runner reports `runner_running` before SQL; a failed or empty probe cannot
+produce a review receipt. A provider job marked done without the required
+markers reports `schedule_evidence_complete`, not a successful readback.
+Inspect the selected runner and its retained lifecycle/log evidence before
+choosing a separately authorized runtime recovery. Preserve the original copy;
+do not use a SQL repair, restore or new generation to replace missing evidence.
 Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
@@ -3363,6 +3372,23 @@ alone is not proof that an existing testing copy has been repaired.
     refused too (the post-deploy renderer applies the same comparison),
     `test_store` on a production lane, a lane with no tracked target record, and
     missing or invalid bindings.
+    On non-production lanes, the protected keys also include the product's
+    production-lane store identities from stored Shopify addon settings or
+    `shopify.shop_url_key`, `shopify.shop_url` and `shopify.store_url`
+    config-parameter overrides. Apply reads this authority
+    again before writing, so a production-store change since dry-run cannot
+    authorize the same store on testing. These are record comparisons, not
+    proof of the store a running credential reaches; the read-only runtime
+    identity comparison remains necessary before Shopify writes.
+    The common post-deploy renderer also checks these production identities
+    when it has record-store authority, including for existing stored intent
+    delivered by post-deploy, bootstrap and target replacement. Offline renders
+    without a record store still require explicitly supplied protected keys;
+    they cannot verify production identity.
+    Integration allowances, including `pre_live`, do not bypass a production-store
+    match. Use a separate development store for a non-production lane when
+    production intent names that store. Store comparisons accept myshopify domains
+    and [Shopify admin store URLs](https://help.shopify.com/en/manual/intro-to-shopify/initial-setup/setup-business-settings).
   - The record changes only intent. Run Odoo post-deploy for the lane afterwards
     so the database receives the settings, then verify them in the lane database.
 - On a non-production lane, post-deploy always sends an explicit Shopify

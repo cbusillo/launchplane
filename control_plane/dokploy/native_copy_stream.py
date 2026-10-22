@@ -20,6 +20,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
@@ -43,9 +44,30 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
 class NativeProgramFailed(NativeSourceUnavailable):
     """A fixed program returned a failed frame; this proves no writer exclusion."""
 
+    def __init__(self, message: str, *, predicate: str = "", kind: str = "unavailable") -> None:
+        super().__init__(message)
+        self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
+        self.evidence = readback_failure_evidence(
+            {
+                "readback_failed_predicate": predicate
+                if predicate in ReadbackPredicate
+                else ReadbackPredicate.NATIVE_READ,
+                "readback_failure_kind": kind if self.has_diagnostic else "unavailable",
+            }
+        )
+        self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])
+        self.unavailable = self.evidence["readback_failure_kind"] == "unavailable"
+        self.code = self.predicate.value + "_" + self.evidence["readback_failure_kind"]
+
 
 class NativeSourceExceedsBound(NativeSourceUnavailable):
     """A determinate capture limit; recovery must not repeat this source read."""
+
+
+def native_failure_diagnostic(error: BaseException) -> str:
+    return (
+        " " + error.code if isinstance(error, NativeProgramFailed) and error.has_diagnostic else ""
+    )
 
 
 class NativeUploadRejected(NativeSourceUnavailable):
@@ -222,7 +244,13 @@ def _read_program(
         if value.get("type") == "denied":
             raise NativeSourceAuthorizationDenied("The registered source refused the read.")
         if value.get("type") == "failed":
-            raise NativeProgramFailed("The registered source read did not pass.")
+            predicate = value.get("predicate")
+            kind = value.get("kind")
+            raise NativeProgramFailed(
+                "The registered source read did not pass.",
+                predicate=predicate if isinstance(predicate, str) else "",
+                kind=kind if isinstance(kind, str) else "unavailable",
+            )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
         if value.get("type") == "upload_failed":
