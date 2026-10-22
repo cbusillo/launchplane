@@ -6,7 +6,7 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import click
@@ -21,6 +21,10 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    SecretCopySourceConflictError,
+)
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 
 
@@ -162,6 +166,118 @@ class _FakeSecretReadStore:
 
 
 class LaunchplaneSecretsTests(unittest.TestCase):
+    def test_unchanged_write_and_relabel_preserve_value_origin_until_value_changes(self) -> None:
+        with (
+            TemporaryDirectory() as temporary,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(temporary) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            arguments: dict[str, Any] = {
+                "scope": "context_instance",
+                "integration": "runtime_environment",
+                "name": "synthetic",
+                "binding_key": "LOCAL_ACCESS",
+                "context_name": "example",
+                "instance_name": "testing",
+                "plaintext_value": "synthetic-local-value",
+            }
+            control_plane_secrets.write_secret_value(record_store=store, **arguments)
+            binding = store.list_secret_bindings(limit=None)[0].model_copy(
+                update={"value_source": "copy", "copied_value_source": "generated"}
+            )
+            store.write_secret_binding(binding)
+            version = store.read_secret_record(binding.secret_id).current_version_id
+            unchanged = control_plane_secrets.write_secret_value(record_store=store, **arguments)
+            self.assertEqual(unchanged["action"], "unchanged")
+            self.assertEqual(
+                store.read_secret_record(binding.secret_id).current_version_id, version
+            )
+            preserved = store.list_secret_bindings(limit=None)[0]
+            self.assertEqual(preserved.value_source, "copy")
+            self.assertEqual(preserved.copied_value_source, "generated")
+            renamed = control_plane_secrets.relabel_secret_binding(
+                record_store=store, binding_id=binding.binding_id, binding_key="RENAMED_ACCESS"
+            )
+            preserved = next(
+                row
+                for row in store.list_secret_bindings(limit=None)
+                if row.binding_id == renamed["binding_id"]
+            )
+            self.assertEqual(preserved.value_source, "copy")
+            self.assertEqual(preserved.copied_value_source, "generated")
+            control_plane_secrets.write_secret_value(
+                record_store=store,
+                **{
+                    **arguments,
+                    "binding_key": "RENAMED_ACCESS",
+                    "plaintext_value": "new-supplied-value",
+                },
+            )
+            replaced = next(
+                row
+                for row in store.list_secret_bindings(limit=None)
+                if row.binding_id == renamed["binding_id"]
+            )
+            self.assertEqual(replaced.value_source, "supplied")
+            self.assertIsNone(replaced.copied_value_source)
+
+    def test_metadata_preservation_refuses_concurrent_origin_change(self) -> None:
+        with (
+            TemporaryDirectory() as temporary,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(temporary) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            arguments: dict[str, Any] = {
+                "scope": "context_instance",
+                "integration": "runtime_environment",
+                "name": "synthetic",
+                "binding_key": "LOCAL_ACCESS",
+                "context_name": "example",
+                "instance_name": "testing",
+                "plaintext_value": "synthetic-local-value",
+            }
+            control_plane_secrets.write_secret_value(record_store=store, **arguments)
+            original = store.write_product_authority_bundle
+            binding = store.list_secret_bindings(limit=None)[0].model_copy(
+                update={"value_source": "copy", "copied_value_source": "supplied"}
+            )
+            changed = binding.model_copy(update={"copied_value_source": "generated"})
+
+            def concurrent_write(bundle: ProductAuthorityBundle) -> None:
+                store.write_secret_binding(changed)
+                original(bundle)
+
+            for action in ("unchanged-write", "relabel"):
+                store.write_secret_binding(binding)
+                with (
+                    self.subTest(action=action),
+                    patch.object(
+                        store, "write_product_authority_bundle", side_effect=concurrent_write
+                    ),
+                    self.assertRaises(SecretCopySourceConflictError),
+                ):
+                    if action == "relabel":
+                        control_plane_secrets.relabel_secret_binding(
+                            record_store=store,
+                            binding_id=binding.binding_id,
+                            binding_key="RENAMED_ACCESS",
+                        )
+                    else:
+                        control_plane_secrets.write_secret_value(record_store=store, **arguments)
+                self.assertEqual(store.list_secret_bindings(limit=None), (changed,))
+
     def test_secret_selection_excludes_versions_before_reading_or_decrypting(self) -> None:
         store = _FakeSecretReadStore()
         local = store.records[0].model_copy(

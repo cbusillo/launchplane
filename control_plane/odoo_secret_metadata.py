@@ -123,6 +123,11 @@ def recover_odoo_secret_metadata(
                 **target.model_dump(),
                 "declared_secret_class": classification,
                 "value_source": value_source,
+                "copied_value_source": (
+                    target.copied_value_source or source.copied_value_source
+                    if value_source == "copy"
+                    else None
+                ),
                 "sharing_reason": sharing,
                 "updated_at": now,
             }

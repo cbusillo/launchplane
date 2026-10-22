@@ -89,6 +89,15 @@ class OdooSecretMetadataTests(unittest.TestCase):
             for item in store.list_secret_bindings(limit=None)
             if item.binding_id == result["binding_id"]
         )
+        destination = destination.model_copy(
+            update={
+                "declared_secret_class": None,
+                "value_source": None,
+                "copied_value_source": None,
+                "sharing_reason": None,
+            }
+        )
+        store.write_secret_binding(destination)
         record = OdooInstanceOverrideRecord(
             context=source.context,
             instance=source.instance,
@@ -172,6 +181,27 @@ class OdooSecretMetadataTests(unittest.TestCase):
                     record,
                 )
                 self.assertEqual(self.plan(store, record).bundle.secret_bindings, ())
+
+    def test_historical_copy_repair_preserves_known_and_unknown_origins(self) -> None:
+        for sql in (False, True):
+            for origin in ("generated", "supplied", None):
+                with self.subTest(sql=sql, origin=origin):
+                    store, source, destination, _, record = self.fixture(sql=sql)
+                    historical = next(
+                        row
+                        for row in store.list_secret_bindings(limit=None)
+                        if row.binding_id == source.binding_id
+                    ).model_copy(update={"value_source": "copy", "copied_value_source": origin})
+                    store.write_secret_binding(historical)
+                    store.write_product_authority_bundle(self.plan(store, record).bundle)
+                    repaired = next(
+                        row
+                        for row in store.list_secret_bindings(limit=None)
+                        if row.binding_id == destination.binding_id
+                    )
+                    self.assertEqual(repaired.value_source, "copy")
+                    self.assertEqual(repaired.copied_value_source, origin)
+                    self.assertEqual(self.plan(store, record).bundle.secret_bindings, ())
 
     def test_partial_relabel_repairs_value_origin_before_atomic_reference_transition(self) -> None:
         store, source, destination, _, record = self.fixture(completed=False)

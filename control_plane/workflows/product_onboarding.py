@@ -28,6 +28,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundleStore,
     ProviderTargetWrite,
     RuntimeEnvironmentWrite,
+    SecretBindingSetExpectation,
 )
 from control_plane.workflows.provider_target_dual_write import (
     ensure_provider_target_identity_unbound_elsewhere,
@@ -372,6 +373,14 @@ def build_secret_bindings(
                     )
                 )
             continue
+        retained = existing_binding
+        if retained is not None and (
+            retained.secret_id != _secret_id(product=manifest.product, binding=binding)
+            or retained.integration != binding.integration
+            or retained.context != binding.context
+            or retained.instance != binding.instance
+        ):
+            retained = None
         secret_bindings.append(
             SecretBinding(
                 binding_id=binding_id,
@@ -381,6 +390,10 @@ def build_secret_bindings(
                 context=binding.context,
                 instance=binding.instance,
                 status=binding.status,
+                value_source=retained.value_source if retained else None,
+                copied_value_source=retained.copied_value_source if retained else None,
+                declared_secret_class=retained.declared_secret_class if retained else None,
+                sharing_reason=retained.sharing_reason if retained else None,
                 created_at=existing_binding.created_at if existing_binding else updated_at,
                 updated_at=updated_at,
             )
@@ -493,10 +506,11 @@ def plan_product_onboarding_authority_bundle(
         (record.scope, record.context, record.instance): record
         for record in existing_runtime_records
     }
+    existing_secret_bindings = record_store.list_secret_bindings(limit=None)
     secret_binding_plan = build_secret_bindings(
         manifest=manifest,
         updated_at=recorded_at,
-        existing_bindings=record_store.list_secret_bindings(limit=None),
+        existing_bindings=existing_secret_bindings,
     )
     secret_bindings = secret_binding_plan.active_bindings
     target_records_by_route = {
@@ -608,6 +622,22 @@ def plan_product_onboarding_authority_bundle(
             for record in runtime_environments
         ),
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
+        secret_binding_sets=tuple(
+            SecretBindingSetExpectation(
+                secret_id=secret_id,
+                bindings=tuple(
+                    binding
+                    for binding in existing_secret_bindings
+                    if binding.secret_id == secret_id
+                ),
+            )
+            for secret_id in sorted(
+                {
+                    binding.secret_id
+                    for binding in (*secret_bindings, *secret_binding_plan.retired_bindings)
+                }
+            )
+        ),
     )
     return result, bundle
 

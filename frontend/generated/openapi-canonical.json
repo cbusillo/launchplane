@@ -49449,6 +49449,23 @@
             "title": "Context",
             "type": "string"
           },
+          "copied_value_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "provider",
+                  "generated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copied Value Source",
+            "x-launchplane-optional-response": true
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"

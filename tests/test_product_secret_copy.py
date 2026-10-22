@@ -181,8 +181,64 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(binding.declared_secret_class, "shared_safe")
         self.assertEqual(binding.value_source, "copy")
+        self.assertEqual(binding.copied_value_source, "supplied")
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
+
+    def test_copy_origin_is_service_owned_and_propagates_without_fresh_generation_credit(
+        self,
+    ) -> None:
+        source_binding = self.store.list_secret_bindings(limit=None)[0]
+        for origin in ("supplied", "provider", "generated", None):
+            with self.subTest(origin=origin):
+                self.store.write_secret_binding(
+                    source_binding.model_copy(update={"value_source": origin})
+                )
+                requested = self.payload["secrets"][0]
+                for depth in range(2):
+                    entry = {**requested, "copied_value_source": "supplied"}
+                    apply_product_config_bundle(
+                        record_store=self.store,
+                        payload={**self.payload, "secrets": [entry]},
+                        mode="apply",
+                        actor="fixture",
+                        source_label="test",
+                    )
+                    destination = next(
+                        binding
+                        for binding in self.store.list_secret_bindings(limit=None)
+                        if binding.instance == "testing"
+                    )
+                    self.assertEqual(destination.value_source, "copy")
+                    self.assertEqual(destination.copied_value_source, origin)
+                    target_record = self.store.read_secret_record(destination.secret_id)
+                    requested = {
+                        **entry,
+                        "copy_from": {
+                            "context": "example-site",
+                            "instance": "testing",
+                            "version_id": target_record.current_version_id,
+                        },
+                    }
+
+    def test_copy_origin_change_aborts_atomic_publication(self) -> None:
+        source_binding = self.store.list_secret_bindings(limit=None)[0].model_copy(
+            update={"value_source": "copy", "copied_value_source": "supplied"}
+        )
+        self.store.write_secret_binding(source_binding)
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        self.store.write_secret_binding(
+            source_binding.model_copy(update={"copied_value_source": "generated"})
+        )
+        with self.assertRaises(SecretCopySourceConflictError):
+            self.store.write_product_authority_bundle(bundle)
+        self.assertFalse(any(row.instance == "testing" for row in self.store.list_secret_records()))
 
     async def test_read_role_cannot_replace_explicit_secret_copy_source_grant(self) -> None:
         app = self.make_app(source_read=False, standing_read=True)

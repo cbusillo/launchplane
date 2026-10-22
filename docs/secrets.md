@@ -923,6 +923,20 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+The binding's write method remains `copy`. The service also records
+`copied_value_source` from the reviewed current source: `supplied`, `provider`,
+`generated`, or unknown. A copy of a copy retains that origin. Caller metadata
+cannot establish it. Copies never earn the independently supplied runtime-safety
+exception or fresh local-generation credit. Source record and binding comparisons
+guard origin propagation at publication; later source rotation does not change a
+completed destination's retained origin. Older copies have unknown origin unless
+supported, unchanged custody evidence establishes it; the service does not guess.
+Metadata-only relabels, unchanged-value writes and matching onboarding updates
+preserve known origin under atomic record/binding comparisons. An actual supplied
+replacement clears copied origin. The external-resource observer accepts only
+known supplied/provider origin, so generated and unknown values, including copies,
+remain unavailable until a provider credential is supplied through the existing
+managed value-writing path. Never put values in comments or agent evidence.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.
