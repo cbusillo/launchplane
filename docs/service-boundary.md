@@ -647,13 +647,13 @@ Frontend contract generation uses the same boundary. Run
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
 The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-from that canonical export. `pnpm --dir frontend check:openapi-drift` regenerates
+from that canonical export. `(cd frontend && pnpm check:openapi-drift)` regenerates
 the checked schemas and agent contract in temporary paths and fails on backend
 contract drift. The TypeScript client at `frontend/src/generated/openapi.ts` is
 ignored rather than committed, so concurrent client generation cannot create a
 merge conflict. Development and both TypeScript checks regenerate it from the
 checked UI schema; production builds (including the container) run the type check.
-Use `pnpm --dir frontend generate:openapi-types` for generation alone. No custom
+Use `(cd frontend && pnpm generate:openapi-types)` for generation alone. No custom
 merge driver or train candidate regeneration is required. The canonical
 `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
@@ -677,7 +677,7 @@ The same canonical export also feeds the narrower checked
 to project only the explicit agent/admin allow-list plus the semantic
 lifecycle, deploy, reconciliation, workflow, and governance overlay. The
 artifact carries a semantic digest and non-gating source revision. The existing
-`pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
+`(cd frontend && pnpm check:openapi-drift)` gate regenerates it in a temporary
 path and compares only its normalization version and semantic digest, so
 unrelated OpenAPI or provenance-only changes do not create consumer drift.
 
@@ -3766,10 +3766,11 @@ with the exact base branch and optional merge method. It requires
 controller's `mutate=false` path, so it verifies current numeric repository and
 repository owner identity, head, base, open/merged state, draft/mergeability, admission,
 and live required-check policy without acquiring a controller lease or writing
-GitHub/provider state. Mergeable tenant UI PRs report required technical-check
-readiness. Engineering returns `not_applicable`; current results for both kinds
-have no human actions. Client decisions use product review and the release
-checklist, separately from these machine checks.
+GitHub/provider state. Mergeable tenant UI PRs report readiness only when both
+required technical checks and the existing current-head Client gate pass.
+Engineering returns `not_applicable`; current results for both kinds have no
+human actions. Client decisions are recorded through product review; this
+evaluation reads them and grants no acceptance or release authority.
 
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
 tenant-admission read model. The query supplies the complete candidate binding:
@@ -3814,7 +3815,7 @@ It is bearer-only, requires `tenant_admission.controller.run_once` authorization
 for the candidate product/context, and is covered by the exact-length JSON body
 guard at 64 KiB. An explicitly authorized terminal agent may invoke this route.
 The controller independently rechecks classification, exact source-control facts,
-and technical evidence before every merge effect. This is a dedicated privileged
+technical evidence, and the existing Client gate before every merge effect. This is a dedicated privileged
 controller action: its context-scoped
 grant intentionally authorizes a central controller or admin whose source
 repository need not equal the target tenant repository. The submitted target
@@ -3838,12 +3839,27 @@ non-draft and currently mergeable. When the live required-check policy is
 strict, the exact PR head must also contain the current base SHA; missing or
 malformed strict-policy and draft evidence fails closed.
 
+Readiness uses the merge train's existing Client-review reader. It validates
+current PR notes and labels against product profiles, requires the configured
+Advisory App's current-head acceptance projection when review is required, and
+independently reads saved current-head decisions for the product's current
+Client. A saved Request changes blocks even after engineering-only notes replace
+the original notes or while a successful projection is stale. Missing profile
+or saved-decision storage cannot establish readiness. Engineering-only and
+Director-standing changes retain the same notes and veto rules as the train.
+
 For `mutate=true`, Launchplane uses the existing repository/base controller
 lease only as a shared mutation and crash-reconciliation fence; it does not
 enqueue the PR or borrow merge-train scheduler, label, batch, or stack policy.
 After the first evaluation it re-fetches PR/base facts, recomputes admission,
-and re-reads technical checks immediately before checkpointing and issuing the
-GitHub merge request with the exact expected head SHA. Provider uncertainty
+and re-reads technical checks and Client review before checkpointing and issuing
+the GitHub merge request with the exact expected head SHA. A newly saved veto or
+a failed pre-merge read releases the lease without a provider mutation. GitHub's
+[documented synchronous merge refusals](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
+(403, 404, 405, 409 and 422) also release
+the fence; other statuses and uncertain merge outcomes retain it. An abrupt
+process death in any active phase requires the same tenant request to resume;
+another controller action cannot adopt that state. Provider uncertainty
 leaves the exact request, admission decision, technical-check digest, and merge
 phase in durable controller state. A retry adopts success only when GitHub shows
 that exact head merged into the requested base and the target branch contains

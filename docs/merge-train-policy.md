@@ -230,7 +230,7 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui`; both take the normal technical merge flow, and retired human admission paths do not qualify a merge.
 - Repository classifications use exact immutable identity and CAS admin recovery without heuristics or PR label fallback.
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
-- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, and uses the [shared required-check evaluation](#candidate-validation) for the target branch and exact head. It enforces base freshness when the effective classic or ruleset policy requires strict checks, then rechecks admission, technical evidence and identity immediately before an expected-SHA merge. Missing named checks remain pending; unreadable or malformed policy or evidence cannot qualify a merge. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
+- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, and uses the [shared required-check evaluation](#candidate-validation) for the target branch and exact head. It enforces base freshness when the effective classic or ruleset policy requires strict checks, then rechecks admission, technical evidence and identity immediately before an expected-SHA merge. Its readiness evaluation and fresh pre-merge evaluation use the train's existing [Client gate](owner-acceptance.md#current-client-review): valid notes, current-head review where required, and saved vetoes for the current Client. A saved veto blocks even with engineering-only notes or a stale successful projection. Missing named checks remain pending; unreadable or malformed policy or evidence cannot qualify a merge. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
 - Advisory `launchplane/engineering-review` and
   `launchplane/owner-acceptance` check runs are visibility projections and are
@@ -1221,7 +1221,7 @@ unrelated optional workflows cannot change its classification:
   stays stopped with `reason_code: infrastructure_retry_used` until the queue or
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
-- **Base checks.** Before splitting or blaming a pull request, the controller
+- **Base checks.** Before blaming a pull request, the controller
   reads the base's effective technical requirements on the candidate's exact
   base commit. It retains the name and App binding of each required identity
   that actually caused the candidate's failure. Those identities need actual
@@ -1236,18 +1236,52 @@ unrelated optional workflows cannot change its classification:
   skipped. A genuinely required shard still needs its own successful base evidence.
   Advisory projections are excluded consistently; configuration checks retain
   their separate current-comparison facet when configured. If a required
-  candidate identity fails there too, its evidence is unproved, or
-  the base's required checks are pending, missing or unreadable, it stays stopped
-  with `reason_code: base_checks_not_green`
-  and a reason naming the base branch and missing or unproved required identities.
-  The same diagnostic appears in controller details. No pull request gets `blocked_label`, and
-  the failed candidate stays active for fresh reads on the next pass. A rerun
-  passing on the same base allows isolation to resume; a changed base or eligible
-  queue uses the existing replacement path.
-  Feedback names the base failure or missing evidence as needing attention;
-  pending checks are reported as waiting. A repository without required-check
-  evidence on its base stays stopped without blame; evidence must be supplied
-  before isolation can identify a culprit.
+  candidate identity fails there too, its evidence is unproved, or the base's
+  required checks are pending or missing, no pull request gets `blocked_label`.
+  A successful read returning fail or unknown can start the bounded
+  exploration below. Pending base checks retain their ordinary wait. A
+  provider/read exception stops with
+  `reason_code: base_checks_not_green`; an error is never permission to explore.
+  Without conclusive current candidate failure evidence naming actual required
+  identities, exploration also stays stopped. A lone failed eligible member stays
+  stopped for fresh base reads. The reason names the base branch and missing or
+  unproved required identities, and the same diagnostic appears in controller details.
+  A rerun passing on the same base allows ordinary isolation to resume.
+- **Non-blaming base exploration.** A failed candidate on an unproved base can
+  test roots individually in queue order, so a repair can land while another
+  change still fails. Its stable queue comes from the ordinary policy projection
+  before contextual Client readiness, batch caps or area grouping. Each trial
+  defers every other policy-eligible root, including unready Client and engineering
+  heads, then applies current Ready, Client and readiness checks to its sole root.
+  Holds use the same policy queue for current membership and active isolation.
+  Ineligible and manually held heads stay excluded. Full stack topology remains
+  available for discovery or the exact recorded collapse proof.
+  Base-conflict and dependency holds retain their current head/base lifetimes;
+  earlier contextual exclusion cannot discard their proof. Pairwise conflicts
+  are released because the conflicting peer is absent. Temporary
+  `failure_isolation` holds are reconsidered between probes. Ordinary conflict
+  planning retains its preceding-head lineage checks.
+  Exact base, source heads and compatible policy scope the failure history across
+  restarts, preventing repeated failed probes. Historical failure schedules work;
+  it never proves blame. Fresh same-SHA passing evidence can recover a singleton
+  using its existing bounded replacement-ref retry; exploration dispatches no rerun.
+  Unsupported stacks and preparation waits defer to later roots. Fresh discovery
+  uses ordinary disposition preparation and fenced plan persistence; the failed
+  parent retires only after its replacement or stack plan persists. Exploration
+  runs no unrelated block recovery or retired-stack restoration.
+  With no plannable probe, `base_failure_exploration_exhausted` reports a wait.
+  Deferred stack causes remain in the message and diagnostics; missing-label
+  preparation belongs to the controller, provider failure to the provider, and
+  structural or policy fixes to the repository agent. A dry run creates no label.
+  Skipped historical reads do not overwrite the failed source in diagnostics;
+  actual rerun recovery retains its own source. Deferred roots report waiting;
+  surviving conflict holds report blocked. Exhausted polls keep the existing
+  feedback scope. Changed heads, queue, base or incompatible policy supply new
+  inputs; operational changes preserving the authority binding retain history.
+  The sweep neither searches arbitrary PR combinations nor clears unchanged
+  `merge-blocked` heads. Infrastructure retry budgets stay unchanged. Every repair
+  still passes exact-tree candidate, protected landing and fresh admission gates.
+  Fresh green-base evidence permits ordinary culprit isolation afterward.
 - **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while
@@ -1358,11 +1392,12 @@ pull request and head is recorded as `held_out` with reason `entry_conflict` and
 merge onto the base). The controller result reports the probe as
 `conflict_probe`, and PR feedback tells each held-out pull request which pull
 requests it conflicts with. Each hold also records `probe_base_sha` and the
-ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
-the base, held head, and accepted preceding PR/head sequence are unchanged. A
-changed base or preceding membership/head permits a fresh observation without
-requiring a speculative PR refresh. Legacy holds without probe lineage are
-re-observed once; their missing history is not reconstructed. On the first
+ordered `conflicts_with_head_shas`. A base-only conflict lasts while its base,
+held head and policy eligibility are unchanged. A pairwise conflict also needs
+the same accepted preceding PR/head sequence from the current planning mode's
+contextual queue. A changed base or preceding membership/head permits a fresh
+observation without requiring a speculative PR refresh. Legacy holds without
+probe lineage are re-observed once; their missing history is not reconstructed. On the first
 mutating pass, this may supersede and rebuild an in-flight candidate and close
 its service batch PR, so its CI runs once more. Trailing queue
 additions do not invalidate a hold. An unchanged real conflict stays held and

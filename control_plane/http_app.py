@@ -24423,6 +24423,28 @@ def create_launchplane_fastapi_app(
             if observation.mode == "collect":
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
+                application_resources: dict[str, object] | None = None
+                if observation.include_application_resources:
+                    from control_plane.dokploy.application_resources import (
+                        collect_application_resource_observation,
+                    )
+
+                    try:
+                        application_resource_observation = await run_in_threadpool(
+                            collect_application_resource_observation,
+                            store,
+                            root=resolved_control_plane_root,
+                            product=profile.product,
+                            context=observation.context,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the application resource observation.",
+                        ) from None
+                    application_resources = application_resource_observation.model_dump(mode="json")
                 observed_at = store.disposable_lane_observation_time()
                 if profile.driver_id != "odoo" or observation.instance != "testing":
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
@@ -24591,6 +24613,11 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",
                         "source_coverage": disposable_collection_coverage(),
+                        **(
+                            {"application_resources": application_resources}
+                            if application_resources is not None
+                            else {}
+                        ),
                     },
                 )
             operation = None
@@ -24641,6 +24668,7 @@ def create_launchplane_fastapi_app(
                             "expected_binding_sha256",
                             "expected_observation_sha256",
                             "lifetime_seconds",
+                            "include_application_resources",
                         }
                     ),
                     "product": profile.product,

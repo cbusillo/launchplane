@@ -17,6 +17,7 @@ from control_plane.contracts.owner_control import (
     verify_owner_control_confirmation_signature,
 )
 from control_plane.contracts.privileged_operation import PrivilegedOperationDescriptorId
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -24,7 +25,6 @@ OWNER_CONTROL_SHADOW_VERIFIER_MODE: Final[Literal["shadow"]] = "shadow"
 OWNER_CONTROL_SHADOW_AUTHORITY_STATE: Final[Literal["inert"]] = "inert"
 OWNER_CONTROL_SHADOW_MAX_ATTEMPTS: Final = 8
 _SERVER_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 
 OwnerControlChannelSessionStatus = Literal["enrolled", "revoked"]
@@ -86,7 +86,7 @@ def _validate_canonical_wire_json(
 def owner_control_challenge_id(approval_request_sha256: str) -> str:
     """Return the deterministic identifier for one exact issued approval request."""
 
-    if _SHA256_PATTERN.fullmatch(approval_request_sha256) is None:
+    if SHA256_PATTERN.fullmatch(approval_request_sha256) is None:
         raise ValueError("approval_request_sha256 must be a lowercase SHA-256 digest")
     return f"owner-control-challenge-{approval_request_sha256[:32]}"
 
@@ -143,7 +143,7 @@ class OwnerControlChannelSessionRecord(BaseModel):
     owner_github_id: int = Field(ge=1, le=9_223_372_036_854_775_807)
     status: OwnerControlChannelSessionStatus
     binding_json: str = Field(min_length=2, max_length=20_000)
-    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     enrolled_at: str
     revoked_at: str | None = None
     authority_state: Literal["inert"] = OWNER_CONTROL_SHADOW_AUTHORITY_STATE
@@ -210,9 +210,9 @@ class OwnerControlIssuedChallengeRecord(BaseModel):
     issued_at: str
     expires_at: str
     approval_request_json: str = Field(min_length=2, max_length=20_000)
-    approval_request_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    approval_request_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     binding_json: str = Field(min_length=2, max_length=20_000)
-    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     state: OwnerControlChallengeState = "issued"
     attempt_count: int = Field(default=0, ge=0, le=OWNER_CONTROL_SHADOW_MAX_ATTEMPTS)
     consumed_at: str | None = None
@@ -301,8 +301,8 @@ class OwnerControlChallengeLifecycleEventRecord(BaseModel):
     challenge_nonce: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     channel_session_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
     operation_id: str = Field(pattern=r"^privileged-operation-[0-9a-f]{32}$")
-    approval_request_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
-    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    approval_request_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     from_state: Literal["issued"] = "issued"
     to_state: Literal["expired"] = "expired"
     transition_reason: OwnerControlChallengeLifecycleTransitionReason = "expired"
@@ -338,9 +338,9 @@ class OwnerControlShadowVerificationEventRecord(BaseModel):
     sequence: int = Field(ge=1, le=OWNER_CONTROL_SHADOW_MAX_ATTEMPTS)
     channel_session_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
     challenge_nonce: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
-    envelope_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
-    approval_request_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
-    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    envelope_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    approval_request_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     verification_status: OwnerControlShadowVerificationStatus
     rejection_reason: OwnerControlShadowVerificationReason | None = None
     resulting_challenge_state: OwnerControlChallengeState

@@ -68,6 +68,47 @@ authoritative application custody/isolation collector prerequisite
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
 
+For an existing application testing recipient, opt into read-only resource
+metadata with `include_application_resources=true` on `collect`, or run the
+repository client with `collect --application-resources`. The client uses the
+installed `operator` helper's transport. Ordinary requests retain their existing
+wire and response shape. The option is unavailable for previews or `inspect`.
+
+The service resolves the recorded application and registered server, then runs
+a fixed read program through the existing private transport. On a verified
+single-local-node Swarm it reports service/task counts, all attributable extant
+containers including stopped containers, configured and referenced named-volume
+counts, and content presence for verified local volume backing. Missing volumes,
+remote drivers, driver options and redirected backing are unavailable, never
+empty. Unsupported mounts are reported by a presence flag without reading their
+contents. Image volume declarations cover only the current immutable local
+service image, not every historical image; unavailable image metadata has a null
+declaration count.
+Unknown or changed inventory supplies no counts.
+Changed inventory includes an optional `changed_component` category identifying
+the first detected difference: Swarm nodes, the owned service, task/container/volume
+membership, or task/container/referenced-volume metadata. Container membership
+and metadata cover the whole local host, including unrelated services. This
+diagnostic supplies no resource identifiers or changed values. It preserves all
+inventory comparisons and the unknown safety verdict; it does not prove that the
+owned application caused the change. Older observations can omit the category.
+Use a compatible repository client to validate this optional diagnostic; an older
+strict client can reject the new field. Preserve an unknown result and use
+supported inspect/readback before considering an explicit new collection.
+
+The response includes no filesystem paths, filenames, file contents, environment
+values or raw provider errors. The reader neither changes resources nor creates
+a schedule. Its counts and `service_quiescent` value describe a sample of the
+selected service, its tasks and its attributable containers. Other volume
+consumers are not excluded. Filesystem data can change independently; service
+quiescence is not an execution fence. The `application_resources` read runs
+before usage collection; `observed_at` and `expires_at` do not timestamp or give
+a validity period to that earlier metadata sample. These observations publish
+no positive custody or production-isolation facts and do not qualify deployment.
+The broader [#4372](https://github.com/cbusillo/launchplane/issues/4372)
+prerequisite remains open until supported sources establish those facts for the
+actual application state.
+
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
@@ -3080,13 +3121,13 @@ each next `action` through its own dry-run/review/apply with a distinct stable
 key and new evidence file:
 
 1. `execute` captures the external source through fixed read-only SSH commands.
-   The filestore archive reads only the files referenced by the captured database
-   dump, without walking live directories or copying unreferenced files and the
-   GC checklist. A referenced file removed by source GC before it is read still
-   fails the capture; every nonzero source status remains a refusal. A bounded
-   read-only check refuses unavailable roots and aliased shard directories before
-   archiving. Dump decoding uses the existing size-scaled time budget; decoded
-   text is streamed, and selected filenames stay within the database byte bound.
+   The filestore is content-addressed. Its live tar runs with C-locale diagnostics
+   and may return status 1 only when its complete, nonempty stderr contains
+   exclusively `file changed as we read it` warnings. Truncated, mixed or unknown
+   diagnostics and every other nonzero status refuse capture. No failed-read
+   suppression is used. Extraction rejects links and special files and applies
+   the safe data filter. Full restored-database attachment size and SHA-1
+   validation still gates the recovery tuple; missing or corrupt references fail.
    Database and filestore streams are bounded. Source-copy lineage is hashed,
    referenced attachments are checked against the restored database, and raw
    failure material stays outside all container mounts. The SQL-only
@@ -3141,13 +3182,23 @@ not identify its root cause; compare provider event logs before diagnosing it.
 The disabled server probe schedule and its deployment logs remain as operational
 evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
 original key can retry only after observing an empty placement and an idle
-probe, with the unchanged reviewed record and no credential binding. Unknown
+probe, with the unchanged original reviewed inputs. If credentials were already
+bound before the first placement checkpoint, their retained binding must match
+the current purpose-local bundle; continuation reuses that bundle. Unknown
 observations keep that key held. Partial prepare and host continuation
 keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
-`ODOO_DB_NAME` set to the final upgraded copy. Its stdin is one JSON object:
+`ODOO_DB_NAME` set to the final upgraded copy. The shared Compose environment
+defaults `ODOO_FILESTORE_PATH` to `/volumes/data/filestore` for both web and the
+script-runner, preserving explicitly configured filestore paths on other lanes.
+Copy/upgrade, before-web readback, attachment checks and product validation inherit
+the same rehearsal filestore setting. Copy/upgrade keeps its per-exec flag for
+containers prepared before this environment change. Existing switched containers
+do not gain a new environment from a source deploy; an already held validation
+still requires its separately reviewed original-operation disposition.
+Its stdin is one JSON object:
 `product`, `rehearsal_id`, `artifact_id`, `source_commit`, `database`, and
 `attempt_sha256`. Launchplane establishes these from the stored rehearsal,
 verified candidate and original operation key. The product independently checks
@@ -3164,9 +3215,15 @@ connected database and holds the native workflow lock; it can access other
 rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 
 The product writes exactly one line
-`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
-discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
+`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other stdout,
+including nonzero-exit stdout, is discarded. Stderr is drained concurrently;
+on failure its bounded tail passes through the existing credential and SQL-row
+redactor into the attempt-bound private child diagnostic, alongside any host
+timeout or output-limit reason. Truncated tails discard their first partial line
+before redaction. No stderr is added to
+a successful receipt. Product code must keep copied business values out of its
+error messages; redaction is not a general Client-data classifier.
+Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
 unknown original-key custody; stopping the host observer does not prove the
 in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`
@@ -3414,8 +3471,8 @@ Its fixed `recovery_reason` distinguishes unavailable observation from
 unqualified placement or source/credential prerequisites; provider authorization
 denials retain their HTTP refusal and trace rather than becoming a hold.
 
-`continue_original_prepare` is limited to an interrupted `project_id` effect:
-the original reviewed intent, unchanged source/artifact/placement and existing
+For an interrupted `project_id` effect, the original reviewed intent,
+unchanged source/artifact/placement and existing
 purpose-local credential bindings must agree, and complete provider inventory
 must prove exactly one service-named project with its original description and
 only its empty default environment. Under the original journal and reacquired

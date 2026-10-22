@@ -23,7 +23,10 @@ from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
     GenericWebResolvedDeployTarget,
+    GenericWebRuntimeArtifactObservation,
+    evaluate_generic_web_runtime_close_out,
 )
 
 
@@ -124,46 +127,177 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.final_target: dict[str, object] | None = None
         self.vanished_tasks: set[str] = set()
 
-    def read(self) -> ApplicationRuntimeObservation:
-        def request(**kwargs: object) -> object:
-            self.requests.append(kwargs)
-            query = kwargs["query"]
-            assert isinstance(query, dict)
-            self.assertEqual(query.get("serverId"), "server-1")
-            if kwargs["path"] == "/api/docker.getServiceContainersByAppName":
-                self.assertEqual(query["appName"], "fixture-app")
-                return deepcopy(self.tasks)
-            self.assertEqual(kwargs["path"], "/api/docker.getConfig")
-            identifier = query["containerId"]
-            if identifier in self.vanished_tasks:
-                raise click.ClickException("fixture task reaped")
-            result = deepcopy(
-                {
-                    "fixture-app": self.service,
-                    "task-1": self.task,
-                    _CONTAINER_ID: self.container,
-                    _IMAGE_ID.removeprefix("sha256:"): self.image,
-                    **self.extra_inspections,
-                }[identifier]
-            )
-            if self.inspect_shape == "json":
-                return json.dumps(result)
-            if self.inspect_shape == "list":
-                return [result]
-            return result
+    def request(self, **kwargs: object) -> object:
+        self.requests.append(kwargs)
+        query = kwargs["query"]
+        assert isinstance(query, dict)
+        self.assertEqual(query.get("serverId"), "server-1")
+        if kwargs["path"] == "/api/docker.getServiceContainersByAppName":
+            self.assertEqual(query["appName"], "fixture-app")
+            return deepcopy(self.tasks)
+        self.assertEqual(kwargs["path"], "/api/docker.getConfig")
+        identifier = query["containerId"]
+        if identifier in self.vanished_tasks:
+            raise click.ClickException("fixture task reaped")
+        result = deepcopy(
+            {
+                "fixture-app": self.service,
+                "task-1": self.task,
+                _CONTAINER_ID: self.container,
+                _IMAGE_ID.removeprefix("sha256:"): self.image,
+                **self.extra_inspections,
+            }[identifier]
+        )
+        if self.inspect_shape == "json":
+            return json.dumps(result)
+        if self.inspect_shape == "list":
+            return [result]
+        return result
 
+    def read(self) -> ApplicationRuntimeObservation:
         with (
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=[self.target, self.final_target or self.target],
             ),
-            patch("control_plane.dokploy.api.dokploy_request", side_effect=request),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=self.request),
         ):
             return fetch_application_runtime(
                 host="https://provider.example",
                 token="fixture-token",
                 application_id="application-1",
             )
+
+    def observe_artifact(self) -> GenericWebRuntimeArtifactObservation:
+        self.target.setdefault("dockerImage", _TAG)
+        self.target.setdefault("sourceType", "docker")
+        with (
+            patch.object(
+                DokployGenericWebDeployProvider,
+                "_read_provider_config",
+                return_value=("https://provider.example", "fixture-token"),
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=lambda **_kwargs: deepcopy(self.target),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=self.request),
+        ):
+            return DokployGenericWebDeployProvider().observe_runtime_artifact(
+                control_plane_root=Path("."), resolved_deploy_target=_application_target()
+            )
+
+    def test_recovery_observer_proves_application_image_without_relabeling_saved_tag(self) -> None:
+        target = _application_target()
+        self.image["RepoDigests"] = ["mirror.example/application@" + _DIGEST, _IMAGE]
+        observation = self.observe_artifact()
+        self.assertEqual(observation.target_artifact_reference, self.target["dockerImage"])
+        self.assertEqual(observation.running_container_images, (_IMAGE,))
+        evidence = evaluate_generic_web_runtime_close_out(
+            observation=observation,
+            expected_artifact_reference=target.ship_request.artifact_id,
+            expected_provider_reference=target.ship_request.deploy_reference,
+            expected_deployment_record_id="deployment-1",
+        )
+        self.assertEqual(
+            evidence.running_container_count, len(observation.running_container_images)
+        )
+        self.assertNotIn("do-not-expose", observation.model_dump_json())
+
+    def test_application_recovery_requires_original_provider_reference_and_deployment(self) -> None:
+        observation = self.observe_artifact()
+        target = _application_target()
+        for reference, record in (
+            ("", "deployment-1"),
+            (_REPOSITORY + ":sha-" + "b" * 40, "deployment-1"),
+            (target.ship_request.deploy_reference, ""),
+            (target.ship_request.deploy_reference, "previous-deployment"),
+        ):
+            with self.subTest(reference=reference, record=record), self.assertRaises(ValueError):
+                evaluate_generic_web_runtime_close_out(
+                    observation=observation,
+                    expected_artifact_reference=target.ship_request.artifact_id,
+                    expected_provider_reference=reference,
+                    expected_deployment_record_id=record,
+                )
+
+    def test_application_recovery_refuses_stale_saved_configuration(self) -> None:
+        initial = deepcopy(self.target)
+        for change in (
+            {"dockerImage": _REPOSITORY + ":sha-" + "b" * 40},
+            {"sourceType": "git"},
+        ):
+            with self.subTest(change=change):
+                self.target = {**initial, **change}
+                with self.assertRaises((ValueError, click.ClickException)):
+                    observation = self.observe_artifact()
+                    evaluate_generic_web_runtime_close_out(
+                        observation=observation,
+                        expected_artifact_reference=_IMAGE,
+                        expected_provider_reference=_TAG,
+                        expected_deployment_record_id="deployment-1",
+                    )
+
+    def test_application_recovery_refuses_configuration_drift_during_real_inspection(self) -> None:
+        original_request = self.request
+        initial = deepcopy(self.target)
+        for field, value in (
+            ("dockerImage", _REPOSITORY + ":sha-" + "b" * 40),
+            ("sourceType", "git"),
+            ("appName", "another-application"),
+            ("serverId", "another-server"),
+        ):
+            with self.subTest(field=field):
+                self.target = deepcopy(initial)
+
+                def change_configuration(**kwargs: object) -> object:
+                    response = original_request(**kwargs)
+                    self.target[field] = value
+                    return response
+
+                with (
+                    patch.object(self, "request", side_effect=change_configuration),
+                    self.assertRaises((ValueError, click.ClickException)),
+                ):
+                    self.observe_artifact()
+
+    def test_application_recovery_refuses_unsettled_or_incomplete_processes(self) -> None:
+        target = _application_target()
+        service = deepcopy(self.service)
+        for state in ("updating", "paused", "rollback_paused", "unreported_update", "foreign_task"):
+            with self.subTest(state=state):
+                self.service = deepcopy(service)
+                self.task["ServiceID"] = "service-1"
+                update = self.service["UpdateStatus"]
+                assert isinstance(update, dict)
+                if state == "unreported_update":
+                    self.service.pop("UpdateStatus")
+                    self.service["PreviousSpec"] = {}
+                elif state == "foreign_task":
+                    self.task["ServiceID"] = "other-service"
+                else:
+                    update["State"] = state
+                observation = self.observe_artifact()
+                with self.assertRaises(ValueError):
+                    evaluate_generic_web_runtime_close_out(
+                        observation=observation,
+                        expected_artifact_reference=target.ship_request.artifact_id,
+                        expected_provider_reference=target.ship_request.deploy_reference,
+                        expected_deployment_record_id="deployment-1",
+                    )
+
+    def test_application_recovery_rejects_tag_only_or_different_immutable_image(self) -> None:
+        for digests in ([], [_REPOSITORY + "@sha256:" + "e" * 64]):
+            with self.subTest(digests=digests):
+                self.image["RepoDigests"] = digests
+                with self.assertRaises((ValueError, click.ClickException)):
+                    observation = self.observe_artifact()
+                    evaluate_generic_web_runtime_close_out(
+                        observation=observation,
+                        expected_artifact_reference=_IMAGE,
+                        expected_provider_reference=_TAG,
+                        expected_deployment_record_id="deployment-1",
+                    )
 
     def test_actual_environment_names_are_bounded_and_values_never_escape(self) -> None:
         spec = self.service["Spec"]

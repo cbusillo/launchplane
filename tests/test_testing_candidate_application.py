@@ -182,7 +182,7 @@ class CandidateApplicationTests(unittest.TestCase):
                 self.subTest(error=type(error).__name__),
                 patch.object(application, "_read_remote", side_effect=error),
             ):
-                with self.assertRaises(expected):
+                with self.assertRaises(expected) as raised:
                     real_readiness(
                         host="https://provider.invalid",
                         token="fixture",
@@ -190,6 +190,9 @@ class CandidateApplicationTests(unittest.TestCase):
                         inputs=inputs,
                         deployment_id=allocation.application.deployment_id,
                     )
+                if isinstance(error, NativeProgramFailed):
+                    assert isinstance(raised.exception, application.CandidatePrivateReadinessFailed)
+                    self.assertEqual(raised.exception.evidence, error.evidence)
 
     def test_private_build_preserves_the_serving_address_and_generated_passwords(self) -> None:
         allocation = self.allocate()

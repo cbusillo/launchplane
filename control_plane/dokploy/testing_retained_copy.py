@@ -3,6 +3,7 @@
 import inspect
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from typing import Any
+from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
 
 from control_plane.dokploy.native_copy_stream import _read_remote
 
@@ -76,7 +77,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     if len(set(services)) != len(services) or any(
         service not in {"web", "database", "script-runner"} for service in services
     ):
-        raise ValueError("Retained testing project contains an unowned service")
+        raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
     web_members = [
         item
         for item in members
@@ -88,26 +89,26 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         if item["Config"]["Labels"].get("com.docker.compose.service") == "database"
     ]
     if len(web_members) != 1 or len(database_members) != 1:
-        raise ValueError("Retained testing container custody is unavailable")
+        raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
     web = web_members[0]
     database = database_members[0]
     states = [item.get("State", {}).get("Status") for item in members]
     stopped = all(value in {"exited", "created"} for value in states)
     environment = dict(item.split("=", 1) for item in web["Config"].get("Env", []) if "=" in item)
     identity = json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null"))
+    if not isinstance(identity, dict) and not (
+        identity is None and stopped and spec.get("allow_unavailable") is True
+    ):
+        raise ValueError("Retained testing runtime identity is unreadable")
     if (
-        (
-            not isinstance(identity, dict)
-            and not (identity is None and stopped and spec.get("allow_unavailable") is True)
-        )
-        or isinstance(identity, dict)
+        isinstance(identity, dict)
         and (identity.get("context"), identity.get("instance")) != (spec["context"], "testing")
         or environment.get("PLATFORM_INSTANCE") != "testing"
         or environment.get("ODOO_DB_HOST") != "database"
     ):
-        raise ValueError("Retained testing runtime is not an isolated local database consumer")
+        raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
     if spec.get("identity") is not None and identity != spec["identity"]:
-        raise ValueError("Retained testing runtime changed")
+        raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
     resources = []
     for member, destination in ((web, "/volumes/data"), (database, "/var/lib/postgresql/data")):
         mounts = [
@@ -119,21 +120,21 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
             or mounts[0].get("RW") is not True
             or not mounts[0].get("Name")
         ):
-            raise ValueError("Retained testing data custody is unavailable")
+            raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
         resources.append({"destination": destination, "volume": mounts[0]["Name"]})
     volumes = {item["volume"] for item in resources}
     if len(volumes) != len(resources):
-        raise ValueError("Retained testing resources are shared")
+        raise CopyReadbackRefused(ReadbackPredicate.BACKING_DISTINCT)
     for member in members:
         configured = dict(
             item.split("=", 1) for item in member.get("Config", {}).get("Env", []) if "=" in item
         )
         if configured.get("PLATFORM_INSTANCE") not in (None, "", "testing"):
-            raise ValueError("The testing project contains another lane's process")
+            raise CopyReadbackRefused(ReadbackPredicate.INSTANCE)
         for mount in member.get("Mounts", []):
             if mount.get("RW", True):
                 if mount.get("Type") != "volume" or not mount.get("Name"):
-                    raise ValueError("Testing retirement requires qualified named writable storage")
+                    raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
                 volumes.add(mount["Name"])
     for other in containers:
         other_project = (other.get("Config", {}).get("Labels") or {}).get(
@@ -142,7 +143,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         if other_project != project and any(
             item.get("Name") in volumes for item in other.get("Mounts", [])
         ):
-            raise ValueError("Retained testing storage is shared outside its project")
+            raise CopyReadbackRefused(ReadbackPredicate.STORAGE_CONSUMERS)
     binding = hashlib.sha256(
         json.dumps(
             {"data": resources, "writable_volumes": sorted(volumes)},
@@ -151,7 +152,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         ).encode()
     ).hexdigest()
     if spec.get("resource_binding") and spec["resource_binding"] != binding:
-        raise ValueError("Retained testing data custody changed")
+        raise CopyReadbackRefused(ReadbackPredicate.CUSTODY)
     state = web.get("State", {}).get("Status")
     if any(
         value not in {"running", "exited", "created", "paused", "restarting", "dead"}
@@ -222,7 +223,7 @@ try:
         backings=inspect_volume_backings(result['volumes'],containers,own)
         result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
     if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
-        raise ValueError('Retained testing backing storage changed')
+        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
     if spec.get('allow_unavailable') is True:
         result['availability']=result.get('availability','stopped' if result['stopped'] else 'available')
         if result['availability']!='available':
@@ -231,7 +232,9 @@ try:
         if spec.get('unavailable_sha256') and result.get('observation_sha256')!=spec['unavailable_sha256']:
             raise ValueError('The unavailable predecessor changed')
     if spec['mode']=='readiness':
-        if result['web_stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
+        if result['web_stopped']:
+            raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
+        if not spec.get('identity') or not spec.get('health_path','').startswith('/'):
             raise ValueError('Retained private health requires the original running process')
         web=next(item for item in inventory() if item['Id']==result['web_id'])
         environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)
@@ -247,8 +250,8 @@ try:
 except PermissionError:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
-except Exception:
-    print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+except Exception as error:
+    print(sys.argv[2]+json.dumps(copy_readback_failure_frame(error)),flush=True)
 """
     )
 

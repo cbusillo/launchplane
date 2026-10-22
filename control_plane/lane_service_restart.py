@@ -18,6 +18,7 @@ from control_plane.contracts.lane_service_restart import (
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -35,6 +36,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.runtime_identity_health import (
     wait_for_runtime_identity_healthcheck_with_retry,
 )
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 
 
 class ServiceRestartRefused(ValueError):
@@ -61,9 +63,7 @@ def plan_service_restart(
         raise ServiceRestartRefused("The requested active product lane is not recorded.")
     if request.service == "web" and not lane.health_url.strip():
         raise ServiceRestartRefused("The lane's HTTP runtime identity endpoint is unavailable.")
-    # These lanes have a shared mutex respected by release enqueues, workers and
-    # synchronous releases. Other drivers must supply equivalent exclusion first.
-    if profile.driver_id != "odoo":
+    if profile.driver_id not in {"odoo", "generic-web"}:
         raise ServiceRestartRefused(
             "This driver does not support service restart with release exclusion."
         )
@@ -182,6 +182,7 @@ class ServiceRestartAdapter:
         token: str,
         health_url: str,
         trace_id: str,
+        require_disposable: bool = False,
     ) -> None:
         self.store = store
         self.root = root
@@ -192,6 +193,7 @@ class ServiceRestartAdapter:
         self.token = token
         self.health_url = health_url
         self.trace_id = trace_id
+        self.require_disposable = require_disposable
 
     def target_key(self) -> str:
         # Fence the immutable recipient of the POST. An old uncertain request
@@ -333,9 +335,16 @@ class ServiceRestartAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        with self.store.odoo_synchronous_lane_reservation(
-            product=self.plan.product, context=self.plan.context, instance=self.plan.instance
-        ) as owner:
+        reservation = (
+            serialize_generic_web_product_operation(
+                record_store=self.store, product=self.plan.product, exclusive=True
+            )
+            if self.plan.driver_id == "generic-web"
+            else self.store.odoo_synchronous_lane_reservation(
+                product=self.plan.product, context=self.plan.context, instance=self.plan.instance
+            )
+        )
+        with reservation as owner:
             if owner is not None:
                 raise ProviderMutationRejectedError(
                     ServiceRestartRefused("A release operation holds this lane.")
@@ -348,6 +357,15 @@ class ServiceRestartAdapter:
                     raise ServiceRestartRefused(
                         "Restart identity changed; inspect and review again."
                     )
+                if self.require_disposable:
+                    require_disposable_lane(
+                        self.store,
+                        product=self.plan.product,
+                        context=self.plan.context,
+                        instance=self.plan.instance,
+                    )
+            except DisposableLaneSafetyUnknown as error:
+                raise ProviderMutationRejectedError(error) from error
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationRejectedError(
                     ServiceRestartRefused(

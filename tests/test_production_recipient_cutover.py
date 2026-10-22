@@ -467,6 +467,33 @@ class RecipientCutoverTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             cutover_intent(self.fixture.root, self.store, self.record, wrong)
 
+    def test_source_lost_after_cached_admission_refuses_first_effect(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        qualified = True
+        original = self.store.checkpoint_mutation_provider_effect
+
+        def source() -> None:
+            if not qualified:
+                raise GenericWebPromotionSourceRefused("Current testing original is unresolved.")
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal qualified
+            qualified = False
+            return original(**kwargs)
+
+        self.adapter.validate_source = source
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            with self.assertRaises(GenericWebPromotionSourceRefused):
+                self.run_release()
+        self.assertFalse(qualified)
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.deploys, 0)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+
     def test_drill_restores_retained_data_then_repromotes_without_reinitialization(self) -> None:
         from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
         from control_plane.production_recipient_inverse import run_recipient_inverse

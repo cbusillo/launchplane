@@ -817,10 +817,15 @@ identity.
 Stage 2 apply is explicit and digest-gated. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
-inspection under `generic_web_deploy.execute` and requires an exact digest match
-before it writes anything. The dry-run plan action never admits apply, including
-production recovery. The
-digest intentionally excludes `observed_at`, so routine database observation
+inspection and requires an exact digest match before it writes anything.
+`generic_web_deploy.execute` remains the explicit authority for production,
+foreign originals and other identities. The authenticated Director
+`local_operator` identity's bounded own-testing-original alternative and forward-retry safety
+requirements are defined in [authorization](authorization-authority.md).
+After `testing_deploy_safety_unknown`, inspect and collect
+`/v1/disposable-lanes/observations`, resolve protections, then refresh the review.
+
+The digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
 provider classification, action, request, and bounded provider observation
 inputs remain part of the digest. Non-legacy digest inputs are unchanged. Only a
@@ -2823,6 +2828,21 @@ Conventional onboarding creates new products only.
 - Runtime log searches filter the bounded redacted tail locally, preserving
   Dokploy's literal, case-insensitive behavior while returning an empty list
   when no lines match. Real provider errors still fail the read.
+- Cookie values are redacted across each complete returned batch or provider-error
+  body before local tailing, filtering, or error truncation. Covered forms include
+  string/byte header pairs, rawHeaders arrays, HTTP_COOKIE, cookies/signedCookies
+  maps, Cookie2/Set-Cookie2, quoted dotted cookie keys, Python cookie objects and
+  jars, encoded JSON strings, and concatenated or folded values.
+  Escaped literals and balanced containers preserve adjacent diagnostics where
+  their boundaries are sound. Unquoted values suppress their same-line suffix
+  and indented continuations; incomplete literals or containers suppress the
+  remaining body. Raw `<Cookie ...>` strings also suppress the remaining body:
+  their unescaped values can forge closers and arbitrary newlines, even in
+  truncated output or quoted logger wrappers. This ambiguity invalidates enclosing
+  apparent strings too; their later diagnostics may be suppressed. A quoted prefix followed by more cookie data or logfmt
+  fields is likewise ambiguous and suppresses that suffix. Other secret patterns
+  keep their existing per-line log behavior. Name-free dumps, other encodings,
+  and continuations whose opener the provider omitted cannot be recognized.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
   /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
   status with exact `subject` and `recipient` filters plus a timezone-qualified
@@ -3170,6 +3190,15 @@ boolean verdicts and setting names only. Each apply key has its own schedule,
 separate from observations and ordinary data workflows, so later deployments
 cannot replace the original script or rotate its job out of shared history.
 Retain uncertain operation schedules and their logs as recovery evidence.
+Failed results always retain `readback_failed_predicate` and
+`readback_failure_kind` (`refused` or `unavailable`), plus safe setting findings,
+log availability and schedule references when observed. A stopped selected
+runner reports `runner_running` before SQL; a failed or empty probe cannot
+produce a review receipt. A provider job marked done without the required
+markers reports `schedule_evidence_complete`, not a successful readback.
+Inspect the selected runner and its retained lifecycle/log evidence before
+choosing a separately authorized runtime recovery. Preserve the original copy;
+do not use a SQL repair, restore or new generation to replace missing evidence.
 Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
@@ -3363,6 +3392,23 @@ alone is not proof that an existing testing copy has been repaired.
     refused too (the post-deploy renderer applies the same comparison),
     `test_store` on a production lane, a lane with no tracked target record, and
     missing or invalid bindings.
+    On non-production lanes, the protected keys also include the product's
+    production-lane store identities from stored Shopify addon settings or
+    `shopify.shop_url_key`, `shopify.shop_url` and `shopify.store_url`
+    config-parameter overrides. Apply reads this authority
+    again before writing, so a production-store change since dry-run cannot
+    authorize the same store on testing. These are record comparisons, not
+    proof of the store a running credential reaches; the read-only runtime
+    identity comparison remains necessary before Shopify writes.
+    The common post-deploy renderer also checks these production identities
+    when it has record-store authority, including for existing stored intent
+    delivered by post-deploy, bootstrap and target replacement. Offline renders
+    without a record store still require explicitly supplied protected keys;
+    they cannot verify production identity.
+    Integration allowances, including `pre_live`, do not bypass a production-store
+    match. Use a separate development store for a non-production lane when
+    production intent names that store. Store comparisons accept myshopify domains
+    and [Shopify admin store URLs](https://help.shopify.com/en/manual/intro-to-shopify/initial-setup/setup-business-settings).
   - The record changes only intent. Run Odoo post-deploy for the lane afterwards
     so the database receives the settings, then verify them in the lane database.
 - On a non-production lane, post-deploy always sends an explicit Shopify

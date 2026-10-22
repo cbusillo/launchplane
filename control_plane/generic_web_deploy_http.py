@@ -24,12 +24,18 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
 )
 from control_plane.workflows.generic_web_execution import ExecutionRecorder
+from control_plane.service_auth import (
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+    director_agent_identity,
+)
 
 
 GENERIC_WEB_DEPLOY_ROUTE = _GENERIC_WEB_DEPLOY_ROUTE.route_path
 
 __all__ = [
     "GENERIC_WEB_DEPLOY_ROUTE",
+    "director_agent_can_deploy_testing",
     "GenericWebDeployEnvelope",
     "GenericWebDeployProductMismatchError",
     "GenericWebDeployRouteDependencyError",
@@ -45,6 +51,17 @@ class GenericWebDeployProductMismatchError(ValueError):
 
 class GenericWebDeployRouteDependencyError(ValueError):
     pass
+
+
+def director_agent_can_deploy_testing(
+    identity: LaunchplaneIdentity, lane: ProductLaneProfile
+) -> bool:
+    return (
+        isinstance(identity, LocalOperatorIdentity)
+        and director_agent_identity(identity)
+        and lane.instance == "testing"
+        and lane.generic_web_cutover is None
+    )
 
 
 def resolve_generic_web_deploy_lane(

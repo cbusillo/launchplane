@@ -62,10 +62,27 @@ _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
     rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
-_COOKIE_LOG_VALUE_PATTERN = re.compile(
-    r"""(?i)((?<![\w-])["']?(?:set-)?cookie["']?\s*[=:]\s*)"""
-    r"""(?:(?P<quote>["'])(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)|[^\r\n]+)"""
+_COOKIE_LOG_NAME_PATTERN = r"(?:HTTP_COOKIE|signedCookies|(?:set-)?cookie(?:s|2)?)"
+_COOKIE_LOG_TOKEN_PATTERN = re.compile(
+    rf"""(?i)(?<![\w-])(?:b?["'`](?:[\w-]+\.)*{_COOKIE_LOG_NAME_PATTERN}["'`][ \t]*[=:,][ \t]*"""
+    rf"""|{_COOKIE_LOG_NAME_PATTERN}(?:[ \t]*[=:]|\\*["'`][ \t]*[=:,])[ \t]*"""
+    rf"""|(?P<escaped>\\+["'](?:[\w-]+\.)*{_COOKIE_LOG_NAME_PATTERN}\\+["'][ \t]*[=:,][ \t]*)"""
+    r"""|(?P<object><(?:Cookie|SimpleCookie|Morsel)(?=[ \t:>])|Cookie(?=\()))"""
+    r"|(?:(?<!\w)|(?<=(?<!\w)[bB]))"
+    r"""(?P<string>"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`)"""
 )
+_LOG_LINE_PREFIX_PATTERN = re.compile(
+    r"(?:[A-Za-z0-9][\w.-]*[ \t]+\| )?"
+    r"(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}) )?"
+)
+_LOG_NEWLINE_PATTERN = re.compile(r"\r\n|[\r\n]")
+_LOG_INDENT_PATTERN = re.compile(r"[ \t]*")
+_COOKIE_PAIR_PATTERN = re.compile(r"[!#$%&'*+.^_`|~\w-]+=")
+_COOKIE_VALUE_TAIL_PATTERN = re.compile(
+    rf"""[^ \t\r\n,;)\]}}>]|[ \t]*(?:;|,?[ \t]*(?=["']?{_COOKIE_PAIR_PATTERN.pattern}))"""
+)
+_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(r"[ \t]*(?P<plus>\+)?[ \t]*")
+_LOG_FIELD_DELIMITER_PATTERN = re.compile(r"[ \t]*[:=]")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
 )
@@ -73,6 +90,7 @@ _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
 _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
 _DOKPLOY_COMPOSE_SERVICE_PATTERN = re.compile(r"^$|^[a-z0-9][a-z0-9._-]{0,127}$")
 type JsonPrimitive = str | int | float | bool | None
+type _CookieBoundary = Literal["closed", "open", "opaque"]
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type MutationObserver = Callable[[str, str, JsonObject, Callable[[], JsonValue]], JsonValue]
@@ -531,14 +549,209 @@ def normalize_dokploy_compose_service_name(raw_service_name: str) -> str:
     return service_name
 
 
-def _redact_cookie_value(match: re.Match[str]) -> str:
-    quote = match["quote"] or ""
-    return f"{match[1]}{quote}[redacted]{quote}"
+def _line_body(text: str, line_start: int) -> tuple[int, int]:
+    while True:
+        prefix = _LOG_LINE_PREFIX_PATTERN.match(text, line_start)
+        body_start = prefix.end() if prefix else line_start
+        indentation = _LOG_INDENT_PATTERN.match(text, body_start)
+        assert indentation is not None
+        if newline := _LOG_NEWLINE_PATTERN.match(text, indentation.end()):
+            line_start = newline.end()
+            continue
+        return indentation.end(), indentation.end() - body_start
+
+
+def _literal_start(text: str, start: int) -> int:
+    if text[start : start + 1] in {"b", "B"} and text[start + 1 : start + 2] in {'"', "'"}:
+        return start + 1
+    return start
+
+
+def _cookie_value_start(text: str, start: int, key_indent: int) -> int | None:
+    if newline := _LOG_NEWLINE_PATTERN.match(text, start):
+        start, indent = _line_body(text, newline.end())
+        start = _literal_start(text, start)
+        if (
+            text[start : start + 1] not in {'"', "'", "`", "[", "{", "("}
+            and indent <= key_indent
+            and not _COOKIE_PAIR_PATTERN.match(text, start)
+            and not text.startswith("- ", start)
+        ):
+            return None
+    start = _literal_start(text, start)
+    return start if start < len(text) else None
+
+
+def _cookie_value_end(
+    text: str, start: int, key_indent: int, *, trusted_object: bool = False
+) -> tuple[int, _CookieBoundary]:
+    end = _cookie_literal_end(text, start, key_indent)
+    if trusted_object:
+        return end, "open" if end == len(text) else "closed"
+    return _cookie_region_end(text, start, end)
+
+
+def _cookie_region_end(text: str, start: int, end: int) -> tuple[int, _CookieBoundary]:
+    if text.find("<Cookie ", start, end) >= 0:
+        return len(text), "opaque"
+    return end, "open" if end == len(text) else "closed"
+
+
+def _cookie_literal_end(text: str, start: int, key_indent: int) -> int:
+    closing = {"<": ">", "[": "]", "{": "}", "(": ")", '"': '"', "'": "'", "`": "`"}
+    if start >= len(text):
+        return start
+    if text.startswith("<Cookie ", start):
+        return len(text)
+    if text[start] not in closing:
+        return _unquoted_cookie_value_end(text, start, key_indent)
+    stack = [(closing[text[start]], start)]
+    index = start + 1
+    while index < len(text):
+        character = text[index]
+        closer, opener = stack[-1]
+        if closer in {'"', "'", "`"}:
+            if character == "\\":
+                index += 2
+                continue
+            if character == closer:
+                stack.pop()
+        elif text.startswith("<Cookie ", index):
+            return len(text)
+        elif character in closing and (
+            closer != ">"
+            or character == '"'
+            or (character == "'" and not text.startswith("<Morsel:", opener))
+        ):
+            stack.append((closing[character], index))
+        elif character == closer:
+            stack.pop()
+        elif closer != ">" and character in "]})":
+            return len(text)
+        index += 1
+        if not stack:
+            return index
+    return len(text)
+
+
+def _unquoted_cookie_value_end(text: str, start: int, key_indent: int) -> int:
+    newline = _LOG_NEWLINE_PATTERN.search(text, start)
+    end = newline.start() if newline else len(text)
+    list_indent = _line_body(text, text.rfind("\n", 0, start) + 1)[1]
+    is_list = text.startswith("- ", start)
+    while newline:
+        body_start, indent = _line_body(text, newline.end())
+        list_item = is_list and indent == list_indent and text.startswith("- ", body_start)
+        if indent <= key_indent and not list_item:
+            break
+        newline = _LOG_NEWLINE_PATTERN.search(text, body_start)
+        end = newline.start() if newline else len(text)
+    return end
+
+
+def _cookie_continuation_end(
+    text: str, end: int, key_indent: int, value_opener: str
+) -> tuple[int, _CookieBoundary]:
+    continuation_openers = {'"', "'", "`"} if value_opener in {'"', "'", "`"} else {"[", "{", "("}
+    if value_opener in {'"', "'", "`", "[", "{", "("}:
+        while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
+            next_start = continuation.end()
+            if newline := _LOG_NEWLINE_PATTERN.match(text, next_start):
+                next_start, indent = _line_body(text, newline.end())
+                next_part = _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, next_start)
+                assert next_part is not None
+                if not continuation["plus"] and not next_part["plus"] and indent <= key_indent:
+                    break
+                next_start = next_part.end()
+            next_start = _literal_start(text, next_start)
+            if text[next_start : next_start + 1] not in continuation_openers:
+                break
+            continued_end, boundary = _cookie_value_end(text, next_start, key_indent)
+            if boundary == "opaque":
+                return continued_end, boundary
+            if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
+                break
+            end = continued_end
+    if tail := _COOKIE_VALUE_TAIL_PATTERN.match(text, end):
+        return _cookie_region_end(
+            text, tail.start(), _unquoted_cookie_value_end(text, tail.start(), key_indent)
+        )
+    return end, "open" if end == len(text) else "closed"
+
+
+def _redact_cookie_string(raw_value: str) -> tuple[str, _CookieBoundary]:
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        redacted, boundary = _scan_cookie_values(raw_value[1:-1])
+        return f"{raw_value[0]}{redacted}{raw_value[-1]}", boundary
+    redacted, boundary = _scan_cookie_values(decoded)
+    return (
+        json.dumps(redacted, ensure_ascii=False) if redacted != decoded else raw_value
+    ), boundary
+
+
+def _redact_cookie_values(text: str) -> str:
+    return _scan_cookie_values(text)[0]
+
+
+def _scan_cookie_values(text: str) -> tuple[str, _CookieBoundary]:
+    parts: list[str] = []
+    cursor = 0
+    search_start = 0
+    boundary: _CookieBoundary = "closed"
+    start: int | None
+    while match := _COOKIE_LOG_TOKEN_PATTERN.search(text, search_start):
+        search_start = match.end()
+        key_indent = _line_body(text, text.rfind("\n", 0, match.start()) + 1)[1]
+        if match["string"]:
+            redacted, boundary = _redact_cookie_string(match[0])
+            end = match.end()
+            if boundary == "opaque":
+                end = len(text)
+            elif boundary == "open":
+                end, boundary = _cookie_continuation_end(text, end, key_indent, match[0][0])
+            if end > match.end():
+                redacted = f"{redacted[:-1]}[redacted]{redacted[-1]}"
+            parts.extend((text[cursor : match.start()], redacted))
+            cursor = search_start = end
+            continue
+        if match["escaped"]:
+            start = match.end()
+            end, boundary = _cookie_region_end(
+                text, start, _unquoted_cookie_value_end(text, start, key_indent)
+            )
+            parts.extend((text[cursor:start], "[redacted]"))
+            cursor = search_start = end
+            continue
+        if match["object"]:
+            start = match.start() if text[match.start()] == "<" else match.end()
+        else:
+            start = _cookie_value_start(text, match.end(), key_indent)
+        if start is None:
+            boundary = "open" if match.end() == len(text) else "closed"
+            continue
+        trusted_object = bool(match["object"]) and match["object"].casefold() != "<cookie"
+        end, boundary = _cookie_value_end(text, start, key_indent, trusted_object=trusted_object)
+        value_opener = text[start : start + 1]
+        if boundary != "opaque" and not trusted_object:
+            end, boundary = _cookie_continuation_end(text, end, key_indent, value_opener)
+        quote = text[start : start + 1]
+        if quote not in {'"', "'", "`"} or text[end - 1 : end] != quote:
+            quote = ""
+        parts.extend((text[cursor:start], f"{quote}[redacted]{quote}"))
+        cursor = end
+        search_start = end
+    parts.append(text[cursor:])
+    return "".join(parts), boundary
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:
-    redacted_line = _COOKIE_LOG_VALUE_PATTERN.sub(_redact_cookie_value, raw_line)
-    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', redacted_line)
+    return _redact_generic_secrets(_redact_cookie_values(raw_line))
+
+
+def _redact_generic_secrets(raw_line: str) -> str:
+    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', raw_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
     redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
     redacted_line = _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
@@ -546,6 +759,13 @@ def redact_dokploy_log_line(raw_line: str) -> str:
 
 
 def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
+    return tuple(
+        _redact_generic_secrets(line)
+        for line in _redact_cookie_values("\n".join(_raw_dokploy_log_lines(payload))).splitlines()
+    )
+
+
+def _raw_dokploy_log_lines(payload: JsonValue) -> list[str]:
     raw_lines: list[str] = []
     if isinstance(payload, str):
         raw_lines.extend(payload.splitlines())
@@ -569,11 +789,9 @@ def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
                 raw_lines.extend(value.splitlines())
                 break
             if isinstance(value, list):
-                raw_lines.extend(
-                    line for item in value for line in normalize_dokploy_log_payload(item)
-                )
+                raw_lines.extend(line for item in value for line in _raw_dokploy_log_lines(item))
                 break
-    return tuple(redact_dokploy_log_line(line) for line in raw_lines)
+    return raw_lines
 
 
 def fetch_dokploy_application_logs(
@@ -1648,7 +1866,7 @@ def _schedule_execution_failure(
         except click.ClickException:
             recent_output = ()
     redacted_provider_detail = redact_dokploy_log_line(provider_detail).strip()
-    redacted_recent_output = _bounded_redacted_log_lines(recent_output)
+    redacted_recent_output = _bounded_log_lines(recent_output)
     return DokployScheduleExecutionFailed(
         schedule_id=schedule_id,
         deployment_id=deployment_id,
@@ -1659,14 +1877,13 @@ def _schedule_execution_failure(
     )
 
 
-def _bounded_redacted_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
+def _bounded_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
     remaining_length = _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH
     redacted_lines: list[str] = []
     for line in lines:
         if remaining_length <= 0:
             break
-        redacted_line = redact_dokploy_log_line(line)
-        redacted_lines.append(redacted_line[:remaining_length])
+        redacted_lines.append(line[:remaining_length])
         remaining_length -= len(redacted_lines[-1])
     return tuple(redacted_lines)
 

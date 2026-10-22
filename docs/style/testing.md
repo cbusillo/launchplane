@@ -329,18 +329,21 @@ Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
-pnpm --dir frontend exec playwright install chromium
-pnpm --dir frontend test:browser
-pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
+(cd frontend && pnpm exec playwright install chromium)
+(cd frontend && pnpm test:browser)
+(cd frontend && pnpm exec node --test tests/browser-support/server-isolation.test.mjs)
 ```
 
 The Playwright suite starts its own Vite development server on an OS-assigned
 loopback port. Playwright captures the listener URL from Vite's startup output
 and passes it to workers; overlapping runner jobs never reuse another job's
-server. The isolation test holds two focused browser probes open together using
-the smoke configuration and checks that their origins differ. It runs as part
-of `test:browser`; the standalone command above is for focused diagnosis.
-It writes only task-local test artifacts.
+server. Each smoke server process also owns its temporary dependency-optimizer
+caches, removed when that process exits after teardown or startup failure.
+The isolation test holds two focused browser probes open together, proves their
+actual caches and origins differ, and checks that one server's cleanup preserves
+its peer's serving cache.
+It runs as part of `test:browser`; the standalone command above is for focused
+diagnosis. It writes only task-local test artifacts.
 
 CI uses a bounded worker count in `frontend/playwright.config.ts`, including
 self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
@@ -350,7 +353,7 @@ option for a measured diagnostic comparison.
 CI divides the unchanged suite into two jobs with Playwright's built-in
 `--shard` option. Each job retains four workers, zero retries, the isolation
 probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
-partition through `pnpm --dir frontend test:browser`; without that variable,
+partition through `(cd frontend && pnpm test:browser)`; without that variable,
 the local command still runs the whole browser suite and checks all screenshots.
 Sharded runs write Playwright JSON reports under `tmp/browser-smoke/reports`.
 After both jobs succeed, CI downloads their evidence into a freshly cleared
@@ -394,7 +397,7 @@ behind an explicit release gate until the test observes the intermediate
 screen, rather than consuming one response and assuming only one request.
 Development remounts can read a session more than once.
 
-`pnpm --dir frontend check:browser-timing` rejects sleeps, timer aliases,
+`(cd frontend && pnpm check:browser-timing)` rejects sleeps, timer aliases,
 test-specific timeouts/retries and unmanaged clock/context creation. Both
 frontend validation and browser smoke run this check. Shared Playwright
 failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
@@ -411,13 +414,13 @@ suite under representative sibling host load. Record the revision, worker
 count, load samples and pass/fail totals on the owning issue or PR. For example:
 
 ```bash
-CI=true pnpm --dir frontend exec playwright test --repeat-each=5 --workers=4 --retries=0
+(cd frontend && CI=true pnpm exec playwright test --repeat-each=5 --workers=4 --retries=0)
 ```
 
 Use a focused repetition for diagnosis:
 
 ```bash
-CI=true pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30
+(cd frontend && CI=true pnpm exec playwright test sidebar-freshness --repeat-each=30)
 ```
 
 The suite uses only repo-local
@@ -446,8 +449,8 @@ required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
 as representative layout tests, alongside focused responsive and spacing cases.
 Unmarked journeys retain desktop coverage; narrow-width defects in those
 journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
-`pnpm --dir frontend exec playwright test --list --project=desktop` and
-`pnpm --dir frontend exec playwright test --list --project=narrow`.
+`(cd frontend && pnpm exec playwright test --list --project=desktop)` and
+`(cd frontend && pnpm exec playwright test --list --project=narrow)`.
 
 The core admin journeys check route-heading and keyboard focus behavior, reject
 duplicate document IDs and horizontal overflow, and fail on unexpected
@@ -468,7 +471,11 @@ observer; OS-assigned Vite ports still isolate overlapping suite processes.
 The digest-pinned Playwright image supplies browser system libraries. Browser
 execution runs inside the container, with private shared memory and the job's
 actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
-installs frontend dependencies; the container uses the job's Node executable
+installs frontend dependencies and exports the manifest-selected pnpm with
+`corepack pack`, reusing its cache or filling a missing entry on the host.
+The container hydrates its own cache from that read-only temporary archive with
+Corepack network access disabled. Cleanup removes the archive after success or failure.
+The container uses the job's Node executable
 and the image's Chromium. Every frontend CI job selects a pnpm store under its
 own checkout before cache restore and install. The helper publishes a relative
 cache target so runner slots share cache versions and archives; each restore
@@ -483,8 +490,8 @@ image's Playwright version to the frontend dependency when updating it. Preserve
 the same suite, diagnostics, timeouts and zero retries when qualifying changes
 under normal sibling CI load.
 
-Development fixtures remain excluded from production authority. `pnpm --dir
-frontend validate` still runs the independent production build and
+Development fixtures remain excluded from production authority.
+`(cd frontend && pnpm validate)` still runs the independent production build and
 `assert-production-fixtures.mjs` scan; browser smoke does not weaken or replace
 that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather

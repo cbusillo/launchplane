@@ -32,6 +32,7 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerStateRecordStore,
     merge_train_controller_lease_owner,
 )
+from control_plane.merge_train_branch_refresh import require_merge_train_client_review_read_store
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -280,9 +281,31 @@ TransportFactory = Callable[[str], MergeTrainGitHubTransport]
 
 
 class TenantAdmissionControllerGitHubClient:
-    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+    def __init__(
+        self,
+        *,
+        transport: MergeTrainGitHubTransport,
+        review_store: object | None = None,
+    ) -> None:
         self.transport = transport
+        self.review_store = review_store
         self.merge_client = GitHubMergeTrainClient(transport=transport)
+
+    def require_current_client_review(self, *, candidate: TenantMergeCandidate) -> None:
+        if not callable(getattr(self.review_store, "list_product_review_decision_records", None)):
+            raise TenantAdmissionControllerError(
+                "Tenant admission requires readable saved Client decisions."
+            )
+        review_store = require_merge_train_client_review_read_store(
+            self.review_store, route="Tenant admission"
+        )
+        GitHubMergeTrainClient(
+            transport=self.transport, branch_refresh_store=review_store
+        ).require_current_client_review(
+            repository=candidate.repository,
+            pull_request_number=candidate.pull_request_number,
+            head_sha=candidate.head_sha,
+        )
 
     def read_pull_request(
         self,
@@ -669,7 +692,9 @@ def evaluate_tenant_admission_candidate(
 ) -> TenantAdmissionControllerRunOnceResult:
     if request.mutate:
         raise ValueError("Tenant admission evaluation requires mutate=false.")
-    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
+    client = TenantAdmissionControllerGitHubClient(
+        transport=transport_factory(token), review_store=store
+    )
     return _evaluate_tenant_admission_candidate(
         request=request,
         store=store,
@@ -695,7 +720,9 @@ def execute_tenant_admission_controller_run_once(
             transport_factory=transport_factory,
         )
 
-    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
+    client = TenantAdmissionControllerGitHubClient(
+        transport=transport_factory(token), review_store=store
+    )
     operation_id = tenant_admission_controller_operation_id(request)
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     controller_state = store.acquire_merge_train_controller_state_record(
@@ -868,9 +895,11 @@ def _execute_tenant_admission_merge(
         merge_commit_sha = client.merge_pull_request(request=request)
     except MergeTrainGitHubStaleHeadError as error:
         lease.release()
-        raise TenantAdmissionControllerStaleCandidateError(
-            "GitHub rejected the merge because the exact pull request head moved."
-        ) from error
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
+    except MergeTrainGitHubError as error:
+        if error.status_code in {403, 404, 405, 409, 422}:
+            lease.release()
+        raise
     checkpoint = checkpoint.model_copy(update={"merge_commit_sha": merge_commit_sha})
     lease.checkpoint(
         active_phase="confirm_merge",
@@ -1005,6 +1034,19 @@ def _evaluate_tenant_admission_candidate(
             technical_checks=checks,
             detail=f"Technical checks are {checks.status} for the exact current head.",
         )
+    try:
+        client.require_current_client_review(candidate=request.candidate)
+    except MergeTrainGitHubStaleHeadError as error:
+        return TenantAdmissionControllerRunOnceResult(
+            outcome="blocked",
+            candidate=request.candidate,
+            base_branch=request.base_branch,
+            merge_method=request.merge_method,
+            pull_request_facts=facts,
+            admission=admission,
+            technical_checks=checks,
+            detail=str(error),
+        )
     return TenantAdmissionControllerRunOnceResult(
         outcome="ready",
         candidate=request.candidate,
@@ -1013,7 +1055,7 @@ def _evaluate_tenant_admission_candidate(
         pull_request_facts=facts,
         admission=admission,
         technical_checks=checks,
-        detail="Tenant admission and technical checks are current for the exact head.",
+        detail="Tenant admission, technical checks, and Client review are current for the exact head.",
     )
 
 

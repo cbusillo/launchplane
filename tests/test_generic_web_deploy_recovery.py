@@ -62,6 +62,14 @@ _RECOVERY_APPLY_ROUTE = "/v1/admin/generic-web/deploy-recovery/apply"
 _OPERATOR_TOKEN = "local-operator-token"
 
 
+def _recovery_bearer_config() -> BearerIdentityConfig:
+    return BearerIdentityConfig(
+        local_operator_token=_OPERATOR_TOKEN,
+        local_operator_subject="local-owner-agent",
+        local_operator_token_label="local-owner-write",
+    )
+
+
 def _create_recovery_app(
     *,
     root: Path,
@@ -81,11 +89,7 @@ def _create_recovery_app(
             contexts=contexts,
         ),
         control_plane_root_path=root,
-        bearer_identity_config=BearerIdentityConfig(
-            local_operator_token=_OPERATOR_TOKEN,
-            local_operator_subject="local-owner-agent",
-            local_operator_token_label="local-owner-write",
-        ),
+        bearer_identity_config=_recovery_bearer_config(),
     )
 
 

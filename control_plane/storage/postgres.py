@@ -18,6 +18,10 @@ from control_plane.provider_target_holds import (
     provider_hold_source_sha256,
     provider_hold_classification,
 )
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceSnapshot,
+    generic_web_source_target_key,
+)
 from control_plane.contracts.provider_target_origin import (
     ProviderTargetOrigin,
     RetainedProviderTargetOrigin,
@@ -523,7 +527,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -7887,6 +7894,16 @@ class PostgresRecordStore(HumanSessionStore):
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
         )
 
+    def _lock_runner_lane_registration_audit_write(
+        self, session: Session, *, audit_record_key: str
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": f"launchplane:runner-lifecycle-audit:{audit_record_key}"},
+        )
+
     def _lock_merge_train_policy_write(self, session: Any) -> None:
         if self.database_url.startswith("sqlite"):
             return
@@ -7925,11 +7942,23 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     @contextmanager
-    def _product_authority_bundle_read_guard(self) -> Iterator[None]:
-        held = getattr(self._disposable_authority_context, "session", None)
+    def _product_authority_bundle_read_guard(
+        self, *, bind_observation_session: bool = False
+    ) -> Iterator[None]:
+        previous = getattr(self._disposable_authority_context, "observation_read_session", None)
+        held = previous or getattr(self._disposable_authority_context, "session", None)
         if held is not None:
-            held.execute(text("SELECT 1"))
-            yield
+            if not bind_observation_session:
+                held.execute(text("SELECT 1"))
+                yield
+                return
+            self._disposable_authority_context.observation_read_session = held
+            try:
+                with held.no_autoflush:
+                    held.execute(text("SELECT 1"))
+                    yield
+            finally:
+                self._disposable_authority_context.observation_read_session = previous
             return
         with self._session_factory() as session:
             if self.database_url.startswith("sqlite"):
@@ -7939,9 +7968,14 @@ class PostgresRecordStore(HumanSessionStore):
                     text("select pg_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
                     {"lock_name": "launchplane:product-authority-bundle"},
                 )
+            if bind_observation_session:
+                self._disposable_authority_context.observation_read_session = session
             try:
-                yield
+                with session.no_autoflush:
+                    yield
             finally:
+                if bind_observation_session:
+                    self._disposable_authority_context.observation_read_session = previous
                 session.rollback()
 
     @contextmanager
@@ -8525,8 +8559,32 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        with self._product_authority_bundle_read_guard(bind_observation_session=True):
+            profile = self.read_product_profile_record(product)
+            inventory = self.read_environment_inventory(
+                context_name=context_name, instance_name=instance_name
+            )
+            deployment = self.read_deployment_record(inventory.deployment_record_id)
+            target = self.read_provider_target_record(
+                context_name=context_name, instance_name=instance_name
+            )
+            return GenericWebSourceSnapshot(
+                profile=profile,
+                inventory=inventory,
+                deployment=deployment,
+                provider_target=target,
+                held_reservations=self.list_held_provider_target_reservations(
+                    provider_target_key=generic_web_source_target_key(
+                        target, deployment.deploy.target_type
+                    )
+                ),
+            )
+
     def list_held_provider_target_reservations(
-        self,
+        self, *, provider_target_key: str = ""
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         statement = (
             select(LaunchplaneIdempotencyRow)
@@ -8536,10 +8594,19 @@ class PostgresRecordStore(HumanSessionStore):
             )
             .order_by(LaunchplaneIdempotencyRow.provider_target_key)
         )
-        with self._session_factory() as session:
+        if provider_target_key:
+            statement = statement.where(
+                LaunchplaneIdempotencyRow.provider_target_key == provider_target_key
+            )
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
             return tuple(
-                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
-                for row in session.scalars(statement)
+                self._read_provider_hold_record(row)
+                if provider_target_key
+                else self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord, payload=row.payload
+                )
+                for row in session.scalars(statement.execution_options(populate_existing=True))
             )
 
     def read_original_mutation_intent(
@@ -9423,9 +9490,9 @@ class PostgresRecordStore(HumanSessionStore):
                     from control_plane.service_deploy_drain import lock
 
                     lock(self, session)
-                if normalized_provider_target_key.startswith("testing-private-ingress:"):
-                    # Private edge admission and native application publication
-                    # share the same authority transaction fence.
+                if normalized_provider_target_key.startswith(
+                    ("testing-private-ingress:", "generic-web-provider-target:")
+                ):
                     self._lock_product_authority_bundle_write(session)
                 observed = self._observe_mutation_during_drain(
                     session,
@@ -9469,6 +9536,10 @@ class PostgresRecordStore(HumanSessionStore):
                 from control_plane.service_deploy_drain import lock
 
                 lock(self, session)
+            if normalized_provider_target_key.startswith(
+                ("testing-private-ingress:", "generic-web-provider-target:")
+            ):
+                self._lock_product_authority_bundle_write(session)
             observed = self._observe_mutation_during_drain(
                 session,
                 scope=normalized_scope,
@@ -9745,10 +9816,17 @@ class PostgresRecordStore(HumanSessionStore):
             if effect_admission_checkpoint is not None:
                 # Reads only, before locking the reservation against its heartbeat.
                 # Decision insertion uses this same authority transaction lock.
+                previous = getattr(
+                    self._disposable_authority_context, "observation_read_session", None
+                )
+                self._disposable_authority_context.observation_read_session = session
                 try:
-                    effect_admission_checkpoint()
+                    with session.no_autoflush:
+                        effect_admission_checkpoint()
                 except Exception as error:
                     raise MutationEffectAdmissionRefusedError(error) from error
+                finally:
+                    self._disposable_authority_context.observation_read_session = previous
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -10275,6 +10353,8 @@ class PostgresRecordStore(HumanSessionStore):
                     from control_plane.service_deploy_drain import lock
 
                     lock(self, session)
+                if normalized_provider_target_key.startswith("generic-web-provider-target:"):
+                    self._lock_product_authority_bundle_write(session)
                 admit_reservation(self, session, scope, route_path)
                 row = session.scalar(
                     self._idempotency_statement(
@@ -10438,6 +10518,8 @@ class PostgresRecordStore(HumanSessionStore):
             from control_plane.service_deploy_drain import admit_reservation
 
             admit_reservation(self, session, reservation.scope, reservation.route_path)
+            if reservation.provider_target_key.startswith("generic-web-provider-target:"):
+                self._lock_product_authority_bundle_write(session)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -18489,6 +18571,11 @@ class PostgresRecordStore(HumanSessionStore):
         if self._engine.dialect.name != "postgresql":
             yield
             return
+        if self._preview_refresh_is_held(normalized_preview_id, exclusive=not shared):
+            yield
+            return
+        if not shared and self._preview_refresh_is_held(normalized_preview_id, exclusive=False):
+            raise ValueError("A shared preview reservation cannot be upgraded to exclusive.")
         factory = self._session_factory
         if dedicated:
             assert self._preview_lock_engine is not None
@@ -18516,10 +18603,13 @@ class PostgresRecordStore(HumanSessionStore):
         SQLite rehearsals and another thread's lock cannot establish exclusion.
         Probe the original transaction so a lost connection cannot supply proof.
         """
+        return self._preview_refresh_is_held(preview_id, exclusive=True)
+
+    def _preview_refresh_is_held(self, preview_id: str, *, exclusive: bool) -> bool:
         for name, shared, session, transaction in getattr(
             self._preview_execution_context, "held", ()
         ):
-            if name == preview_id and not shared:
+            if name == preview_id and (not exclusive or not shared):
                 if (
                     transaction is None
                     or not transaction.is_active
@@ -26694,17 +26784,31 @@ class PostgresRecordStore(HumanSessionStore):
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> None:
-        self._write_row(
-            LaunchplaneRunnerLaneRegistrationAuditRow(
-                audit_record_key=record.audit_record_key,
-                repository=record.request.repository.strip().lower(),
-                host_name=record.request.host_name.strip().lower(),
-                lane_name=record.request.lane_name.strip().lower(),
-                status=record.status,
-                mutate=int(record.request.mutate),
-                payload=self._payload_dict(record),
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_runner_lane_registration_audit_write(
+                session, audit_record_key=record.audit_record_key
             )
-        )
+            existing = session.get(
+                LaunchplaneRunnerLaneRegistrationAuditRow, record.audit_record_key
+            )
+            if existing is not None:
+                validate_runner_lane_registration_audit_identity(
+                    RunnerLaneRegistrationAuditRecord.model_validate(existing.payload), record
+                )
+            session.merge(
+                LaunchplaneRunnerLaneRegistrationAuditRow(
+                    audit_record_key=record.audit_record_key,
+                    repository=record.request.repository,
+                    host_name=record.request.host_name,
+                    lane_name=record.request.lane_name,
+                    status=record.status,
+                    mutate=int(record.request.mutate),
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def list_runner_lane_registration_audit_records(
         self,

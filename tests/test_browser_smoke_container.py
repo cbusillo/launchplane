@@ -6,13 +6,23 @@ import unittest
 
 
 class BrowserSmokeContainerTests(unittest.TestCase):
-    @staticmethod
-    def run_smoke(smoke_exit: int, create_exit: int = 0, attach_exit: int = 0) -> tuple[int, str]:
+    def run_smoke(
+        self, smoke_exit: int, create_exit: int = 0, attach_exit: int = 0, pack_exit: int = 0
+    ) -> tuple[int, str]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             for name, body in {
                 "node": "exit 0\n",
                 "readlink": "echo 'net:[fixture-host]'\n",
+                "corepack": """
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output|-o) shift; printf '%s' "$1" > "$ARCHIVE_RECEIPT"; break ;;
+  esac
+  shift
+done
+[ "$PACK_EXIT" = 0 ] || exit "$PACK_EXIT"
+""",
                 "docker": """
 case "$1" in
   create) if [ "$CREATE_EXIT" != 0 ]; then exit "$CREATE_EXIT"; fi
@@ -38,10 +48,15 @@ esac
                     "CREATE_EXIT": str(create_exit),
                     "ATTACH_EXIT": str(attach_exit),
                     "CLEANUP_RECEIPT": str(receipt),
+                    "ARCHIVE_RECEIPT": str(root / "archive"),
+                    "PACK_EXIT": str(pack_exit),
+                    "RUNNER_TEMP": directory,
                 },
                 capture_output=True,
                 text=True,
             )
+            archive = Path((root / "archive").read_text())
+            self.assertFalse(archive.parent.exists())
             return result.returncode, receipt.read_text().strip() if receipt.exists() else ""
 
     def test_failed_suite_fails_the_job_and_removes_its_container(self) -> None:
@@ -62,4 +77,9 @@ esac
     def test_failed_creation_does_not_remove_an_unowned_container(self) -> None:
         status, removed = self.run_smoke(0, create_exit=17)
         self.assertEqual(status, 17)
+        self.assertEqual(removed, "")
+
+    def test_unavailable_cached_package_manager_stops_before_container_creation(self) -> None:
+        status, removed = self.run_smoke(0, pack_exit=19)
+        self.assertEqual(status, 19)
         self.assertEqual(removed, "")

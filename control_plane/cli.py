@@ -1974,14 +1974,7 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-        override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
-        )
+        override_runtime_store = PostgresRecordStore(database_url=database_url)
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -2003,8 +1996,7 @@ def _run_compose_post_deploy_update(
             )
             raise
         finally:
-            if override_runtime_store is not None:
-                override_runtime_store.close()
+            override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,

@@ -91,9 +91,15 @@ def digest(path):
     return value.hexdigest()
 
 
-def bounded_capture(arguments,path,bound,*,stdin=None):
-    process=subprocess.Popen(arguments,stdin=stdin,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def filestore_tar_warning_only(status: int, errors: bytes, truncated: bool) -> bool:
+    return (status == 1 and not truncated
+        and re.fullmatch(rb'(?:tar: [^\r\n]+: file changed as we read it\n)+', errors) is not None)
+
+
+def bounded_capture(arguments,path,bound,*,filestore=False):
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     errors=b''
+    error_bytes=0
     try:
         size=0
         with path.open('xb') as output:
@@ -107,15 +113,16 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
                         if not chunk:
                             selector.unregister(event.fileobj)
                         elif event.data=='error':
-                            errors=(errors+chunk)[-65536:]
+                            error_bytes+=len(chunk)
+                            errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
                         else:
                             size+=len(chunk)
                             if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
                             output.write(chunk)
         status=process.wait(timeout=30)
-        if status:
+        if status and not (filestore and filestore_tar_warning_only(status,errors,error_bytes>len(errors))):
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=errors),None)
+                arguments,status,stdout=b'',stderr=diagnostic_tail(errors)),None)
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
@@ -322,36 +329,44 @@ def business_validation_precheck(spec,containers):
 
 
 def product_command(arguments, *, stdin=None):
-    # Discard product stderr and failed stdout, which can contain Client data.
     process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
     output=bytearray()
+    errors=b''
     try:
         if stdin is not None:
             process.stdin.write(stdin)
             process.stdin.close()
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout,selectors.EVENT_READ)
-            while True:
+            selector.register(process.stdout,selectors.EVENT_READ,'output')
+            selector.register(process.stderr,selectors.EVENT_READ,'error')
+            while selector.get_map():
                 remaining=deadline-time.monotonic()
-                if remaining<=0 or not selector.select(remaining):
+                events=selector.select(max(0,remaining))
+                if remaining<=0 or not events:
                     raise subprocess.TimeoutExpired('product validation',PRODUCT_COMMAND_TIMEOUT_SECONDS)
-                chunk=os.read(process.stdout.fileno(),65536)
-                if not chunk:
-                    break
-                if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
-                    raise ValueError('Product output exceeds its bound')
-                output.extend(chunk)
+                for event,_ in events:
+                    chunk=os.read(event.fd,65536)
+                    if not chunk:
+                        selector.unregister(event.fileobj)
+                    elif event.data=='error':
+                        errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
+                    else:
+                        if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
+                            raise ValueError('Product output exceeds its bound')
+                        output.extend(chunk)
         status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
         if status:
             raise ValueError('Product validation failed')
         return bytes(output)
-    except (ValueError,OSError,subprocess.TimeoutExpired):
-        raise RehearsalCommandFailure({'step':'business_validation',
-            'exit_status':process.returncode or -1,'error_text':'Product validation unavailable'}) from None
+    except (ValueError,OSError,subprocess.TimeoutExpired) as error:
+        diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
+            arguments,process.returncode or -1,stdout=b'',stderr=diagnostic_tail(errors)+b'\n'+str(error).encode()),None)
+        raise RehearsalCommandFailure({**diagnostic,'step':'business_validation'}) from None
     finally:
         process.stdout.close()
+        process.stderr.close()
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
         if process.poll() is None:
@@ -432,25 +447,6 @@ def sanitize_capture(spec,containers,database,raw):
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
-def source_filestore_archive_command(filestore: str) -> str:
-    check='''from pathlib import Path
-import stat
-import sys
-root=Path(sys.argv[1])
-if not root.is_dir():
-    raise RuntimeError('Source filestore is unavailable')
-for shard in range(256):
-    try:
-        metadata=(root/f'{shard:02x}').lstat()
-    except FileNotFoundError:
-        continue
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise RuntimeError('Source filestore shard is aliased or unavailable')
-'''
-    archive=['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-']
-    return shlex.join(['python3','-c',check,filestore])+' && exec '+shlex.join(archive)
-
-
 def capture(spec,root,containers,database):
     started=time.monotonic()
     raw=root/'raw-source'
@@ -462,10 +458,8 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    names=write_captured_attachment_names(spec,raw,containers)
-    remote=source_filestore_archive_command(filestore)
-    with names.open('rb') as listed:
-        bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
+    remote=shlex.join(['env','LC_ALL=C','tar','-cf','-','-C',filestore,'.'])
+    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],filestore=True)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:
@@ -490,8 +484,6 @@ def capture(spec,root,containers,database):
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
-    # Check the dump's attachment set against the copied bytes, so a concurrent
-    # source deletion or incomplete rsync cannot be called a consistent capture.
     validation=attachment_validation_payload(containers,database,'validate')
     reason=validation['reason']
     if reason!='verified':

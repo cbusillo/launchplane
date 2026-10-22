@@ -62,6 +62,7 @@ from control_plane.dokploy import api, compose, post_deploy, source
 from control_plane.dokploy.native_copy_stream import (
     require_registered_remote_server,
     NativeSourceUnavailable,
+    native_failure_diagnostic,
     NativeSourceAuthorizationDenied,
 )
 from control_plane.dokploy.testing_retained_copy import retained_copy_operation
@@ -1495,8 +1496,8 @@ class NativeTestingRebuildExecution:
                 lease=self.lease,
                 guard=self.guard,
             )
-        except CandidatePrivateReadinessFailed:
-            self.failed_private_readiness(plan)
+        except CandidatePrivateReadinessFailed as error:
+            self.failed_private_readiness(plan, error.code)
         except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
             current = self.store.read_testing_candidate(self.allocation.namespace)
             if current is not None and current.application is not None:
@@ -1581,8 +1582,8 @@ class NativeTestingRebuildExecution:
                 inputs=self.inputs,
                 deployment_id=self.allocation.application.deployment_id,
             )
-        except CandidatePrivateReadinessFailed:
-            self.failed_private_readiness(plan)
+        except CandidatePrivateReadinessFailed as error:
+            self.failed_private_readiness(plan, error.code)
         assert isinstance(self.lease, ProviderEvidenceLease)
         self.publication = self.publication or plan_testing_publication(
             self.store,
@@ -1605,7 +1606,9 @@ class NativeTestingRebuildExecution:
             evidence_id=prepared.source_witness,
         )
 
-    def failed_private_readiness(self, plan: TestingRebuildPlan) -> NoReturn:
+    def failed_private_readiness(
+        self, plan: TestingRebuildPlan, diagnostic_code: str = ""
+    ) -> NoReturn:
         from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
 
         assert self.inputs is not None
@@ -1625,7 +1628,7 @@ class NativeTestingRebuildExecution:
                 )
             )
             raise NativeTestingRebuildPending(
-                "The private candidate is within its readiness grace."
+                "The private candidate is within its readiness grace. " + diagnostic_code
             )
         grace = (
             self.intent.before.target.deploy_timeout_seconds
@@ -1633,7 +1636,7 @@ class NativeTestingRebuildExecution:
         )
         if (now - checkpoint.private_readiness_failed_at).total_seconds() < grace:
             raise NativeTestingRebuildPending(
-                "The private candidate is within its readiness grace."
+                "The private candidate is within its readiness grace. " + diagnostic_code
             )
         self.guard(recovery=True)
         current = self.store.read_testing_candidate(self.allocation.namespace)
@@ -1647,7 +1650,8 @@ class NativeTestingRebuildExecution:
             copy_id=plan.new.copy_id,
             evidence_id=evidence
             + ":private-readiness:"
-            + checkpoint.private_readiness_failed_at.isoformat(),
+            + checkpoint.private_readiness_failed_at.isoformat()
+            + (":" + diagnostic_code if diagnostic_code else ""),
             private_readiness=True,
         )
 
@@ -2396,7 +2400,7 @@ def execute_native_testing_rebuild(
         TestingRebuildObservationUnavailable,
     ) as error:
         raise NativeTestingRebuildPending(
-            "The original candidate needs another observation."
+            "The original candidate needs another observation." + native_failure_diagnostic(error)
         ) from error
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:

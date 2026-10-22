@@ -18,6 +18,7 @@ from control_plane.dokploy.testing_retained_copy import (
     retained_copy_host_program,
 )
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
 
 
 class RetainedTestingCopyTests(unittest.TestCase):
@@ -87,8 +88,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.containers[1]["State"]["Status"] = "exited"
         self.assertTrue(qualify_retained_copy(self.containers, original)["stopped"])
         self.containers[1]["Mounts"][0]["Name"] = "foreign-data"
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused) as raised:
             qualify_retained_copy(self.containers, original)
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.CUSTODY)
 
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
@@ -103,27 +105,27 @@ class RetainedTestingCopyTests(unittest.TestCase):
         )
 
     def test_foreign_storage_consumers_or_another_lane_in_the_project_refuse(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(
                 [*self.containers, {"Mounts": deepcopy(self.containers[1]["Mounts"])}], self.spec
             )
         self.containers[1]["Config"]["Env"] = ["PLATFORM_INSTANCE=prod"]
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(self.containers, self.spec)
 
     def test_foreign_identity_or_database_refuses(self) -> None:
         for update in ({"context": "foreign"}, {"identity": {**self.identity, "instance": "prod"}}):
-            with self.subTest(update=update), self.assertRaises(ValueError):
+            with self.subTest(update=update), self.assertRaises(CopyReadbackRefused):
                 qualify_retained_copy(self.containers, {**self.spec, **update})
 
     def test_unowned_service_in_project_cannot_be_included_in_stack_retirement(self) -> None:
         extra = deepcopy(self.containers[1])
         extra["Id"] = "another-application"
         extra["Config"]["Labels"]["com.docker.compose.service"] = "another-application"
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy([*self.containers, extra], self.spec)
         self.containers[0]["Config"]["Env"].append("ODOO_DB_HOST=production-database")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(self.containers, self.spec)
 
     def run_host(
@@ -200,6 +202,15 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertTrue(frame["healthy"])
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))
         self.assertEqual(frame["physical_binding"], read["physical_binding"])
+        frame, _ = self.run_host(extra={"physical_binding": "changed"})
+        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertEqual(frame["kind"], "refused")
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(
+            mode="readiness", extra={"physical_binding": read["physical_binding"]}
+        )
+        self.assertEqual(frame["predicate"], ReadbackPredicate.RUNTIME)
+        self.assertEqual(frame["kind"], "refused")
 
     def test_host_read_refuses_a_bind_alias_of_the_testing_data(self) -> None:
         self.containers.append(
@@ -216,7 +227,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(frame, {"type": "denied"})
         self.assertEqual(len(commands), 1)
         frame, commands = self.run_host(mode="stop")
-        self.assertEqual(frame, {"type": "failed"})
+        self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))
 
     def test_stopped_inventory_is_bound_without_starting_a_copy_or_reading_health(self) -> None:
@@ -265,8 +276,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
             self.assertNotIn(field, read)
         self.assertTrue(read["observation_sha256"])
         self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused) as raised:
             qualify_retained_copy([], self.spec)
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.SERVICES)
 
     def test_matching_ids_with_missing_inspect_fields_cannot_establish_absence_or_isolation(
         self,

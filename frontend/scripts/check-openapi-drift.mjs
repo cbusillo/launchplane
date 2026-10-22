@@ -92,7 +92,7 @@ async function main() {
       agentContractDrifted
     ) {
       throw new Error(
-        "Generated contracts are out of date. Run `pnpm --dir frontend generate:openapi` and commit the results.",
+        "Generated contracts are out of date. Run `(cd frontend && pnpm generate:openapi)` and commit the results.",
       );
     }
   } finally {

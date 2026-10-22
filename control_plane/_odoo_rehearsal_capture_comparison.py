@@ -5,7 +5,6 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 import selectors
-from typing import Any
 
 
 def valid_attachment_reference(value):
@@ -151,39 +150,6 @@ def captured_attachment_reference_present(chunks,reference):
     for row in captured_attachment_rows(chunks):
         found=found or row==expected
     return found
-
-
-def write_captured_attachment_names(spec: dict[str, Any], raw: Path, containers: dict[str, Any]) -> Path:
-    bound=spec['record']['storage']['database_bytes']
-    references=set()
-    name_bytes=0
-    with capture_comparison_file(raw/'database.dump') as (stream,metadata):
-        if not 0<metadata.st_size<=bound:
-            raise ValueError('Captured database exceeds its reviewed bound')
-        budget=capture_comparison_budget(metadata.st_size,spec['capture_comparison_timeout_seconds'])
-        chunks=captured_attachment_table_chunks(stream,containers,time.monotonic()+budget,None)
-        try:
-            for row in captured_attachment_rows(chunks):
-                if row['store_fname']==b'\\N':
-                    continue
-                checksum=row['checksum']
-                name=row['store_fname']
-                if (not re.fullmatch(b'[a-f0-9]{40}',checksum)
-                        or name!=checksum[:2]+b'/'+checksum):
-                    raise ValueError('Captured attachment reference is unsupported')
-                if name not in references:
-                    name_bytes+=len(name)+1
-                    if name_bytes>bound:
-                        raise ValueError('Captured attachment names exceed their reviewed bound')
-                references.add(name)
-        finally:
-            chunks.close()
-    path=raw/'attachment-names'
-    with path.open('xb') as output:
-        os.chmod(path,0o600)
-        for name in sorted(references):
-            output.write(name+b'\0')
-    return path
 
 
 def compare_captured_database_reference(spec,root,containers,reference):

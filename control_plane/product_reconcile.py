@@ -24,8 +24,8 @@ from control_plane.lane_movement import (
     require_forward_build,
 )
 
-from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -220,7 +220,11 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_slug,
     serialize_generic_web_preview_operation,
 )
-from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
+from control_plane.workflows.launchplane import (
+    PreviewMutationRecordStore,
+    find_preview_record,
+    launchplane_github_token,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewApplyInputsRequest,
@@ -964,6 +968,7 @@ def _deploy_generic_web_testing(
             deploy_provider=provider,
             retain_event_request=True,
             post_deploy_authority_digest=authority,
+            complete_inert_inventory_refusal=True,
         )
         execution_lock = (
             record_store.testing_replacement_execution_lock(
@@ -2751,6 +2756,37 @@ def reconcile_product_request(
             {"target": request.target_kind, "action": "none", "reason": "product_inactive"}
         )
     identity = product_repository_identity(record_store, profile)
+    if request.target_kind == "preview" and (
+        not profile.preview.enabled or not profile.preview.context.strip()
+    ):
+        assert request.pull_request_number is not None
+        lifecycle_previews = record_store.list_preview_records(
+            anchor_repo=_preview_anchor_repo(profile),
+            anchor_pr_number=request.pull_request_number,
+        )
+        if not any(
+            preview.state not in _ENDED_PREVIEW_STATES for preview in lifecycle_previews
+        ) and not _has_preview_reservation(record_store, profile, request.pull_request_number):
+            with _repository_read_transport(profile, control_plane_root) as reader:
+                pull_request = _object(
+                    reader.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls/{request.pull_request_number}"
+                    ),
+                    "pull request",
+                )
+            state = pull_request.get("state")
+            if state not in {"open", "closed"}:
+                raise ProductReconcileError("Pull request state is unavailable.")
+            return ReconcileOutcome(
+                {
+                    "target": "preview",
+                    "action": "none",
+                    "pull_request_number": request.pull_request_number,
+                    "reason": "preview_not_configured"
+                    if state == "open"
+                    else "pull_request_not_open",
+                }
+            )
     transport = transport_factory(record_store, profile)
     if request.target_kind == "testing":
         return reconcile_testing_target(
@@ -2773,6 +2809,26 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+
+
+def _has_preview_reservation(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+) -> bool:
+    from control_plane.preview_reservation_recovery import (
+        held_preview_reservations,
+        original_preview_intent,
+    )
+
+    for reservation in held_preview_reservations(record_store, product=profile.product):
+        try:
+            original = original_preview_intent(reservation, profile=profile, store=record_store)
+        except ValueError:
+            return True
+        if original.issued_plan.plan_request.pr_number == pull_request_number:
+            return True
+    return False
 
 
 def run_product_reconcile_once(
@@ -3009,7 +3065,9 @@ def reconcile_reservation_scope(product: str) -> str:
 def request_product_reconcile_sweep(
     record_store: ProductReconcileStore,
     now: str,
-    transport_factory: TransportFactory = resolve_build_provenance_transport,
+    transport_factory: TransportFactory | None = None,
+    *,
+    control_plane_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Request every mapped product's testing target, live preview and open PR.
 
@@ -3024,9 +3082,8 @@ def request_product_reconcile_sweep(
             profile, inventory_records, profiles
         ):
             continue
-        if not any(lane.instance == "testing" for lane in profile.lanes):
-            continue
-        targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
+        if any(lane.instance == "testing" for lane in profile.lanes):
+            targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
@@ -3044,18 +3101,15 @@ def request_product_reconcile_sweep(
                     pull_request_number=original.issued_plan.plan_request.pr_number,
                 )
             )
-        preview_context = profile.preview.context.strip()
-        if not preview_context:
-            continue
-        for number in _open_pull_requests(record_store, profile, transport_factory):
+        for number in _open_pull_requests(
+            record_store, profile, transport_factory, control_plane_root
+        ):
             targets.append(
                 ProductReconcileTarget(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(
-            context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        )
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
@@ -3118,30 +3172,61 @@ def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
 def _open_pull_requests(
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
-    transport_factory: TransportFactory,
+    transport_factory: TransportFactory | None,
+    control_plane_root: Path | None,
 ) -> tuple[int, ...]:
     """The product's open PRs, drafts included; an unreadable list only skips this product."""
-    if not profile.preview.enabled:
-        return ()
     numbers: list[int] = []
     try:
-        transport = transport_factory(record_store, profile)
-        for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
-            pulls = _list(
-                transport.get_json(
-                    f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+        with (
+            nullcontext(transport_factory(record_store, profile))
+            if transport_factory is not None
+            else _repository_read_transport(profile, control_plane_root)
+        ) as transport:
+            for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
+                pulls = _list(
+                    transport.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+                    )
                 )
-            )
-            numbers.extend(
-                pull["number"]
-                for pull in pulls
-                if isinstance(pull, dict) and isinstance(pull.get("number"), int)
-            )
-            if len(pulls) < 100:
-                break
-    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError) as error:
-        _LOGGER.warning("Sweep could not list %s's open pull requests: %s", profile.product, error)
+                numbers.extend(
+                    pull["number"]
+                    for pull in pulls
+                    if isinstance(pull, dict) and isinstance(pull.get("number"), int)
+                )
+                if len(pulls) < 100:
+                    break
+    except (
+        BuildProvenanceError,
+        ProductReconcileError,
+        click.ClickException,
+        OSError,
+        ValueError,
+    ) as error:
+        _LOGGER.warning(
+            "Sweep could not list %s's open pull requests (%s).",
+            profile.product,
+            type(error).__name__,
+        )
     return tuple(numbers)
+
+
+@contextmanager
+def _repository_read_transport(
+    profile: LaunchplaneProductProfileRecord, control_plane_root: Path | None
+) -> Iterator[BuildProvenanceTransport]:
+    if control_plane_root is None:
+        raise ProductReconcileError("Repository reads require the service control-plane root.")
+    with launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name="",
+        repository=profile.repository,
+        purpose="repository_read",
+        report_failure=True,
+    ) as token:
+        if not token:
+            raise ProductReconcileError("Delivery App repository-read credential is unavailable.")
+        yield GitHubBuildProvenanceTransport(token=token)
 
 
 def _has_repository_identity(
