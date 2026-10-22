@@ -17,6 +17,7 @@ import tomllib
 import tokenize
 from typing import Protocol, cast
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -150,7 +151,6 @@ GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN = re.compile(
 GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:github|steps\.[A-Za-z0-9_-]+\.outputs)\.[A-Za-z0-9_.-]+$"
 )
-GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
@@ -4049,7 +4049,7 @@ def _launchplane_config_authority_workflow_revision(value: object) -> str:
     if match is None:
         return ""
     revision = match.group("revision")
-    return revision if GIT_COMMIT_SHA_PATTERN.fullmatch(revision) is not None else ""
+    return revision if GIT_SHA1_PATTERN.fullmatch(revision) is not None else ""
 
 
 def _is_launchplane_config_authority_connector(
