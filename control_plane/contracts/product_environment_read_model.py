@@ -92,6 +92,7 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.integration_readback import integration_credential_warnings
 
 
 from control_plane.preview_inventory_evidence import (
@@ -774,6 +775,7 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
+            *integration_credential_warnings(lane_summary),
             *(
                 topology_warning.detail
                 for topology_warning in topology.warnings
@@ -2210,8 +2212,9 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
-        warnings=tuple(
-            warning.detail for warning in topology.warnings if warning.severity != "info"
+        warnings=(
+            *integration_credential_warnings(lane_summary),
+            *(warning.detail for warning in topology.warnings if warning.severity != "info"),
         ),
         available_actions=_action_availability(
             descriptor=descriptor,

@@ -7,13 +7,18 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
 )
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy.api import JsonValue
 from control_plane.dokploy.post_deploy import (
     OdooPostDeployReadbackFailure,
     extract_odoo_post_deploy_readback_markers,
     require_integration_readback_evidence,
 )
-from control_plane.integration_readback import integration_readback_policy
+from control_plane.integration_readback import (
+    integration_readback_policy,
+    integration_credential_warnings,
+)
 
 
 def _policies(*allowed: str, protected: tuple[str, ...] = ()) -> DokployTargetPolicies:
@@ -33,6 +38,53 @@ def _integrations(policy_families: tuple[object, ...]) -> set[str]:
 
 
 class IntegrationReadbackPolicyTests(unittest.TestCase):
+    def test_credential_warnings_use_configured_in_scope_integrations_only(self) -> None:
+        binding = SecretBinding(
+            binding_id="binding",
+            secret_id="secret",
+            integration="runtime_environment",
+            binding_key="ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
+            context="example",
+            instance="testing",
+            created_at="2026-10-21T00:00:00Z",
+            updated_at="2026-10-21T00:00:00Z",
+        )
+        summary = LaunchplaneLaneSummary(
+            context="example", instance="testing", secret_bindings=(binding,)
+        )
+        self.assertTrue(integration_credential_warnings(summary))
+        for update in (
+            {"status": "disabled"},
+            {"context": "other"},
+            {"instance": "prod"},
+            {"binding_key": "DATABASE_PASSWORD"},
+            {"binding_key": "NOTSHOPIFY_TOKEN"},
+        ):
+            with self.subTest(update=update):
+                self.assertFalse(
+                    integration_credential_warnings(
+                        summary.model_copy(
+                            update={"secret_bindings": (binding.model_copy(update=update),)}
+                        )
+                    )
+                )
+        self.assertFalse(
+            integration_credential_warnings(summary.model_copy(update={"instance": "prod"}))
+        )
+        self.assertTrue(
+            integration_credential_warnings(
+                summary.model_copy(
+                    update={
+                        "secret_bindings": (
+                            binding.model_copy(
+                                update={"integration": "shopify", "binding_key": "API_TOKEN"}
+                            ),
+                        )
+                    }
+                )
+            )
+        )
+
     def test_non_production_lanes_check_every_family_and_carry_allowances(self) -> None:
         for instance in ("testing", "dev", "qa-2"):
             with self.subTest(instance=instance):

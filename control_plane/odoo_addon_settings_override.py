@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
 from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooInstanceOverrideRecord,
@@ -82,6 +83,8 @@ class OdooAddonSettingsStale(ValueError):
 
 
 class OdooAddonSettingsStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
@@ -282,7 +285,7 @@ def _read_existing_record(
 
 
 def _protected_store_keys(
-    *, record_store: OdooAddonSettingsStore, context: str, instance: str
+    *, record_store: OdooAddonSettingsStore, product: str, context: str, instance: str
 ) -> tuple[str, ...]:
     try:
         target = record_store.read_dokploy_target_record(
@@ -294,7 +297,34 @@ def _protected_store_keys(
             "Odoo addon settings require the lane's tracked target record so its protected "
             "Shopify store keys can be checked.",
         ) from error
-    return target.policies.shopify.protected_store_keys
+    protected = list(target.policies.shopify.protected_store_keys)
+    if odoo_instance_is_production(instance):
+        return tuple(protected)
+    profile = record_store.read_product_profile_record(product)
+    for lane in profile.lanes:
+        if not odoo_instance_is_production(lane.instance):
+            continue
+        record = _read_existing_record(
+            record_store=record_store, context=lane.context, instance=lane.instance
+        )
+        if record is None:
+            continue
+        values = [
+            setting.value
+            for setting in record.addon_settings
+            if setting.addon == SHOPIFY_ADDON_NAME and setting.setting == "shop_url_key"
+        ]
+        values.extend(
+            parameter.value
+            for parameter in record.config_parameters
+            if parameter.key == "shopify.shop_url_key"
+        )
+        protected.extend(
+            value.value
+            for value in values
+            if value.source == "literal" and isinstance(value.value, str) and value.value.strip()
+        )
+    return tuple(protected)
 
 
 def _validate_store_key(*, shop_url_key: str, protected_store_keys: tuple[str, ...]) -> None:
@@ -529,7 +559,10 @@ def build_odoo_addon_settings_plan(
             "Shopify test_store cannot be set on a production lane.",
         )
     protected_store_keys = _protected_store_keys(
-        record_store=record_store, context=request.context, instance=request.instance
+        record_store=record_store,
+        product=request.product,
+        context=request.context,
+        instance=request.instance,
     )
     _validate_store_key(
         shop_url_key=request.shopify.shop_url_key, protected_store_keys=protected_store_keys

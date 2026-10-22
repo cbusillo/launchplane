@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.odoo_instance_overrides import shopify_store_handle
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -139,6 +140,31 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
         restore_only=True,
     ),
 )
+
+
+def integration_credential_warnings(summary: LaunchplaneLaneSummary | None) -> tuple[str, ...]:
+    if summary is None or runtime_key_safety_environment_class(summary.instance) == "prod":
+        return ()
+    allowed = (
+        {item.integration for item in summary.dokploy_target.policies.integration_allowances}
+        if summary.dokploy_target is not None
+        else set()
+    )
+    integrations = {
+        family.integration
+        for binding in summary.secret_bindings
+        if binding.status == "configured"
+        and binding.context in {"", summary.context}
+        and binding.instance in {"", summary.instance}
+        for family in INTEGRATION_FAMILIES
+        if binding.integration == family.integration
+        or f"_{family.integration.upper()}_"
+        in f"_{re.sub(r'[_.]+', '_', binding.binding_key.upper())}_"
+    }
+    return tuple(
+        f"Stored {integration} credentials have no integration allowance for this non-production lane."
+        for integration in sorted(integrations - allowed)
+    )
 
 
 @dataclass(frozen=True)
