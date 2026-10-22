@@ -18,7 +18,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config import apply_product_config_bundle
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
 from tests.support.auth import _local_operator_policy, scoped_agent_test
@@ -188,6 +188,198 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "synthetic-external-token", json.dumps([row.model_dump(mode="json") for row in events])
         )
+
+    async def test_production_external_purpose_preserves_testing_generation_and_remains_observable(
+        self,
+    ) -> None:
+        key = "SERVICE_ACCESS"
+        self.profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(binding_key=key, testing_local_credential=True),
+        )
+        self.store.write_product_profile_record(self.profile)
+        payload = {
+            **self.payload,
+            "secrets": [
+                {"binding_key": key, "generate": "testing_local", "secret_class": "testing"}
+            ],
+        }
+        self.assertEqual((await self.post(payload)).status_code, 202)
+        generated = await self.post({**payload, "mode": "apply"}, "local-service-access")
+        self.assertEqual(generated.status_code, 202, generated.text)
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "prod",
+                "secrets": [{"binding_key": key, "value": "synthetic-production-bot-token"}],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        declared = await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/product-profiles/expected-config/apply",
+            payload={
+                "product": self.profile.product,
+                "mode": "apply",
+                "reason": "Production uses the external service; testing uses its local stub.",
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": key,
+                        "context": self.profile.product,
+                        "instance": "prod",
+                        "external_provider": "discord_bot",
+                    }
+                ],
+            },
+            headers={
+                "Authorization": "Bearer test-operator-token",
+                "Idempotency-Key": "production-purpose",
+            },
+        )
+        self.assertEqual(declared.status_code, 202, declared.text)
+        for inventory in (False, True):
+            with (
+                self.subTest(inventory=inventory),
+                patch(
+                    "control_plane.discord_external_resources.request_public_http",
+                    side_effect=self.provider_response,
+                ),
+            ):
+                report = await self.audit(inventory=inventory, external=True)
+            self.assertEqual(report.status_code, 200, report.text)
+            result = report.json()["external_resources"]
+            self.assertEqual(result["status"], "observed", result)
+            self.assertEqual(
+                [(row["instance"], row["binding_key"]) for row in result["entries"]],
+                [("prod", key)],
+            )
+            self.assertIn(key, report.json()["lanes"][0]["local_keys"])
+            self.assertIn(key, report.json()["lanes"][0]["generated_keys"])
+
+        from control_plane.testing_local_credentials import validate_generation
+
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "local_admins": [
+                        {
+                            "subjects": ["scope-admin"],
+                            "token_labels": ["scope-admin"],
+                            "products": [self.profile.product],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.expected_config.apply"],
+                        }
+                    ]
+                }
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+                local_admin_token="scope-admin-token",
+                local_admin_subject="scope-admin",
+                local_admin_token_label="scope-admin",
+            ),
+        )
+        classified = await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/product-profiles/expected-config/apply",
+            payload={
+                "product": self.profile.product,
+                "mode": "apply",
+                "reason": "Admin reclassifies the testing key as external.",
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": key,
+                        "context": self.profile.product,
+                        "instance": "testing",
+                        "external_provider": "discord_bot",
+                    }
+                ],
+            },
+            headers={
+                "Authorization": "Bearer scope-admin-token",
+                "Idempotency-Key": "testing-external-shadow",
+            },
+        )
+        self.assertEqual(classified.status_code, 202, classified.text)
+        with self.assertRaises(ValueError):
+            validate_generation(
+                self.store,
+                product=self.profile.product,
+                context=self.profile.product,
+                instance="testing",
+                entries=({"binding_key": key, "name": key},),
+            )
+        for inventory in (False, True):
+            with (
+                self.subTest(inventory=inventory, shadow="testing"),
+                patch(
+                    "control_plane.discord_external_resources.request_public_http",
+                    side_effect=self.provider_response,
+                ),
+            ):
+                report = await self.audit(inventory=inventory, external=True)
+            result = report.json()["external_resources"]
+            self.assertEqual(result["status"], "observed", result)
+            self.assertEqual(
+                {(row["instance"], row["binding_key"]) for row in result["entries"]},
+                {("testing", key), ("prod", key)},
+            )
+            self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
+
+        reverse = self.store.read_product_profile_record(self.profile.product)
+        reverse.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key=key, context=self.profile.product, external_provider="discord_bot"
+            ),
+        )
+        self.store.write_product_profile_record(reverse)
+        local_intent = await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/product-profiles/expected-config/apply",
+            payload={
+                "product": self.profile.product,
+                "mode": "apply",
+                "reason": "A later local declaration cannot override external purpose.",
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": key,
+                        "context": self.profile.product,
+                        "instance": "testing",
+                        "testing_local_credential": True,
+                    }
+                ],
+            },
+            headers={
+                "Authorization": "Bearer test-operator-token",
+                "Idempotency-Key": "local-after-external",
+            },
+        )
+        self.assertEqual(local_intent.status_code, 202, local_intent.text)
+        with self.assertRaises(ValueError):
+            validate_generation(
+                self.store,
+                product=self.profile.product,
+                context=self.profile.product,
+                instance="testing",
+                entries=({"binding_key": key, "name": key},),
+            )
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.provider_response,
+        ):
+            report = await self.audit(external=True)
+        self.assertEqual(report.json()["external_resources"]["status"], "observed")
+        self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
 
     async def test_external_use_requires_persisted_redacted_attempt_before_provider_call(
         self,

@@ -119,17 +119,6 @@ def capture_external_resource_inputs(
                 )
             ]
             for key in sorted({row.binding_key for row in declarations}):
-                if any(
-                    row.testing_local_credential
-                    and row.binding_key == key
-                    and product_config_requirement_applies_to_lane(
-                        requirement_context=row.context,
-                        requirement_instance=row.instance,
-                        lane=lane,
-                    )
-                    for row in profile.expected_config.managed_secret_bindings
-                ):
-                    raise ValueError("The external resource declaration conflicts with generation.")
                 binding = bindings.get(key)
                 if binding is None:
                     raise ValueError("The external resource binding is unavailable.")

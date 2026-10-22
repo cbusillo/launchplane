@@ -133,6 +133,10 @@ intent or shadowing a local declaration uses the existing expected-config action
 and a live product's admin boundary. A denial stays stopped; it is not permission
 to switch identity. The client preserves other requirement metadata. Odoo's
 driver-owned local password keys reject external declarations at profile validation.
+Applicable external purpose excludes that key from effective testing generation
+across broad and exact declarations, in either declaration order. Production has
+no testing-local generation. External observations use the applicable purpose and
+delivered binding; raw local flags do not create a second generation rule there.
 It creates no account, credential, grant, provider resource or runtime change.
 The client checks the saved intent and requirement, then independently reads the
 classification back. An uncertain apply retains its original key and intent;
