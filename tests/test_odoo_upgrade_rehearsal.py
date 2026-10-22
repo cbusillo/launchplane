@@ -73,6 +73,26 @@ class RehearsalScenario(unittest.TestCase):
         with patch.object(adapter, "apply", side_effect=remote_apply) as effect:
             paused = self.run_operation(adapter, "checkpoint-execute")
         self.assertEqual(paused.status, "checkpointed")
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        code, pending, post = client.call(
+            "apply",
+            action="execute",
+            response=paused.response_payload,
+            request=adapter.request,
+            product=self.product,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(pending["status"], "checkpointed")
+        self.assertEqual(pending["trace_id"], paused.response_payload["trace_id"])
+        self.assertEqual(
+            pending["operation_id"],
+            cast(dict[str, object], paused.response_payload["records"])["operation"],
+        )
+        self.assertTrue(pending["original_key_required"])
+        self.assertNotIn("completed", pending)
+        post.assert_called_once()
         assert paused.record is not None
         self.assertEqual(paused.record.state, "reconcile_required")
         self.assertEqual(effect.call_count, 1)
@@ -133,6 +153,44 @@ class RehearsalScenario(unittest.TestCase):
         assert settled is not None
         self.assertEqual(settled.state, "completed")
         self.assertEqual(settled.record_id, paused.record.record_id)
+
+    def test_client_accepts_producer_reviews_completed_applies_and_readbacks(self) -> None:
+        from control_plane.http_routes.mutation_support import accepted_evidence_response
+        from control_plane.provider_operations import provider_operation_response_payload
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        public = OdooRehearsalAdapter.public(self.record)
+        for mode in ("dry-run", "apply", "readback"):
+            with self.subTest(mode=mode):
+                result = dict(public)
+                if mode == "dry-run":
+                    result.update(
+                        plan_sha256=self.record.binding_sha256, action="prepare", applied=False
+                    )
+                if mode == "readback":
+                    result["completed"] = True
+                response = (
+                    provider_operation_response_payload(
+                        trace_id="fixture-trace",
+                        records={"rehearsal": self.identifier},
+                        result=result,
+                    )
+                    if mode == "apply"
+                    else accepted_evidence_response(
+                        trace_id="fixture-trace",
+                        records={"rehearsal": self.identifier},
+                        result=result,
+                    ).model_dump(mode="json")
+                )
+                code, receipt, post = client.call(
+                    mode, response=response, request=self.request, product=self.product
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(receipt["status"], "verified")
+                self.assertEqual(receipt["rehearsal_id"], self.identifier)
+                self.assertEqual(receipt["trace_id"], response["trace_id"])
+                post.assert_called_once()
 
     def test_rehearsal_checkpoint_preserves_live_executor_and_original_binding(self) -> None:
         from control_plane.rehearsal_deploy_resume import resume_rehearsals
