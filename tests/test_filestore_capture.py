@@ -1,6 +1,9 @@
 import ast
 import base64
 import hashlib
+import io
+import json
+from contextlib import redirect_stdout
 import os
 from pathlib import Path
 import subprocess
@@ -146,3 +149,28 @@ with tempfile.TemporaryDirectory() as temporary:
         )
         validate = validator["validate_attachment_files"]
         self.assertEqual(validate([row], extracted, None), "verified")
+
+
+class NativeFilestoreCaptureTests(FilestoreCaptureTests):
+    def setUp(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NATIVE_ODOO_SOURCE_READ_PROGRAM
+        from tests.test_odoo_testing_native_source import descriptor
+
+        super().setUp()
+        spec = base64.b64encode(
+            json.dumps({"source": descriptor().model_dump(mode="json")}).encode()
+        ).decode()
+        with patch.object(sys, "argv", ["source", spec, "fixture:"]):
+            self.native = capture_namespace(NATIVE_ODOO_SOURCE_READ_PROGRAM)
+
+    def capture(self, arguments: list[str], *, filestore: bool = True) -> bytes:
+        output = io.StringIO()
+        part = "filestore" if filestore else "database"
+        with redirect_stdout(output):
+            receipt = self.native["stream"](part, arguments)
+        frames = [
+            json.loads(line.removeprefix("fixture:")) for line in output.getvalue().splitlines()
+        ]
+        data = b"".join(base64.b64decode(frame["data"], validate=True) for frame in frames)
+        self.assertEqual(receipt, {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+        return data
