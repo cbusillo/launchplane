@@ -822,13 +822,8 @@ inspection and requires an exact digest match before it writes anything.
 foreign originals and other identities. The authenticated Director
 `local_operator` identity's bounded own-testing-original alternative and forward-retry safety
 requirements are defined in [authorization](authorization-authority.md).
-Event-reconciler originals have a different caller scope and retain explicit
-apply authority. The dry-run plan action itself never admits apply, and
-terminal-agent mutation transport remains unavailable. A
-`testing_deploy_safety_unknown` response names a factual prerequisite: inspect
-and collect `/v1/disposable-lanes/observations`, resolve protections, then
-refresh the review. It is not a request for a grant. Unknown original effects
-stay fenced and cannot be bypassed with another key.
+After `testing_deploy_safety_unknown`, inspect and collect
+`/v1/disposable-lanes/observations`, resolve protections, then refresh the review.
 
 The digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
