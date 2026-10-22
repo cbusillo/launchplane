@@ -27,7 +27,7 @@ Inspect or collect current evidence through `/v1/disposable-lanes/observations`
 before a fresh apply; missing or expired resource/custody evidence returns
 `disposable_lane_safety_unknown`. Completed replay and
 original-request reconciliation remain observational when that eligibility
-changes. Production and other local operators keep their policy checks;
+changes. Production and other scoped callers keep their policy checks;
 terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
