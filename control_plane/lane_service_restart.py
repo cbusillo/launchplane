@@ -22,7 +22,10 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
-from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    require_disposable_lane,
+)
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
     inspect_service,
@@ -136,7 +139,9 @@ def plan_service_restart(
             in DEPLOY_BLOCKED_DESCRIPTIONS
             and attempt.runtime_source.get("provider_outcome", "") != "uncertain"
         ):
-            raise ServiceRestartRefused("A newer deployment may have changed the provider.")
+            raise ServiceRestartRefused(
+                f"A newer deployment may have changed the provider: {attempt.record_id}."
+            )
     expected = deployment.runtime_identity
     if (
         expected is None
@@ -409,7 +414,7 @@ class ServiceRestartAdapter:
                     ServiceRestartRefused("A release operation holds this lane.")
                 )
             try:
-                fresh, *_ = plan_service_restart(
+                fresh, expected, host, token, _ = plan_service_restart(
                     store=self.store, root=self.root, request=self.request, actor=self.plan.actor
                 )
                 if fresh.digest() != self.request.reviewed_plan_sha256:
@@ -417,11 +422,23 @@ class ServiceRestartAdapter:
                         "Restart identity changed; inspect and review again."
                     )
                 if self.require_disposable:
+                    runtime_stopped = fresh.service == "web" and not fresh.before.running
+                    if fresh.service == "database":
+                        runtime_stopped = not inspect_service(
+                            host=host,
+                            token=token,
+                            app_name=fresh.app_name,
+                            server_id=fresh.server_id,
+                            service="web",
+                            expected=expected,
+                        ).running
                     require_disposable_lane(
                         self.store,
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
+                        same_artifact_restart=not fresh.before.running,
+                        runtime_stopped=runtime_stopped,
                     )
             except DisposableLaneSafetyUnknown as error:
                 raise ProviderMutationRejectedError(error) from error

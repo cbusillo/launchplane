@@ -269,7 +269,7 @@ def register_service_restart_route(
             except DisposableLaneSafetyUnknown:
                 refuse(
                     "disposable_lane_safety_unknown",
-                    "Testing restart requires current disposable-lane evidence and resolved use, custody and isolation protections. Inspect /v1/disposable-lanes/observations.",
+                    "Restart requires resolved use, target ownership and resource protections. Inspect /v1/disposable-lanes/observations.",
                 )
                 raise AssertionError
             except ServiceRestartRefused as error:
