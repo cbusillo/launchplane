@@ -2857,7 +2857,13 @@ metadata.
 Live target runtime sync uses the native FastAPI
 `POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
 or `mode: "apply"`, product/context/instance, and optional apply-only deploy
-controls. Dry-run requires `live_target_runtime.plan`; apply requires
+controls. Optional `selected_keys` is a nonempty list of unique existing managed
+key names. It restricts the plan, delivery and persistence readback to those
+keys, preserves every unselected provider value, and applies no retirements.
+Unknown, missing or retired selected keys fail before provider mutation.
+Selection cannot deploy or stage testing separation; any literal qualification
+must also be selected. Omitting the field retains full-lane sync behavior.
+Dry-run requires `live_target_runtime.plan`; apply requires
 `live_target_runtime.apply`. The route resolves DB-backed runtime environment
 records, managed runtime secrets, and the tracked Dokploy target in the deployed
 Launchplane service, evaluates runtime key-safety policy, compares desired and

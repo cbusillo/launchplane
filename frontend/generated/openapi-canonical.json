@@ -77626,6 +77626,20 @@
                     "title": "Schema Version",
                     "type": "integer"
                   },
+                  "selected_keys": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Selected Keys"
+                  },
                   "separation_only": {
                     "default": false,
                     "title": "Separation Only",

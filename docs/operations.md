@@ -3041,7 +3041,15 @@ Conventional onboarding creates new products only.
   by key/count metadata only, and never prints plaintext env or secret values.
   Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
   then use `mode: "apply"` through an authorized workflow or admin API
-  caller. The `live-target-runtime.yml` workflow wraps this route with the
+  caller. For an exact subset, send the same nonempty `selected_keys` list in
+  dry-run, apply and readback, with deployment disabled. Selected sync delivers
+  only existing non-retired managed keys and leaves other provider values and
+  stored retirement intent unchanged. Its readback can pass while unselected
+  managed keys still drift. The installed caller exposes one repeated `--key`
+  per selection on `live-target-runtime-sync-dry-run` and `-apply`; save and
+  review the names-only plan before apply. Its digest binds the selection,
+  lane, target fingerprint and key/count plan, not secret values or revisions.
+  The `live-target-runtime.yml` workflow wraps this route with the
   shared Launchplane request action and uploads sanitized request/response
   artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native

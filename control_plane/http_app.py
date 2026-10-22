@@ -21901,6 +21901,7 @@ def create_launchplane_fastapi_app(
                 ),
                 allow_owned_preview=director_disposable_apply,
                 requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
+                selected_keys=live_target_runtime_request.selected_keys,
                 deploy_trigger=(
                     control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
                 ),
