@@ -907,8 +907,16 @@ failed health checks are retained as failures. Older interrupted rollback record
 without the saved target evidence remain held. Successful recovery settles the
 existing accepted release step; the release worker can continue any remaining
 steps under that decision's normal acceptance and hold checks.
-The current Dokploy runtime observer proves compose targets only; application
-targets remain held until their provider supports the same exact runtime proof.
+The Dokploy observer supports Compose and Docker-backed application targets.
+Application recovery requires the original saved provider reference, actual
+service image, independently inspected immutable running images and this
+operation's deployment identity, with converged processes and a settled rollout.
+Missing, ambiguous or changed evidence stays fenced; apply observes again and
+requires the reviewed proof to remain current. Automatic rollback uses the
+effective durable deployment's provider reference, while a drill uses its
+captured plan. Compose behavior remains unchanged. Runtime identity proof
+supplies neither volume recovery nor permission to retry an uncertain deployment
+or perform a live recovery operation.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

@@ -964,6 +964,7 @@ class GenericWebDeployProviderMutationAdapter:
                 observation=observation,
                 expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
                 expected_deployment_record_id=expected_deployment_record_id,
+                expected_provider_reference=resolved_deploy_target.ship_request.deploy_reference,
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return None
