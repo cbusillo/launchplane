@@ -2044,7 +2044,7 @@ def _preview_cleanup_guard(
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
         DisposableLaneStore,
-        require_disposable_lane,
+        resolve_disposable_preview,
     )
 
     if store.read_product_profile_record(profile.product) != profile:
@@ -2052,26 +2052,25 @@ def _preview_cleanup_guard(
             "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
         )
     instance = profile.preview.slug_template.format(number=number)
-    evidence = cast(DisposableLaneStore, store).read_disposable_lane_safety(
-        profile.product, profile.preview.context, instance
-    )
-    for condition, value, required in (
-        ("usage", evidence.usage if evidence else "unknown", "unused"),
-        ("data", evidence.data if evidence else "unknown", "reproducible"),
-    ):
-        if value != required:
-            raise ProductReconcileError(
-                f"Preview cleanup held: {condition} is {value}.",
-                code=f"preview_cleanup_{condition}_{value}",
-            )
     try:
-        require_disposable_lane(
+        resolve_disposable_preview(
             cast(DisposableLaneStore, store),
-            product=profile.product,
-            context=profile.preview.context,
-            instance=instance,
-            preview_cleanup=True,
+            profile,
+            profile.preview.context,
+            instance,
         )
+        targets = cast(DisposableLaneStore, store).list_dokploy_target_id_records()
+        owned_targets = {
+            target.target_id
+            for target in targets
+            if (target.context, target.instance) == (profile.preview.context, instance)
+        }
+        if any(
+            target.target_id in owned_targets
+            and (target.context, target.instance) != (profile.preview.context, instance)
+            for target in targets
+        ):
+            raise DisposableLaneSafetyUnknown("The preview target aliases another lane's target.")
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 

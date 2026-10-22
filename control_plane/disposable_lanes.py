@@ -203,7 +203,6 @@ def require_disposable_lane(
     retirement: bool = False,
     separation_only: bool = False,
     preview_refresh: bool = False,
-    preview_cleanup: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
@@ -287,12 +286,10 @@ def require_disposable_lane(
     evidence = store.read_disposable_lane_safety(product, context, instance)
     if (
         evidence is not None
-        and evidence.observer_kind == "director_agent_preview_cleanup"
-        and not (preview_cleanup or preview_refresh or retirement)
+        and evidence.observer_kind != "director_agent"
+        and not (preview_refresh or retirement)
     ):
-        raise DisposableLaneSafetyUnknown(
-            "Preview cleanup observations do not qualify other lane mutations."
-        )
+        raise DisposableLaneSafetyUnknown("Historical observations cannot qualify lane mutations.")
     usage = evaluate_lane_usage(
         usage_store if usage_store is not None else store,
         profile=profile,
@@ -386,12 +383,7 @@ def require_disposable_lane(
     if (
         usage.protected
         or evidence.data != "reproducible"
-        # Cleanup removes the exact preview target, not credentials it reads.
-        # Target aliases are refused above; resource deletion owns its destroy set.
-        or (
-            not (preview_cleanup and owned_preview)
-            and evidence.production_resources not in allowed_resources
-        )
+        or evidence.production_resources not in allowed_resources
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data, shares production resources, or safety is unknown."

@@ -305,14 +305,11 @@ reservation. The webhook request never waits on a deploy.
     A changed lifecycle record, product-profile revision, or destroy reason permits
     a new bounded run;
     reopening the PR resumes normal preview reconciliation.
-    Scheduled reconciliation applies the overall direction's disposable rule
-    to closed PR previews. Current disposable-lane observations must establish
-    unused, reproducible data and isolated resources. Missing, stale or changed
-    observations retain the preview, as do staff-testing holds and only-copy
-    data; the reconcile names the condition holding cleanup. The existing
-    disposable-lane observation service and client supply cleanup-only facts and
-    wake normal reconciliation, without a new recovery endpoint or access grant.
-    Safety holds do not spend failed-reconcile feedback budgets.
+    Scheduled reconciliation tears down previews whose PR is confirmed closed
+    or merged. It requires no usage, custody or data-origin facts, assertions,
+    waivers or preview collectors. Open PR previews remain; unavailable PR state
+    is held. Teardown preserves resources shared with another lane or production,
+    including target aliases and credentials outside the destroy set.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as
@@ -322,7 +319,7 @@ reservation. The webhook request never waits on a deploy.
     insufficient. The normal destroy then persists the destroyed lifecycle;
     the durable runner verifies its current record before reporting success.
     Missing-intent disposal does not claim that historical server-side jobs
-    completed: it discards unused, reproducible, isolated preview output and
+    completed: it discards the closed PR's owned preview output and
     supersedes the old result as a failure. Retained original schedule proof is
     still required when observing or superseding an available original request.
     Missing recorded serving identity or incomplete provider evidence remains

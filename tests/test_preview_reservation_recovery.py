@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from typing import Any, cast
+from typing import cast
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException
@@ -556,75 +556,18 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.store.write_preview_generation_record(generation)
         preview = preview.model_copy(update={"serving_generation_id": generation.generation_id})
         self.store.write_preview_record(preview)
-        from control_plane.http_app import create_launchplane_fastapi_app
-        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
-        from control_plane.service_auth import LaunchplaneAuthzPolicy
-        from tests.http_app_test_support import _RejectingVerifier, _local_operator_bearer_config
-        from tests.support.http import request as http_request
+        if not facts:
+            return
+        from tests.support.disposable_lanes import record_safety
 
-        policy = LaunchplaneAuthzPolicy()
-        self.store.seed_authz_policy_if_absent(
-            LaunchplaneAuthzPolicyRecord(
-                record_id="preview-cleanup-fixture-policy",
-                source="test",
-                updated_at=self.profile.updated_at,
-                policy=policy,
-            )
+        record_safety(
+            self.store,
+            self.profile.product,
+            preview.context,
+            "pr-42",
+            preview=preview,
+            **facts,
         )
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=policy,
-            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
-            record_store_factory=lambda: self.store,
-            control_plane_root_path=self.root,
-        )
-        payload = {
-            "mode": "inspect",
-            "product": self.profile.product,
-            "context": preview.context,
-            "instance": "pr-42",
-            "preview_id": preview.preview_id,
-        }
-
-        def observe() -> Any:
-            return asyncio.run(
-                http_request(
-                    app,
-                    "POST",
-                    "/v1/disposable-lanes/observations",
-                    headers={"Authorization": "Bearer local-operator-token"},
-                    payload=payload,
-                )
-            )
-
-        inspected = observe()
-        self.assertEqual(inspected.status_code, 202, inspected.text)
-        payload.update(
-            mode="clear",
-            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-            expected_observation_sha256=inspected.json()["result"]["observation_sha256"],
-        )
-        cleared = observe()
-        self.assertEqual(cleared.status_code, 202, cleared.text)
-        payload["mode"] = "inspect"
-        payload.pop("expected_observation_sha256")
-        inspected = observe()
-        self.assertEqual(inspected.status_code, 202, inspected.text)
-        payload.update(
-            {
-                "mode": "record",
-                "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
-                "usage": "unused",
-                "data": "reproducible",
-                "production_resources": "isolated",
-                "usage_evidence": "fixture:occupancy",
-                "data_evidence": "fixture:copy",
-                "isolation_evidence": "fixture:isolated",
-                **facts,
-            }
-        )
-        recorded = observe()
-        self.assertEqual(recorded.status_code, 202, recorded.text)
 
     def cleanup(
         self,
@@ -674,22 +617,13 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         assert old is not None
         self.assertNotEqual(old.response_payload["result"]["status"], "pass")
 
-    def test_cleanup_holds_name_protected_and_unknown_conditions(self) -> None:
+    def test_closed_pr_cleanup_ignores_usage_and_custody_reports(self) -> None:
         self.remove_original_intent()
-        for condition, value in (
-            ("usage", "in_use"),
-            ("usage", "unknown"),
-            ("data", "only_copy"),
-            ("data", "unknown"),
-        ):
-            with self.subTest(condition=condition, value=value):
-                self.prepare_cleanup(**{condition: value})
-                result = self.cleanup()
-                self.assertTrue(result.plan["held"])
-                self.assertIn(value, str(result.plan["reason"]))
-                self.assertFalse(self.provider.applied)
-                self.assertEqual(self.store.list_preview_records()[0].state, "active")
-                self.assertTrue(held_preview_reservations(self.store, product=self.profile.product))
+        self.prepare_cleanup(usage="in_use", data="only_copy")
+        result = self.cleanup()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
     def test_cleanup_leaves_shared_credentials_untouched(self) -> None:
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
@@ -728,7 +662,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
         self.assertEqual(self.store.list_secret_bindings(), bindings)
 
-    def test_only_cleanup_can_ignore_credential_isolation(self) -> None:
+    def test_cleanup_does_not_change_other_lane_isolation_rules(self) -> None:
         from control_plane.disposable_lanes import (
             DisposableLaneSafetyUnknown,
             require_disposable_lane,
@@ -760,8 +694,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 if isolation != "unknown":
                     with self.assertRaises(DisposableLaneSafetyUnknown):
                         require_lane(preview_refresh=True)
-                require_lane(preview_cleanup=True)
                 _preview_cleanup_guard(self.store, self.profile, 42)
+        record_safety(self.store, **lane, preview=preview, observer_kind="historical-preview")
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_lane()
+        _preview_cleanup_guard(self.store, self.profile, 42)
         record_safety(
             self.store,
             self.profile.product,
@@ -775,7 +712,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 product=self.profile.product,
                 context=preview.context,
                 instance="testing",
-                preview_cleanup=True,
             )
 
     def test_cleanup_refuses_a_production_shared_target(self) -> None:
@@ -883,13 +819,30 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
         first = self.cleanup(execute_apply=fail)
         self.assertTrue(first.error)
-        self.prepare_cleanup(usage="unknown")
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        for instance in ("prod", "pr-42"):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=self.profile.preview.context,
+                    instance=instance,
+                    target_id="shared-target",
+                    updated_at=self.profile.updated_at,
+                )
+            )
         held = self.cleanup(previous_plan=first.plan, execute_apply=fail)
         self.assertTrue(held.plan["held"])
         self.assertEqual(
             held.plan["destroy_failed_attempts"], first.plan["destroy_failed_attempts"]
         )
-        self.prepare_cleanup()
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.profile.preview.context,
+                instance="pr-42",
+                target_id="owned-preview-target",
+                updated_at=self.profile.updated_at,
+            )
+        )
         resumed = self.cleanup(previous_plan=held.plan, execute_apply=fail)
         self.assertEqual(
             resumed.plan["destroy_failed_attempts"],
@@ -901,7 +854,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         from tests.test_product_reconcile import FakePreviewProvider
 
         self.remove_original_intent()
-        self.prepare_cleanup()
+        self.prepare_cleanup(usage="unknown")
         first = self.cleanup(
             execute_apply=Mock(side_effect=ProviderMutationUnknownError("lost response"))
         )
