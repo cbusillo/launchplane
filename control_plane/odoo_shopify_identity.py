@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from inspect import getsource
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -23,7 +24,12 @@ from control_plane.odoo_addon_settings_override import (
 )
 from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS, shopify_store_handle
 from control_plane.odoo_product_driver_http import resolve_odoo_product_route
-from control_plane.odoo_shopify_identity_probe import DOMAIN_PATTERN
+from control_plane.odoo_shopify_identity_probe import (
+    DOMAIN_PATTERN,
+    QUERY,
+    NoRedirects,
+    read_identity,
+)
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, _decrypt_secret_value
 
 ROUTE = "/v1/products/{product}/environments/{environment}/shopify-identity"
@@ -42,6 +48,7 @@ class ShopifyIdentityResult(BaseModel):
     testing_domain_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_shop_id_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     production_domain_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    production_shop_id_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     applied: Literal[False] = False
     values_redacted: Literal[True] = True
 
@@ -51,6 +58,8 @@ class ShopifyIdentityResult(BaseModel):
             self.probe != "verified"
             or not self.testing_domain_sha256
             or not self.testing_shop_id_sha256
+            or not self.production_shop_id_sha256
+            or self.testing_shop_id_sha256 == self.production_shop_id_sha256
             or not self.production_domain_sha256
             or self.testing_domain_sha256 == self.production_domain_sha256
         ):
@@ -232,6 +241,28 @@ def runtime_identity(
         if selected is None
         else {"domain": selected.domain, "api_version": selected.api_version, "token": token}
     )
+    program_text = Path(__file__).with_name(program).read_text()
+    if production:
+        program_text = program_text.replace(
+            "from control_plane.odoo_instance_overrides import shopify_store_handle",
+            "from urllib.parse import urlsplit\n" + getsource(shopify_store_handle),
+        )
+        query_library = "\n".join(
+            (
+                "import hashlib,json,re",
+                "from urllib.error import HTTPError",
+                "from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener",
+                f"DOMAIN_PATTERN = {DOMAIN_PATTERN!r}",
+                f"QUERY = {QUERY!r}",
+                getsource(NoRedirects),
+                getsource(read_identity),
+                "read_shopify_identity = read_identity",
+            )
+        )
+        program_text = program_text.replace(
+            "from control_plane.odoo_shopify_identity_probe import read_identity as read_shopify_identity",
+            query_library,
+        )
     _read_remote(
         host=connection.host,
         token=connection.token,
@@ -241,7 +272,7 @@ def runtime_identity(
             "container": connection.evidence.container_id,
             "project": connection.app_name,
             "identity": observed,
-            "program": Path(__file__).with_name(program).read_text(),
+            "program": program_text,
             "request": request,
         },
         receive=frames.append,
@@ -257,14 +288,11 @@ def runtime_identity(
     }:
         raise ValueError("Identity unavailable")
     keys = (
-        (
-            {"status", "domain_sha256"}
-            if production
-            else {"status", "shop_id_sha256", "domain_sha256"}
-        )
+        {"status", "domain_sha256", "shop_id_sha256"}
         if result["status"] == "verified"
         else {"status"}
     )
+
     if set(result) != keys or any(not isinstance(value, str) for value in result.values()):
         raise ValueError("Identity unavailable")
     return result
@@ -297,17 +325,6 @@ def compare_identity(
             production_connection.app_name,
             production_selection.identity,
         )
-        production = runtime_identity(production_connection, None, production_environment, "")
-        if (
-            production.get("status") != "verified"
-            or re.fullmatch(r"[a-f0-9]{64}", production.get("domain_sha256", "")) is None
-        ):
-            return ShopifyIdentityResult()
-        production_domain = production["domain_sha256"]
-        if digest(selected.domain) == production_domain:
-            return ShopifyIdentityResult(
-                separation="same", production_domain_sha256=production_domain
-            )
         selection = reads.select_stable_runtime(store, profile, "testing")
         connection = reads.connect_runtime(
             store=store,
@@ -339,9 +356,18 @@ def compare_identity(
             != environment
         ):
             return ShopifyIdentityResult()
+        if observed["status"] != "verified":
+            return ShopifyIdentityResult(
+                probe=cast(Literal["token_rejected", "unavailable"], observed["status"])
+            )
         reads.assert_selection_current(store, production_selection)
-        if runtime_identity(production_connection, None, production_environment, "") != production:
+        production = runtime_identity(production_connection, None, production_environment, "")
+        if production.get("status") != "verified" or any(
+            re.fullmatch(r"[a-f0-9]{64}", production.get(key, "")) is None
+            for key in ("domain_sha256", "shop_id_sha256")
+        ):
             return ShopifyIdentityResult()
+        production_domain = production["domain_sha256"]
         if authority(store, product).snapshot != selected.snapshot:
             return ShopifyIdentityResult()
         reads.assert_selection_current(store, production_selection)
@@ -349,11 +375,15 @@ def compare_identity(
         result = ShopifyIdentityResult(
             probe=cast(Literal["verified", "token_rejected", "unavailable"], observed["status"]),
             production_domain_sha256=production_domain,
+            production_shop_id_sha256=production["shop_id_sha256"],
         )
         if result.probe != "verified":
             return result
         testing_domain = observed["domain_sha256"]
-        if testing_domain == production_domain:
+        if (
+            testing_domain == production_domain
+            or observed["shop_id_sha256"] == production["shop_id_sha256"]
+        ):
             return result.model_copy(update={"separation": "same"})
         if testing_domain != digest(selected.domain):
             return ShopifyIdentityResult()
@@ -363,6 +393,7 @@ def compare_identity(
             testing_domain_sha256=testing_domain,
             testing_shop_id_sha256=observed["shop_id_sha256"],
             production_domain_sha256=production_domain,
+            production_shop_id_sha256=production["shop_id_sha256"],
         )
     except NativeSourceAuthorizationDenied:
         raise reads.OdooRuntimeReadError(

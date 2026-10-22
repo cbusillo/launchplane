@@ -14,7 +14,7 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
-def read_identity(spec: dict[str, object]) -> dict[str, str]:
+def read_identity(spec: dict[str, object], *, require_domain_match: bool = True) -> dict[str, str]:
     unknown = {"status": "unavailable"}
     domain, version, token = (spec.get(key) for key in ("domain", "api_version", "token"))
     if (
@@ -49,15 +49,18 @@ def read_identity(spec: dict[str, object]) -> dict[str, str]:
         if (
             not isinstance(shop_id, str)
             or re.fullmatch(r"gid://shopify/Shop/[1-9][0-9]*", shop_id) is None
-            or observed != domain
+            or not isinstance(observed, str)
+            or re.fullmatch(DOMAIN_PATTERN, observed) is None
+            or (require_domain_match and observed != domain)
         ):
             return unknown
         return {
             "status": "verified",
             "shop_id_sha256": hashlib.sha256(shop_id.encode()).hexdigest(),
-            "domain_sha256": hashlib.sha256(domain.encode()).hexdigest(),
+            "domain_sha256": hashlib.sha256(observed.encode()).hexdigest(),
         }
     except HTTPError as error:
+        error.close()
         return {"status": "token_rejected"} if error.code in {401, 403} else unknown
     except (OSError, ValueError, TypeError, AttributeError):
         return unknown

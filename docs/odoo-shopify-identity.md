@@ -16,13 +16,16 @@ protected-store checks still run. A token bound outside testing or a target that
 aliases another lane is refused. This read does not bypass the hold for runtime
 sync or any other write.
 
-Production's applied `ir.config_parameter` store key is read inside its verified
-container with a read-only PostgreSQL transaction and statement timeout. Only a
-canonical domain hash leaves that container. Prepared settings and protected-store
-lists alone cannot prove production's applied identity. Missing or conflicting
-applied keys, unavailable configuration or unverifiable production runtime leave
-separation unknown. The production read is repeated after testing's response.
-No Shopify request is sent from production.
+Production's applied `ir.config_parameter` store key, API version and existing
+credential are read inside its verified container with a read-only PostgreSQL
+transaction and statement timeout. The same fixed identity-only Shopify query
+obtains its authoritative shop ID and canonical domain. Its credential stays
+inside that process. Applied settings are re-read after the query; only identity
+hashes leave the container. Prepared settings and protected-store lists alone
+cannot prove production's identity. Missing or conflicting applied settings,
+rejected credentials or an unverifiable production runtime leave separation
+unknown. The production query runs after testing's response. Comparing immutable
+shop IDs prevents domain aliases from appearing to be separate stores.
 
 Testing's managed token is decrypted inside Launchplane and consumed by one fixed
 `query { shop { id myshopifyDomain } }` request inside testing's verified container.
@@ -30,8 +33,8 @@ The existing provider transport disables terminal echo/history before sending
 private input. The token travels on stdin, never Docker arguments, environment,
 files or result output. The probe uses HTTPS, refuses redirects and proxy
 inheritance, bounds the response and uses no retry. It returns only the shop-ID
-and canonical-domain hashes. The returned domain must agree with the requested
-store. Runtime, container, settings, hold and credential authority changes discard
+and canonical-domain hashes. Testing's returned domain must agree with its requested store. Both shop IDs
+and domains must differ before separation is proved. Runtime, container, settings, hold and credential authority changes discard
 the evidence. The hold, provider environment, Odoo database settings and dispatcher
 remain unchanged.
 
@@ -39,11 +42,11 @@ After deploying this source, from a checkout containing the matching caller:
 
 ```sh
 uv run python scripts/read-shopify-identity.py \
-  --operator-helper /Users/cbusillo/Developer/codex-skills/skills/launchplane/scripts/launchplane-write-action.py \
-  --product odoo-tenant-opw
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product>
 ```
 
-The caller reuses the installed operator transport and private configuration.
+The caller reuses the installed admin transport and private configuration.
 It prints the trace and strictly validated hash-only result. Exit zero requires
 `separation=separate` with complete verified evidence. `same`, `unknown`,
 `token_rejected`, HTTP refusal and malformed replies exit nonzero. Stop there;

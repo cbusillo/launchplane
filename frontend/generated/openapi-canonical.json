@@ -50278,6 +50278,12 @@
             "title": "Production Domain Sha256",
             "type": "string"
           },
+          "production_shop_id_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Production Shop Id Sha256",
+            "type": "string"
+          },
           "separation": {
             "default": "unknown",
             "enum": [

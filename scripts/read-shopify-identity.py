@@ -1,5 +1,4 @@
 import argparse
-import http.client
 import json
 from pathlib import Path
 import runpy
@@ -41,8 +40,9 @@ def main() -> int:
         print(response.model_dump_json())
         return 0 if response.result.separation == "separate" else 1
     except urllib.error.HTTPError as error:
+        error.close()
         print(json.dumps({"status": "unavailable", "http_status": error.code}), file=sys.stderr)
-    except (OSError, ValueError, http.client.HTTPException):
+    except Exception:
         print('{"status":"unavailable"}', file=sys.stderr)
     return 1
 

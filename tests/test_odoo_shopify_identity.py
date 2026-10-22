@@ -1,3 +1,5 @@
+import socket
+from urllib import request as urllib_request
 import configparser
 import importlib
 import os
@@ -202,6 +204,11 @@ class ShopifyComparisonTests(unittest.TestCase):
         }
         self.real_runtime_identity = comparison.runtime_identity
         self.observation: dict[str, str] = {}
+        network = patch.object(
+            socket, "create_connection", side_effect=AssertionError("No network in fixture")
+        )
+        network.start()
+        self.addCleanup(network.stop)
         self.calls = []
         for patcher in (
             patch.object(
@@ -213,7 +220,19 @@ class ShopifyComparisonTests(unittest.TestCase):
                     else replace(self.fixture.connection, selection=kw["selection"])
                 ),
             ),
-            patch.object(reads, "inspect_runtime_container", return_value=self.environment),
+            patch.object(
+                reads,
+                "inspect_runtime_container",
+                side_effect=lambda *args: (
+                    self.environment
+                    if args[-1].instance == "testing"
+                    else {
+                        "PLATFORM_INSTANCE": "prod",
+                        "ODOO_DB_NAME": "fixture-db",
+                        RUNTIME_IDENTITY_ENV_KEY: self.production_runtime_identity.model_dump_json(),
+                    }
+                ),
+            ),
             patch.object(comparison, "_decrypt_secret_value", return_value="fixture-secret"),
             patch.object(
                 comparison,
@@ -224,6 +243,7 @@ class ShopifyComparisonTests(unittest.TestCase):
                     else {
                         "status": "verified",
                         "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
+                        "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
                     }
                 ),
             ),
@@ -259,7 +279,11 @@ class ShopifyComparisonTests(unittest.TestCase):
             self.store.read_dokploy_target_record.return_value.policies.staff_testing_hold.purpose,
             "isolation_staging",
         )
-        self.assertEqual(self.calls[-1].call_count, 3)
+        reads_seen = self.calls[-1].call_args_list
+        testing_index = next(
+            index for index, call in enumerate(reads_seen) if call.args[1] is not None
+        )
+        self.assertTrue(any(call.args[1] is None for call in reads_seen[testing_index + 1 :]))
 
     def test_equal_or_unavailable_identity_never_proves_separation(self) -> None:
         for observation in (
@@ -283,12 +307,17 @@ class ShopifyComparisonTests(unittest.TestCase):
         self.assertEqual(self.run_comparison().separation, "unknown")
         self.calls[-1].assert_not_called()
 
+    def test_same_shop_id_under_different_domains_never_proves_separation(self) -> None:
+        self.observation["shop_id_sha256"] = self.comparison.digest("gid://shopify/Shop/456")
+        self.assertNotEqual(self.run_comparison().separation, "separate")
+
     def test_authority_drift_discards_success(self) -> None:
         def observe(connection: object, selected: object, *args: object) -> dict[str, str]:
             if selected is None:
                 return {
                     "status": "verified",
                     "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
+                    "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
                 }
             self.settings = self.settings.model_copy(update={"source_label": "changed"})
             return self.observation
@@ -298,16 +327,100 @@ class ShopifyComparisonTests(unittest.TestCase):
 
     def test_foreign_or_production_classified_secret_prevents_decryption(self) -> None:
         self.bindings["api_token"] = self.bindings["api_token"].model_copy(
-            update={"declared_secret_class": "production"}
+            update={"declared_secret_class": "prod_only"}
         )
         self.assertEqual(self.run_comparison().separation, "unknown")
         self.calls[-2].assert_not_called()
+
+    def test_unsafe_recipient_or_credential_authority_never_decrypts_or_probes(self) -> None:
+        original_bindings = dict(self.bindings)
+        original_record_read = self.store.read_secret_record.side_effect
+        original_versions = dict(self.fixture.versions)
+        original_target_ids = self.store.list_dokploy_target_id_records.return_value
+        for kind in (
+            "target_alias",
+            "credential_shared",
+            "missing_allowance",
+            "staff_hold",
+            "missing_production",
+            "record_context",
+            "record_scope",
+            "version_owner",
+        ):
+            with self.subTest(kind=kind):
+                self.store.read_dokploy_target_record.return_value = self.target
+                self.store.list_dokploy_target_id_records.return_value = original_target_ids
+                self.store.read_product_profile_record.return_value = self.fixture.profile
+                self.store.list_product_profile_records.return_value = (self.fixture.profile,)
+                self.bindings = dict(original_bindings)
+                self.fixture.versions = dict(original_versions)
+                self.store.read_secret_record.side_effect = original_record_read
+                self.calls[-2].reset_mock()
+                self.calls[-1].reset_mock()
+                if kind == "target_alias":
+                    self.store.list_dokploy_target_id_records.return_value = (
+                        *original_target_ids,
+                        original_target_ids[0].model_copy(update={"instance": "prod"}),
+                    )
+                elif kind == "credential_shared":
+                    self.bindings["foreign"] = self.bindings["api_token"].model_copy(
+                        update={
+                            "binding_id": "foreign",
+                            "instance": "prod",
+                            "declared_secret_class": "prod_only",
+                        }
+                    )
+                elif kind in {"missing_allowance", "staff_hold"}:
+                    changes = (
+                        {"integration_allowances": ()}
+                        if kind == "missing_allowance"
+                        else {
+                            "staff_testing_hold": self.target.policies.staff_testing_hold.model_copy(
+                                update={"purpose": "staff_testing"}
+                            )
+                        }
+                    )
+                    self.store.read_dokploy_target_record.return_value = self.target.model_copy(
+                        update={"policies": self.target.policies.model_copy(update=changes)}
+                    )
+                elif kind == "missing_production":
+                    profile = self.fixture.profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane
+                                for lane in self.fixture.profile.lanes
+                                if lane.instance != "prod"
+                            )
+                        }
+                    )
+                    self.store.read_product_profile_record.return_value = profile
+                    self.store.list_product_profile_records.return_value = (profile,)
+                elif kind in {"record_context", "record_scope"}:
+                    changes = (
+                        {"context": "foreign"}
+                        if kind == "record_context"
+                        else {"scope": "context", "instance": ""}
+                    )
+                    self.store.read_secret_record.side_effect = lambda secret_id: (
+                        original_record_read(secret_id).model_copy(update=changes)
+                    )
+                else:
+                    version_id = original_record_read(
+                        self.bindings["api_token"].secret_id
+                    ).current_version_id
+                    self.fixture.versions[version_id] = self.fixture.versions[
+                        version_id
+                    ].model_copy(update={"secret_id": "foreign"})
+                self.assertEqual(self.run_comparison().separation, "unknown")
+                self.calls[-2].assert_not_called()
+                self.calls[-1].assert_not_called()
 
     def execute_program(self, program: str, input_text: str, argv: list[str] | None = None) -> str:
         with (
             patch.object(sys, "stdin", io.StringIO(input_text)),
             patch.object(sys, "argv", argv or ["probe"]),
             contextlib.redirect_stdout(io.StringIO()) as output,
+            patch.dict(sys.modules, {"control_plane.odoo_instance_overrides": None}),
         ):
             exec(compile(program, "<identity-probe>", "exec"), {"__name__": "__main__"})
         return output.getvalue()
@@ -316,6 +429,7 @@ class ShopifyComparisonTests(unittest.TestCase):
         commands = []
         inspections = 0
         drift = False
+        current_environment = dict(self.environment)
 
         def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             nonlocal inspections
@@ -337,64 +451,91 @@ class ShopifyComparisonTests(unittest.TestCase):
                                         "com.docker.compose.service": "web",
                                     },
                                     "Env": [
-                                        key + "=" + value for key, value in self.environment.items()
+                                        key + "=" + value
+                                        for key, value in current_environment.items()
                                     ],
                                 },
-                                "State": {"Running": True, "Pid": inspections if drift else 1},
+                                "State": {
+                                    "Running": True,
+                                    "Pid": inspections
+                                    if drift
+                                    and current_environment["PLATFORM_INSTANCE"] == "testing"
+                                    else 1,
+                                },
                             }
                         ]
                     ),
                 )
-            if json.loads(kwargs["input"]).get("config_path"):
+            with patch.dict(os.environ, current_environment, clear=True):
                 return subprocess.CompletedProcess(
-                    command,
-                    0,
-                    stdout=json.dumps(
-                        {
-                            "status": "verified",
-                            "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
-                        }
-                    ),
+                    command, 0, stdout=self.execute_program(command[-1], kwargs["input"])
                 )
-            return subprocess.CompletedProcess(
-                command, 0, stdout=self.execute_program(command[-1], kwargs["input"])
-            )
 
         def remote(**kwargs: Any) -> None:
+            nonlocal current_environment
+            identity = kwargs["payload"]["identity"]
+            current_environment = {
+                "PLATFORM_INSTANCE": identity["instance"],
+                "ODOO_DB_NAME": "fixture-db",
+                RUNTIME_IDENTITY_ENV_KEY: json.dumps(identity),
+            }
             encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
             output = self.execute_program(kwargs["program"], "", ["host", encoded, "FRAME:"])
             kwargs["receive"](json.loads(output.removeprefix("FRAME:")))
 
+        database = MagicMock()
+        database.connect.return_value.cursor.return_value.__enter__.return_value.fetchmany.return_value = [
+            ("shopify.shop_url_key", "https://admin.shopify.com/store/fixture-production/settings"),
+            ("shopify.api_token", "fixture-production-secret"),
+            ("shopify.api_version", "2026-01"),
+        ]
         opener = MagicMock()
-        opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(
-            {
-                "data": {
-                    "shop": {
-                        "id": "gid://shopify/Shop/123",
-                        "myshopifyDomain": "fixture-testing.myshopify.com",
+
+        def open_request(request: Any, **kwargs: Any) -> Any:
+            production = request.get_header("X-shopify-access-token") == "fixture-production-secret"
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "data": {
+                        "shop": {
+                            "id": "gid://shopify/Shop/456"
+                            if production
+                            else "gid://shopify/Shop/123",
+                            "myshopifyDomain": "fixture-production.myshopify.com"
+                            if production
+                            else "fixture-testing.myshopify.com",
+                        }
                     }
                 }
-            }
-        ).encode()
+            ).encode()
+            return response
+
+        opener.open.side_effect = open_request
         with (
+            patch.object(self.comparison, "runtime_identity", self.real_runtime_identity),
+            patch.object(configparser.ConfigParser, "read", side_effect=lambda path: [path]),
             patch.object(
-                self.comparison,
-                "runtime_identity",
-                side_effect=lambda connection, selected, environment, token: (
-                    self.real_runtime_identity(connection, selected, environment, token)
-                    if selected
-                    else {
-                        "status": "verified",
-                        "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
-                    }
-                ),
+                configparser.ConfigParser,
+                "__getitem__",
+                return_value={
+                    "db_name": "fixture-db",
+                    "db_host": "database",
+                    "db_user": "fixture-user",
+                    "db_password": "fixture-production-secret",
+                },
             ),
+            patch.object(importlib, "import_module", return_value=database),
             patch.object(self.comparison, "_read_remote", side_effect=remote),
             patch.object(subprocess, "run", side_effect=run),
-            patch("urllib.request.build_opener", return_value=opener),
+            patch.object(urllib_request, "build_opener", return_value=opener),
         ):
             self.assertEqual(self.run_comparison().separation, "separate")
-            self.assertEqual(opener.open.call_count, 1)
+            testing_requests = [
+                call
+                for call in opener.open.call_args_list
+                if call.args[0].get_header("X-shopify-access-token") == "fixture-secret"
+            ]
+            self.assertEqual(len(testing_requests), 1)
             drift = True
             self.assertEqual(self.run_comparison().separation, "unknown")
         self.assertTrue(
@@ -501,6 +642,7 @@ class ShopifyCallerTests(unittest.TestCase):
                         "testing_domain_sha256": comparison.digest("testing"),
                         "testing_shop_id_sha256": comparison.digest("shop"),
                         "production_domain_sha256": comparison.digest("prod"),
+                        "production_shop_id_sha256": comparison.digest("prod-id"),
                     },
                 }
                 with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -512,6 +654,11 @@ class ShopifyCallerTests(unittest.TestCase):
             transport["request_launchplane_read"].side_effect = urllib.error.HTTPError(
                 "https://service.invalid", 403, "fixture-private", Message(), io.BytesIO()
             )
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(script["main"](), 1)
+            self.assertNotIn("fixture-private", errors.getvalue())
+            self.assertTrue(transport["request_launchplane_read"].side_effect.fp.closed)
+            transport["request_launchplane_read"].side_effect = KeyError("fixture-private")
             with contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(script["main"](), 1)
             self.assertNotIn("fixture-private", errors.getvalue())
@@ -533,10 +680,26 @@ class ProductionIdentityTests(unittest.TestCase):
         }
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchmany.return_value = [("shopify.shop_url_key", "fixture-production")]
+        cursor.fetchmany.return_value = [
+            ("shopify.shop_url_key", "fixture-production"),
+            ("shopify.api_token", "fixture-production-secret"),
+            ("shopify.api_version", "2026-01"),
+        ]
         database = MagicMock()
         database.connect.return_value = connection
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+            {
+                "data": {
+                    "shop": {
+                        "id": "gid://shopify/Shop/456",
+                        "myshopifyDomain": "fixture-production.myshopify.com",
+                    }
+                }
+            }
+        ).encode()
         with (
+            patch.object(probe, "build_opener", return_value=opener),
             patch.object(configparser.ConfigParser, "read", return_value=[ODOO_WEB_CONFIG_PATH]),
             patch.object(configparser.ConfigParser, "__getitem__", return_value=config),
             patch.dict(os.environ, {"ODOO_DB_NAME": "fixture-db"}),
@@ -552,13 +715,16 @@ class ProductionIdentityTests(unittest.TestCase):
                 {
                     "status": "verified",
                     "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
+                    "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
                 },
-            )
-            self.assertIn(
-                "default_transaction_read_only=on", database.connect.call_args.kwargs["options"]
             )
             connection.rollback.assert_called_once()
             connection.close.assert_called_once()
+            cursor.fetchmany.return_value[0] = (
+                "shopify.shop_url_key",
+                "https://admin.shopify.com/store/fixture-production/settings",
+            )
+            self.assertEqual(production.read_identity(spec), result)
             cursor.fetchmany.return_value.append(
                 ("shopify.store_url", "another-production.myshopify.com")
             )
