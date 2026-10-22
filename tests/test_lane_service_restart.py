@@ -539,7 +539,6 @@ class ServiceRestartTests(unittest.TestCase):
         record_safety(
             self.store, self.expected.product, self.expected.context, "testing", usage="in_use"
         )
-        self.payload["mode"] = "reconcile"
         self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
         status, response = self.invoke(key="lost-reply")
         self.assertEqual(status, 200, response)
@@ -637,7 +636,12 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(self.invoke(key="missing-original")[0], 404)
         self.app = self.create_app(subject="different-authorized-operator")
         self.assertEqual(self.invoke(key=event.restart_recovery.idempotency_key)[0], 409)
-        self.app = self.create_app()
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        record_safety(
+            self.store, self.expected.product, self.expected.context, "testing", usage="in_use"
+        )
         self.provider.config["State"]["Restarting"] = True
         status, response = self.invoke(key=event.restart_recovery.idempotency_key)
         self.assertEqual(status, 409, response)
