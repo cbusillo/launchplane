@@ -81,18 +81,21 @@ containers including stopped containers, configured and referenced named-volume
 counts, and content presence for verified local volume backing. Missing volumes,
 remote drivers, driver options and redirected backing are unavailable, never
 empty. Unsupported mounts are reported by a presence flag without reading their
-contents. Image volume declarations cover only the current immutable local service image, not
-every historical image; unavailable image metadata has a null declaration count.
+contents. Image volume declarations cover only the current immutable local
+service image, not every historical image; unavailable image metadata has a null
+declaration count.
 Unknown or changed inventory supplies no counts.
 
 The response includes no filesystem paths, filenames, file contents, environment
 values or raw provider errors. The reader neither changes resources nor creates
 a schedule. Its counts and `service_quiescent` value describe a sample of the
-selected service, its tasks and its attributable containers. Other volume consumers are
-not excluded. Filesystem data can change independently; service quiescence is
-not an execution fence. These observations publish no positive custody or
-production-isolation facts and do
-not qualify deployment. The broader [#4372](https://github.com/cbusillo/launchplane/issues/4372)
+selected service, its tasks and its attributable containers. Other volume
+consumers are not excluded. Filesystem data can change independently; service
+quiescence is not an execution fence. The `application_resources` read runs
+before usage collection; `observed_at` and `expires_at` do not timestamp or give
+a validity period to that earlier metadata sample. These observations publish
+no positive custody or production-isolation facts and do not qualify deployment.
+The broader [#4372](https://github.com/cbusillo/launchplane/issues/4372)
 prerequisite remains open until supported sources establish those facts for the
 actual application state.
 
