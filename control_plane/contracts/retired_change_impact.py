@@ -9,6 +9,11 @@ import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import (
+    normalize_decimal_id,
+    normalize_sha256,
+    required_token,
+)
 
 
 ChangeImpactPolicyStatus = Literal["active", "superseded"]
@@ -23,49 +28,19 @@ RepositoryChangeKind = Literal["added", "modified", "removed", "renamed", "unkno
 ChangeImpactStoredEvidenceKind = Literal["dependency", "reviewer"]
 RepositoryAuthorshipResolution = Literal["resolved", "unresolved", "conflicting"]
 
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
 _GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,254}$")
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
-def _normalize_decimal_id(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
-    if not normalized.isdecimal() or int(normalized) < 1:
-        raise ValueError(f"{field_name} must be a positive decimal identity")
-    return str(int(normalized))
-
-
 def _normalize_repository(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
+    normalized = required_token(value, field_name).lower()
     if _REPOSITORY_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be owner/name")
     return normalized
 
 
-def _normalize_git_sha(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA")
-    return normalized
-
-
-def _normalize_sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return normalized
-
-
 def _normalize_timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -90,7 +65,7 @@ def _canonical_sha256(payload: object) -> str:
 
 
 def _normalize_path(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lstrip("/")
+    normalized = required_token(value, field_name).lstrip("/")
     if ".." in normalized.split("/"):
         raise ValueError(f"{field_name} cannot contain '..'")
     return normalized
@@ -116,13 +91,13 @@ class ChangeImpactProductScope(BaseModel):
     def _validate_scope(self) -> "ChangeImpactProductScope":
         if self.schema_version != 1:
             raise ValueError("Unsupported change-impact product scope schema version.")
-        object.__setattr__(self, "product", _required_token(self.product, "product"))
-        object.__setattr__(self, "system", _required_token(self.system, "system"))
-        object.__setattr__(self, "owner_action", _required_token(self.owner_action, "owner_action"))
+        object.__setattr__(self, "product", required_token(self.product, "product"))
+        object.__setattr__(self, "system", required_token(self.system, "system"))
+        object.__setattr__(self, "owner_action", required_token(self.owner_action, "owner_action"))
         object.__setattr__(
             self,
             "owner_environment",
-            _required_token(self.owner_environment, "owner_environment"),
+            required_token(self.owner_environment, "owner_environment"),
         )
         return self
 
@@ -146,7 +121,7 @@ class ChangeImpactComponentRule(BaseModel):
     def _validate_rule(self) -> "ChangeImpactComponentRule":
         if self.schema_version != 1:
             raise ValueError("Unsupported change-impact component rule schema version.")
-        object.__setattr__(self, "component", _required_token(self.component, "component"))
+        object.__setattr__(self, "component", required_token(self.component, "component"))
         if self.production_affecting is False:
             object.__setattr__(self, "production_affecting", None)
         if self.governance_impact is False:
@@ -158,9 +133,7 @@ class ChangeImpactComponentRule(BaseModel):
                 raise ValueError("generated_by requires between 1 and 20 component identities")
             if self.affected_products or self.product_impact is not None:
                 raise ValueError("generated_by cannot accompany direct product authority")
-            generators = tuple(
-                _required_token(value, "generated_by") for value in self.generated_by
-            )
+            generators = tuple(required_token(value, "generated_by") for value in self.generated_by)
             if len(generators) != len(set(generators)):
                 raise ValueError("generated_by cannot repeat component identities")
             object.__setattr__(self, "generated_by", tuple(sorted(generators)))
@@ -174,10 +147,10 @@ class ChangeImpactComponentRule(BaseModel):
             "affected_products",
             tuple(sorted(set(self.affected_products), key=_product_scope_key)),
         )
-        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "reason", required_token(self.reason, "reason"))
         computed_rule_id = build_change_impact_component_rule_id(self)
         if self.rule_id:
-            normalized_rule_id = _required_token(self.rule_id, "rule_id")
+            normalized_rule_id = required_token(self.rule_id, "rule_id")
             if normalized_rule_id != computed_rule_id:
                 raise ValueError("change-impact component rule_id does not match payload")
             object.__setattr__(self, "rule_id", normalized_rule_id)
@@ -212,12 +185,12 @@ class ChangeImpactPolicyRecord(BaseModel):
         object.__setattr__(
             self,
             "repository_id",
-            _normalize_decimal_id(self.repository_id, "repository_id"),
+            normalize_decimal_id(self.repository_id, "repository_id"),
         )
         object.__setattr__(
             self,
             "repository_owner_id",
-            _normalize_decimal_id(self.repository_owner_id, "repository_owner_id"),
+            normalize_decimal_id(self.repository_owner_id, "repository_owner_id"),
         )
         object.__setattr__(
             self,
@@ -249,8 +222,8 @@ class ChangeImpactPolicyRecord(BaseModel):
             "effective_at",
             _normalize_timestamp(self.effective_at, "effective_at"),
         )
-        object.__setattr__(self, "source", _required_token(self.source, "source"))
-        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "source", required_token(self.source, "source"))
+        object.__setattr__(self, "reason", required_token(self.reason, "reason"))
         if self.policy_revision == 1 and self.supersedes_record_id is not None:
             raise ValueError("initial change-impact policy cannot supersede another record")
         if self.policy_revision > 1 and not self.supersedes_record_id:
@@ -259,14 +232,14 @@ class ChangeImpactPolicyRecord(BaseModel):
             object.__setattr__(
                 self,
                 "supersedes_record_id",
-                _required_token(self.supersedes_record_id, "supersedes_record_id"),
+                required_token(self.supersedes_record_id, "supersedes_record_id"),
             )
         computed_record_id = build_change_impact_policy_record_id(
             repository_id=self.repository_id,
             policy_revision=self.policy_revision,
         )
         if self.record_id:
-            normalized_record_id = _required_token(self.record_id, "record_id")
+            normalized_record_id = required_token(self.record_id, "record_id")
             if normalized_record_id != computed_record_id:
                 raise ValueError("change-impact policy record_id does not match scope and revision")
             object.__setattr__(self, "record_id", normalized_record_id)
@@ -274,7 +247,7 @@ class ChangeImpactPolicyRecord(BaseModel):
             object.__setattr__(self, "record_id", computed_record_id)
         computed_digest = change_impact_policy_digest(self)
         if self.policy_digest:
-            normalized_digest = _normalize_sha256(self.policy_digest, "policy_digest")
+            normalized_digest = normalize_sha256(self.policy_digest, "policy_digest")
             if normalized_digest != computed_digest:
                 raise ValueError("change-impact policy digest does not match payload")
             object.__setattr__(self, "policy_digest", normalized_digest)
@@ -298,9 +271,9 @@ class ChangeImpactStoredEvidence(BaseModel):
     def _validate_evidence(self) -> "ChangeImpactStoredEvidence":
         if self.schema_version != 1:
             raise ValueError("Unsupported change-impact stored evidence schema version.")
-        object.__setattr__(self, "record_id", _required_token(self.record_id, "record_id"))
-        object.__setattr__(self, "component", _required_token(self.component, "component"))
-        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "record_id", required_token(self.record_id, "record_id"))
+        object.__setattr__(self, "component", required_token(self.component, "component"))
+        object.__setattr__(self, "reason", required_token(self.reason, "reason"))
         object.__setattr__(
             self,
             "affected_products",
@@ -334,7 +307,7 @@ def build_change_impact_component_rule_id(rule: ChangeImpactComponentRule) -> st
 def build_change_impact_policy_record_id(*, repository_id: str, policy_revision: int) -> str:
     if policy_revision < 1:
         raise ValueError("change-impact policy revision must be positive")
-    normalized_repository_id = _normalize_decimal_id(repository_id, "repository_id")
+    normalized_repository_id = normalize_decimal_id(repository_id, "repository_id")
     return f"change-impact-policy-{normalized_repository_id}-r{policy_revision}"
 
 
