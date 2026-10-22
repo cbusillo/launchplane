@@ -31,8 +31,12 @@ changes. Production and other scoped callers keep their policy checks;
 terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
-settled current deployment with a runtime identity and immutable artifact
-manifest. Production also requires recorded acceptance of that exact artifact
+passing deployment named by its environment inventory, with an agreeing runtime
+identity and immutable artifact manifest. Newer attempts may be skipped only when
+each is a failed deploy with a recognized pre-provider-write `deploy_blocked.*`
+code and no uncertain provider outcome. Newer successes, unclassified failures
+and uncertain effects refuse recovery. The same selection is checked during
+apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
 and source commit. The same requirements apply to generic-web Compose lanes.
 Other drivers and application targets are refused. Odoo uses
 the lane reservation respected by release enqueues, workers and synchronous
@@ -55,13 +59,22 @@ image, a valid timezone-aware start time and a container health check. Missing o
 without a restart. `web` additionally verifies the lane's HTTP runtime identity
 after restart and requires that endpoint before the restart; other named services verify their own container health and identity.
 
-These checks also apply to generic-web dependency services. A database container
-without the recorded application runtime identity, immutable artifact image or
-container health check is refused. Merely sharing the Compose project does not
-qualify it. This action does not install missing evidence, change a health check,
-or start an unqualified dependency as a workaround. Typical database containers
-cannot qualify through this action. A dependent application restart does not
-recover its database.
+Odoo testing additionally supports the stopped `database` dependency. It must be
+the sole non-one-off database container in the recorded Compose project, created
+no later than the inventory deployment finished. A sole `web` sibling in that
+project must match the inventory's application identity and immutable image,
+whether running or stopped. The database needs a valid start time and container
+health check; its own image ID, configuration and mounts are bound in the plan.
+Inspection and verification accept that same database after it starts;
+fresh dispatch requires it still stopped. Production and generic-web database
+dependencies are refused.
+
+For a stopped Odoo testing lane, collect fresh disposable-lane evidence, then
+inspect, apply and read back `database`, `web`, and `script-runner` in that order.
+Use a separate review file and idempotency key per service. Web's HTTP identity
+verification proves the recovered application on its recorded artifact.
+A web restart alone does not start its Compose dependencies. This action never
+changes database credentials, configuration, health checks or volumes.
 
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
@@ -71,6 +84,8 @@ runtime identity, and health. A failed verification remains a failed receipt.
 Verification retries unavailable inventory and transient provider reads within
 its bounded window; identity changes fail verification and never cause another
 restart. Policy-authorized callers use the current policy, including live revocations.
+Planner refusals retain their fixed, credential-free reason under
+`restart_refused`; unsettled original requests retain reconciliation responses.
 
 ## Product Ops
 
