@@ -44,6 +44,10 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductProfileConflictError,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -798,13 +802,39 @@ def product_profiles_upsert(
         except (FileNotFoundError, KeyError):
             existing_record = None
         try:
+            if existing_record is not None:
+                record = LaunchplaneProductProfileRecord.model_validate(
+                    {
+                        **existing_record.model_dump(mode="json"),
+                        **record.model_dump(mode="json", exclude_unset=True),
+                        "image": {
+                            **existing_record.image.model_dump(mode="json"),
+                            **record.image.model_dump(mode="json", exclude_unset=True),
+                        },
+                        "preview": {
+                            **existing_record.preview.model_dump(mode="json"),
+                            **record.preview.model_dump(mode="json", exclude_unset=True),
+                        },
+                    }
+                )
             validate_product_profile_history_transition(
                 existing_profile=existing_record,
                 replacement_profile=record,
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
-        store.write_product_profile_record(record)
+        try:
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    product_profiles=(record,),
+                    expected_product_profiles=(existing_record,)
+                    if existing_record is not None
+                    else (),
+                    absent_product_ids=() if existing_record is not None else (record.product,),
+                )
+            )
+        except ProductProfileConflictError as error:
+            raise click.ClickException(str(error)) from error
     finally:
         store.close()
     click.echo(

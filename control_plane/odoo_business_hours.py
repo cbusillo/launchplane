@@ -77,7 +77,6 @@ def _id(value: object) -> int:
 class CalendarSourceObservation:
     companies: tuple[OdooCalendarCompanyReference, ...]
     permitted_company_ids: tuple[int, ...]
-    truncated: bool
     calendar: dict[str, object]
     attendance: list[dict[str, object]]
     leaves: list[dict[str, object]]
@@ -170,9 +169,7 @@ def read_calendar_sources(
         if company_id is not None and company_id not in permitted:
             raise ValueError("Selected company is outside the authenticated visibility scope.")
 
-        def search(
-            model: str, domain: list[object], fields: list[str], *, allow_truncation: bool = False
-        ) -> list[dict[str, object]]:
+        def search(model: str, domain: list[object], fields: list[str]) -> list[dict[str, object]]:
             value = _rpc(
                 opener,
                 origin,
@@ -191,14 +188,13 @@ def read_calendar_sources(
                     },
                 },
             )
-            return _rows(value, maximum=129 if allow_truncation else 128)
+            return _rows(value)
 
         company_fields = ["id", "name", "resource_calendar_id"]
         companies = search(
             "res.company",
             [["id", "=", company_id]] if company_id else [["id", "in", list(permitted)]],
             company_fields,
-            allow_truncation=inspect_only,
         )
         references = tuple(_company_reference(row) for row in companies)
         if len({row.company_id for row in references}) != len(references) or any(
@@ -210,15 +206,9 @@ def read_calendar_sources(
                 len(references) != 1 or references[0].company_id != company_id
             ):
                 raise ValueError("Selected company is unavailable.")
-            if (
-                company_id is None
-                and len(references) <= 128
-                and {row.company_id for row in references} != set(permitted)
-            ):
+            if company_id is None and {row.company_id for row in references} != set(permitted):
                 raise ValueError("Company visibility is incomplete.")
-            result = CalendarSourceObservation(
-                references[:128], permitted, len(references) > 128, {}, [], []
-            )
+            result = CalendarSourceObservation(references, permitted, {}, [], [])
         else:
             if company_id is None or len(companies) != 1 or references[0].company_id != company_id:
                 raise ValueError("The selected company is unavailable.")
@@ -280,7 +270,7 @@ def read_calendar_sources(
                 ["date_from", "date_to"],
             )
             result = CalendarSourceObservation(
-                references, permitted, False, calendars[0], attendance, leaves
+                references, permitted, calendars[0], attendance, leaves
             )
     finally:
         destroy_diagnostic_session(

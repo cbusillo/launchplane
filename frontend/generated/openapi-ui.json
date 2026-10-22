@@ -21680,11 +21680,6 @@
             "title": "Timezone",
             "type": "string"
           },
-          "truncated": {
-            "default": false,
-            "title": "Truncated",
-            "type": "boolean"
-          },
           "window": {
             "anyOf": [
               {
@@ -21713,7 +21708,6 @@
           "policy_before",
           "runtime_identity",
           "timezone",
-          "truncated",
           "window"
         ],
         "title": "OdooBusinessHoursConfigResult",

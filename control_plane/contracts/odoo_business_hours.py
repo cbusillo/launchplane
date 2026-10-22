@@ -72,7 +72,6 @@ class OdooBusinessHoursConfigResult(BaseModel):
     company_scope: Literal["permitted_company_ids"] = "permitted_company_ids"
     permitted_company_ids: tuple[int, ...] = ()
     companies: tuple[OdooCalendarCompanyReference, ...] = ()
-    truncated: bool = False
     runtime_identity: RuntimeIdentity | None = None
     company_id: int | None = None
     calendar_id: int | None = None

@@ -31,7 +31,12 @@ The policy applies only when that product's `production_use` is `live`.
 Configure it for staff-facing Odoo products before live activation; website
 products remain unselected. A reviewed `operation: clear` disables scheduling for that
 product without requiring a healthy calendar read. Whole-profile POST cannot
-set, change or clear the policy; re-onboarding preserves it. Existing release holds and exact-candidate acceptance still apply.
+set, change or clear the policy. Re-onboarding and explicitly acknowledged
+bootstrap/recovery profile CLI upserts preserve the existing policy and refuse
+concurrent profile changes. The CLI preserves profile fields outside its supported
+flags, including nested image and preview settings. Its direct-DB acknowledgement
+does not authorize routine shared or production mutations. Existing release holds
+and exact-candidate acceptance still apply.
 
 For a private Odoo site, `odoo_business_hours.private_endpoint_key` references
 an existing active private health endpoint for the same product's prod lane.

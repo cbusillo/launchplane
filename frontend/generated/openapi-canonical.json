@@ -23088,11 +23088,6 @@
             "title": "Timezone",
             "type": "string"
           },
-          "truncated": {
-            "default": false,
-            "title": "Truncated",
-            "type": "boolean"
-          },
           "window": {
             "anyOf": [
               {

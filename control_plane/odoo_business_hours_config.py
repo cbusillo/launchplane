@@ -70,7 +70,6 @@ def plan_business_hours_config(
             update={
                 "permitted_company_ids": observation.permitted_company_ids,
                 "companies": observation.companies if request.operation == "inspect" else (),
-                "truncated": observation.truncated,
                 "runtime_identity": connection.selection.identity,
                 "company_id": request.company_id,
                 "calendar_id": request.expected_calendar_id,
@@ -81,8 +80,6 @@ def plan_business_hours_config(
         )
         if request.operation == "inspect":
             return result, profile
-        if observation.truncated:
-            raise ValueError("Calendar qualification is truncated.")
         if request.company_id is None:
             raise ValueError("A selected company is required.")
         after = OdooBusinessHoursPolicy(

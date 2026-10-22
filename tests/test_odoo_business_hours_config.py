@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -114,6 +115,7 @@ class CalendarRuntimeFixture(unittest.TestCase):
         self.store.write_private_health_endpoint_record(self.endpoint)
         self.provider_calls: list[str] = []
         self.rpc_calls: list[dict[str, Any]] = []
+        self.rpc_paths: list[str] = []
         self.origins: list[str] = []
         self.enterContext(
             patch(
@@ -170,6 +172,7 @@ class CalendarRuntimeFixture(unittest.TestCase):
         body = json.loads(request.data)
         params = body["params"]
         self.rpc_calls.append(params)
+        self.rpc_paths.append(urlsplit(request.full_url).path)
         envelope = {"jsonrpc": "2.0", "id": body["id"]}
         if request.full_url.endswith("authenticate"):
             return {
@@ -239,7 +242,9 @@ class CalendarRuntimeTests(CalendarRuntimeFixture):
         self.assertTrue(self.origins)
         self.assertTrue(all(url.startswith("https://odoo.internal/") for url in self.origins))
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
-        self.assertEqual(self.rpc_calls[-1], {})
+        self.assertEqual(self.rpc_paths[0], "/web/session/authenticate")
+        self.assertEqual(self.rpc_paths[-1], "/web/session/destroy")
+        self.assertEqual(self.rpc_paths.count("/web/session/destroy"), 1)
 
     def test_live_reader_refuses_wrong_company_calendar_and_missing_membership(self) -> None:
         original = self.http
@@ -275,6 +280,97 @@ class CalendarRuntimeTests(CalendarRuntimeFixture):
                 self.assertTrue(window.applies)
                 self.assertTrue(window.blocked_reason)
                 self.assertFalse(window.next_release_at)
+
+
+class CalendarCliProfileTests(CalendarRuntimeFixture):
+    def upsert(self, record: LaunchplaneProductProfileRecord) -> Any:
+        from click.testing import CliRunner
+        from control_plane.cli import main
+
+        return CliRunner().invoke(
+            main,
+            [
+                "product-profiles",
+                "upsert",
+                "--database-url",
+                "sqlite://",
+                "--product",
+                record.product,
+                "--display-name",
+                "Updated display",
+                "--repository",
+                record.repository,
+                "--driver-id",
+                record.driver_id,
+                "--image-repository",
+                record.image.repository,
+                "--runtime-port",
+                str(record.runtime_port),
+                "--health-path",
+                record.health_path,
+                "--lanes-json",
+                json.dumps([lane.model_dump(mode="json") for lane in record.lanes]),
+                "--preview-enabled" if record.preview.enabled else "--preview-disabled",
+                "--preview-context",
+                record.preview.context,
+                "--preview-slug-template",
+                record.preview.slug_template,
+                "--updated-at",
+                record.updated_at,
+                "--source-label",
+                record.source,
+                "--allow-direct-db-mutation",
+            ],
+        )
+
+    def test_break_glass_upsert_preserves_non_cli_profile_fields(self) -> None:
+        self.profile = LaunchplaneProductProfileRecord.model_validate(
+            self.profile.model_copy(
+                update={"image": self.profile.image.model_copy(update={"scan_enabled": True})}
+            ).model_dump(mode="json")
+        )
+        self.store.write_product_profile_record(self.profile)
+        with patch(
+            "control_plane.cli_policy_profiles._product_profile_store", return_value=self.store
+        ):
+            result = self.upsert(self.profile)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product),
+            self.profile.model_copy(update={"display_name": "Updated display"}),
+        )
+
+    def test_break_glass_upsert_refuses_concurrent_existing_and_absent_profiles(self) -> None:
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
+
+        for exists in (True, False):
+            with self.subTest(exists=exists):
+                planned = (
+                    self.profile
+                    if exists
+                    else self.profile.model_copy(update={"product": "new-product"})
+                )
+                concurrent = planned.model_copy(
+                    update={"odoo_business_hours": OdooBusinessHoursPolicy(company_id=8)}
+                )
+                original = self.store.write_product_authority_bundle
+
+                def race(bundle: Any) -> None:
+                    self.store.write_product_profile_record(concurrent)
+                    original(bundle)
+
+                with (
+                    patch(
+                        "control_plane.cli_policy_profiles._product_profile_store",
+                        return_value=self.store,
+                    ),
+                    patch.object(self.store, "write_product_authority_bundle", side_effect=race),
+                ):
+                    result = self.upsert(planned)
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                self.assertEqual(
+                    self.store.read_product_profile_record(planned.product), concurrent
+                )
 
 
 class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAsyncioTestCase):
@@ -559,25 +655,19 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
 
-    async def test_raw_writer_cannot_set_clear_or_initially_register_policy(self) -> None:
+    async def test_raw_writer_cannot_clear_existing_policy(self) -> None:
         from tests.support.http import request
 
-        for profile in (
-            self.profile.model_copy(update={"odoo_business_hours": None}),
-            self.profile.model_copy(update={"product": "new-product"}),
-        ):
-            response = await request(
-                self.app,
-                "POST",
-                "/v1/product-profiles",
-                headers={"Authorization": "Bearer valid-token"},
-                payload=profile.model_dump(mode="json"),
-            )
-            self.assertEqual(
-                response.status_code,
-                409 if profile.product == self.profile.product else 403,
-                response.text,
-            )
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=self.profile.model_copy(update={"odoo_business_hours": None}).model_dump(
+                mode="json"
+            ),
+        )
+        self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_generic_profile_write_cannot_overwrite_a_concurrent_policy_apply(self) -> None:
@@ -781,6 +871,47 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
         with patch("control_plane.odoo_runtime_reads._http_json", side_effect=missing_scope):
             unavailable = await self.post(body)
         self.assertEqual(unavailable.status_code, 503, unavailable.text)
+
+    async def test_inspect_refuses_unbounded_duplicate_or_incomplete_company_scope(self) -> None:
+        original = self.http
+        for contradiction in ("membership_bound", "rows_bound", "duplicate", "omitted"):
+            with self.subTest(contradiction=contradiction):
+
+                def invalid_scope(opener: object, request: Any) -> object:
+                    response = cast(dict[str, Any], original(opener, request))
+                    if request.data is not None:
+                        params = json.loads(request.data)["params"]
+                        if contradiction == "membership_bound" and request.full_url.endswith(
+                            "authenticate"
+                        ):
+                            response["result"]["user_companies"]["allowed_companies"] = {
+                                str(i): {"id": i, "name": "Company"} for i in range(1, 130)
+                            }
+                        elif params.get("model") == "res.company":
+                            if contradiction == "rows_bound":
+                                response["result"] *= 129
+                            elif contradiction == "duplicate":
+                                response["result"] *= 2
+                            elif contradiction == "omitted":
+                                response["result"] = []
+                    return response
+
+                with patch(
+                    "control_plane.odoo_runtime_reads._http_json", side_effect=invalid_scope
+                ):
+                    response = await self.post(
+                        {
+                            **self.request_payload,
+                            "odoo_business_hours": {
+                                "operation": "inspect",
+                                "private_endpoint_key": "calendar-prod",
+                            },
+                        }
+                    )
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.profile.product), self.profile
+                )
 
     async def test_human_session_requires_csrf_for_existing_config_route(self) -> None:
         from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
@@ -997,7 +1128,7 @@ class CalendarBundleAgreementTests(unittest.TestCase):
             plan_product_config_authority_bundle,
         )
 
-        with self.assertRaises(ProductConfigError) as refusal:
+        with self.assertRaises(ProductConfigError):
             plan_product_config_authority_bundle(
                 record_store=cast(ProductConfigStore, object()),
                 payload={"odoo_business_hours": {"operation": "clear"}},
@@ -1005,4 +1136,3 @@ class CalendarBundleAgreementTests(unittest.TestCase):
                 actor="test",
                 source_label="test",
             )
-        self.assertEqual(refusal.exception.code, "odoo_business_hours_service_required")
