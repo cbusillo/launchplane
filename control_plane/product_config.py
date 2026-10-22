@@ -191,6 +191,15 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         "runtime_env": normalized_runtime_input,
         "secrets": [dict(secret) for secret in secrets],
     }
+    if "odoo_business_hours" in payload:
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursConfigRequest
+
+        try:
+            normalized["odoo_business_hours"] = OdooBusinessHoursConfigRequest.model_validate(
+                payload["odoo_business_hours"]
+            ).model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        except ValueError as error:
+            raise ProductConfigError("Calendar configuration is invalid.") from error
     if "public_hosts" in payload:
         if instance_name != "prod" or not context_name:
             raise ProductConfigError("Public hosts require an exact prod lane.")
@@ -233,6 +242,11 @@ def plan_product_config_authority_bundle(
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
     secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
+    if "odoo_business_hours" in payload:
+        raise ProductConfigError(
+            "Calendar policy requires the service product-config path.",
+            code="odoo_business_hours_service_required",
+        )
     if "public_hosts" in payload:
         raise ProductConfigError(
             "Public hosts require the service product-config dry-run/apply path.",

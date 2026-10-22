@@ -21559,6 +21559,166 @@
         "title": "OdooAddonSettingOverride",
         "type": "object"
       },
+      "OdooBusinessHoursConfigResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "apply_eligible": {
+            "default": false,
+            "title": "Apply Eligible",
+            "type": "boolean"
+          },
+          "authority_digest": {
+            "default": "",
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "calendar_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "companies": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OdooCalendarCompanyReference"
+            },
+            "title": "Companies",
+            "type": "array"
+          },
+          "company_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Id"
+          },
+          "company_scope": {
+            "const": "permitted_company_ids",
+            "default": "permitted_company_ids",
+            "title": "Company Scope",
+            "type": "string"
+          },
+          "effective_when": {
+            "const": "live",
+            "default": "live",
+            "title": "Effective When",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "inspect",
+              "set",
+              "clear"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "permitted_company_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Permitted Company Ids",
+            "type": "array"
+          },
+          "plan_digest": {
+            "default": "",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_before": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "default": "",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BusinessHoursWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "applied",
+          "apply_eligible",
+          "authority_digest",
+          "calendar_id",
+          "changed",
+          "companies",
+          "company_id",
+          "company_scope",
+          "effective_when",
+          "operation",
+          "permitted_company_ids",
+          "plan_digest",
+          "policy_after",
+          "policy_before",
+          "runtime_identity",
+          "timezone",
+          "truncated",
+          "window"
+        ],
+        "title": "OdooBusinessHoursConfigResult",
+        "type": "object"
+      },
       "OdooBusinessHoursPolicy": {
         "additionalProperties": false,
         "description": "Select the company calendar in Odoo; never copy its hours into Launchplane.",
@@ -21579,6 +21739,46 @@
           "private_endpoint_key"
         ],
         "title": "OdooBusinessHoursPolicy",
+        "type": "object"
+      },
+      "OdooCalendarCompanyReference": {
+        "additionalProperties": false,
+        "properties": {
+          "calendar_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "company_id": {
+            "minimum": 1,
+            "title": "Company Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "label_omitted": {
+            "default": false,
+            "title": "Label Omitted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "calendar_id",
+          "company_id",
+          "label",
+          "label_omitted"
+        ],
+        "title": "OdooCalendarCompanyReference",
         "type": "object"
       },
       "OdooConfigParameterOverride": {
@@ -28203,6 +28403,17 @@
             },
             "title": "Next Actions",
             "type": "array"
+          },
+          "odoo_business_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursConfigResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "product": {
             "title": "Product",

@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any
 import unittest
+from tests import test_odoo_business_hours_config as calendar_config_tests
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
@@ -17064,3 +17065,85 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
             with self.assertRaises(ValueError):
                 bind_legacy_preview(self.store, request)
         self.assertFalse(self.reads)
+
+
+class RealPostgresCalendarConfigurationTests(calendar_config_tests.CalendarConfigurationHttpTests):
+    def open_store(self, root: Path) -> PostgresRecordStore:
+        return self.enterContext(_store_for_fresh_head_database())
+
+
+class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
+    def test_stale_absence_and_existing_plans_cannot_erase_calendar_or_publish_false_receipt(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
+        from control_plane.storage.product_authority_bundle import ProductProfileConflictError
+
+        for absent in (False, True):
+            with self.subTest(absent=absent), _store_for_fresh_head_database() as store:
+                before = _product_profile()
+                if before.driver_id != "odoo":
+                    before = before.model_copy(update={"driver_id": "odoo"})
+                store.write_product_profile_record(before)
+                second = PostgresRecordStore(database_url=store.database_url)
+                barrier = threading.Barrier(2)
+                setting = before.model_copy(
+                    update={"odoo_business_hours": OdooBusinessHoursPolicy(company_id=7)}
+                )
+                candidates = {
+                    "setting": setting,
+                    "stale": before.model_copy(update={"display_name": "Unrelated editor"}),
+                }
+
+                def commit(name: str) -> tuple[str, bool]:
+                    active = store if name == "setting" else second
+                    now = datetime.now(timezone.utc).isoformat()
+                    completion = LaunchplaneIdempotencyRecord(
+                        record_id=f"calendar-{name}",
+                        scope="calendar-fixture",
+                        route_path="/v1/product-config/apply",
+                        idempotency_key=name,
+                        request_fingerprint=name,
+                        response_status_code=202,
+                        response_trace_id=name,
+                        recorded_at=now,
+                        response_payload={
+                            "status": "accepted",
+                            "records": {},
+                            "result": {"applied": True, "winner": name},
+                        },
+                    )
+                    bundle = ProductAuthorityBundle(
+                        product_profiles=(candidates[name],),
+                        expected_product_profiles=() if absent and name == "stale" else (before,),
+                        absent_product_ids=(before.product,) if absent and name == "stale" else (),
+                        idempotency_record=completion,
+                    )
+                    barrier.wait(timeout=60)
+                    try:
+                        active.write_product_authority_bundle(bundle)
+                        return name, True
+                    except ProductProfileConflictError:
+                        return name, False
+
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        outcomes = dict(executor.map(commit, ("setting", "stale")))
+                    self.assertEqual(sum(outcomes.values()), 1)
+                    winner = next(name for name, passed in outcomes.items() if passed)
+                    if absent:
+                        self.assertEqual(winner, "setting")
+                    self.assertEqual(
+                        store.read_product_profile_record(before.product), candidates[winner]
+                    )
+                    for name, passed in outcomes.items():
+                        receipt = store.read_idempotency_record(
+                            scope="calendar-fixture",
+                            route_path="/v1/product-config/apply",
+                            idempotency_key=name,
+                        )
+                        self.assertEqual(receipt is not None, passed)
+                        if receipt is not None:
+                            self.assertEqual(receipt.response_payload["result"]["winner"], name)
+                finally:
+                    second.close()

@@ -4,13 +4,34 @@ title: Client release review
 
 ## Odoo business hours
 
-An admin selects `odoo_business_hours.company_id` in a product profile through
-the existing product-profile API. This selects that company's
-`resource_calendar_id` in Odoo; Launchplane stores no copy of the hours.
+An authorized caller selects the company through the standalone
+`odoo_business_hours` section of `POST /v1/product-config/apply`. First use
+`operation: inspect` in dry-run mode to read the verified prod runtime's permitted
+company IDs, private labels and calendar references. That visibility scope is
+not proof of every company in the database or of which company serves the
+intended business. Select that company deliberately; ambiguous business identity
+needs clarification before configuration. The same read works before live
+activation and does not change production classification.
+
+Then dry-run `operation: set` with explicit `company_id` and
+`expected_calendar_id`, plus an existing `private_endpoint_key` when needed.
+The current company-to-calendar relation must match that assertion. Apply carries
+the returned `plan_digest` as `reviewed_plan_sha256`, the same reviewed request
+and a stable Idempotency-Key. It needs the same caller's stored dry-run and
+unchanged profile/runtime/transport authority. Read the stored policy through
+`GET /v1/product-profiles/{product}`. Installed caller delivery is tracked in
+[codex-skills#2538](https://github.com/cbusillo/codex-skills/issues/2538);
+source capability alone does not prove that caller or deployment is available.
+
+Only `company_id` and the optional endpoint key are stored in the profile.
+`expected_calendar_id` is a configuration assertion, not calendar authority:
+release reads follow that company's current `resource_calendar_id` in Odoo.
+Launchplane stores no copy of the hours.
 The policy applies only when that product's `production_use` is `live`.
 Configure it for staff-facing Odoo products before live activation; website
-products remain unselected. Removing the policy disables scheduling for that
-product. Existing release holds and exact-candidate acceptance still apply.
+products remain unselected. A reviewed `operation: clear` disables scheduling for that
+product without requiring a healthy calendar read. Whole-profile POST cannot
+set, change or clear the policy; re-onboarding preserves it. Existing release holds and exact-candidate acceptance still apply.
 
 For a private Odoo site, `odoo_business_hours.private_endpoint_key` references
 an existing active private health endpoint for the same product's prod lane.

@@ -3087,6 +3087,17 @@ Conventional onboarding creates new products only.
   Launchplane execution context, run `--dry-run` first, then run `--apply` only
   after the key/action summary matches the approved change.
 
+For Odoo calendar-policy configuration, use that route's standalone
+`odoo_business_hours` inspect/set/clear section described in
+[release review](release-review.md#odoo-business-hours). Qualify actual company
+and calendar references before setting them, including for prelaunch products;
+do not turn a product live to obtain evidence. Apply and persisted readback do
+not prove live activation, Client acceptance or a release drill. The service
+and installed caller must both support the operation; caller delivery is tracked
+in codex-skills#2538. Existing real-system mutation boundaries still apply.
+Private company labels stay in private inspection evidence, not public issues.
+
+
 Example product config bundle shape:
 
 ```json

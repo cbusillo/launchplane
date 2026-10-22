@@ -2212,6 +2212,34 @@ changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
 
+### Odoo business-hours policy
+
+A standalone `odoo_business_hours` section selects an Odoo prod company's
+calendar, with `inspect` (dry-run only), `set` or explicit `clear`. It cannot
+combine runtime settings, secrets or public hosts. It retains normal
+`product_config.plan` / `product_config.apply` lane authority and requires
+`product_profile.read` plus existing instance-scoped `operations.read` runtime
+permission. Applying additionally requires `product_profile.write` in the service
+context. Config-only authority does not acquire release-policy write authority.
+Signed-in mutations retain CSRF checks; terminal-agent exclusion is unchanged.
+
+Set requires positive `company_id` and `expected_calendar_id`, and optionally an
+existing owned prod private endpoint key. Inspection reports bounded permitted
+company scope rather than database-wide completeness. Authentication membership
+is bounded to 128 companies; a larger or incomplete membership response refuses
+qualification, including when a company filter is supplied. The reviewed plan binds
+scope, full starting profile, requested references, endpoint/runtime authority,
+reason and source label; clock progress and forecasts do not change its digest.
+Apply requires `reviewed_plan_sha256` and the same caller's saved dry-run marker.
+The profile write, expected existing profile or verified absence, and successful
+idempotency receipt commit in one authority bundle. Completed original-key replay
+precedes remote qualification; concurrent profile edits refuse without overwriting
+them. Runtime/Odoo observations remain point-in-time; the transaction does not
+freeze external systems. Clear needs no Odoo read. The result's optional
+`odoo_business_hours` contains bounded evidence; other runtime/secret results are
+skipped/empty and no live-sync action is requested. See
+[business-hours configuration](release-review.md#odoo-business-hours).
+
 ### Public hostnames on the prod compose target
 
 The generic product-config request also accepts `public_hosts`, a complete list

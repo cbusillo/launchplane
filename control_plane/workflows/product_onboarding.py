@@ -154,6 +154,7 @@ def build_product_profile_record(
             for lane in manifest.lanes
         ),
         historical_contexts=historical_contexts,
+        odoo_business_hours=existing_profile.odoo_business_hours if existing_profile else None,
         preview=ProductPreviewProfile.model_validate(manifest.preview.model_dump(mode="json")),
         promotion_workflow=manifest.promotion_workflow,
         expected_config=manifest.product_expected_config_profile(),
@@ -561,6 +562,8 @@ def plan_product_onboarding_authority_bundle(
     )
     bundle = ProductAuthorityBundle(
         product_profiles=(product_profile,),
+        expected_product_profiles=(existing_product_profile,) if existing_product_profile else (),
+        absent_product_ids=() if existing_product_profile else (product_profile.product,),
         dokploy_targets=provider_targets,
         dokploy_target_ids=provider_target_ids,
         provider_target_writes=tuple(

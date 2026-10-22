@@ -6747,6 +6747,18 @@ class PostgresRecordStore(HumanSessionStore):
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
                 )
+            for product in bundle.absent_product_ids:
+                if (
+                    session.scalar(
+                        select(LaunchplaneProductProfileRow)
+                        .where(LaunchplaneProductProfileRow.product == product)
+                        .with_for_update()
+                    )
+                    is not None
+                ):
+                    raise ProductProfileConflictError(
+                        "Product profile was created before bundle commit."
+                    )
             for expected_profile in bundle.expected_product_profiles:
                 current_profile_row = session.scalar(
                     select(LaunchplaneProductProfileRow)

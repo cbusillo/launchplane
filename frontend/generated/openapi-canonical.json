@@ -22967,6 +22967,150 @@
         "title": "OdooAddonSettingOverride",
         "type": "object"
       },
+      "OdooBusinessHoursConfigResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "apply_eligible": {
+            "default": false,
+            "title": "Apply Eligible",
+            "type": "boolean"
+          },
+          "authority_digest": {
+            "default": "",
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "calendar_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "companies": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OdooCalendarCompanyReference"
+            },
+            "title": "Companies",
+            "type": "array"
+          },
+          "company_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Id"
+          },
+          "company_scope": {
+            "const": "permitted_company_ids",
+            "default": "permitted_company_ids",
+            "title": "Company Scope",
+            "type": "string"
+          },
+          "effective_when": {
+            "const": "live",
+            "default": "live",
+            "title": "Effective When",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "inspect",
+              "set",
+              "clear"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "permitted_company_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Permitted Company Ids",
+            "type": "array"
+          },
+          "plan_digest": {
+            "default": "",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_before": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "default": "",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BusinessHoursWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "changed"
+        ],
+        "title": "OdooBusinessHoursConfigResult",
+        "type": "object"
+      },
       "OdooBusinessHoursPolicy": {
         "additionalProperties": false,
         "description": "Select the company calendar in Odoo; never copy its hours into Launchplane.",
@@ -22986,6 +23130,43 @@
           "company_id"
         ],
         "title": "OdooBusinessHoursPolicy",
+        "type": "object"
+      },
+      "OdooCalendarCompanyReference": {
+        "additionalProperties": false,
+        "properties": {
+          "calendar_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "company_id": {
+            "minimum": 1.0,
+            "title": "Company Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "label_omitted": {
+            "default": false,
+            "title": "Label Omitted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "company_id"
+        ],
+        "title": "OdooCalendarCompanyReference",
         "type": "object"
       },
       "OdooConfigParameterOverride": {
@@ -32658,6 +32839,17 @@
             },
             "title": "Next Actions",
             "type": "array"
+          },
+          "odoo_business_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursConfigResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "product": {
             "title": "Product",
@@ -82540,6 +82732,55 @@
             "application/json": {
               "schema": {
                 "$defs": {
+                  "OdooBusinessHoursConfigRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "company_id": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Company Id"
+                      },
+                      "expected_calendar_id": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Expected Calendar Id"
+                      },
+                      "operation": {
+                        "enum": [
+                          "inspect",
+                          "set",
+                          "clear"
+                        ],
+                        "title": "Operation",
+                        "type": "string"
+                      },
+                      "private_endpoint_key": {
+                        "default": "",
+                        "maxLength": 256,
+                        "title": "Private Endpoint Key",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ],
+                    "title": "OdooBusinessHoursConfigRequest",
+                    "type": "object"
+                  },
                   "ProductConfigRuntimeInput": {
                     "additionalProperties": true,
                     "properties": {
@@ -82877,6 +83118,16 @@
                     "title": "Mode",
                     "type": "string"
                   },
+                  "odoo_business_hours": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/OdooBusinessHoursConfigRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "product": {
                     "title": "Product",
                     "type": "string"
@@ -82898,6 +83149,11 @@
                   "reason": {
                     "default": "",
                     "title": "Reason",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
                     "type": "string"
                   },
                   "runtime_env": {

@@ -33,6 +33,10 @@ from control_plane.runtime_key_safety import (
 )
 
 
+from control_plane.contracts.odoo_business_hours import (
+    OdooBusinessHoursConfigRequest,
+    OdooBusinessHoursConfigResult,
+)
 from control_plane.contracts.public_hosts import normalize_public_hosts
 
 ProductConfigMode = Literal["dry-run", "apply"]
@@ -336,6 +340,11 @@ class ProductConfigApplyResult(BaseModel):
     )
     summary: ProductConfigApplySummary
     next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
+    odoo_business_hours: OdooBusinessHoursConfigResult | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     public_hosts: ProductConfigPublicHostsResult | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -381,6 +390,8 @@ class ProductConfigApplyEnvelope(BaseModel):
     )
     secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
     public_hosts: tuple[str, ...] | None = None
+    odoo_business_hours: OdooBusinessHoursConfigRequest | None = None
+    reviewed_plan_sha256: str = ""
 
     @field_validator("public_hosts", mode="before")
     @classmethod
@@ -407,6 +418,25 @@ class ProductConfigApplyEnvelope(BaseModel):
             raise ValueError("Product config apply requires product.")
         if self.public_hosts is not None and (self.instance != "prod" or not self.context):
             raise ValueError("Public hosts require an exact prod lane.")
+        if self.odoo_business_hours is not None:
+            if self.instance != "prod" or not self.context or not self.reason:
+                raise ValueError("Calendar policy requires an exact prod lane and reason.")
+            if (
+                self.runtime_env is not None
+                or self.runtime_environment is not None
+                or self.secrets
+                or self.public_hosts is not None
+            ):
+                raise ValueError("Calendar policy must be a standalone configuration request.")
+            if self.mode == "apply" and (
+                self.odoo_business_hours.operation == "inspect"
+                or re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None
+            ):
+                raise ValueError("Calendar apply requires a reviewed set or clear plan digest.")
+            if self.mode == "dry-run" and self.reviewed_plan_sha256:
+                raise ValueError("Dry run cannot supply a reviewed plan digest.")
+        elif self.reviewed_plan_sha256:
+            raise ValueError("Reviewed calendar digest requires a calendar request.")
         return self
 
     def adopts_provider_keys(self) -> bool:
@@ -436,6 +466,10 @@ class ProductConfigApplyEnvelope(BaseModel):
             payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
         if self.public_hosts is not None:
             payload["public_hosts"] = list(self.public_hosts)
+        if self.odoo_business_hours is not None:
+            payload["odoo_business_hours"] = self.odoo_business_hours.model_dump(
+                mode="json", exclude_none=True, exclude_defaults=True
+            )
         return payload
 
 

@@ -234,6 +234,7 @@ class ProductAuthorityBundle(BaseModel):
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    absent_product_ids: tuple[str, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
@@ -266,6 +267,20 @@ class ProductAuthorityBundle(BaseModel):
     # (product, context, instance); an empty instance checks the whole context.
     # This also covers authorized admins configuring Launchplane itself.
     required_product_config_target: tuple[str, str, str] | None = None
+
+    @model_validator(mode="after")
+    def validate_profile_absence(self) -> "ProductAuthorityBundle":
+        written = {profile.product for profile in self.product_profiles}
+        expected = {profile.product for profile in self.expected_product_profiles}
+        if len(set(self.absent_product_ids)) != len(self.absent_product_ids) or any(
+            not product
+            or product != product.strip()
+            or product not in written
+            or product in expected
+            for product in self.absent_product_ids
+        ):
+            raise ValueError("Absent product expectations require unique newly written products.")
+        return self
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:

@@ -542,6 +542,10 @@ class FilesystemRecordStore:
             profiles = self._list_product_profile_records_locked()
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            if any(product in current_profiles for product in bundle.absent_product_ids):
+                raise ProductProfileConflictError(
+                    "Product profile was created before bundle commit."
+                )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")

@@ -1,4 +1,5 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane import odoo_business_hours_config
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
@@ -1415,6 +1416,8 @@ class ProductProfileWriteStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
+
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None: ...
 
 
 class PreviewDesiredStateWriteStore(Protocol):
@@ -3179,6 +3182,7 @@ def require_product_profile_write_store(record_store: object) -> ProductProfileW
         for method_name in (
             "read_product_profile_record",
             "write_product_profile_record",
+            "write_product_authority_bundle",
         )
         if not callable(getattr(record_store, method_name, None))
     ]
@@ -3612,8 +3616,15 @@ def canonical_product_config_request_payload(payload: dict[str, object]) -> dict
     normalized_payload = control_plane_product_config.normalize_product_config_payload(
         request.product_config_payload()
     )
+    if request.odoo_business_hours is not None:
+        normalized_payload.pop("runtime_env", None)
     return {
         **normalized_payload,
+        **(
+            {"reviewed_plan_sha256": request.reviewed_plan_sha256}
+            if request.reviewed_plan_sha256
+            else {}
+        ),
         "mode": request.mode,
         "source_label": request.source_label,
         "reason": request.reason,
@@ -3627,6 +3638,7 @@ def product_config_continuity_payload(payload: dict[str, object]) -> dict[str, o
     continuity_payload.pop("reason", None)
     continuity_payload.pop("confirmation", None)
     continuity_payload.pop("source_label", None)
+    continuity_payload.pop("reviewed_plan_sha256", None)
     return continuity_payload
 
 
@@ -3709,7 +3721,7 @@ def product_config_dry_run_exists(
     identity: LaunchplaneIdentity,
     request_payload: dict[str, object],
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
-    public_hosts_plan_digest: str = "",
+    authority_plan_digest: str = "",
 ) -> bool:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
@@ -3721,7 +3733,7 @@ def product_config_dry_run_exists(
         scope=idempotency_scope(identity),
         route_path=route_path,
         idempotency_key=product_config_dry_run_key(request_payload)
-        + (":" + public_hosts_plan_digest if public_hosts_plan_digest else ""),
+        + (":" + authority_plan_digest if authority_plan_digest else ""),
     )
     return stored_record is not None and stored_record.request_fingerprint == continuity_fingerprint
 
@@ -3740,13 +3752,13 @@ def store_product_config_dry_run_record(
     trace_id: str,
     response: BaseModel,
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
-    public_hosts_plan_digest: str = "",
+    authority_plan_digest: str = "",
 ) -> None:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
         return
     dry_run_idempotency_key = product_config_dry_run_key(request_payload) + (
-        ":" + public_hosts_plan_digest if public_hosts_plan_digest else ""
+        ":" + authority_plan_digest if authority_plan_digest else ""
     )
     dry_run_request_fingerprint = product_config_request_fingerprint(
         product_config_continuity_payload(request_payload)
@@ -13694,6 +13706,15 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if profile.odoo_business_hours != (
+            existing_profile.odoo_business_hours if existing_profile else None
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="business_hours_bounded_apply_required",
+                message="Change calendar policy through the reviewed product-config operation.",
+            )
         if existing_profile is not None and "production_use_authority" not in raw_payload:
             profile = profile.model_copy(
                 update={"production_use_authority": existing_profile.production_use_authority}
@@ -13768,13 +13789,17 @@ def create_launchplane_fastapi_app(
                         "the reviewed prelaunch-rebuild apply endpoint."
                     ),
                 )
-        profile_store.write_product_profile_record(profile)
         response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"product_profile": profile.product},
+            trace_id=trace_id, records={"product_profile": profile.product}
         )
-        store_apply_idempotency(
-            record_store=record_store,
+        bundle = authority_bundle_with_apply_idempotency(
+            bundle=ProductAuthorityBundle(
+                product_profiles=(profile,),
+                expected_product_profiles=(existing_profile,)
+                if existing_profile is not None
+                else (),
+                absent_product_ids=() if existing_profile is not None else (profile.product,),
+            ),
             identity=identity,
             route_path=_PRODUCT_PROFILES_ROUTE,
             idempotency_key=normalized_idempotency_key,
@@ -13782,6 +13807,26 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             response=response,
         )
+        try:
+            profile_store.write_product_authority_bundle(bundle)
+        except ProductProfileConflictError as error:
+            if normalized_idempotency_key:
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_PRODUCT_PROFILES_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+                if replay_response is not None:
+                    return replay_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product profile changed before save; read and review again.",
+            ) from error
         return response
 
     async def apply_product_expected_config(
@@ -17152,6 +17197,49 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+        if product_config_request.odoo_business_hours is not None:
+            required_actions = [
+                (
+                    "product_profile.read",
+                    product_config_request.product,
+                    _LAUNCHPLANE_SERVICE_CONTEXT,
+                    None,
+                ),
+                (
+                    "operations.read",
+                    "launchplane",
+                    product_config_request.context,
+                    AuthorizationTarget(scope="instance", instances=("prod",)),
+                ),
+            ]
+            if product_config_request.mode == "apply":
+                required_actions.append(
+                    (
+                        "product_profile.write",
+                        product_config_request.product,
+                        _LAUNCHPLANE_SERVICE_CONTEXT,
+                        None,
+                    )
+                )
+            for (
+                required_action,
+                required_product,
+                required_context,
+                required_target,
+            ) in required_actions:
+                if not resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action=required_action,
+                    product=required_product,
+                    context=required_context,
+                    target=required_target,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message=f"Caller cannot perform {required_action} for calendar configuration.",
+                    )
         if isinstance(identity, LocalOperatorIdentity) and (
             product_config_request.mode == "apply" or not director_agent_identity(identity)
         ):
@@ -17175,7 +17263,11 @@ def create_launchplane_fastapi_app(
             )
         normalized_idempotency_key = idempotency_key.strip()
         if (
-            (operator_identity or product_config_request.public_hosts is not None)
+            (
+                operator_identity
+                or product_config_request.public_hosts is not None
+                or product_config_request.odoo_business_hours is not None
+            )
             and product_config_request.mode == "apply"
             and not normalized_idempotency_key
         ):
@@ -17309,6 +17401,7 @@ def create_launchplane_fastapi_app(
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
             and product_config_request.instance != TESTING_INSTANCE
+            and product_config_request.odoo_business_hours is None
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
@@ -17324,6 +17417,7 @@ def create_launchplane_fastapi_app(
             operator_identity
             and product_config_request.mode == "apply"
             and product_config_request.public_hosts is None
+            and product_config_request.odoo_business_hours is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -17346,6 +17440,7 @@ def create_launchplane_fastapi_app(
             (copy_references or product_config_request.adopts_provider_secrets())
             and product_config_request.mode == "apply"
             and product_config_request.public_hosts is None
+            and product_config_request.odoo_business_hours is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -17395,7 +17490,61 @@ def create_launchplane_fastapi_app(
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
+        calendar_plan = None
+        calendar_replacement = None
         try:
+            if product_config_request.odoo_business_hours is not None:
+                try:
+                    calendar_plan, calendar_replacement = await asyncio.to_thread(
+                        odoo_business_hours_config.plan_business_hours_config,
+                        store=database_store,
+                        profile=config_profile,
+                        request=product_config_request.odoo_business_hours,
+                        root=resolved_control_plane_root,
+                        reason=product_config_request.reason,
+                        source_label=product_config_request.source_label,
+                    )
+                    if product_config_request.mode == "apply" and (
+                        product_config_request.reviewed_plan_sha256 != calendar_plan.plan_digest
+                        or not product_config_dry_run_exists(
+                            record_store=database_store,
+                            identity=identity,
+                            request_payload=request_payload,
+                            route_path=route_path,
+                            authority_plan_digest=calendar_plan.plan_digest,
+                        )
+                    ):
+                        raise ValueError("Calendar review no longer matches.")
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    click.ClickException,
+                    SQLAlchemyError,
+                ):
+                    if product_config_request.mode == "apply":
+                        _, _, calendar_replay = await replay_apply_idempotency(
+                            request=request,
+                            record_store=database_store,
+                            identity=identity,
+                            route_path=route_path,
+                            idempotency_key=idempotency_key,
+                            trace_id=trace_id,
+                            request_payload=request_payload,
+                            check_replay=True,
+                        )
+                        if calendar_replay is not None:
+                            return ProductConfigApplyResponse.model_validate(
+                                calendar_replay.model_dump(mode="json")
+                            )
+                    raise _launchplane_http_error(
+                        status_code=409 if product_config_request.mode == "apply" else 503,
+                        trace_id=trace_id,
+                        code="calendar_qualification_unavailable",
+                        message="Calendar references or reviewed authority could not be verified. Inspect and review again.",
+                    ) from None
+
             if product_config_request.public_hosts is not None:
                 public_hosts_plan = await asyncio.to_thread(
                     product_public_hosts.plan_public_hosts,
@@ -17411,7 +17560,7 @@ def create_launchplane_fastapi_app(
                     identity=identity,
                     request_payload=request_payload,
                     route_path=route_path,
-                    public_hosts_plan_digest=public_hosts_plan.result.plan_digest,
+                    authority_plan_digest=public_hosts_plan.result.plan_digest,
                 ):
                     raise _launchplane_http_error(
                         status_code=409,
@@ -17444,7 +17593,7 @@ def create_launchplane_fastapi_app(
                     payload={
                         key: value
                         for key, value in product_config_request.product_config_payload().items()
-                        if key != "public_hosts"
+                        if key not in {"public_hosts", "odoo_business_hours"}
                     },
                     mode=product_config_request.mode,
                     actor=launchplane_identity_actor(identity),
@@ -17525,6 +17674,22 @@ def create_launchplane_fastapi_app(
             **planned_driver_result,
             "reason": product_config_request.reason,
         }
+        if calendar_plan is not None and calendar_replacement is not None:
+            if product_config_request.mode == "apply":
+                if calendar_plan.changed:
+                    calendar_replacement = LaunchplaneProductProfileRecord.model_validate(
+                        calendar_replacement.model_copy(
+                            update={
+                                "updated_at": utc_now_timestamp(),
+                                "source": product_config_request.source_label,
+                            }
+                        ).model_dump(mode="json")
+                    )
+                authority_bundle = authority_bundle.model_copy(
+                    update={"product_profiles": (calendar_replacement,)}
+                )
+                calendar_plan = calendar_plan.model_copy(update={"applied": True})
+            driver_result["odoo_business_hours"] = calendar_plan.model_dump(mode="json")
         if public_hosts_plan is not None:
             authority_bundle = authority_bundle.model_copy(
                 update={"dokploy_targets": (public_hosts_plan.replacement,)}
@@ -17552,6 +17717,7 @@ def create_launchplane_fastapi_app(
             or copy_references
             or product_config_request.adopts_provider_secrets()
             or public_hosts_plan is not None
+            or calendar_plan is not None
         ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
@@ -17560,7 +17726,9 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
                 route_path=route_path,
-                public_hosts_plan_digest=public_hosts_plan.result.plan_digest
+                authority_plan_digest=calendar_plan.plan_digest
+                if calendar_plan
+                else public_hosts_plan.result.plan_digest
                 if public_hosts_plan
                 else "",
             )
@@ -18662,7 +18830,7 @@ def create_launchplane_fastapi_app(
                     response=onboarding_response,
                 )
             )
-        except RuntimeEnvironmentConflictError as error:
+        except (RuntimeEnvironmentConflictError, ProductProfileConflictError) as error:
             replay_response = replay_stored_apply_idempotency(
                 record_store=database_store,
                 identity=identity,
@@ -18673,7 +18841,16 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
-            raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
+            if isinstance(error, RuntimeEnvironmentConflictError):
+                raise runtime_environment_conflict_http_error(
+                    trace_id=trace_id, error=error
+                ) from error
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product profile changed before onboarding; read and review again.",
+            ) from error
         return onboarding_response
 
     async def import_merge_train_policy(

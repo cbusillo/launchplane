@@ -3,14 +3,23 @@
 from datetime import UTC, datetime, time, timedelta
 from http.cookiejar import CookieJar
 from pathlib import Path
-from dataclasses import replace
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import hashlib
+import json
+import re
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
-from control_plane.contracts.odoo_business_hours import BusinessHoursWindow
+from control_plane.contracts.odoo_business_hours import (
+    BusinessHoursWindow,
+    OdooCalendarCompanyReference,
+)
+from control_plane.contracts.private_health_endpoint_record import (
+    private_health_endpoint_record_sha256,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.odoo_runtime_reads import (
@@ -64,14 +73,66 @@ def _id(value: object) -> int:
     raise ValueError("Missing Odoo calendar reference.")
 
 
-def read_company_calendar(
+@dataclass(frozen=True)
+class CalendarSourceObservation:
+    companies: tuple[OdooCalendarCompanyReference, ...]
+    permitted_company_ids: tuple[int, ...]
+    truncated: bool
+    calendar: dict[str, object]
+    attendance: list[dict[str, object]]
+    leaves: list[dict[str, object]]
+
+
+def _permitted_companies(authenticated: object) -> tuple[int, ...]:
+    if not isinstance(authenticated, dict):
+        raise ValueError("Company visibility is unavailable.")
+    companies = authenticated.get("user_companies")
+    allowed = companies.get("allowed_companies") if isinstance(companies, dict) else None
+    if not isinstance(allowed, dict) or not allowed or len(allowed) > 128:
+        raise ValueError("Company visibility is unavailable or exceeds its bound.")
+    identifiers: list[int] = []
+    for key, value in allowed.items():
+        if not isinstance(value, dict) or type(value.get("id")) is not int:
+            raise ValueError("Company visibility is invalid.")
+        identifier = value["id"]
+        if identifier <= 0 or str(identifier) != str(key) or identifier in identifiers:
+            raise ValueError("Company visibility is invalid.")
+        identifiers.append(identifier)
+    return tuple(sorted(identifiers))
+
+
+def _company_reference(row: dict[str, object]) -> OdooCalendarCompanyReference:
+    identifier = row.get("id")
+    if type(identifier) is not int or identifier < 1:
+        raise ValueError("Company identity is unavailable.")
+    relation = row.get("resource_calendar_id")
+    calendar_id = None if relation is False else _id(relation)
+    label = row.get("name")
+    safe = (
+        isinstance(label, str)
+        and 0 < len(label) <= 160
+        and not any(ord(c) < 32 for c in label)
+        and re.search(r"https?://|(?:password|secret|token)\s*[:=]", label, re.IGNORECASE) is None
+    )
+    return OdooCalendarCompanyReference(
+        company_id=identifier,
+        calendar_id=calendar_id,
+        label=label if safe and isinstance(label, str) else "",
+        label_omitted=not safe,
+    )
+
+
+def read_calendar_sources(
     connection: OdooRuntimeConnection,
     *,
-    company_id: int,
+    company_id: int | None,
     observed_at: datetime,
     private_origin: bool = False,
-) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
-    origin = connection.selection.base_url.rstrip("/")
+    transport_origin: str = "",
+    inspect_only: bool = False,
+    expected_calendar_id: int | None = None,
+) -> CalendarSourceObservation:
+    origin = (transport_origin or connection.selection.base_url).rstrip("/")
     url = urlsplit(origin)
     if (
         url.scheme != "https"
@@ -99,9 +160,20 @@ def read_company_calendar(
             connection.selection.identity, runtime_identity_from_health_payload(payload)
         )
 
-    def search(model: str, domain: list[object], fields: list[str]) -> list[dict[str, object]]:
-        return _rows(
-            _rpc(
+    health()
+    authenticated = authenticate_diagnostic(
+        connection, lambda: _rpc(opener, origin, "/web/session/authenticate", authentication)
+    )
+    try:
+        require_diagnostic_user(connection, authenticated)
+        permitted = _permitted_companies(authenticated)
+        if company_id is not None and company_id not in permitted:
+            raise ValueError("Selected company is outside the authenticated visibility scope.")
+
+        def search(
+            model: str, domain: list[object], fields: list[str], *, allow_truncation: bool = False
+        ) -> list[dict[str, object]]:
+            value = _rpc(
                 opener,
                 origin,
                 "/web/dataset/call_kw",
@@ -113,84 +185,196 @@ def read_company_calendar(
                         "fields": fields,
                         "limit": 129,
                         "order": "id",
-                        "context": {"allowed_company_ids": [company_id]},
+                        "context": {
+                            "allowed_company_ids": [company_id] if company_id else list(permitted)
+                        },
                     },
                 },
             )
-        )
+            return _rows(value, maximum=129 if allow_truncation else 128)
 
-    health()
-    authenticated = authenticate_diagnostic(
-        connection,
-        lambda: _rpc(opener, origin, "/web/session/authenticate", authentication),
-    )
-    try:
-        require_diagnostic_user(connection, authenticated)
-        companies = search("res.company", [["id", "=", company_id]], ["resource_calendar_id"])
-        if len(companies) != 1:
-            raise ValueError("The selected company is unavailable.")
-        calendar_id = _id(companies[0].get("resource_calendar_id"))
-        calendars = search(
-            "resource.calendar",
-            [["id", "=", calendar_id]],
-            ["tz", "two_weeks_calendar", "flexible_hours", "duration_based"],
+        company_fields = ["id", "name", "resource_calendar_id"]
+        companies = search(
+            "res.company",
+            [["id", "=", company_id]] if company_id else [["id", "in", list(permitted)]],
+            company_fields,
+            allow_truncation=inspect_only,
         )
-        if len(calendars) != 1:
-            raise ValueError("The company calendar is unavailable.")
-        # Resource-specific attendance is an optional addon extension, not a
-        # field in base Odoo 19. Read its schema before requesting that column.
-        attendance_schema = _rpc(
-            opener,
-            origin,
-            "/web/dataset/call_kw",
-            {
-                "model": "resource.calendar.attendance",
-                "method": "fields_get",
-                "args": [["resource_id"]],
-                "kwargs": {"attributes": ["type"]},
-            },
-        )
-        if not isinstance(attendance_schema, dict):
-            raise ValueError("Attendance schema is unavailable.")
-        resource_field = attendance_schema.get("resource_id")
-        if resource_field is not None and (
-            not isinstance(resource_field, dict) or resource_field.get("type") != "many2one"
+        references = tuple(_company_reference(row) for row in companies)
+        if len({row.company_id for row in references}) != len(references) or any(
+            row.company_id not in permitted for row in references
         ):
-            raise ValueError("Resource-specific attendance has an unsupported schema.")
-        attendance_fields = ["dayofweek", "hour_from", "hour_to", "week_type", "display_type"]
-        if resource_field is not None:
-            attendance_fields.append("resource_id")
-        attendance = search(
-            "resource.calendar.attendance",
-            [["calendar_id", "=", calendar_id]],
-            attendance_fields,
-        )
-        # Odoo dates are naive UTC. Include calendar-independent company holidays.
-        leaves = search(
-            "resource.calendar.leaves",
-            [
-                ["calendar_id", "in", [False, calendar_id]],
-                ["company_id", "=", company_id],
-                ["resource_id", "=", False],
-                ["time_type", "=", "leave"],
-                ["date_to", ">=", observed_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")],
+            raise ValueError("Returned companies contradict the visibility scope.")
+        if inspect_only:
+            if company_id is not None and (
+                len(references) != 1 or references[0].company_id != company_id
+            ):
+                raise ValueError("Selected company is unavailable.")
+            if (
+                company_id is None
+                and len(references) <= 128
+                and {row.company_id for row in references} != set(permitted)
+            ):
+                raise ValueError("Company visibility is incomplete.")
+            result = CalendarSourceObservation(
+                references[:128], permitted, len(references) > 128, {}, [], []
+            )
+        else:
+            if company_id is None or len(companies) != 1 or references[0].company_id != company_id:
+                raise ValueError("The selected company is unavailable.")
+            calendar_id = _id(companies[0].get("resource_calendar_id"))
+            if expected_calendar_id is not None and calendar_id != expected_calendar_id:
+                raise ValueError("The company's calendar changed; inspect and review again.")
+            calendar_fields = ["tz", "two_weeks_calendar", "flexible_hours", "duration_based"]
+            calendars = search(
+                "resource.calendar",
+                [["id", "=", calendar_id]],
+                ["id"] + calendar_fields,
+            )
+            if (
+                len(calendars) != 1
+                or type(calendars[0].get("id")) is not int
+                or calendars[0].get("id") != calendar_id
+            ):
+                raise ValueError("The company calendar is unavailable.")
+            schema = _rpc(
+                opener,
+                origin,
+                "/web/dataset/call_kw",
+                {
+                    "model": "resource.calendar.attendance",
+                    "method": "fields_get",
+                    "args": [["resource_id"]],
+                    "kwargs": {"attributes": ["type"]},
+                },
+            )
+            if not isinstance(schema, dict):
+                raise ValueError("Attendance schema is unavailable.")
+            resource = schema.get("resource_id")
+            if resource is not None and (
+                not isinstance(resource, dict) or resource.get("type") != "many2one"
+            ):
+                raise ValueError("Resource-specific attendance has an unsupported schema.")
+            fields = ["dayofweek", "hour_from", "hour_to", "week_type", "display_type"] + (
+                ["resource_id"] if resource is not None else []
+            )
+            attendance = search(
+                "resource.calendar.attendance", [["calendar_id", "=", calendar_id]], fields
+            )
+            leaves = search(
+                "resource.calendar.leaves",
                 [
-                    "date_from",
-                    "<=",
-                    (observed_at + timedelta(days=15))
-                    .astimezone(UTC)
-                    .strftime("%Y-%m-%d %H:%M:%S"),
+                    ["calendar_id", "in", [False, calendar_id]],
+                    ["company_id", "=", company_id],
+                    ["resource_id", "=", False],
+                    ["time_type", "=", "leave"],
+                    ["date_to", ">=", observed_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")],
+                    [
+                        "date_from",
+                        "<=",
+                        (observed_at + timedelta(days=15))
+                        .astimezone(UTC)
+                        .strftime("%Y-%m-%d %H:%M:%S"),
+                    ],
                 ],
-            ],
-            ["date_from", "date_to"],
-        )
+                ["date_from", "date_to"],
+            )
+            result = CalendarSourceObservation(
+                references, permitted, False, calendars[0], attendance, leaves
+            )
     finally:
         destroy_diagnostic_session(
             connection,
             lambda: _rpc(opener, origin, "/web/session/destroy", {}, expect_result=False),
         )
     health()
-    return calendars[0], attendance, leaves
+    return result
+
+
+def read_company_calendar(
+    connection: OdooRuntimeConnection,
+    *,
+    company_id: int,
+    observed_at: datetime,
+    private_origin: bool = False,
+    transport_origin: str = "",
+) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
+    result = read_calendar_sources(
+        connection,
+        company_id=company_id,
+        observed_at=observed_at,
+        private_origin=private_origin,
+        transport_origin=transport_origin,
+    )
+    return result.calendar, result.attendance, result.leaves
+
+
+def calendar_runtime_connection(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    private_endpoint_key: str,
+    control_plane_root: Path,
+) -> tuple[OdooRuntimeConnection, str, str]:
+    selection = select_stable_runtime(store, profile, "prod")
+    origin = ""
+    endpoint_digest = ""
+    if private_endpoint_key:
+        endpoint = store.read_private_health_endpoint_record(private_endpoint_key)
+        if (
+            endpoint.status != "active"
+            or endpoint.product != profile.product
+            or endpoint.context != selection.identity.context
+            or endpoint.instance != "prod"
+        ):
+            raise ValueError("Private calendar endpoint is outside the product lane.")
+        parsed = urlsplit(endpoint.url)
+        if parsed.scheme != "https":
+            raise ValueError("Calendar reads require HTTPS.")
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        endpoint_digest = private_health_endpoint_record_sha256(endpoint)
+    connection = connect_runtime(
+        store=store,
+        selection=selection,
+        control_plane_root=control_plane_root,
+        database_url=store.database_url,
+        diagnostics=True,
+    )
+    return connection, origin, endpoint_digest
+
+
+def require_calendar_authority_current(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    connection: OdooRuntimeConnection,
+    private_endpoint_key: str,
+    endpoint_digest: str,
+) -> str:
+    if store.read_product_profile_record(profile.product) != profile:
+        raise ValueError("Product profile changed during calendar qualification.")
+    assert_selection_current(store, connection.selection)
+    if (
+        private_endpoint_key
+        and private_health_endpoint_record_sha256(
+            store.read_private_health_endpoint_record(private_endpoint_key)
+        )
+        != endpoint_digest
+    ):
+        raise ValueError("Private calendar transport changed during qualification.")
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "identity": connection.selection.identity.model_dump(mode="json"),
+                "base_url": connection.selection.base_url,
+                "slot_target_id": connection.selection.slot_target_id,
+                "route_host": connection.selection.route_host,
+                "endpoint_digest": endpoint_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def calendar_window(
@@ -297,36 +481,27 @@ def read_business_hours_window(
     try:
         if control_plane_root is None or not isinstance(store, PostgresRecordStore):
             raise ValueError("Calendar read source is unavailable.")
-        selection = select_stable_runtime(store, profile, "prod")
-        private = bool(policy.private_endpoint_key)
-        if private:
-            endpoint = store.read_private_health_endpoint_record(policy.private_endpoint_key)
-            if (
-                endpoint.status != "active"
-                or endpoint.product != profile.product
-                or endpoint.context != selection.identity.context
-                or endpoint.instance != "prod"
-            ):
-                raise ValueError("Private calendar endpoint is outside the product lane.")
-            origin = urlsplit(endpoint.url)
-            selection = replace(selection, base_url=f"{origin.scheme}://{origin.netloc}")
-        connection = connect_runtime(
+        connection, origin, endpoint_digest = calendar_runtime_connection(
             store=store,
-            selection=selection,
+            profile=profile,
+            private_endpoint_key=policy.private_endpoint_key,
             control_plane_root=control_plane_root,
-            database_url=store.database_url,
-            diagnostics=True,
         )
         now = observed_at or datetime.now(UTC)
         calendar, rows, leaves = read_company_calendar(
-            connection, company_id=policy.company_id, observed_at=now, private_origin=private
+            connection,
+            company_id=policy.company_id,
+            observed_at=now,
+            private_origin=bool(policy.private_endpoint_key),
+            transport_origin=origin,
         )
-        # The recorded private endpoint supplies transport, never runtime identity.
-        current = select_stable_runtime(store, profile, "prod")
-        if current.identity != selection.identity:
-            raise ValueError("Odoo runtime changed during the calendar read.")
-        if not private:
-            assert_selection_current(store, selection)
+        require_calendar_authority_current(
+            store=store,
+            profile=profile,
+            connection=connection,
+            private_endpoint_key=policy.private_endpoint_key,
+            endpoint_digest=endpoint_digest,
+        )
         return calendar_window(calendar, rows, leaves, observed_at=observed_at or datetime.now(UTC))
     except (OSError, ValueError, KeyError, TypeError, click.ClickException, SQLAlchemyError):
         # Provider errors can contain credentials and private URLs; never surface them.

@@ -68,7 +68,10 @@ class BusinessHoursTests(unittest.TestCase):
             if path == "/web/session/authenticate":
                 self.assertEqual(params["login"], "diagnostic-reader")
                 self.assertEqual(params["password"], "diagnostic-password")
-                return {"uid": 7}
+                return {
+                    "uid": 7,
+                    "user_companies": {"allowed_companies": {"7": {"id": 7, "name": "Example"}}},
+                }
             if path == "/web/session/destroy":
                 return None
             if params["method"] == "fields_get":
@@ -78,8 +81,10 @@ class BusinessHoursTests(unittest.TestCase):
                 if any(field not in rows[0] for field in params["kwargs"]["fields"]):
                     raise ValueError("Odoo rejected an unsupported attendance field.")
             responses: dict[str, list[dict[str, object]]] = {
-                "res.company": [{"resource_calendar_id": [17, "Company calendar"]}],
-                "resource.calendar": [calendar()],
+                "res.company": [
+                    {"id": 7, "name": "Example", "resource_calendar_id": [17, "Company calendar"]}
+                ],
+                "resource.calendar": [calendar() | {"id": 17}],
                 "resource.calendar.attendance": rows,
                 "resource.calendar.leaves": [],
             }
