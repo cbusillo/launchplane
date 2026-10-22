@@ -6117,6 +6117,11 @@
             "title": "Expected Observation Sha256",
             "type": "string"
           },
+          "include_application_resources": {
+            "default": false,
+            "title": "Include Application Resources",
+            "type": "boolean"
+          },
           "instance": {
             "minLength": 1,
             "title": "Instance",

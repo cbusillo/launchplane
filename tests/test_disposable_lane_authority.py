@@ -16,6 +16,7 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
+from tests.support.application_resources import ApplicationResourceFixture
 from tests.support.disposable_lanes import record_safety
 from control_plane.disposable_lanes import disposable_lane_observation_sha256
 from tests.support.http import request
@@ -111,6 +112,19 @@ class _DisposableRuntimeAuthorityFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
+    def testing_application(self) -> ProviderTargetRecord:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"target_type": "application"})
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        ).model_copy(update={"provider_target_type": "application"})
+        self.store.write_provider_target_record(provider)
+        return provider
+
     async def test_bounded_observer_records_actor_and_leaves_lane_config_unchanged(self) -> None:
         initial = self.store.read_product_profile_record("example-site")
         inspected = await self.observe()
@@ -743,6 +757,115 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             (response.json()["result"]["data"], response.json()["result"]["production_resources"]),
             ("unknown", "unknown"),
         )
+
+    async def test_existing_application_collection_reports_storage_without_qualifying_it(
+        self,
+    ) -> None:
+        provider = self.testing_application()
+        fixture = ApplicationResourceFixture(Path(self.temporary.name) / "provider")
+        (fixture.data / "private-state").write_text("synthetic-state")
+        payload = {
+            "applicationId": provider.target_id,
+            "appName": fixture.application,
+            "serverId": "recorded-server",
+            "mounts": [{"type": "volume", "volumeName": "owned-state"}],
+        }
+
+        inspected = await self.observe()
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch("control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=payload),
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=fixture.native_read,
+            ) as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                include_application_resources=True,
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["application_resources"]["nonempty_volume_count"], 1)
+        self.assertFalse(result["application_resources"]["quiescent"])
+        self.assertEqual((result["data"], result["production_resources"]), ("unknown", "unknown"))
+        self.assertFalse(result["provider_mutation"])
+        reader.assert_called_once()
+        self.assertEqual(reader.call_args.kwargs["server_id"], payload["serverId"])
+        self.assertEqual(reader.call_args.kwargs["payload"]["application"], payload["appName"])
+        self.assertNotIn("synthetic-provider-token", response.text)
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+
+    async def test_application_resource_denial_preserves_protection_without_further_reads(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        provider = self.testing_application()
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            usage="in_use",
+            data="only_copy",
+            production_resources="shared",
+        )
+        before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        inspected = await self.observe()
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": provider.target_id,
+                    "appName": "owned-application",
+                    "serverId": "recorded-server",
+                    "mounts": [],
+                },
+            ) as target_reader,
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=NativeSourceAuthorizationDenied("synthetic-private-detail"),
+            ) as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                include_application_resources=True,
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        reader.assert_called_once()
+        target_reader.assert_called_once()
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), before
+        )
+        self.assertNotIn("synthetic-private", response.text)
+
+    async def test_application_resource_option_keeps_existing_identity_boundary(self) -> None:
+        inspected = await self.observe()
+        with (
+            scoped_agent_transport(),
+            patch("control_plane.dokploy.native_copy_stream._read_remote") as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                include_application_resources=True,
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        reader.assert_not_called()
 
     async def test_collect_does_not_confuse_other_lane_or_provider_kinds_with_production_alias(
         self,
