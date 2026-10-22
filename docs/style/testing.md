@@ -468,7 +468,12 @@ observer; OS-assigned Vite ports still isolate overlapping suite processes.
 The digest-pinned Playwright image supplies browser system libraries. Browser
 execution runs inside the container, with private shared memory and the job's
 actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
-installs frontend dependencies; the container uses the job's Node executable
+installs frontend dependencies and exports the manifest-selected pnpm from its
+existing Corepack cache with network access disabled. The container hydrates its
+own Corepack cache from that read-only temporary archive and keeps Corepack
+network access disabled, so starting the smoke never downloads pnpm again.
+Cleanup removes the owned archive after the container exits, including failures.
+The container uses the job's Node executable
 and the image's Chromium. Every frontend CI job selects a pnpm store under its
 own checkout before cache restore and install. The helper publishes a relative
 cache target so runner slots share cache versions and archives; each restore
