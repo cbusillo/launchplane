@@ -28,6 +28,7 @@ from control_plane.contracts.runtime_identity import runtime_identity_env
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_lane_service_restart import seed_lane
 from tests.support.auth import StubVerifier, identity, local_operator_policy
+from tests.support.disposable_lanes import record_safety
 from control_plane.service_auth import BearerIdentityConfig
 from tests.test_service import create_launchplane_fastapi_test_app
 
@@ -117,6 +118,7 @@ HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
                 store.read_product_profile_record(expected.product).lanes[0].health_url
                 == profile.lanes[0].health_url
             )
+            record_safety(store, expected.product, expected.context, "testing")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if (
