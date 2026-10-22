@@ -186,10 +186,13 @@ reservation. The webhook request never waits on a deploy.
     that original as failed under its current lease. This requires the exact
     persisted pending deployment and unchanged empty execution receipt, with no
     effect checkpoint or settled image. The corrected inventory is preserved;
-    it never becomes the original receipt's baseline. The next reconcile uses
-    the same deterministic successor chain. Missing evidence, uncertain effects
-    or failed publication/completion retain the original fence. Manual deploy
-    and recovery callers keep their existing baseline-refusal behavior.
+    it never becomes the original receipt's baseline. The failed outcome belongs
+    to the completed operation; its pending deployment intent stays unchanged.
+    If completion is interrupted, native lease expiry and absence recovery must
+    re-prove and complete that original before any successor is allowed. The
+    next reconcile uses the same deterministic successor chain. Missing evidence,
+    uncertain effects or failed publication/completion retain the original fence.
+    Manual deploy and recovery callers keep their existing baseline-refusal behavior.
     A typed safety refusal after a successful image-save reply and before the
     deploy trigger has its own durable phase. With current target authority,
     exact original-lease evidence and fresh deployment absence, the same

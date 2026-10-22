@@ -1953,8 +1953,11 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
     def test_inert_inventory_correction_preserves_lifecycle_before_successor(self) -> None:
         self.check_inert_inventory_correction(lifecycle=True)
 
-    def test_inert_inventory_completion_failure_keeps_original_fence(self) -> None:
+    def test_inert_inventory_completion_failure_retries_original_before_successor(self) -> None:
         self.check_inert_inventory_correction(completion_failure=True)
+
+    def test_inert_lifecycle_completion_failure_retries_original_before_successor(self) -> None:
+        self.check_inert_inventory_correction(lifecycle=True, completion_failure=True)
 
     def test_unknown_inventory_successor_stays_fenced_after_another_correction(self) -> None:
         self.check_inert_inventory_correction(unknown_successor=True)
@@ -1969,6 +1972,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         from control_plane.dokploy import api
         from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
         from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
         from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
         from control_plane.workflows.generic_web_execution import evidence_digest, execution_receipt
 
@@ -2092,7 +2096,32 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                     ),
                     corrected,
                 )
-            return
+            expired_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            expired = completed.model_copy(
+                update={
+                    "lease_expires_at": expired_at.isoformat(),
+                    "updated_at": (expired_at - timedelta(minutes=1)).isoformat(),
+                }
+            )
+            with self.store._session_factory() as session:
+                row = session.get(LaunchplaneIdempotencyRow, completed.record_id)
+                assert row is not None
+                self.store._sync_idempotency_row(row, expired)
+                session.commit()
+            self.request()
+            with patch.object(
+                self.application_inputs_provider,
+                "observe_artifact_deploy",
+                return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
+            ):
+                self.assertEqual(self.run_once().state, "failed")
+            completed = self.store.read_idempotency_record(
+                scope=reconcile_reservation_scope("site"),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=original_key,
+            )
+            assert completed is not None
+            self.assertEqual(triggered, previous_triggers)
         self.assertTrue(testing_attempt_was_settled(completed))
         result = GenericWebDeployResult.model_validate(completed.response_payload["result"])
         self.assertEqual(result.deployment_record_id, original.record_id)
@@ -2143,7 +2172,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(successor.state, "done", successor.last_error)
         self.assertNotEqual(
             successor.last_plan["deploy_idempotency_key"],
-            refused.last_plan["deploy_idempotency_key"],
+            original_key,
         )
         self.assertEqual(len(triggered), len(previous_triggers) + 1)
         successor_record = self.store.read_deployment_record(

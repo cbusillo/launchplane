@@ -1787,6 +1787,15 @@ class GenericWebDeployProviderMutationAdapter:
             inventory.model_dump(mode="json") if inventory else None
         ):
             return None
+        guard = getattr(self._record_store, "provider_evidence_guard")
+        with guard(lease.evidence_reservation, authority_checkpoint=self.execution_check):
+            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
+                reservation=lease.evidence_reservation(),
+                expected_deployment=record,
+                expected_inventory=inventory,
+                deployment=record,
+                inventory=None,
+            )
         failed = record.model_copy(
             update={
                 "deploy": record.deploy.model_copy(
@@ -1801,15 +1810,6 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
             }
         )
-        guard = getattr(self._record_store, "provider_evidence_guard")
-        with guard(lease.evidence_reservation, authority_checkpoint=self.execution_check):
-            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
-                reservation=lease.evidence_reservation(),
-                expected_deployment=record,
-                expected_inventory=inventory,
-                deployment=failed,
-                inventory=None,
-            )
         records, result = generic_web_record_result(
             record=failed,
             product=self._profile.product,
