@@ -2072,18 +2072,15 @@ size and its SHA-1. Both metadata and content passes share a read-only database
 snapshot and stream the attachment rows. Missing or corrupt references refuse the
 copy; no repair is attempted. Resume rechecks the same integrity gate before
 registry work and preserves an existing copy on refusal. SSH copies retain their
-existing attachment contract. An attachment refusal returns the value-free
-`copy_attachments_verified` predicate with kind `refused` through both native
-frames and schedule readback; attachment paths, checksums and raw diagnostics
-stay private. Retrying the generation reuses its original capture and cannot
-repair its source data. Preserve the request, chunks, cache and operation fence.
-For a modern native rebuild, use original-operation readback until its failed
-restore is terminal and [retained as failed](#signed-in-testing-rebuild-and-native-preflight),
-then submit a fresh rebuild with its own generation and capture after the source
-integrity problem is resolved. A legacy generation must meet the separate
-[retirement prerequisites](#retire-an-incomplete-legacy-generation-into-custody)
-before creating its isolated successor. Unknown effects never authorize a new
-capture or manual fence release.
+existing attachment contract. An attachment refusal reports the value-free
+`copy_attachments_verified` predicate with kind `refused` in schedule readback.
+The modern rebuild retains safe schedule diagnostics in its candidate and failure
+evidence when the original provider logs are available; paths, checksums and raw
+logs stay private. Retry reuses the original capture. After original-operation
+readback observes the failed restore as terminal and retains its candidate,
+fix the source and start a fresh rebuild. Legacy generations follow their
+[retirement prerequisites](#retire-an-incomplete-legacy-generation-into-custody).
+Unknown effects remain fenced and never authorize recapture.
 Module, integration and website readback still precede the web gate. Successful
 readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the
