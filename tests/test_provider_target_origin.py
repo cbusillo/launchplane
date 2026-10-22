@@ -1,5 +1,3 @@
-"""Original attention identity survives retries without changing physical fencing."""
-
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -152,7 +150,6 @@ class ProviderTargetOriginTests(unittest.TestCase):
             reconciliation_key="reconcile",
             provider_target_key=self.origin.target_key(),
         )
-        # Explicit old-schema fixture insertion, not a new admission without origin.
         with self.store._session_factory() as session:
             session.add(self.store._idempotency_row(historical))
             session.commit()

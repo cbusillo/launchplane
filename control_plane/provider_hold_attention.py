@@ -1,5 +1,3 @@
-"""Closed service attention models; retained holds never imply recovery authority."""
-
 from datetime import datetime, timedelta, timezone
 import re
 from typing import Literal, Protocol
@@ -75,7 +73,6 @@ class ProviderHoldAttentionPage(BaseModel):
     items: tuple[ProviderHoldAttentionItem, ...]
     next_cursor: str | None
     has_more: bool
-    # A continuation, including an empty final page, never proves a global absence.
     completeness: Literal["single_page", "partial"]
     observed_at: str
     stale_after: str

@@ -561,8 +561,6 @@ def _held_generic_web_deploy_fences(
             if value.startswith("provider-operation:")
         )
         refs = tuple(sorted(set(refs)))
-        # Historical ref-less warnings have no exact settlement proof. Catalog
-        # retirement cannot supply it. Never fabricate an incarnation for them.
         references[(incident.product, incident.context, incident.instance)] = refs or (
             "provider-operation:unavailable",
         )
@@ -581,9 +579,6 @@ def _held_generic_web_deploy_fences(
             "Provider operation evidence is unavailable; provider observations will not be accepted. "
             "Other health checks continue."
         )
-        # The strict source read remains unavailable, not an empty inventory or
-        # attributed hold. Keep unrelated probes running; these unaccepted provider
-        # snapshots cannot resolve incidents even if source repairs before publication.
         return {
             lane: ProviderHoldLaneSnapshot(
                 *lane,
@@ -1194,8 +1189,6 @@ def _store_monitor_observation(
         )
         write_status = getattr(write_result, "status", "written")
         if write_status == "provider_source_changed":
-            # Do not publish the stale pass or its recovery/outbox. A bounded next
-            # scheduler observation re-evaluates pure local source from scratch.
             summary = (
                 "Provider operation evidence is unavailable; observation was not accepted."
                 if expected_provider_hold_snapshot is not None

@@ -71,6 +71,13 @@ current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
 does not replace that evidence. The trial does not change CI workflows or
 required checks.
 
+Each gate checks the change's entire contribution; missing or unprovable
+history fails. An already protected candidate proves an empty contribution,
+but its scanner/audit and independent required gates still run. The
+[CI comment step](../../.github/workflows/ci.yml) and
+[transitional config-authority workflow](../../.github/workflows/reusable-product-repo-config-authority.yml)
+own event-range selection and validation.
+
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes keep their safety classification. Credential handling falls under safety
 and authorization; shared test helpers, shard tooling, and CI runner selection

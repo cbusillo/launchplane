@@ -5772,7 +5772,6 @@ class PostgresRecordStore(HumanSessionStore):
                 for lane, snapshot in provider_snapshots.items()
             }
         except ValueError:
-            # Malformed evidence must wake monitoring without inventing custody.
             fence_snapshots = {lane: [("provider-holds", "unavailable")] for lane in lane_keys}
         revisions = {}
         for profile in profiles:
@@ -8462,7 +8461,6 @@ class PostgresRecordStore(HumanSessionStore):
     def _read_provider_hold_record(
         self, row: LaunchplaneIdempotencyRow
     ) -> LaunchplaneIdempotencyRecord:
-        """Reject contradictory indexed source before interpreting held/terminal evidence."""
         record = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
         canonical = record.model_dump(mode="json")
         if any(value != canonical.get(name) for name, value in row.payload.items()) or any(
@@ -8507,7 +8505,6 @@ class PostgresRecordStore(HumanSessionStore):
     def read_provider_target_origin(
         self, reservation: LaunchplaneIdempotencyRecord
     ) -> RetainedProviderTargetOrigin | None:
-        """Internal bound custody read; missing or invalid evidence stays unavailable."""
         with self._session_factory() as session:
             try:
                 receipt = self._original_mutation_receipt(
@@ -8560,7 +8557,6 @@ class PostgresRecordStore(HumanSessionStore):
             }
 
     def list_provider_target_holds(self) -> tuple[ProviderTargetHold, ...]:
-        """Bulk internal projection. Unattributed rows remain in this service-level result."""
         with self._session_factory() as session:
             holds, _authority = self._provider_target_holds(session)
             return tuple(hold for hold in holds if hold.reservation.state != "completed")
@@ -8625,7 +8621,6 @@ class PostgresRecordStore(HumanSessionStore):
         limit: int = 50,
         cursor: str | None = None,
     ) -> ProviderHoldAttentionPage:
-        """One bounded indexed keyset read, followed by a bounded batch origin read."""
         if not 1 <= limit <= PROVIDER_HOLD_PAGE_LIMIT:
             raise ValueError("Invalid provider attention page limit.")
         after_id = parse_provider_hold_cursor(cursor)
@@ -8638,8 +8633,6 @@ class PostgresRecordStore(HumanSessionStore):
                 .order_by(LaunchplaneIdempotencyRow.record_id)
                 .limit(limit + 1)
             )
-            # Validate indexed columns against payload before projecting. A corrupt held
-            # source makes this page unavailable rather than silently disappearing.
             reservations = tuple(
                 self._read_provider_hold_record(row) for row in session.scalars(statement)
             )
@@ -8730,8 +8723,6 @@ class PostgresRecordStore(HumanSessionStore):
             for value in references
             if (reference := ProviderOperationReference.parse(value)) is not None
         )
-        # One indexed membership read and one primary-key batch receipt read, including
-        # completed referenced rows. Never scan private family intent to discover origin.
         statement = (
             select(LaunchplaneIdempotencyRow)
             .where(
@@ -8755,7 +8746,6 @@ class PostgresRecordStore(HumanSessionStore):
         replacements = self._provider_hold_replacements(
             session, references=references, for_update=for_update, lane_key=lane_key
         )
-        # Reservation -> typed rows -> nonblocking authority -> incident.
         if for_update and not self.database_url.startswith("sqlite"):
             if not session.scalar(
                 text("select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
@@ -8811,8 +8801,6 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         references: tuple[str, ...] = (),
     ) -> ProviderHoldLaneSnapshot:
-        # A bulk read unions every incident's references. Terminal rows loaded only
-        # for another lane must not enter this lane's locked source comparison.
         reference_ids = {
             reference.record_id
             for value in references
@@ -8869,8 +8857,6 @@ class PostgresRecordStore(HumanSessionStore):
                 and not hold.separated
             )
         )
-        # Heartbeat timestamps are classified separately at observation and locked
-        # acceptance times. Preserve every other source/separation input exactly.
         material = [
             [
                 (
@@ -9516,9 +9502,6 @@ class PostgresRecordStore(HumanSessionStore):
                 requires_provider_target_origin(normalized_provider_target_key)
                 or provider_target_origin is not None
             ):
-                # This was an unbound row, so assigning a shared physical key is
-                # a fresh admission. Preserve its existing family equality; a
-                # caller's different supplied intent must still conflict.
                 self._retain_original_mutation_intent(
                     session,
                     reclaimed_record,
@@ -13369,7 +13352,6 @@ class PostgresRecordStore(HumanSessionStore):
         scope: str | None = None,
         preparation_key: str | None = None,
     ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
-        """Read bound activation progress and real parents in the caller's transaction."""
         payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
             "testing_activation"
         ]
@@ -30762,8 +30744,6 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if incident_changed:
                 if expected_provider_hold_snapshot is not None:
-                    # A retry can discover new held source. Do not leave an
-                    # unaccepted pass behind before that independent recheck.
                     return PublicIngressTransitionWriteResult(status="incident_changed")
                 unlinked_observation = observation.model_copy(
                     update={"incident_id": "", "incident_event_id": ""}
@@ -33658,12 +33638,6 @@ class PostgresRecordStore(HumanSessionStore):
 
 
 class _ProviderHoldAuthorityView(PostgresRecordStore):
-    """Bulk same-session inputs for the existing retained-fence separation predicate.
-
-    This read-only view deliberately uses the predicate's existing store interface;
-    it cannot perform a provider call, acquire authority or write a record.
-    """
-
     def __init__(
         self,
         store: PostgresRecordStore,
@@ -33747,8 +33721,6 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
         *,
         reservations: tuple[LaunchplaneIdempotencyRecord, ...],
     ) -> object:
-        # Only evidence demanded by the separation predicate belongs in its witness.
-        # This projection must never read more history outside that fail-closed boundary.
         application_material: list[object] = []
         from control_plane.workflows.generic_web_deploy_provider import (
             decode_generic_web_provider_reconciliation_target,
