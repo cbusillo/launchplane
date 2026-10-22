@@ -215,26 +215,63 @@ class ResourceQualificationTests(unittest.TestCase):
         self.snapshot["volumes"].append({"name": "foreign", "driver": "nfs"})
         self.assertEqual(self.run_qualifier()[0], digest)
 
+    def run_program(self, rows: str, reviewed: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                RESOURCE_QUALIFICATION_PROGRAM,
+                "example-testing-app",
+                "example_testing",
+                "example",
+                self.identity,
+                reviewed,
+            ],
+            input=rows,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_real_program_distinguishes_negative_resources_from_unreadable_inventory(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        foreign = copy.deepcopy(self.snapshot["containers"][1])
+        foreign.update(id="foreign-id", project="another")
+        self.snapshot["containers"].append(foreign)
+        for rows, kind in (
+            (inventory_rows(self.snapshot), "refused"),
+            ("{}", "unavailable"),
+            ('{"kind":"unknown"}', "unavailable"),
+        ):
+            with self.subTest(kind=kind, malformed=rows.startswith("{")):
+                result = self.run_program(rows)
+                self.assertNotEqual(result.returncode, 0)
+                evidence = extract_odoo_post_deploy_readback_markers(
+                    {"logs": result.stdout + result.stderr}
+                )
+                self.assertEqual(evidence["readback_failed_predicate"], ReadbackPredicate.RESOURCES)
+                self.assertEqual(evidence["readback_failure_kind"], kind)
+
     def test_real_program_filters_secrets_and_refuses_a_stale_review(self) -> None:
         digest, _ = self.run_qualifier()
         for item in self.snapshot["containers"]:
             item["environment"]["ODOO_DB_PASSWORD"] = "synthetic-secret-never-output"
         for reviewed, expected in ((digest, 0), ("wrong-review", 1)):
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    RESOURCE_QUALIFICATION_PROGRAM,
-                    "example-testing-app",
-                    "example_testing",
-                    "example",
-                    self.identity,
-                    reviewed,
-                ],
-                input=inventory_rows(self.snapshot),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = self.run_program(inventory_rows(self.snapshot), reviewed)
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             self.assertNotIn("synthetic-secret", result.stdout + result.stderr)
+            if expected:
+                from control_plane.copy_readback_diagnostics import ReadbackPredicate
+                from control_plane.dokploy.post_deploy import (
+                    extract_odoo_post_deploy_readback_markers,
+                )
+
+                evidence = extract_odoo_post_deploy_readback_markers(
+                    {"logs": result.stdout + result.stderr}
+                )
+                self.assertEqual(
+                    evidence["readback_failed_predicate"], ReadbackPredicate.REVIEW_BINDING
+                )
+                self.assertEqual(evidence["readback_failure_kind"], "refused")
