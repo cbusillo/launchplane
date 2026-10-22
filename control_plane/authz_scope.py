@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from control_plane.action_effects import AGENT_READ_ROLE_ACTION, ODOO_CONNECTION_ISOLATION_ACTIONS
+from control_plane.action_effects import (
+    AGENT_READ_ROLE_ACTION,
+    GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,
+    ODOO_CONNECTION_ISOLATION_ACTIONS,
+)
 
 
 # Creates one lane's Dokploy compose target; granted per context and instance.
@@ -29,6 +33,7 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "every_code_feedback_resume.request",
         "every_code_feedback_resume.execute",
         "generic_web_deploy_recovery_provider_evidence.read",
+        GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,
         "inventory.read",
         "ingress_route.audit",
         "product_profile.health_monitoring.apply",
