@@ -893,15 +893,23 @@ resolver. `lane_binding_resolution` states these inputs and reports each declare
 lane's selected binding metadata and coverage. It reads no versions or values.
 
 Selection uses the existing secret resolver's precedence before authorization.
-An unreadable winner is withheld; a readable shadow never replaces it. Coverage
+Each lane's qualification view returns selected rows only when authority covers
+every requested scope; otherwise the whole selection is withheld with `scoped`
+coverage. A hidden higher-precedence source cannot make a readable shadow appear
+or disappear in that view. The ordinary copy `bindings` remain available under
+their existing eligibility and authorization. A context-only reader may request
+only `scopes=context` for a complete answer to that narrower question; that does
+not claim coverage of instance or global delivery sources. Coverage
 depends on authority over every requested scope, even when no binding exists,
 so it cannot reveal whether a hidden source exists. Complete global coverage
 needs the existing universal read standing plus managed-secret list authority;
 an allow on the empty context alone cannot prove every global source readable.
-Other selection scopes require explicit `secret.list` to prove complete scope
-coverage. Environment metadata access still returns authorized names, but stays
-`scoped` without that proof. Hidden context-ownership records cannot change the
-coverage status through inherited product-read rules.
+Other selection scopes require that standing or explicit `secret.list` to prove
+complete scope coverage. Environment metadata access still returns authorized
+copy names, but selection stays `scoped` without that proof. Metadata enumeration
+still uses the shared resolver even when selection rows are withheld. Hidden
+context-ownership records cannot change the qualification projection or its
+coverage through inherited product-read rules.
 Individual global sources still require existing `secret.list` at their actual
 source scope. Product-environment metadata access can cover only runtime sources
 in an exclusive product context, never a global or ambiguous source or another

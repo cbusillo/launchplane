@@ -671,40 +671,90 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
 
     @scoped_agent_test
     async def test_hidden_winner_never_falls_back_to_an_authorized_shadow(self) -> None:
-        self.write_binding(name="CONTEXT_SHADOW", key="REPAIRSHOPR_TOKEN", scope="context")
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
-        context_list_rule = _local_operator_policy(
-            actions=("secret.list",), contexts=("example-site",)
-        ).local_operators[0]
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(
-                schema_version=2, local_operators=(profile_rule, context_list_rule)
-            ),
-            record_store_factory=lambda: self.store,
-            bearer_identity_config=BearerIdentityConfig(
-                local_operator_token="test-operator-token",
-                local_operator_subject="local-owner-agent",
-                local_operator_token_label="local-owner-write",
-            ),
+        cases: tuple[tuple[SecretScope, str], ...] = (
+            ("context", "runtime_environment"),
+            ("global", "runtime_environment"),
+            ("context", "other_integration"),
         )
-        response = await _asgi_request(
-            app,
-            "GET",
-            "/v1/products/example-site/secret-bindings?include_resolution=true",
-            headers={"Authorization": "Bearer test-operator-token"},
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        lanes = {
-            lane["instance"]: lane for lane in response.json()["lane_binding_resolution"]["lanes"]
-        }
-        self.assertEqual(lanes["prod"]["bindings"], [])
-        self.assertEqual(lanes["prod"]["coverage"]["status"], "scoped")
-        self.assertEqual(lanes["testing"]["bindings"][0]["name"], "CONTEXT_SHADOW")
-        self.assertEqual(lanes["testing"]["coverage"]["status"], "scoped")
+        for index, (scope, integration) in enumerate(cases):
+            with self.subTest(scope=scope, integration=integration):
+                visible_name = f"VISIBLE_{index}"
+                key = f"SHARED_{index}"
+                self.write_binding(name=visible_name, key=key, scope=scope, integration=integration)
+                list_rule = _local_operator_policy(
+                    actions=("secret.list",),
+                    contexts=("" if scope == "global" else "example-site",),
+                ).local_operators[0]
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2, local_operators=(profile_rule, list_rule)
+                    ),
+                    record_store_factory=lambda: self.store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="test-operator-token",
+                        local_operator_subject="local-owner-agent",
+                        local_operator_token_label="local-owner-write",
+                    ),
+                )
+                higher_scope: SecretScope = "context" if scope == "global" else "context_instance"
+                url = f"/v1/products/example-site/secret-bindings?include_resolution=true&integration={integration}&scopes={scope}&scopes={higher_scope}"
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    before = await _asgi_request(
+                        app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+                    )
+                self.write_binding(
+                    name=f"HIDDEN_{index}",
+                    key=key,
+                    scope=higher_scope,
+                    integration=integration,
+                    instance="prod" if higher_scope == "context_instance" else "",
+                )
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    after = await _asgi_request(
+                        app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+                    )
+                self.assertEqual(before.status_code, 200, before.text)
+                self.assertEqual(after.status_code, 200, after.text)
+                self.assertEqual(
+                    before.json()["lane_binding_resolution"],
+                    after.json()["lane_binding_resolution"],
+                )
+                self.assertTrue(
+                    all(
+                        not lane["bindings"]
+                        for lane in after.json()["lane_binding_resolution"]["lanes"]
+                    )
+                )
+                self.assertEqual(
+                    after.json()["lane_binding_resolution"]["coverage"]["status"], "scoped"
+                )
+                self.assertEqual(before.json()["bindings"], after.json()["bindings"])
+                if scope == "context":
+                    narrower = await _asgi_request(
+                        app,
+                        "GET",
+                        f"/v1/products/example-site/secret-bindings?include_resolution=true&integration={integration}&scopes=context",
+                        headers={"Authorization": "Bearer test-operator-token"},
+                    )
+                    self.assertEqual(
+                        narrower.json()["lane_binding_resolution"]["coverage"]["status"], "complete"
+                    )
+                    self.assertTrue(
+                        all(
+                            visible_name in {binding["name"] for binding in lane["bindings"]}
+                            for lane in narrower.json()["lane_binding_resolution"]["lanes"]
+                        )
+                    )
 
     @scoped_agent_test
     async def test_ambiguous_context_does_not_inherit_environment_read(self) -> None:
+        self.write_binding(name="CONTEXT_SHADOW", key="SHARED_KEY", scope="context")
         profiles = self.store.list_product_profile_records()
         foreign = self.profile.model_copy(update={"product": "foreign-site"})
         context_app = self._environment_read_app(products=("example-site",), instances=())
@@ -1001,7 +1051,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         list_rule = (
             _local_operator_policy(actions=("secret.list",))
             .local_operators[0]
-            .model_copy(update={"instances": ("prod", "testing")})
+            .model_copy(update={"instances": ("prod",)})
         )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -1018,7 +1068,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         response = await _asgi_request(
             app,
             "GET",
-            "/v1/products/example-site/secret-bindings",
+            "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context_instance",
             headers={"Authorization": "Bearer test-operator-token"},
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -1026,6 +1076,13 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             [item["binding_key"] for item in response.json()["bindings"]], ["REPAIRSHOPR_TOKEN"]
         )
         self.assertNotIn("SITE_PASSWORD", response.text)
+        lanes = {
+            lane["instance"]: lane for lane in response.json()["lane_binding_resolution"]["lanes"]
+        }
+        self.assertEqual(lanes["prod"]["coverage"]["status"], "complete")
+        self.assertEqual(lanes["prod"]["bindings"][0]["binding_key"], "REPAIRSHOPR_TOKEN")
+        self.assertEqual(lanes["testing"]["coverage"]["status"], "scoped")
+        self.assertEqual(lanes["testing"]["bindings"], [])
 
     def test_filesystem_copy_commits_without_nested_lock_deadlock(self) -> None:
         root = Path(self.directory.name) / "file-state"

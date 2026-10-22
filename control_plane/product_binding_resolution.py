@@ -47,6 +47,9 @@ def product_binding_resolution(
     lanes = []
     authorization_complete = True
     for lane in profile.lanes:
+        lane_authorized = all(
+            scope_read_allowed(scope, lane.context, lane.instance) for scope in scopes
+        )
         selected = secrets.resolve_effective_secret_bindings_from_store(
             record_store=store,
             integration=integration,
@@ -55,9 +58,8 @@ def product_binding_resolution(
             scopes=scopes,
         )
         visible = []
-        lane_authorized = all(
-            scope_read_allowed(scope, lane.context, lane.instance) for scope in scopes
-        )
+        if not lane_authorized:
+            selected = {}
         for key, (binding, record) in sorted(selected.items()):
             if not source_read_allowed(record):
                 continue
