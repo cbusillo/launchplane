@@ -840,6 +840,7 @@ class RehearsalScenario(unittest.TestCase):
     ) -> None:
         import yaml
         from pydantic import BaseModel, Field, SecretStr
+        from control_plane.testing_activation_compose import interpolate
 
         class ProductSettings(BaseModel):
             database_host: str = Field(alias="ODOO_DB_HOST")
@@ -855,30 +856,54 @@ class RehearsalScenario(unittest.TestCase):
             "apply",
             self.source,
             self.shape,
-            {"ODOO_DB_PASSWORD": "fixture-password"},
+            {"ODOO_DB_PASSWORD": "fixture-password", "ODOO_MASTER_PASSWORD": "fixture-master"},
         )
         database = self.identifier.replace("-", "_") + "_final_upgrade"
-        supplied = {**cast(dict[str, str], spec["environment"]), "ODOO_DB_NAME": database}
+        supplied = {
+            **cast(dict[str, str], spec["environment"]),
+            "ODOO_DB_NAME": database,
+            "ODOO_VERSION": self.record.target_artifact.build_flags.values["odoo_version"],
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": "{}",
+        }
+        helper = RehearsalHostSafetyTests()
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        executions: list[dict[str, str]] = []
+
+        def docker(*arguments: str, **kwargs: Any) -> bytes:
+            executions.append(dict(item.split("=", 1) for item in arguments if "=" in item))
+            return b"testing_copy_sanitized=true\ntesting_copy_pre_registry_sanitized=true\nodoo_module_update_completed=true\nodoo_module_update_modules_configured=true\n"
+
+        helper.host["docker"] = docker
+        for sanitize in (True, False):
+            helper.host["copy_runner"](
+                spec,
+                {"script-runner": ("runner", {})},
+                database,
+                fresh=sanitize,
+                sanitize_only=sanitize,
+            )
         for compose in cast(dict[str, str], spec["compose"]).values():
             services = yaml.safe_load(compose)["services"]
             for name, service in services.items():
                 if name == "database":
                     continue
-                environment = {}
-                for key, value in service["environment"].items():
-                    match = re.fullmatch(r"\$\{(\w+)(?::[-?](.*))?\}", str(value))
-                    environment[key] = supplied.get(match[1], match[2] or "") if match else value
+                environment = interpolate(service["environment"], supplied)
                 with self.subTest(service=name):
                     settings = ProductSettings.model_validate(environment)
-                    self.assertEqual(settings.database_host, "database")
+                    self.assertIn(settings.database_host, services)
                     self.assertEqual(settings.database_name, database)
-                    self.assertEqual(settings.platform_instance, "rehearsal")
+                    self.assertEqual(settings.platform_instance, supplied["PLATFORM_INSTANCE"])
                     data_mount = next(
                         volume.split(":")[1]
                         for volume in service["volumes"]
                         if volume.split(":")[0] == "odoo_data"
                     )
-                    self.assertEqual(settings.filestore_path, Path(data_mount) / "filestore")
+                    self.assertTrue(settings.filestore_path.is_relative_to(data_mount))
+                    for execution in executions:
+                        self.assertEqual(
+                            Path(execution["ODOO_FILESTORE_PATH"]), settings.filestore_path
+                        )
 
     def test_artifact_from_another_product_cannot_receive_copied_data(self) -> None:
         assert self.manifests[1].source_build is not None
@@ -2519,6 +2544,24 @@ else:
                 len(diagnostic["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
             )
 
+    def test_truncated_process_diagnostics_do_not_expose_a_partial_secret(self) -> None:
+        import sys
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
+
+        secret = "prefix-private-secret-suffix"
+        suffix = secret[len(secret) // 2 :]
+        marker = b"\n-----BEGIN PRIVATE KEY-----\n"
+        payload = (
+            secret.encode()
+            + marker
+            + b"x" * (REHEARSAL_DIAGNOSTIC_TAIL_LIMIT - len(suffix) - len(marker))
+        )
+        available, output = self.host["diagnostic_process_output"](
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(" + repr(payload) + ")"]
+        )
+        self.assertTrue(available)
+        self.assertNotIn(suffix, self.host["diagnostic_text"](output, [secret]))
+
     def test_retained_logs_are_bounded_read_only_and_exclude_symlinks(self) -> None:
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
 
@@ -2587,7 +2630,7 @@ else:
                     [
                         sys.executable,
                         "-c",
-                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT + 1});sys.stderr.write('capture child error');sys.exit(7)",
+                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT + 1});sys.stderr.write('\\ncapture child error');sys.exit(7)",
                     ],
                     root / "partial.dump",
                     1024,

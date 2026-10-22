@@ -107,7 +107,7 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
                         if not chunk:
                             selector.unregister(event.fileobj)
                         elif event.data=='error':
-                            errors=(errors+chunk)[-65536:]
+                            errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
                         else:
                             size+=len(chunk)
                             if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
@@ -115,7 +115,7 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
         status=process.wait(timeout=30)
         if status:
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=errors),None)
+                arguments,status,stdout=b'',stderr=diagnostic_tail(errors)),None)
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
@@ -274,7 +274,7 @@ def restore_preserved_snapshot(spec,root,containers,source_database,destination)
 def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=False):
     arguments=['exec','-i']
     workflow={**spec['workflow'],'ODOO_DB_NAME':database,'ODOO_VERSION':spec['record']['source_odoo_version'] if sanitize_only else spec['versions'][spec['target_image']],
-        'ENV_OVERRIDE_DISABLE_CRON':'true',
+        'ODOO_FILESTORE_PATH':'/volumes/data/filestore','ENV_OVERRIDE_DISABLE_CRON':'true',
         'ODOO_RESTORE_KEPT_INTEGRATIONS':'','NO_SANITIZE':'false'}
     for key,value in workflow.items():
         arguments+=['-e',key+'='+value]
@@ -344,7 +344,7 @@ def product_command(arguments, *, stdin=None):
                     if not chunk:
                         selector.unregister(event.fileobj)
                     elif event.data=='error':
-                        errors=(errors+chunk)[-65536:]
+                        errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
                     else:
                         if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
                             raise ValueError('Product output exceeds its bound')
@@ -355,7 +355,7 @@ def product_command(arguments, *, stdin=None):
         return bytes(output)
     except (ValueError,OSError,subprocess.TimeoutExpired) as error:
         diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-            arguments,process.returncode or -1,stdout=b'',stderr=errors or str(error).encode()),None)
+            arguments,process.returncode or -1,stdout=b'',stderr=diagnostic_tail(errors)+b'\n'+str(error).encode()),None)
         raise RehearsalCommandFailure({**diagnostic,'step':'business_validation'}) from None
     finally:
         process.stdout.close()

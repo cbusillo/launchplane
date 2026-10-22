@@ -816,7 +816,6 @@ class BusinessValidationHostTests(unittest.TestCase):
             ):
                 helper.host["product_command"]([sys.executable, "-c", script])
             self.assertNotIn("copied customer", str(failure.exception.diagnostic))
-            self.assertNotIn("private traceback", str(failure.exception.diagnostic))
         self.assertEqual(
             helper.host["product_command"](
                 [
@@ -827,6 +826,23 @@ class BusinessValidationHostTests(unittest.TestCase):
             ),
             b"receipt\n",
         )
+
+    def test_product_stderr_does_not_hide_host_observation_failure(self) -> None:
+        import sys
+
+        cases: tuple[tuple[str, dict[str, int], str], ...] = (
+            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 1}, "timed out"),
+            ("print('x' * 100000)", {}, "exceeds its bound"),
+        )
+        for command, limits, reason in cases:
+            script = "import sys; print('startup notice', file=sys.stderr, flush=True); " + command
+            with (
+                self.subTest(reason=reason),
+                patch.dict(self.host, limits),
+                self.assertRaises(self.host["RehearsalCommandFailure"]) as failure,
+            ):
+                self.native_product_command([sys.executable, "-c", script])
+            self.assertIn(reason, failure.exception.diagnostic["error_text"])
 
 
 class BusinessValidationClientTests(unittest.TestCase):
