@@ -53,17 +53,32 @@ _SECRET_LOG_KEY_PATTERN = (
     r"DATABASE_URL|CREDENTIAL|ARGS_BASE64|PAYLOAD_BASE64)[A-Z0-9_]*"
 )
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf"(?i)(\b{_SECRET_LOG_KEY_PATTERN}\s*[=:]\s*)([^\s,;]+)"
+    rf"(?i)(\b{_SECRET_LOG_KEY_PATTERN}[^\S\r\n]*[=:][^\S\r\n]*)([^\s,;]+)"
 )
 _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf'(?i)("?\b{_SECRET_LOG_KEY_PATTERN}"?\s*[=:]\s*)"[^"\r\n]*"'
+    rf'(?i)("?\b{_SECRET_LOG_KEY_PATTERN}"?[^\S\r\n]*[=:][^\S\r\n]*)"[^"\r\n]*"'
 )
 _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
+    rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?[^\S\r\n]*[=:][^\S\r\n]*)'[^'\r\n]*'"
 )
-_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
-_COOKIE_LOG_KEY_PATTERN = re.compile(r"""(?i)(?<![\w-])["']?(?:set-)?cookie["']?\s*[=:]\s*""")
-_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(r"""\s*(?:\+\s*|(?=["']))""")
+_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer[^\S\r\n]+)[A-Za-z0-9._~+/=-]+")
+_COOKIE_LOG_KEY_PATTERN = re.compile(r"""(?i)(?<![\w-])["']?(?:set-)?cookie["']?[ \t]*[=:][ \t]*""")
+_ESCAPED_COOKIE_LOG_KEY_PATTERN = re.compile(
+    r"""(?<![\w-])\\+["'](?:set-)?cookie\\+["'][ \t]*[=:][ \t]*""", re.IGNORECASE
+)
+_JSON_OR_ESCAPED_COOKIE_PATTERN = re.compile(
+    r'"(?:\\.|[^"\\\r\n])*"|(?P<key>' + _ESCAPED_COOKIE_LOG_KEY_PATTERN.pattern + r")[\s\S]*",
+    re.IGNORECASE,
+)
+_COOKIE_VALUE_CONTINUATION_PATTERN = re.compile(
+    r"[ \t]*(?:\+[ \t]*)?(?:\r?\n[ \t]*(?:[^\r\n|]*\|[ \t]*|"
+    r"\d{4}-\d{2}-\d{2}[T ][\d:.+-]+Z?[ \t]+)?)?"
+    r"""[ \t]*(?:\+[ \t]*)?(?=["'])"""
+)
+_LOG_NEWLINE_PATTERN = re.compile(r"[\r\n]")
+_INDENTED_LOG_VALUE_PATTERN = re.compile(r"\r?\n[ \t]+")
+_INDENTED_LOG_LINE_PATTERN = re.compile(r"\r?\n[ \t]+[^\r\n]*")
+_LOG_FIELD_DELIMITER_PATTERN = re.compile(r"[ \t]*[:=]")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
 )
@@ -534,8 +549,11 @@ def _cookie_value_end(text: str, start: int) -> int:
     if start >= len(text):
         return start
     if text[start] not in closing:
-        newline = re.search(r"[\r\n]", text[start:])
-        return start + newline.start() if newline else len(text)
+        newline = _LOG_NEWLINE_PATTERN.search(text, start)
+        end = newline.start() if newline else len(text)
+        while continuation := _INDENTED_LOG_LINE_PATTERN.match(text, end):
+            end = continuation.end()
+        return end
     stack = [closing[text[start]]]
     index = start + 1
     while index < len(text):
@@ -558,17 +576,37 @@ def _cookie_value_end(text: str, start: int) -> int:
     return len(text)
 
 
+def _redact_encoded_cookie_value(match: re.Match[str]) -> str:
+    if key := match["key"]:
+        return f"{key}[redacted]"
+    raw_value = match[0]
+    if "\\" not in raw_value:
+        return raw_value
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return '"[redacted]"' if _ESCAPED_COOKIE_LOG_KEY_PATTERN.search(raw_value) else raw_value
+    redacted = _redact_cookie_values(decoded)
+    return json.dumps(redacted) if redacted != decoded else raw_value
+
+
 def _redact_cookie_values(text: str) -> str:
+    text = _JSON_OR_ESCAPED_COOKIE_PATTERN.sub(_redact_encoded_cookie_value, text)
     parts: list[str] = []
     cursor = 0
     for match in _COOKIE_LOG_KEY_PATTERN.finditer(text):
         if match.start() < cursor:
             continue
         start = match.end()
+        if indented_value := _INDENTED_LOG_VALUE_PATTERN.match(text, start):
+            start = indented_value.end()
         end = _cookie_value_end(text, start)
         if text[start : start + 1] in {'"', "'"}:
             while continuation := _COOKIE_VALUE_CONTINUATION_PATTERN.match(text, end):
-                end = _cookie_value_end(text, continuation.end())
+                continued_end = _cookie_value_end(text, continuation.end())
+                if _LOG_FIELD_DELIMITER_PATTERN.match(text, continued_end):
+                    break
+                end = continued_end
         quote = text[start : start + 1]
         if quote not in {'"', "'"} or text[end - 1 : end] != quote:
             quote = ""

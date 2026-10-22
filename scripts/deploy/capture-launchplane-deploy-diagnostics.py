@@ -152,10 +152,9 @@ def _print_container_logs(
         path="/api/compose.readLogs",
         query={"composeId": target_id, "containerId": container_id, "tail": 300, "since": "1h"},
     )
-    log_text = log_payload if isinstance(log_payload, str) else json.dumps(log_payload)
     print(f"--- Dokploy logs for {container.get('name')} ({container_id}) ---")
-    for line in log_text.splitlines()[-120:]:
-        print(_redact_text(line)[:1200])
+    for line in control_plane_dokploy.normalize_dokploy_log_payload(log_payload)[-120:]:
+        print(line[:1200])
 
 
 def main() -> int:

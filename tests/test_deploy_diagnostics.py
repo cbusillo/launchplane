@@ -96,7 +96,10 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                     },
                 }
             if path == "/api/compose.readLogs":
-                return "started\nLAUNCHPLANE_DATABASE_URL=postgresql://secret\n"
+                return (
+                    "started\nCookie: [\n'session_id=made-up-cookie',\n'other=made-up-other']\n"
+                    "LAUNCHPLANE_DATABASE_URL=postgresql://secret\n"
+                )
             raise AssertionError(f"Unexpected path: {path}")
 
         output = io.StringIO()
@@ -130,6 +133,7 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
         self.assertIn('"has_dokploy_network": true', output.getvalue())
         self.assertIn("LAUNCHPLANE_DATABASE_URL=[redacted]", output.getvalue())
         self.assertNotIn("postgresql://secret", output.getvalue())
+        self.assertNotIn("made-up-", output.getvalue())
         self.assertEqual(requests[-1]["path"], "/api/compose.readLogs")
         self.assertEqual(
             requests[-1]["query"],

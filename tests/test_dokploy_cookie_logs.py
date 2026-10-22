@@ -1,3 +1,4 @@
+import json
 import unittest
 from pprint import pformat
 from unittest.mock import patch
@@ -21,7 +22,51 @@ class DokployCookieLogTests(unittest.TestCase):
                     self.assertNotIn("made-up-", redacted)
                     self.assertIn("'status': 502", redacted)
                     self.assertIn("retry scheduled", redacted)
-                    self.assertIn("[redacted]", redacted)
+
+    def test_folded_headers_and_yaml_cookie_lists_redact_indented_continuations(self) -> None:
+        for text in (
+            "Set-Cookie:\n  - sid=made-up-one\n  - other=made-up-two\nstatus=502",
+            "Cookie: sid=made-up-one;\n  other=made-up-two\nstatus=502",
+        ):
+            with self.subTest(text=text):
+                redacted = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", redacted)
+                self.assertIn("status=502", redacted)
+
+    def test_prefixed_quoted_cookie_continuations_redact_transport_prefixes(self) -> None:
+        for prefix in ("web-1 | ", "2026-10-22T01:00:00Z "):
+            for operator in ("+", ""):
+                with self.subTest(prefix=prefix, operator=operator):
+                    text = (
+                        f"{prefix}Cookie: 'sid=made-up-one' {operator}\n"
+                        f"{prefix}  'other=made-up-two'\n{prefix}status=502"
+                    )
+                    redacted = api.redact_dokploy_log_line(text)
+                    self.assertNotIn("made-up-", redacted)
+                    self.assertIn("status=502", redacted)
+
+    def test_cookie_keys_in_encoded_json_errors_redact_without_losing_diagnostics(self) -> None:
+        text = json.dumps(
+            {"message": json.dumps({"headers": {"set-cookie": ["sid=made-up-one"]}, "status": 502})}
+        )
+        for body in (text, json.dumps({"error": text}), text[:-10]):
+            with self.subTest(body=body):
+                redacted = api.redact_dokploy_log_line(body)
+                self.assertNotIn("made-up-", redacted)
+                self.assertIn("message", redacted)
+        self.assertIn("502", api.redact_dokploy_log_line(text))
+
+    def test_incomplete_keys_and_new_quoted_fields_preserve_diagnostics(self) -> None:
+        for text in (
+            "Missing cookie:\nretry scheduled",
+            "Missing TOKEN:\nretry scheduled",
+            "Missing Bearer\nretry scheduled",
+            'Cookie: "sid=made-up-one"\n"status": 502',
+        ):
+            with self.subTest(text=text):
+                redacted = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", redacted)
+                self.assertIn(text.splitlines()[-1], redacted)
 
     def test_truncated_cookie_containers_and_strings_fail_closed(self) -> None:
         for value in (

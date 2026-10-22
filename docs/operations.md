@@ -2826,7 +2826,8 @@ Conventional onboarding creates new products only.
 - Cookie and Set-Cookie values are redacted across each complete returned batch
   or provider-error body before local tailing, filtering, or error truncation.
   Quoted values, nested containers and string concatenations retain context
-  across lines; incomplete values suppress the rest of the available value.
+  across lines; unclosed quoted values or containers suppress the rest of the
+  available batch or error body, including later diagnostics and result markers.
   Adjacent diagnostics survive completed values. Continuations whose opener
   the provider already omitted cannot be identified as cookie values.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
