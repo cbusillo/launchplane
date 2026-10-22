@@ -236,6 +236,24 @@ refuse a Director read without a matching rule. Report that as a tool defect.
 
 ## Disposable-lane engineering
 
+The native Odoo testing rebuild also accepts the authenticated Director's existing
+`local_operator` transport without a DB action grant. Only an active Odoo product's
+exclusively owned `testing` lane and `replace-and-cutover` lifecycle qualify.
+The general `odoo_target_replacement_apply.execute` action still requires its
+existing policy on ordinary replacement, production and other callers.
+The queue records `director_testing_rebuild` as source-owned provenance, with
+the original agent subject and token label, no credential value or policy
+rule. Other durable workers refuse that provenance. At each native worker
+checkpoint the configured agent must still exist and match the original
+caller, and the product/lane ownership must still qualify. A missing worker
+bootstrap identity fails closed. Current holds/use, retained-copy custody,
+independent resources, local credentials and health-before-cutover checks
+remain in the native lifecycle; standing authority supplies none of those facts.
+The original authenticated caller can resume its held request or cancel it before
+effects under the same standing scope. Existing held-effect cancellation fences
+remain authoritative. The operation's provenance audits these source-authorized
+admissions rather than a matching DB action-rule decision.
+
 The authenticated Director-agent marker also identifies ordinary disposable-lane
 work under the overall direction. `POST /v1/live-target-runtime/apply` retains
 the existing context-scoped policy check for existing callers, including

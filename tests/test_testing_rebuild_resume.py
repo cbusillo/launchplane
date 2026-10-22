@@ -135,6 +135,64 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assert_original_fences()
 
+    async def test_director_operator_resumes_its_original_standing_rebuild_without_a_rule(
+        self,
+    ) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            configured_local_operator_identity,
+        )
+        from control_plane.testing_rebuild_authorization import (
+            capture_director_testing_rebuild_authorization,
+        )
+        from tests.http_app_test_support import _RejectingVerifier
+        from tests.support.http import request
+
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-operator",
+            local_operator_subject="fixture-director",
+            local_operator_token_label="fixture-token",
+        )
+        identity = configured_local_operator_identity(config)
+        assert identity is not None
+        authorization = capture_director_testing_rebuild_authorization(
+            identity=identity,
+            request=self.held.request,
+            context=self.held.context,
+            store=self.store,
+            authorized_at=self.held.created_at,
+        )
+        self.held = self.held.model_copy(update={"authorization": authorization})
+        self.store.write_odoo_stable_target_replacement_operation_record(self.held)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.http.policy,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.worker.root,
+            bearer_identity_config=config,
+        )
+        response = await request(
+            app,
+            "POST",
+            self.path,
+            headers={
+                "Authorization": "Bearer fixture-operator",
+                "Idempotency-Key": self.held.idempotency_key,
+            },
+            payload=self.payload,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        resumed = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.held.operation_id
+        )
+        self.assertEqual(resumed.status, "pending")
+        assert resumed.authorization is not None and self.held.authorization is not None
+        self.assertEqual(resumed.authorization.caller, self.held.authorization.caller)
+        self.assertEqual(resumed.authorization.grant, self.held.authorization.grant)
+        self.assertEqual(resumed.request, self.held.request)
+        self.assert_original_fences()
+
     async def test_repeating_the_same_resume_does_not_requeue_again(self) -> None:
         first = await self.resume()
         self.assertTrue(first.is_success, first.text)
