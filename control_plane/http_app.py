@@ -2166,6 +2166,16 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
             _secret_config_requirement_key(removal)
             for removal in self.remove_managed_secret_bindings
         ]
+        secret_additions = [
+            _secret_config_requirement_key(requirement)
+            for requirement in self.managed_secret_bindings
+        ]
+        if any(
+            "external_provider" in requirement.model_fields_set
+            and secret_additions.count(_secret_config_requirement_key(requirement)) > 1
+            for requirement in self.managed_secret_bindings
+        ):
+            raise ValueError("External provider declarations must be unique.")
         if len(runtime_removals) != len(set(runtime_removals)) or len(secret_removals) != len(
             set(secret_removals)
         ):
@@ -2297,6 +2307,7 @@ def _merge_product_expected_config(
     added_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     unchanged_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     added_secret_requirements: list[ProductSecretConfigRequirement] = []
+    updated_secret_requirements: list[ProductSecretConfigRequirement] = []
     unchanged_secret_requirements: list[ProductSecretConfigRequirement] = []
 
     for runtime_requirement in request.runtime_environment_keys:
@@ -2311,6 +2322,29 @@ def _merge_product_expected_config(
     for secret_requirement in request.managed_secret_bindings:
         secret_key = _secret_config_requirement_key(secret_requirement)
         if secret_key in existing_secret_keys:
+            if "external_provider" in secret_requirement.model_fields_set:
+                index = next(
+                    index
+                    for index, existing in enumerate(secret_requirements)
+                    if _secret_config_requirement_key(existing) == secret_key
+                )
+                existing = secret_requirements[index]
+                changes: dict[str, object] = {
+                    "external_provider": secret_requirement.external_provider
+                }
+                if "testing_local_credential" in secret_requirement.model_fields_set:
+                    changes["testing_local_credential"] = (
+                        secret_requirement.testing_local_credential
+                    )
+                replacement = ProductSecretConfigRequirement.model_validate(
+                    {**existing.model_dump(mode="json"), **changes}
+                )
+                if replacement != existing:
+                    secret_requirements[index] = replacement
+                    updated_secret_requirements.append(replacement)
+                    continue
+                unchanged_secret_requirements.append(existing)
+                continue
             unchanged_secret_requirements.append(secret_requirement)
             continue
         existing_secret_keys.add(secret_key)
@@ -2320,6 +2354,7 @@ def _merge_product_expected_config(
     changed = bool(
         added_runtime_requirements
         or added_secret_requirements
+        or updated_secret_requirements
         or removed_runtime_requirements
         or removed_secret_requirements
     )
@@ -2334,6 +2369,9 @@ def _merge_product_expected_config(
                 "updated_at": updated_at,
                 "source": request.source_label,
             }
+        )
+        merged_profile = LaunchplaneProductProfileRecord.model_validate(
+            merged_profile.model_dump(mode="json")
         )
 
     runtime_result: dict[str, object] = {
@@ -2356,6 +2394,14 @@ def _merge_product_expected_config(
         "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
         "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
     }
+    if any(
+        "external_provider" in requirement.model_fields_set
+        for requirement in request.managed_secret_bindings
+    ):
+        secret_result["updated"] = [
+            requirement.model_dump(mode="json") for requirement in updated_secret_requirements
+        ]
+        summary["managed_secret_binding_update_count"] = len(updated_secret_requirements)
     # Add-only responses keep their original shape for callers that validate it
     # strictly; removal dispositions appear only when the request asked for them.
     if request.requests_removal:
@@ -13830,18 +13876,24 @@ def create_launchplane_fastapi_app(
             and not expected_config_request.requests_removal
             and not any(
                 requirement.owner_input is not None
+                or (
+                    "external_provider" in requirement.model_fields_set
+                    and (
+                        requirement.external_provider is None
+                        or requirement.testing_local_credential
+                    )
+                )
                 for requirement in expected_config_request.managed_secret_bindings
             )
         )
-        if (
-            not director_declaration
-            and not resolved_authz_policy_runtime.allows(
+
+        def policy_authorized() -> bool:
+            return resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.expected_config.apply",
                 product=expected_config_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            )
-            and not (
+            ) or (
                 expected_config_request.mode != "apply"
                 and resolved_authz_policy_runtime.allows(
                     identity=identity,
@@ -13850,7 +13902,8 @@ def create_launchplane_fastapi_app(
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 )
             )
-        ):
+
+        if not director_declaration and not policy_authorized():
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -13891,21 +13944,6 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        if (
-            expected_config_request.mode == "apply"
-            and isinstance(identity, LocalOperatorIdentity)
-            and profile.production_use == "live"
-            and not director_declaration
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="live_product_requires_operator",
-                message=(
-                    "A live product's expected configuration requires an admin for "
-                    "scoped agents, removals, or Client credential requests."
-                ),
-            )
         secret_bindings: tuple[SecretBinding, ...] = ()
         if expected_config_request.remove_managed_secret_bindings:
             list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
@@ -13929,12 +13967,61 @@ def create_launchplane_fastapi_app(
                 )
                 for binding in list_secret_bindings(integration=integration, limit=None)
             )
-        merged_profile, result = _merge_product_expected_config(
-            profile=profile,
-            request=expected_config_request,
-            updated_at=utc_now_timestamp(),
-            secret_bindings=secret_bindings,
-        )
+        try:
+            merged_profile, result = _merge_product_expected_config(
+                profile=profile,
+                request=expected_config_request,
+                updated_at=utc_now_timestamp(),
+                secret_bindings=secret_bindings,
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="The declaration conflicts with existing requirement metadata.",
+            ) from error
+        if director_declaration and any(
+            "external_provider" in requirement.model_fields_set
+            for requirement in expected_config_request.managed_secret_bindings
+        ):
+            from control_plane.testing_local_credentials import local_credential_keys
+
+            director_declaration = not any(
+                existing.testing_local_credential
+                and not replacement.testing_local_credential
+                and _secret_config_requirement_key(existing)
+                == _secret_config_requirement_key(replacement)
+                for existing in profile.expected_config.managed_secret_bindings
+                for replacement in merged_profile.expected_config.managed_secret_bindings
+            ) and all(
+                local_credential_keys(profile, lane.context)
+                <= local_credential_keys(merged_profile, lane.context)
+                for lane in profile.lanes
+                if lane.instance == "testing"
+            )
+        if not director_declaration and not policy_authorized():
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot retire product expected config metadata.",
+            )
+        if (
+            expected_config_request.mode == "apply"
+            and isinstance(identity, LocalOperatorIdentity)
+            and profile.production_use == "live"
+            and not director_declaration
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message=(
+                    "A live product's expected configuration requires an admin for "
+                    "scoped agents, removals, or Client credential requests."
+                ),
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},

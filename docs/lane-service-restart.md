@@ -19,16 +19,19 @@ explicit product, context and instance; no access rule is installed.
 
 The service-authenticated Director `local_operator` can also restart an eligible
 testing service under standing direction without a write grant. Immediately
-before the restart checkpoint, under the release lane reservation, it must pass
-the existing [disposable-lane qualification](disposable-lanes.md): current bound
-reproducible and production-isolated evidence, protected-use checks, no staff-testing hold,
-and no target alias. This qualification applies even with an explicit grant.
-Inspect or collect current evidence through `/v1/disposable-lanes/observations`
-before a fresh apply; missing or expired resource/custody evidence returns
-`disposable_lane_safety_unknown`. Completed replay and
+before the restart checkpoint, under the release lane reservation, it checks
+[disposable-lane protections](disposable-lanes.md). Starting its own stopped
+container preserves the image, configuration and volumes, so no fresh collection
+or positive data-custody/isolation proof is required. Staff-testing holds,
+protected use, target aliases and recorded production sharing still block. A
+running service keeps the full current disposable qualification. These checks
+apply to the Director's testing restart even with an explicit grant; other
+callers and production keep their existing policy checks. Resolve holds through
+the testing-hold action and protective observations through
+`/v1/disposable-lanes/observations` before apply. Reset, rebuild, retirement and
+target changes keep their own data and isolation gates. Completed replay and
 original-request reconciliation remain observational when that eligibility
-changes. Production and other scoped callers keep their policy checks;
-terminal-agent credentials cannot restart a service.
+changes. Terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
 passing deployment named by its environment inventory, with an agreeing runtime
@@ -37,7 +40,7 @@ each is a completed failed deploy with a recognized pre-provider-write `deploy_b
 code, no attempted post-deploy work and no uncertain provider outcome. Attempts
 started or finished since the current deployment began are checked regardless
 of their position in history. Newer unfinished attempts, successes, unclassified
-failures and uncertain effects refuse recovery. The same selection is checked during
+failures and uncertain effects refuse recovery and name the blocking deployment record. The same selection is checked during
 apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
 and source commit. The same requirements apply to generic-web Compose lanes.
 Historical rows may omit a start or finish time: their latest available timestamp
@@ -74,8 +77,7 @@ Inspection and verification accept that same database after it starts;
 fresh dispatch requires it still stopped. Production and generic-web database
 dependencies are refused.
 
-For a stopped Odoo testing lane, collect fresh disposable-lane evidence, then
-inspect, apply and read back `database`, `web`, and `script-runner` in that order.
+For a stopped Odoo testing lane, inspect, apply and read back `database`, `web`, and `script-runner` in that order.
 Use a separate review file and idempotency key per service. Web's HTTP identity
 verification proves the recovered application on its recorded artifact.
 A web restart alone does not start its Compose dependencies. This action never
