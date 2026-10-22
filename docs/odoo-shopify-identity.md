@@ -34,8 +34,8 @@ private input. The token travels on stdin, never Docker arguments, environment,
 files or result output. The probe uses HTTPS, refuses redirects and proxy
 inheritance, bounds the response and uses no retry. It returns only the shop-ID
 and canonical-domain hashes. Testing's returned domain must agree with its requested store. Both shop IDs
-and domains must differ before separation is proved. Runtime, container, settings, hold and credential authority changes discard
-the evidence. The hold, provider environment, Odoo database settings and dispatcher
+and domains must differ before separation is proved. Runtime, container, settings,
+hold and credential authority changes discard the evidence. The hold, provider environment, Odoo database settings and dispatcher
 remain unchanged.
 
 After deploying this source, from a checkout containing the matching caller:
@@ -47,7 +47,9 @@ uv run python scripts/read-shopify-identity.py \
 ```
 
 The caller reuses the installed admin transport and private configuration.
-It prints the trace and strictly validated hash-only result. Exit zero requires
+It prints the trace and strictly validated hash-only result. The caller waits up
+to 60 seconds. Sequential server probes and provider reads can outlast that
+budget; a timeout is unavailable comparison evidence and never authorizes a retry. Exit zero requires
 `separation=separate` with complete verified evidence. `same`, `unknown`,
 `token_rejected`, HTTP refusal and malformed replies exit nonzero. Stop there;
 retain the trace. An unavailable production runtime needs supported runtime

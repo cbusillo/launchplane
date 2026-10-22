@@ -275,9 +275,8 @@ class ShopifyComparisonTests(unittest.TestCase):
         )
         self.assertFalse(result.applied)
         self.assertNotIn("fixture-secret", result.model_dump_json())
-        self.assertEqual(
-            self.store.read_dokploy_target_record.return_value.policies.staff_testing_hold.purpose,
-            "isolation_staging",
+        self.assertFalse(
+            [name for name, _, _ in self.store.mock_calls if name.startswith("write_")]
         )
         reads_seen = self.calls[-1].call_args_list
         testing_index = next(
@@ -298,15 +297,6 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.observation = observation
                 self.assertNotEqual(self.run_comparison().separation, "separate")
 
-    def test_staff_hold_missing_production_or_foreign_target_prevents_probe(self) -> None:
-        self.store.read_dokploy_target_record.return_value = self.target.model_copy(
-            update={
-                "policies": self.target.policies.model_copy(update={"staff_testing_hold": None})
-            }
-        )
-        self.assertEqual(self.run_comparison().separation, "unknown")
-        self.calls[-1].assert_not_called()
-
     def test_same_shop_id_under_different_domains_never_proves_separation(self) -> None:
         self.observation["shop_id_sha256"] = self.comparison.digest("gid://shopify/Shop/456")
         self.assertNotEqual(self.run_comparison().separation, "separate")
@@ -325,13 +315,6 @@ class ShopifyComparisonTests(unittest.TestCase):
         self.calls[-1].side_effect = observe
         self.assertEqual(self.run_comparison().separation, "unknown")
 
-    def test_foreign_or_production_classified_secret_prevents_decryption(self) -> None:
-        self.bindings["api_token"] = self.bindings["api_token"].model_copy(
-            update={"declared_secret_class": "prod_only"}
-        )
-        self.assertEqual(self.run_comparison().separation, "unknown")
-        self.calls[-2].assert_not_called()
-
     def test_unsafe_recipient_or_credential_authority_never_decrypts_or_probes(self) -> None:
         original_bindings = dict(self.bindings)
         original_record_read = self.store.read_secret_record.side_effect
@@ -342,6 +325,8 @@ class ShopifyComparisonTests(unittest.TestCase):
             "credential_shared",
             "missing_allowance",
             "staff_hold",
+            "missing_hold",
+            "production_class",
             "missing_production",
             "record_context",
             "record_scope",
@@ -368,6 +353,18 @@ class ShopifyComparisonTests(unittest.TestCase):
                             "binding_id": "foreign",
                             "instance": "prod",
                             "declared_secret_class": "prod_only",
+                        }
+                    )
+                elif kind == "production_class":
+                    self.bindings["api_token"] = self.bindings["api_token"].model_copy(
+                        update={"declared_secret_class": "prod_only"}
+                    )
+                elif kind == "missing_hold":
+                    self.store.read_dokploy_target_record.return_value = self.target.model_copy(
+                        update={
+                            "policies": self.target.policies.model_copy(
+                                update={"staff_testing_hold": None}
+                            )
                         }
                     )
                 elif kind in {"missing_allowance", "staff_hold"}:
