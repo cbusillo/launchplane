@@ -1253,6 +1253,7 @@ unrelated optional workflows cannot change its classification:
   before contextual Client readiness, batch caps or area grouping. Each trial
   defers every other policy-eligible root, including unready Client and engineering
   heads, then applies current Ready, Client and readiness checks to its sole root.
+  Failed-probe reflow validates its existing holds against the same policy queue.
   Ineligible and manually held heads stay excluded. Full stack topology remains
   available for discovery or the exact recorded collapse proof.
   Base-conflict and dependency holds retain their current head/base lifetimes;

@@ -5009,6 +5009,11 @@ def try_reflow_failed_merge_train_candidate(
         held_out=active_candidate_record.candidate.held_out,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
         isolating_entries=active_candidate_record.candidate.entries,
+        queue=build_merge_train_queue_entries(
+            policy=policy,
+            snapshot=snapshot,
+            batch_landing=active_candidate_record.ordinary_job_binding is None,
+        ),
     )
     queue_snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(

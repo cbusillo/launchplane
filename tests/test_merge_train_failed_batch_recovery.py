@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -352,7 +352,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         update={
                             "number": 3,
                             "head_sha": "manual-head",
-                            "labels": (*waiting.labels, "merge-blocked"),
+                            "labels": (*waiting.labels, self.policy.policies[0].blocked_label),
                         }
                     ),
                     waiting.model_copy(
@@ -390,12 +390,13 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 ):
                     self._prepare()
                     first, repair = self.snapshot.pull_requests
+                    created = datetime.fromisoformat(first.created_at.replace("Z", "+00:00"))
                     client = first.model_copy(
                         update={
                             "number": 3,
                             "head_sha": "unready-client-head",
                             "head_ref": "feature/unready-client",
-                            "created_at": "2026-05-01T00:00:00Z",
+                            "created_at": (created + timedelta(minutes=1)).isoformat(),
                             "owner_review_required": True,
                             "required_checks_status": client_checks,
                         }
@@ -407,11 +408,20 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                             "labels": (*client.labels, self.policy.policies[0].blocked_label),
                         }
                     )
+                    innocent = repair.model_copy(
+                        update={
+                            "number": 5,
+                            "head_sha": "innocent-head",
+                            "head_ref": "feature/innocent",
+                            "created_at": (created + timedelta(minutes=2)).isoformat(),
+                        }
+                    )
                     self.snapshot = self.snapshot.model_copy(
                         update={
                             "pull_requests": (
                                 first.model_copy(update={"owner_review_required": True}),
                                 client,
+                                innocent,
                                 repair,
                                 manual,
                             )
@@ -425,34 +435,54 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         }
                     )
                     store = FilesystemRecordStore(state_dir=Path(directory))
-                    first_result = self._reflow(store, self.candidate, base_status="fail")
+                    failed = build_merge_train_batch_candidate(
+                        dry_run_result=build_merge_train_dry_run_result(
+                            policy=self.policy,
+                            snapshot=self.snapshot,
+                            batch_landing=True,
+                            existing_candidate_size=len(self.snapshot.pull_requests),
+                        ),
+                        base_sha=self.snapshot.base_sha,
+                        policy_sha256=self.candidate.policy_sha256,
+                        created_at=self.candidate.created_at,
+                    ).model_copy(
+                        update={
+                            "candidate_sha": "failed-current-group",
+                            "status": "failed",
+                            "required_checks_status": "fail",
+                        }
+                    )
+                    first_result = self._reflow(store, failed, base_status="fail")
                     first_probe = MergeTrainBatchCandidate.model_validate(first_result["candidate"])
                     self.assertEqual(
                         [entry.pull_request_number for entry in first_probe.entries], [first.number]
                     )
-                    result = self._reflow(
-                        store,
-                        first_probe.model_copy(
-                            update={
-                                "candidate_sha": "failed-first-probe",
-                                "status": "failed",
-                                "required_checks_status": "fail",
-                            }
-                        ),
-                        base_status="fail",
-                    )
-                    self.assertEqual(result["controller_action"], "plan_candidate")
-                    singleton = MergeTrainBatchCandidate.model_validate(result["candidate"])
-                    self.assertEqual(
-                        [entry.pull_request_number for entry in singleton.entries], [repair.number]
-                    )
-                    events = {
-                        row["pull_request_number"]: row["event"]
-                        for row in build_feedback_payloads(response={"result": result})
-                    }
-                    self.assertEqual(events[client.number], "waiting")
-                    self.assertNotIn(manual.number, events)
-                    self.reflow_client.add_pull_request_label.assert_not_called()
+                    probe = first_probe
+                    for expected in (innocent, repair):
+                        result = self._reflow(
+                            FilesystemRecordStore(state_dir=Path(directory)),
+                            probe.model_copy(
+                                update={
+                                    "candidate_sha": f"failed-probe-{probe.entries[0].pull_request_number}",
+                                    "status": "failed",
+                                    "required_checks_status": "fail",
+                                }
+                            ),
+                            base_status="fail",
+                        )
+                        self.assertEqual(result["controller_action"], "plan_candidate")
+                        probe = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                        self.assertEqual(
+                            [entry.pull_request_number for entry in probe.entries],
+                            [expected.number],
+                        )
+                        events = {
+                            row["pull_request_number"]: row["event"]
+                            for row in build_feedback_payloads(response={"result": result})
+                        }
+                        self.assertEqual(events[client.number], "waiting")
+                        self.assertNotIn(manual.number, events)
+                        self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_base_exploration_preserves_a_contextually_hidden_base_conflict(self) -> None:
         first, repair = self.snapshot.pull_requests
@@ -1047,7 +1077,14 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_base_exploration_observes_passing_rerun_of_a_deferred_singleton(self) -> None:
-        for peer in ("none", "engineering", "pending_client", "failed_client"):
+        for peer in (
+            "none",
+            "engineering",
+            "pending_client",
+            "failed_client",
+            "explored_pending_client",
+            "explored_failed_client",
+        ):
             with self.subTest(peer=peer):
                 self._prepare()
                 if peer != "none":
@@ -1134,9 +1171,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                                 "head_sha": "pending-peer-head",
                                 "head_ref": "feature/pending-peer",
                                 "created_at": (earlier + (later - earlier) / 2).isoformat(),
-                                "required_checks_status": "fail"
-                                if peer == "failed_client"
-                                else "pending",
+                                "required_checks_status": "fail" if "failed" in peer else "pending",
                                 "owner_review_required": peer.endswith("client"),
                             }
                         )
@@ -1152,6 +1187,24 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                             update={
                                 "pull_requests": (*self.snapshot.pull_requests, pending, manual),
                             }
+                        )
+                    held_roots = {entry.pull_request_number for entry in current.entries}
+                    if peer.startswith("explored_"):
+                        current = prior.model_copy(
+                            update={
+                                "held_out": tuple(
+                                    MergeTrainBatchHeldOutEntry(
+                                        pull_request_number=pull.number,
+                                        head_sha=pull.head_sha,
+                                        reason="failure_isolation",
+                                        probe_base_sha=prior.base_sha,
+                                    )
+                                    for pull in (self.snapshot.pull_requests[1], pending)
+                                )
+                            }
+                        )
+                        parent = build_merge_train_batch_candidate_record(
+                            candidate=current, source="test", updated_at=prior.created_at
                         )
                     self.provider = _RerunProvider(prior)
                     self.provider.created = True
@@ -1234,8 +1287,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         held_numbers = {entry.pull_request_number for entry in retry.held_out}
                         self.assertEqual(
                             held_numbers,
-                            {entry.pull_request_number for entry in current.entries}
-                            | ({pending.number} if peer != "none" else set()),
+                            held_roots | ({pending.number} if peer != "none" else set()),
                         )
                         recovered_messages = {
                             payload["pull_request_number"]: payload["message"]
