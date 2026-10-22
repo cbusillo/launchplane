@@ -117,6 +117,17 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+The expected-config declaration path remains additive for the authenticated
+Director agent. It may add a positive external-provider purpose to an existing
+nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
+or retiring existing generation intent, or adding a provider declaration that
+shadows a local key requires the existing `product_profile.expected_config.apply`
+authority; a live product also retains its admin boundary. Inert planning retains
+its existing read/plan permission. Completed exact-key receipts replay before
+current-state retirement checks, while a new write compares the same captured
+profile that passed those checks. Odoo's driver-owned local passwords cannot
+be declared external through any profile input path. No grant is added here.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials retain their read-only transport boundary.
@@ -127,6 +138,30 @@ that action on the exact testing lane. Mutation authentication and browser CSRF,
 reviewed digests, original-key replay, generation and custody fences, staff
 holds, active/unknown-operation refusal and the worker's safety checks remain
 in force. See [testing retry](testing-deploy-retry.md).
+
+The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
+also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
+Generic-web deploy recovery dry runs authorize the instance-scoped
+`generic_web_deploy_recovery.plan` action, with the existing execute grant as a
+compatibility alternative. The authenticated Director agent inherits this inert
+plan permission. Both the current lane and the stored original lane must pass
+authorization; exact request, reference, reservation and target checks remain.
+Apply retains `generic_web_deploy.execute` for production, foreign originals and
+other identities. The authenticated service-marked Director `local_operator`
+may instead recover its own exact native testing original on the current owned
+lane. The stored caller scope, original route, key, fingerprint, product,
+context and captured target must agree; a current target or caller ownership
+claim alone cannot establish ownership. This route-local alternative does not
+classify the mixed execute action as standing permission.
+Adoption, terminal settlement and completed replay retain their existing proof
+requirements without renewed disposable qualification. New forward retry work
+requires fresh disposable-lane facts and rechecks them at effect admission;
+person use, only-copy data, production sharing and missing evidence refuse with
+`testing_deploy_safety_unknown`. Collect the named factual prerequisites through
+the supported disposable-lane observations route rather than requesting access.
+An unknown provider outcome still holds the original fence; planning never
+settles, retries or releases it.
 
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof

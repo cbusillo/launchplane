@@ -21,6 +21,10 @@ from control_plane.storage.delivery_evidence import (
     source_changed,
 )
 
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceSnapshot,
+    generic_web_source_target_key,
+)
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -243,7 +247,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
@@ -1104,11 +1111,19 @@ class FilesystemRecordStore:
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> Path:
-        return self._write_model(
-            "launchplane_runner_lane_registration_audits",
-            _runner_audit_record_id(record.audit_record_key),
-            record,
-        )
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        record_type = "launchplane_runner_lane_registration_audits"
+        record_id = _runner_audit_record_id(record.audit_record_key)
+        with self._product_authority_bundle_lock():
+            try:
+                existing = self._read_model_locked(
+                    RunnerLaneRegistrationAuditRecord, record_type, record_id
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                validate_runner_lane_registration_audit_identity(existing, record)
+            return self._write_model_locked(record_type, record_id, record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
@@ -4777,6 +4792,33 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        with self._product_authority_bundle_lock():
+            profile = self._read_product_profile_record_path(
+                self._record_path("launchplane_product_profiles", product)
+            )
+            inventory = self._read_model_locked(
+                EnvironmentInventory, "inventory", f"{context_name}-{instance_name}"
+            )
+            deployment = self._read_model_locked(
+                DeploymentRecord, "deployments", inventory.deployment_record_id
+            )
+            target = self._read_model_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+                _context_instance_record_id(context_name, instance_name),
+            )
+            target_key = generic_web_source_target_key(target, deployment.deploy.target_type)
+            held = tuple(
+                record
+                for record in self._list_models_locked(LaunchplaneIdempotencyRecord, "idempotency")
+                if record.state in {"running", "reconcile_required"}
+                and record.provider_target_key == target_key
+            )
+            return GenericWebSourceSnapshot(profile, inventory, deployment, target, held)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         with self._product_authority_bundle_lock():

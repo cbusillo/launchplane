@@ -11,6 +11,7 @@ from control_plane.odoo_testing_restore import (
     require_distinct_testing_credentials,
 )
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite, read_walkthrough_prerequisites
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.product_path_check import ActionAllowed, PathCheckStep
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
@@ -161,7 +162,18 @@ def read_testing_prerequisites(
                         description=(
                             "This prerequisite passed."
                             if state == "clear"
-                            else _WALKTHROUGH_DESCRIPTIONS[code]
+                            else (
+                                "Physical-copy predicate "
+                                + code.value
+                                + (
+                                    " was not satisfied."
+                                    if state == "blocked"
+                                    else " could not be observed."
+                                )
+                                + " Preserve the original copy and inspect the selected runtime."
+                                if isinstance(code, ReadbackPredicate)
+                                else _WALKTHROUGH_DESCRIPTIONS[code]
+                            )
                         ),
                         fix="none"
                         if state == "clear"

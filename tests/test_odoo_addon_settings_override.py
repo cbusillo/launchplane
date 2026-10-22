@@ -33,6 +33,8 @@ from control_plane.odoo_addon_settings_override import (
 from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
+    build_post_deploy_environment,
+    shopify_store_key_is_protected,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -64,6 +66,12 @@ def _seed_lane(
     write_target: bool = True,
     integration: str = "runtime_environment",
 ) -> None:
+    try:
+        store.read_product_profile_record(_PRODUCT)
+    except FileNotFoundError:
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane())
+        )
     if write_target:
         store.write_dokploy_target_record(
             DokployTargetRecord(
@@ -157,6 +165,169 @@ def _request(**kwargs: object) -> OdooAddonSettingsApplyRequest:
 
 
 class OdooAddonSettingsPlanTests(unittest.TestCase):
+    def test_apply_refuses_production_store_with_padded_stored_lane_names(self) -> None:
+        for instance, padding in (
+            ("testing", {"context": " CM\t"}),
+            ("testing", {"instance": " testing\n"}),
+            ("prod", {"context": " CM\t"}),
+            ("prod", {"instance": " prod\n"}),
+        ):
+            with (
+                self.subTest(instance=instance, padding=padding),
+                TemporaryDirectory() as directory,
+            ):
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                _seed_lane(store, protected_keys=())
+                profile = store.read_product_profile_record(_PRODUCT)
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane.model_copy(update=padding)
+                                if lane.instance == instance
+                                else lane
+                                for lane in profile.lanes
+                            )
+                        }
+                    )
+                )
+                plan, _, replacement = build_odoo_addon_settings_plan(
+                    record_store=store, request=_request()
+                )
+                production = _existing_record("prod").model_copy(
+                    update={
+                        "addon_settings": tuple(
+                            setting
+                            for setting in replacement.addon_settings
+                            if setting.setting == "shop_url_key"
+                        )
+                    }
+                )
+                store.write_odoo_instance_override_record(production)
+                with self.assertRaises(ClickException):
+                    build_post_deploy_environment(replacement, record_store=store)
+                with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                    apply_odoo_addon_settings_plan(
+                        record_store=store,
+                        request=_request(mode="apply", reviewed_plan_sha256=plan.plan_sha256),
+                    )
+                self.assertEqual(raised.exception.code, "protected_store_key")
+                with self.assertRaises(FileNotFoundError):
+                    store.read_odoo_instance_override_record(
+                        context_name=_CONTEXT, instance_name="testing"
+                    )
+
+    def test_apply_refuses_retained_production_store_parameter_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_lane(store, protected_keys=())
+            production = _existing_record("prod").model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key="shopify.shop_url_key",
+                            value=OdooOverrideValue(source="literal", value=_PROTECTED_KEY),
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(production)
+            existing = _existing_record().model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key="shopify.store_url",
+                            value=OdooOverrideValue(
+                                source="literal", value=f"https://{_PROTECTED_KEY}.myshopify.com"
+                            ),
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(existing)
+            for mode in ("dry-run", "apply"):
+                with self.subTest(mode=mode):
+                    with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                        request = _request(
+                            mode=mode, reviewed_plan_sha256="0" * 64 if mode == "apply" else ""
+                        )
+                        if mode == "apply":
+                            apply_odoo_addon_settings_plan(record_store=store, request=request)
+                        else:
+                            build_odoo_addon_settings_plan(record_store=store, request=request)
+                    self.assertEqual(raised.exception.code, "protected_store_key")
+                    self.assertEqual(
+                        store.read_odoo_instance_override_record(
+                            context_name=_CONTEXT, instance_name="testing"
+                        ),
+                        existing,
+                    )
+
+    def test_apply_refuses_store_that_became_production_after_review(self) -> None:
+        for field in (
+            "addon_settings",
+            "config_parameters",
+            "shopify.shop_url",
+            "shopify.store_url",
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                _seed_lane(store, protected_keys=())
+                profile = store.read_product_profile_record(_PRODUCT)
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane.model_copy(update={"context": "separate-production"})
+                                if lane.instance == "prod"
+                                else lane
+                                for lane in profile.lanes
+                            )
+                        }
+                    )
+                )
+                production = _existing_record("prod").model_copy(
+                    update={"context": "separate-production"}
+                )
+                value = OdooOverrideValue(source="literal", value="different-store")
+                setting = (
+                    OdooAddonSettingOverride(addon="shopify", setting="shop_url_key", value=value)
+                    if field == "addon_settings"
+                    else OdooConfigParameterOverride(
+                        key=field if field.startswith("shopify.") else "shopify.shop_url_key",
+                        value=value,
+                    )
+                )
+                field = "config_parameters" if field.startswith("shopify.") else field
+                production = production.model_copy(update={field: (setting,)})
+                store.write_odoo_instance_override_record(production)
+                plan, _, replacement = build_odoo_addon_settings_plan(
+                    record_store=store, request=_request()
+                )
+                setting = setting.model_copy(
+                    update={
+                        "value": OdooOverrideValue(
+                            source="literal",
+                            value=f"https://admin.shopify.com/store/{_DEV_STORE_KEY}/products",
+                        )
+                    }
+                )
+                store.write_odoo_instance_override_record(
+                    production.model_copy(update={field: (setting,)})
+                )
+                with self.assertRaises(ClickException):
+                    build_post_deploy_environment(replacement, record_store=store)
+                with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                    apply_odoo_addon_settings_plan(
+                        record_store=store,
+                        request=_request(mode="apply", reviewed_plan_sha256=plan.plan_sha256),
+                    )
+                self.assertEqual(raised.exception.code, "protected_store_key")
+                with self.assertRaises(FileNotFoundError):
+                    store.read_odoo_instance_override_record(
+                        context_name=_CONTEXT, instance_name="testing"
+                    )
+
     def test_dry_run_returns_redacted_diff_and_digest(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -466,6 +637,15 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
 
 
 class OdooShopifyResolverTests(unittest.TestCase):
+    def test_admin_urls_compare_the_store_identity_instead_of_the_shared_host(self) -> None:
+        protected = (f"https://admin.shopify.com/store/{_PROTECTED_KEY}/products",)
+        self.assertTrue(shopify_store_key_is_protected(_PROTECTED_KEY, protected))
+        self.assertFalse(
+            shopify_store_key_is_protected(
+                f"https://admin.shopify.com/store/{_DEV_STORE_KEY}", protected
+            )
+        )
+
     @staticmethod
     def _record(instance: str) -> OdooInstanceOverrideRecord:
         return _existing_record(instance)

@@ -18,6 +18,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationTokenRecord
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
+from control_plane.contracts.text_fields import require_text
 from control_plane.github_payload import repository_full_name
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
@@ -51,16 +52,16 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneRegistrationExecutorRequest":
         self.repository = repository_full_name(self.repository)
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane registration executor requires host_name"
         ).lower()
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane, "runner lane registration executor requires execution_lane"
         ).lower()
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user, "runner lane registration executor requires service_user"
         )
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane registration executor requires lane_name"
         ).lower()
         _validate_slug(
@@ -75,7 +76,7 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
             self.lane_name,
             "runner lane registration executor lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
-        self.registration_root = _required_text(
+        self.registration_root = require_text(
             self.registration_root,
             "runner lane registration executor requires registration_root",
         )
@@ -86,7 +87,7 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
         )
         if not self.labels:
             raise ValueError("runner lane registration executor requires labels")
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner lane registration executor requires audit_record_key",
         )
@@ -644,13 +645,6 @@ def _audit_route_payload(audit: RunnerLaneRegistrationAuditRecord) -> dict[str, 
         "product": "launchplane",
         "audit": audit.model_dump(mode="json"),
     }
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _validate_slug(value: str, message: str) -> None:

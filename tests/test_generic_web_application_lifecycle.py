@@ -175,6 +175,30 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         return result, store
 
+    def test_completed_activation_does_not_reinherit_historical_qualified_schedules(self) -> None:
+        result, store = self._deploy()
+        original = recorded_application_lifecycle(
+            store.read_deployment_record(result.deployment_record_id)
+        )
+        assert original is not None
+        with patch(
+            "control_plane.testing_activation.completed_application_predecessor", return_value=True
+        ):
+            snapshot = application_snapshot_for_deploy(
+                store=store,
+                product=original.product,
+                context=original.context,
+                instance=original.instance,
+                provider_id=original.provider_id,
+                target_id=original.target_id,
+                artifact_id=original.artifact_id,
+                source_git_ref=original.source_git_ref,
+                deployment_record_id="independent-successor",
+                extensions=GenericWebLaneExtensions(),
+                rollback=False,
+            )
+        self.assertIsNone(snapshot)
+
     def test_source_refusal_before_lifecycle_effects_leaves_no_draft_for_next_attempt(self) -> None:
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
@@ -775,14 +799,16 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
         profile = profile.model_copy(update={"lanes": (lane,)})
         store = _GenericWebDeployStore(profile)
+        operation_key = "provider-operation:lifecycle"
         provider = _LifecycleDeployProvider(
+            original_operation_key=operation_key,
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="success",
                 deployment_id="deployed-123",
                 started_at=utc_now_timestamp(),
                 finished_at=utc_now_timestamp(),
-            )
+            ),
         )
         adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=Path("."),
@@ -794,7 +820,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             deploy_provider=provider,
         )
         observation = adapter.observe(
-            "provider-operation:lifecycle",
+            operation_key,
             "application_schedule_canary",
             adapter.reconciliation_key(),
         )

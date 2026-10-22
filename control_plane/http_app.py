@@ -1,3 +1,4 @@
+from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
@@ -849,6 +850,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -2172,6 +2174,16 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
             _secret_config_requirement_key(removal)
             for removal in self.remove_managed_secret_bindings
         ]
+        secret_additions = [
+            _secret_config_requirement_key(requirement)
+            for requirement in self.managed_secret_bindings
+        ]
+        if any(
+            "external_provider" in requirement.model_fields_set
+            and secret_additions.count(_secret_config_requirement_key(requirement)) > 1
+            for requirement in self.managed_secret_bindings
+        ):
+            raise ValueError("External provider declarations must be unique.")
         if len(runtime_removals) != len(set(runtime_removals)) or len(secret_removals) != len(
             set(secret_removals)
         ):
@@ -2303,6 +2315,7 @@ def _merge_product_expected_config(
     added_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     unchanged_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     added_secret_requirements: list[ProductSecretConfigRequirement] = []
+    updated_secret_requirements: list[ProductSecretConfigRequirement] = []
     unchanged_secret_requirements: list[ProductSecretConfigRequirement] = []
 
     for runtime_requirement in request.runtime_environment_keys:
@@ -2317,6 +2330,29 @@ def _merge_product_expected_config(
     for secret_requirement in request.managed_secret_bindings:
         secret_key = _secret_config_requirement_key(secret_requirement)
         if secret_key in existing_secret_keys:
+            if "external_provider" in secret_requirement.model_fields_set:
+                index = next(
+                    index
+                    for index, existing in enumerate(secret_requirements)
+                    if _secret_config_requirement_key(existing) == secret_key
+                )
+                existing = secret_requirements[index]
+                changes: dict[str, object] = {
+                    "external_provider": secret_requirement.external_provider
+                }
+                if "testing_local_credential" in secret_requirement.model_fields_set:
+                    changes["testing_local_credential"] = (
+                        secret_requirement.testing_local_credential
+                    )
+                replacement = ProductSecretConfigRequirement.model_validate(
+                    {**existing.model_dump(mode="json"), **changes}
+                )
+                if replacement != existing:
+                    secret_requirements[index] = replacement
+                    updated_secret_requirements.append(replacement)
+                    continue
+                unchanged_secret_requirements.append(existing)
+                continue
             unchanged_secret_requirements.append(secret_requirement)
             continue
         existing_secret_keys.add(secret_key)
@@ -2326,6 +2362,7 @@ def _merge_product_expected_config(
     changed = bool(
         added_runtime_requirements
         or added_secret_requirements
+        or updated_secret_requirements
         or removed_runtime_requirements
         or removed_secret_requirements
     )
@@ -2340,6 +2377,9 @@ def _merge_product_expected_config(
                 "updated_at": updated_at,
                 "source": request.source_label,
             }
+        )
+        merged_profile = LaunchplaneProductProfileRecord.model_validate(
+            merged_profile.model_dump(mode="json")
         )
 
     runtime_result: dict[str, object] = {
@@ -2362,6 +2402,14 @@ def _merge_product_expected_config(
         "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
         "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
     }
+    if any(
+        "external_provider" in requirement.model_fields_set
+        for requirement in request.managed_secret_bindings
+    ):
+        secret_result["updated"] = [
+            requirement.model_dump(mode="json") for requirement in updated_secret_requirements
+        ]
+        summary["managed_secret_binding_update_count"] = len(updated_secret_requirements)
     # Add-only responses keep their original shape for callers that validate it
     # strictly; removal dispositions appear only when the request asked for them.
     if request.requests_removal:
@@ -4623,7 +4671,10 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
+            if request.url.path in (
+                _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
+                PROVIDER_HOLD_ATTENTION_ROUTE,
+            ) or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                 or request.url.path.startswith(("/v1/agent/ordinary-agent-", "/v1/ordinary-agent-"))
@@ -7417,9 +7468,14 @@ def create_launchplane_fastapi_app(
                 records=response.records,
             )
             return response
-        except BridgeNetworkCapacityRefused as error:
+        except (BridgeNetworkCapacityRefused, PreviewMemoryCapacityRefused) as error:
             raise _launchplane_http_error(
-                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.public_message()
+                if isinstance(error, PreviewMemoryCapacityRefused)
+                else str(error),
             ) from None
         except NativeSourceAuthorizationDenied:
             raise _launchplane_http_error(
@@ -13850,18 +13906,24 @@ def create_launchplane_fastapi_app(
             and not expected_config_request.requests_removal
             and not any(
                 requirement.owner_input is not None
+                or (
+                    "external_provider" in requirement.model_fields_set
+                    and (
+                        requirement.external_provider is None
+                        or requirement.testing_local_credential
+                    )
+                )
                 for requirement in expected_config_request.managed_secret_bindings
             )
         )
-        if (
-            not director_declaration
-            and not resolved_authz_policy_runtime.allows(
+
+        def policy_authorized() -> bool:
+            return resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.expected_config.apply",
                 product=expected_config_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            )
-            and not (
+            ) or (
                 expected_config_request.mode != "apply"
                 and resolved_authz_policy_runtime.allows(
                     identity=identity,
@@ -13870,7 +13932,8 @@ def create_launchplane_fastapi_app(
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 )
             )
-        ):
+
+        if not director_declaration and not policy_authorized():
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -13911,21 +13974,6 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        if (
-            expected_config_request.mode == "apply"
-            and isinstance(identity, LocalOperatorIdentity)
-            and profile.production_use == "live"
-            and not director_declaration
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="live_product_requires_operator",
-                message=(
-                    "A live product's expected configuration requires an admin for "
-                    "scoped agents, removals, or Client credential requests."
-                ),
-            )
         secret_bindings: tuple[SecretBinding, ...] = ()
         if expected_config_request.remove_managed_secret_bindings:
             list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
@@ -13949,12 +13997,61 @@ def create_launchplane_fastapi_app(
                 )
                 for binding in list_secret_bindings(integration=integration, limit=None)
             )
-        merged_profile, result = _merge_product_expected_config(
-            profile=profile,
-            request=expected_config_request,
-            updated_at=utc_now_timestamp(),
-            secret_bindings=secret_bindings,
-        )
+        try:
+            merged_profile, result = _merge_product_expected_config(
+                profile=profile,
+                request=expected_config_request,
+                updated_at=utc_now_timestamp(),
+                secret_bindings=secret_bindings,
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="The declaration conflicts with existing requirement metadata.",
+            ) from error
+        if director_declaration and any(
+            "external_provider" in requirement.model_fields_set
+            for requirement in expected_config_request.managed_secret_bindings
+        ):
+            from control_plane.testing_local_credentials import local_credential_keys
+
+            director_declaration = not any(
+                existing.testing_local_credential
+                and not replacement.testing_local_credential
+                and _secret_config_requirement_key(existing)
+                == _secret_config_requirement_key(replacement)
+                for existing in profile.expected_config.managed_secret_bindings
+                for replacement in merged_profile.expected_config.managed_secret_bindings
+            ) and all(
+                local_credential_keys(profile, lane.context)
+                <= local_credential_keys(merged_profile, lane.context)
+                for lane in profile.lanes
+                if lane.instance == "testing"
+            )
+        if not director_declaration and not policy_authorized():
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot retire product expected config metadata.",
+            )
+        if (
+            expected_config_request.mode == "apply"
+            and isinstance(identity, LocalOperatorIdentity)
+            and profile.production_use == "live"
+            and not director_declaration
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message=(
+                    "A live product's expected configuration requires an admin for "
+                    "scoped agents, removals, or Client credential requests."
+                ),
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},
@@ -21765,7 +21862,7 @@ def create_launchplane_fastapi_app(
             from control_plane.testing_runtime_separation import (
                 TestingRuntimeSeparation,
                 TestingSeparationRefused,
-                separation_binding,
+                separation_admission,
             )
 
             if not director_agent_identity(identity):
@@ -21779,6 +21876,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 trace_id=trace_id,
             )
+            separation_origin = None
             prior = None
             if normalized_idempotency_key:
                 prior = separation_store.read_idempotency_record(
@@ -21811,7 +21909,7 @@ def create_launchplane_fastapi_app(
                 target_key = prior.provider_target_key
             else:
                 try:
-                    binding, target_key = separation_binding(
+                    binding, target_key, separation_origin = separation_admission(
                         separation_store,
                         live_target_runtime_request,
                         launchplane_identity_actor(identity),
@@ -21858,6 +21956,7 @@ def create_launchplane_fastapi_app(
                             actor=launchplane_identity_actor(identity),
                             binding=binding,
                             target_key=target_key,
+                            origin=separation_origin,
                             trace_id=trace_id,
                         ),
                         in_progress_message="Testing separation is in progress.",
@@ -21925,6 +22024,7 @@ def create_launchplane_fastapi_app(
                 ),
                 allow_owned_preview=director_disposable_apply,
                 requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
+                selected_keys=live_target_runtime_request.selected_keys,
                 deploy_trigger=(
                     control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
                 ),
@@ -24383,6 +24483,8 @@ def create_launchplane_fastapi_app(
             )
         store = require_provider_operation_store(record_store=record_store, trace_id=trace_id)
         try:
+            if observation.mode == "record" and observation.preview_id:
+                raise ValueError("Preview safety assertions are not supported.")
             if observation.mode == "clear":
                 fingerprint = await run_in_threadpool(
                     store.clear_reviewed_disposable_lane_safety,
@@ -24446,6 +24548,28 @@ def create_launchplane_fastapi_app(
             if observation.mode == "collect":
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
+                application_resources: dict[str, object] | None = None
+                if observation.include_application_resources:
+                    from control_plane.dokploy.application_resources import (
+                        collect_application_resource_observation,
+                    )
+
+                    try:
+                        application_resource_observation = await run_in_threadpool(
+                            collect_application_resource_observation,
+                            store,
+                            root=resolved_control_plane_root,
+                            product=profile.product,
+                            context=observation.context,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the application resource observation.",
+                        ) from None
+                    application_resources = application_resource_observation.model_dump(mode="json")
                 observed_at = store.disposable_lane_observation_time()
                 if profile.driver_id != "odoo" or observation.instance != "testing":
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
@@ -24614,6 +24738,11 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",
                         "source_coverage": disposable_collection_coverage(),
+                        **(
+                            {"application_resources": application_resources}
+                            if application_resources is not None
+                            else {}
+                        ),
                     },
                 )
             operation = None
@@ -24664,40 +24793,23 @@ def create_launchplane_fastapi_app(
                             "expected_binding_sha256",
                             "expected_observation_sha256",
                             "lifetime_seconds",
+                            "include_application_resources",
                         }
                     ),
                     "product": profile.product,
                     "binding_sha256": fingerprint,
                     "observed_by": launchplane_identity_actor(identity),
-                    "observer_kind": "director_agent_preview_cleanup"
-                    if preview is not None
-                    else "director_agent",
+                    "observer_kind": "director_agent",
                     "observed_at": now,
                     "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
                     "replaced_target_id": retained_target,
-                    # The authenticated Director agent can record its observed
-                    # facts for this exact owned disposable preview. Testing
-                    # retains its independent service-collector requirement.
-                    "usage": observation.usage if preview is not None else "unknown",
-                    "data": observation.data if preview is not None else "unknown",
-                    "production_resources": observation.production_resources
-                    if preview is not None
-                    else "unknown",
+                    "usage": "unknown",
+                    "data": "unknown",
+                    "production_resources": "unknown",
                 }
             )
             if not store.publish_collected_disposable_lane_safety(evidence):
                 raise ValueError("Protected usage evidence cannot be cleared by assertions.")
-            if preview is not None:
-                from control_plane.contracts.product_reconcile import ProductReconcileTarget
-
-                store.request_product_reconcile(
-                    ProductReconcileTarget(
-                        product=profile.product,
-                        target_kind="preview",
-                        pull_request_number=preview.anchor_pr_number,
-                    ),
-                    now.isoformat(),
-                )
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={"product_profile": profile.product},
@@ -24712,7 +24824,6 @@ def create_launchplane_fastapi_app(
                     "provider_mutation": False,
                     "automatic_fact_collection": "unavailable",
                     "source_coverage": disposable_collection_coverage(),
-                    "reconcile_requested": preview is not None,
                 },
             )
         except FileNotFoundError as error:

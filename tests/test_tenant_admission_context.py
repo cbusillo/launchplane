@@ -25,12 +25,15 @@ from tests.test_tenant_admission_status import (
 
 class TenantAdmissionContextTests(unittest.TestCase):
     def test_tenant_context_reports_checks_without_retired_human_actions(self) -> None:
-        evaluation = evaluate_tenant_admission_candidate(
-            request=_request(mutate=False),
-            store=_classification_only_store((_classification(),)),
-            token="token",
-            transport_factory=lambda _token: _TenantControllerTransport(),
-        )
+        with TemporaryDirectory() as temporary_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_name))
+            store.write_tenant_repository_classification_record(_classification())
+            evaluation = evaluate_tenant_admission_candidate(
+                request=_request(mutate=False),
+                store=store,
+                token="token",
+                transport_factory=lambda _token: _TenantControllerTransport(),
+            )
         read_model = build_tenant_admission_evaluation_read_model(
             evaluation=evaluation,
             generated_at=EVALUATED_AT,

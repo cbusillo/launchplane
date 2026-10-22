@@ -2,15 +2,29 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import click
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy.api import JsonObject
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    require_lane_target_ownership,
+)
 
 
 PreviewResourceType = Literal["application", "compose"]
 PreviewResourceDestroyStatus = Literal["pass", "fail"]
+PREVIEW_CLEANUP_SAFETY_UNKNOWN = "preview_cleanup_safety_unknown"
+
+
+@runtime_checkable
+class PreviewTargetOwnershipStore(Protocol):
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -28,6 +42,29 @@ class PreviewResourceDestroyResult:
 
 
 def destroy_dokploy_preview_resource(
+    *, record_store: object, context: str, instance: str, resource_id: str, **kwargs: Any
+) -> PreviewResourceDestroyResult:
+    resource_id = resource_id.strip()
+    try:
+        if not context or not instance or not isinstance(record_store, PreviewTargetOwnershipStore):
+            raise DisposableLaneSafetyUnknown("Preview target ownership inventory is unavailable.")
+        require_lane_target_ownership(
+            (
+                *record_store.list_dokploy_target_id_records(),
+                *record_store.list_physical_provider_target_records(),
+            ),
+            context=context,
+            instance=instance,
+            target_id=resource_id,
+        )
+    except DisposableLaneSafetyUnknown as error:
+        return PreviewResourceDestroyResult(
+            status="fail", cleanup_errors=(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: {error}",)
+        )
+    return destroy_dokploy_resource(resource_id=resource_id, **kwargs)
+
+
+def destroy_dokploy_resource(
     *,
     host: str,
     token: str,

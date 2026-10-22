@@ -351,7 +351,7 @@ export function App() {
       theme={theme}
     >
       {route.kind === "product-index" ? (
-        <ProductIndexRoute resource={productsResource} onRetry={refreshProducts} />
+        <ProductIndexRoute key={`index:${authState.identity.login}:${authState.identity.role}`} admin={authState.identity.role === "admin"} fixtureMode={fixtureMode} refreshToken={productRefreshToken} resource={productsResource} onRetry={refreshProducts} />
       ) : null}
       {route.kind === "product-workspace" ? (
         <ProductWorkspaceRoute

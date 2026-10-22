@@ -12,6 +12,7 @@ from control_plane.dokploy.testing_route import (
     compile_testing_route,
     observe_testing_route,
     route_document,
+    select_testing_route_raw,
 )
 
 
@@ -67,6 +68,32 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
+    def test_scoped_observation_ignores_unreferenced_redirects(self) -> None:
+        before = select_testing_route_raw(self.raw, self.host, ("web", "websecure"))
+        self.raw["middlewares"]["another-lane@file"] = {
+            "status": "enabled",
+            "redirectScheme": {"scheme": "https"},
+        }
+        self.assertEqual(
+            select_testing_route_raw(self.raw, self.host, ("web", "websecure")), before
+        )
+
+    def test_disabled_serving_routers_are_terminal_refusals(self) -> None:
+        plan = self.plan()
+        document = route_document(plan, self.new)
+        for owned in (False, True):
+            with self.subTest(owned=owned):
+                raw = self.apply(plan, self.new)
+                name = (
+                    next(name for name in raw["routers"] if name.endswith("@file"))
+                    if owned
+                    else "old-http@docker"
+                )
+                raw["routers"][name]["status"] = "disabled"
+                with self.assertRaises(ValueError) as raised:
+                    observe_testing_route(plan, raw, document)
+                self.assertNotIsInstance(raised.exception, TestingRoutePending)
+
     def setUp(self) -> None:
         self.host = "testing.example.invalid"
         self.old = "http://testing-old-web-1:8069"

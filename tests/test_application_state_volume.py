@@ -1,4 +1,6 @@
 from copy import deepcopy
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from contextlib import nullcontext
 import json
 from typing import Any
@@ -772,6 +774,14 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             idempotency_key="original-key",
             request_fingerprint="original-request",
             provider_target_key=dokploy_generic_web_provider_target_key(current),
+            provider_target_origin=ProviderTargetOrigin(
+                product="example-site",
+                context=current.context,
+                instance=current.instance,
+                provider_id=current.provider_id,
+                target_type=current.target_category,
+                target_id=current.target_id,
+            ),
             reconciliation_key="original-binding",
             lease_owner="original-worker",
         )

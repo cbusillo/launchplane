@@ -213,7 +213,68 @@ remains fenced.
 A successful deployment retains a keyed, value-free receipt for those captured
 inputs. Missing legacy evidence or changed site inputs makes the same verified
 image eligible for one normal testing deployment; an unchanged receipt settles
-without another deployment. Staff/staging holds and unresolved operations still
+without another deployment only when the actual application runtime also agrees.
+A completed provider job alone does not prove Swarm convergence: application
+testing checks the exact service, tasks, inspected immutable container images,
+deployment-record identity, replica count and configured container health. This
+also applies to application lanes without managed inputs. The provider job and
+runtime wait share the original deployment timeout. Unknown or updating runtime
+remains fenced; missing or unreadable task/container evidence is also unknown at
+the original deadline. Missing Swarm update status is not negative settlement
+proof: a newly accepted spec clears it before asynchronous reconciliation, and
+it can remain absent when that reconciliation finds no dirty slots to update.
+Neither job failure, elapsed timeout nor an observed task makes that missing
+status terminal. The full native service read can separately prove first creation
+when both PreviousSpec and UpdateStatus are absent; an accepted update atomically
+adds PreviousSpec. That value-free fact defaults to unproved for other observers
+and preserves first-deployment failure handling. Fully matching healthy runtime
+may still qualify without update status.
+An unresolved original cannot be bypassed with a fresh deployment key or a
+provider redeploy. The supported independent application
+[preparation and activation](testing-activation.md) path preserves its fence and
+resources, then binds the testing hold lift to the qualified replacement.
+That path still requires independent resources for carried writable external
+capabilities; an existing testing credential alone does not prove separation.
+Where those prerequisites are absent, retain the original fence and record the
+missing prerequisite rather than claim settlement from the provider job or
+timeout. With no unresolved original, a deliberate normal testing deploy remains
+available through the native generic-web deploy service, subject to its existing
+authority, hold and reservation checks.
+A complete observation of explicitly completed nonconvergence may fail
+qualification at that deadline. A correlated terminal rollback or failed
+qualification never receives delivery credit. Recovery adds the same
+current-runtime check while retaining exact-original execution receipts,
+reviewed settlement and publication CAS. A healthy image cannot prove that
+earlier product work has stopped. An already final failed original result may
+finish that reservation as failed when its original execution receipt proves
+terminal product work and retains the same provider deployment ID that the
+original runtime qualifier proved settled, either successfully or as a known
+failure. The proof, saved image result and observed provider job must agree.
+It needs no later runtime success proof. Legacy records without retained image
+settlement proof still require current runtime qualification, including records
+whose image status says pass but whose product result failed.
+This preserves the failed record and inventory; it grants no delivery credit.
+Missing required or nonterminal execution proof and cancelled jobs remain
+fenced. Recovery does not infer the original runtime deadline from an expired
+reservation lease.
+
+The optional image settlement reference lives in the existing producer-owned
+execution receipt and cannot be removed or changed after recording. Empty
+references are omitted from old receipt serialization. Older service versions
+reject receipts containing the new reference rather than guessing its meaning;
+deploy the receipt producer and recovery reader together. Follow the existing
+[service recovery guidance](operations.md#launchplane-service-deploy-posture)
+with a compatible rollback reader or a fixed forward build. Keep the retained
+proof when reverting unrelated code.
+
+Ordinary sweeps check current application runtime before returning
+`already_deployed`. Missing update status without the native first-creation fact
+also leaves drift unverified. Positively stable service drift permits one normal
+same-artifact repair bound to existing artifact, authority, managed inputs and
+starting inventory. Pending or unreadable observations wait. Failed repairs
+replay the same operation; successful repairs advance inventory so later drift
+can be repaired again. Explicit settlement and changed authority retain the
+supported continuation rules above. Staff/staging holds and unresolved operations still
 prevent dispatch. Recovery preserves only the original readback-verified receipt
 and never credits current inputs to an earlier attempt. An old operation without
 that receipt can settle, then the next normal sweep repairs its inputs. Removing
@@ -278,15 +339,38 @@ history fails, the replacement and provider effects do not proceed.
 Deleted historical hosts are not queried
 as current candidates. Missing or changed current evidence fails the probe.
 
-The health request connects to the configured NPMplus API origin's machine on
-HTTPS port 443. That origin must resolve exclusively to the existing permitted
-private address ranges (RFC1918 or RFC6598), and must reach the same edge's HTTPS
-listener. Socket addresses are validated and pinned before connecting, while
+The health request connects to the existing edge's private HTTPS listener on
+port 443. An API origin that already resolves exclusively privately still
+identifies that machine, even if its self-proxy uses a provider-local backend
+or custom configuration. Otherwise, for an API hostname on the standard
+HTTP/HTTPS listener, its authenticated provider
+inventory may instead supply one exact, enabled, loaded proxy route with no
+aliases, custom locations/configuration or delegated authentication. Its normal
+HTTP(S) backend host identifies the private machine; its admin scheme and port
+do not become the health scheme or port. Other hosts and wildcard routes never
+supply that binding. The exact API route and its uniqueness are checked again
+after the probe, along with existing endpoint, receipt and application authority.
+Changed API configuration invalidates the result. No new record, credential or
+provider write is needed.
+
+Selecting the directly addressed private origin is an address-admission check,
+not a health attempt. The health socket resolves and pins private addresses
+again; a connection, TLS or health failure never retries through another binding.
+Only an address-scope refusal permits selection from authenticated route
+metadata. A classified DNS failure aborts selection or readback with its DNS
+diagnostic; an unclassified provider or authority failure remains a verification
+refusal. A failed private admission without one exact API route refuses before
+the health request.
+
+The selected machine must resolve exclusively to the existing permitted private
+address ranges (RFC1918 or RFC6598), and reach the same edge's HTTPS listener.
+Socket addresses are validated and pinned before connecting, while
 Host, SNI and ordinary certificate/name verification use the endpoint hostname.
 Endpoint DNS is never used to select this socket, so wildcard DNS changes cannot
-redirect it; a public or mixed answer for the configured edge origin refuses.
-No DNS record or shared trust store changes. A provider API hosted separately
-from its HTTPS listener does not qualify through this transport.
+redirect it; a public or mixed answer for the selected listener refuses.
+No DNS record or shared trust store changes. The selected API origin or backend
+host must identify that same edge's HTTPS listener from Launchplane's network;
+a provider-local bridge or container address alone does not prove that identity.
 
 This continuation sends only an unauthenticated `GET /health`, with no request
 body, query, API credentials, cookies or redirects. It requires the monitor's

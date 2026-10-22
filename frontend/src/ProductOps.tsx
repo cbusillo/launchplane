@@ -13,6 +13,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
+import { providerAttentionQualifier } from "./provider-hold-attention";
+
 import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
@@ -66,12 +69,17 @@ interface InspectionStep {
 export function ProductIndexRoute({
   resource,
   onRetry,
+  admin, fixtureMode, refreshToken,
 }: {
+  admin: boolean; fixtureMode: DevFixtureMode; refreshToken: number;
   resource: ResourceState<ProductSiteOverview[]>;
   onRetry: () => void;
 }) {
+  const attention = useProviderHoldAttention(admin, fixtureMode, refreshToken);
+  const serviceAttentionQualifier = fixtureMode ? "Demo mode. Service operation attention is not loaded." : !admin ? "Service operation attention is unavailable for this session; only authorized lane incidents are shown." : providerAttentionQualifier(attention.resource);
+  const attentionPanel = <ProviderHoldAttention admin={admin} fixtureMode={fixtureMode} resource={attention.resource} onNext={attention.next} onRefresh={attention.refresh} />;
   const products = (resource.data ?? []).map(product => expireProductEvidence(product));
-  useEvidenceExpiry(products.flatMap(product => product.environments), products.map(product => product.preview.provenance.stale_after));
+  useEvidenceExpiry(products.flatMap(product => product.environments), [...products.map(product => product.preview.provenance.stale_after), attention.resource.data?.stale_after ?? ""]);
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
     loading && !products.length
@@ -89,23 +97,23 @@ export function ProductIndexRoute({
   }, [viewState]);
 
   if (loading && !products.length) {
-    return <ProductIndexSkeleton />;
+    return <><ProductIndexSkeleton />{attentionPanel}</>;
   }
   if (resource.status === "error" && !products.length) {
     const accessDenied = resource.statusCode === 401 || resource.statusCode === 403;
     return (
-      <RouteError
+      <><RouteError
         eyebrow="Product Ops"
         message={resource.error}
         onRetry={accessDenied ? undefined : onRetry}
         returnTo={accessDenied ? null : undefined}
         title={accessDenied ? "Product inventory access denied" : "Product inventory unavailable"}
         traceId={resource.traceId}
-      />
+      />{attentionPanel}</>
     );
   }
   if (resource.status === "ready" && !products.length) {
-    return <NoProducts onRetry={onRetry} />;
+    return <><NoProducts onRetry={onRetry} />{attentionPanel}</>;
   }
 
   return (
@@ -134,7 +142,8 @@ export function ProductIndexRoute({
         />
       ) : null}
 
-      <ProductIncidentOverview products={products} />
+      <ProductIncidentOverview products={products} serviceAttentionQualifier={serviceAttentionQualifier} />
+      {attentionPanel}
 
       <div className="directory-head" aria-hidden="true">
         <span>Product</span>
@@ -620,9 +629,11 @@ interface ActiveProductIncident {
 function ProductIncidentOverview({
   compact = false,
   products,
+  serviceAttentionQualifier,
 }: {
   compact?: boolean;
   products: ProductSiteOverview[];
+  serviceAttentionQualifier?: string;
 }) {
   const incidents = products.flatMap((product) =>
     product.environments.flatMap((environment) =>
@@ -669,6 +680,7 @@ function ProductIncidentOverview({
           </p>
         </div>
       </div>
+      {serviceAttentionQualifier ? <p>{serviceAttentionQualifier}</p> : null}
       {incidents.length ? (
         <ul className="product-incident-list">
           {incidents.map((incident) => (

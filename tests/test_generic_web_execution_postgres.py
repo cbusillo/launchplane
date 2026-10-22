@@ -7,8 +7,10 @@ from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
 from typing import Any
+import time
 import unittest
 from unittest.mock import patch
+from sqlalchemy import text
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -38,6 +40,7 @@ from control_plane.workflows.generic_web_execution import (
     evidence_digest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider, _profile, _request
 from tests.test_postgres_integration import _head_postgres_database
 from tests import test_generic_web_execution_receipts as receipt_tests
@@ -52,6 +55,64 @@ from tests.test_generic_web_deploy_recovery import (
 
 
 class OriginalExecutionPostgresTests(unittest.TestCase):
+    def test_nested_product_reservation_refuses_upgrade_and_lost_transaction(self) -> None:
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+            serialize_generic_web_product_operation(record_store=store, product="fixture-product"),
+        ):
+            with self.assertRaises(ValueError):
+                with serialize_generic_web_product_operation(
+                    record_store=store, product="fixture-product", exclusive=True
+                ):
+                    self.fail("A shared holder cannot gain exclusive authority.")
+            store._preview_execution_context.held[0][2].rollback()
+            with self.assertRaises(ValueError):
+                with serialize_generic_web_product_operation(
+                    record_store=store, product="fixture-product"
+                ):
+                    self.fail("A lost transaction cannot supply a nested reservation.")
+
+    def test_nested_product_deploy_does_not_deadlock_a_waiting_restart(self) -> None:
+        with (
+            _head_postgres_database() as url,
+            closing(
+                PostgresRecordStore(database_url=url, postgres_statement_timeout_milliseconds=2000)
+            ) as store,
+            closing(PostgresRecordStore(database_url=url)) as peer,
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            restarted = Event()
+
+            def restart() -> None:
+                with serialize_generic_web_product_operation(
+                    record_store=peer, product="fixture-product", exclusive=True
+                ):
+                    restarted.set()
+
+            try:
+                with serialize_generic_web_product_operation(
+                    record_store=store, product="fixture-product"
+                ):
+                    future = pool.submit(restart)
+                    deadline = time.monotonic() + 10
+                    with store._engine.connect() as observer:
+                        while not observer.scalar(
+                            text(
+                                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))"
+                            )
+                        ):
+                            self.assertLess(time.monotonic(), deadline)
+                            restarted.wait(0.01)
+                    with serialize_generic_web_product_operation(
+                        record_store=store, product="fixture-product"
+                    ):
+                        self.assertFalse(restarted.is_set())
+                    self.assertFalse(restarted.is_set())
+            finally:
+                future.result(timeout=10)
+            self.assertTrue(restarted.is_set())
+
     def test_receipt_merge_during_ingestion_preserves_correction_and_recovery_cas(self) -> None:
         with (
             _head_postgres_database() as url,
@@ -115,7 +176,6 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 normal = pool.submit(
                     fixture.run_normal, fixture.normal_adapter(), "receipt-correction"
                 )
-                ingestion = None
                 try:
                     self.assertTrue(executing.wait(15))
                     progress = first.read_environment_inventory(
@@ -384,6 +444,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 lease_owner="original",
                 reconciliation_key=adapter.reconciliation_key(),
                 provider_target_key=adapter.target_key(),
+                provider_target_origin=adapter.provider_target_origin(),
             )
             assert reserved.record is not None
             reservation = reserved.record
@@ -394,6 +455,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 request_fingerprint=reservation.request_fingerprint,
                 reconciliation_key=reservation.reconciliation_key,
             )
+            provider.original_operation_key = operation
             record, _records, _result = build_observed_generic_web_deploy(
                 record_store=first,
                 profile=profile,

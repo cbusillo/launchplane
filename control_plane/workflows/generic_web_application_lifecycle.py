@@ -22,6 +22,7 @@ from control_plane.workflows.generic_web_execution import (
 )
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
+    ApplicationLifecycleBaselineChanged,
     application_snapshot_for_deploy,
     recorded_application_lifecycle,
 )
@@ -57,7 +58,7 @@ class GenericWebApplicationLifecycle(Protocol):
     snapshot: ApplicationLifecycleSnapshot
     effect_attempted: bool
 
-    def capture(self) -> None: ...
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None: ...
     def prepare(self) -> None: ...
     def maintain(self) -> dict[str, str]: ...
     def complete(self) -> dict[str, str]: ...
@@ -72,7 +73,7 @@ class RecordedApplicationLifecycle:
     snapshot: ApplicationLifecycleSnapshot
     effect_attempted: bool = False
 
-    def capture(self) -> None:
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
         pass
 
     def prepare(self) -> None:
@@ -181,11 +182,20 @@ class DokployApplicationLifecycle:
                 ),
             )
 
-    def capture(self) -> None:
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
         # Capture every baseline before the first provider mutation. The caller
         # durably writes this artifact-bound receipt before prepare().
         for name in self.snapshot.managed_names:
             observed = self._read(name)
+            if (require_unchanged_baseline and name not in self.snapshot.originals) or (
+                self.snapshot.mode == "deploy"
+                and require_unchanged_baseline
+                and name in self.snapshot.originals
+                and observed != self.snapshot.originals[name]
+            ):
+                raise ApplicationLifecycleBaselineChanged(
+                    "The original's application schedule baseline changed.",
+                )
             self.observed[name] = observed
             if self.snapshot.mode == "rollback" and name not in self.snapshot.current_originals:
                 self.snapshot.current_originals[name] = observed
@@ -407,8 +417,8 @@ class RecordedPreviewApplicationLifecycle(DokployApplicationLifecycle):
                 "Preview application lifecycle receipt storage failed."
             ) from error
 
-    def capture(self) -> None:
-        super().capture()
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
+        super().capture(require_unchanged_baseline=require_unchanged_baseline)
         # Persist ownership and the full baseline before pausing any job.
         self._save()
 

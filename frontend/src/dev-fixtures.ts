@@ -2607,10 +2607,12 @@ export function productReviewForFixture(
   assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "ready";
+  const carriedDecision = ["carried-decision", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
+  const invisibleCarry = scenario !== "carried-decision";
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
   const previewUrl =
-    ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
+    ["missing-preview", "pending-without-preview", "carried-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
     ? "No Client set for this product"
     : !viewerIsOwner
@@ -2645,16 +2647,19 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
-        : ["carried-decision", "carried-invisible-decision"].includes(scenario)
+        : carriedDecision
         ? {
-            ...productReviewDecisionForFixture("accepted", ""),
+            ...productReviewDecisionForFixture("accepted", "Keep the contact details visible."),
+            owner_github_id: scenario === "former-client-carried-decision" ? "9000" : "9001",
+            owner_github_login: scenario === "former-client-carried-decision" ? "former-client" : "example-owner",
+            head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "b".repeat(40) : "a".repeat(40),
             carried_from: {
               record_id: "fixture-original-acceptance",
-              head_sha: "b".repeat(40),
-              reason: scenario === "carried-invisible-decision" ? "client_impact_none" : "unchanged_patch_base_update",
-              commits: scenario === "carried-invisible-decision" ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
+              head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
+              reason: invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
+              commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: scenario === "carried-invisible-decision" ? "" : "c".repeat(40),
+              comparison_base_sha: invisibleCarry ? "" : "c".repeat(40),
             },
           }
         : scenario === "decided"

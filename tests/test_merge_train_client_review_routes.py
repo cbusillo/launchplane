@@ -22,7 +22,8 @@ from tests.merge_train_policy_fixtures import (
     build_test_merge_train_policy_record,
 )
 from tests.test_merge_train_github import (
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
     _owner_review_check,
     _advisory_runtime_records,
     _combined_status,
@@ -64,8 +65,15 @@ def _labelled_pull_request_transport(
             pull,
             {"permission": "admin"},
             _label_events(),
+            _protected_branch_with_checks("ci-status", app_id=None),
+            [],
             _combined_status(statuses=({"context": "ci", "state": "success"},)),
-            {"check_runs": [_check_run("completed", "success"), *client_statuses]},
+            {
+                "check_runs": [
+                    _required_check_run("ci-status", "completed", "success"),
+                    *client_statuses,
+                ]
+            },
             _conversation_rule(),
             [],  # no active branch rules
         )
@@ -184,12 +192,16 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
                 first,
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 second,
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )

@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,6 +14,12 @@ from control_plane.contracts.merge_train_controller_state import (
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralCandidateResult,
+)
+from control_plane.contracts.record_fields import (
+    normalize_git_sha,
+    normalize_optional_git_sha,
+    normalize_sha256,
+    required_token,
 )
 
 
@@ -35,51 +40,20 @@ MergeLandingOutcomeReason = Literal[
     "landing_evidence_contradicted",
 ]
 
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
 
 class MergeAdmissionFenceRejectedError(RuntimeError):
     """Raised when persisted controller authority no longer admits an effect."""
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
 def _normalize_repository(value: str) -> str:
-    normalized = _required_token(value, "repository").lower()
+    normalized = required_token(value, "repository").lower()
     if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("repository must use owner/name")
     return normalized
 
 
-def _normalize_git_sha(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA")
-    return normalized
-
-
-def _normalize_optional_git_sha(value: str, field_name: str) -> str:
-    normalized = value.strip().lower()
-    if normalized and _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA when present")
-    return normalized
-
-
-def _normalize_sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return normalized
-
-
 def _normalize_timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -155,7 +129,7 @@ class MergeAdmissionRecord(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         for field_name in (
             "effective_base_sha",
@@ -169,7 +143,7 @@ class MergeAdmissionRecord(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_git_sha(str(getattr(self, field_name)), field_name),
+                normalize_git_sha(str(getattr(self, field_name)), field_name),
             )
         for field_name in (
             "candidate_sha256",
@@ -179,7 +153,7 @@ class MergeAdmissionRecord(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_sha256(str(getattr(self, field_name)), field_name),
+                normalize_sha256(str(getattr(self, field_name)), field_name),
             )
         for field_name in ("lease_acquired_at", "lease_expires_at", "created_at"):
             object.__setattr__(
@@ -233,7 +207,7 @@ class MergeAdmissionRecord(BaseModel):
             raise ValueError("merge admission attempt ID does not match its deterministic identity")
         expected_binding = merge_admission_binding_sha256(self)
         binding = self.admission_binding_sha256.strip().lower()
-        if binding and _normalize_sha256(binding, "admission_binding_sha256") != expected_binding:
+        if binding and normalize_sha256(binding, "admission_binding_sha256") != expected_binding:
             raise ValueError("merge admission binding digest does not match payload")
         expected_id = f"merge-admission-{expected_binding[:24]}"
         admission_id = self.admission_id.strip()
@@ -263,7 +237,7 @@ class MergeBatchNoEffectEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _validate_head(self) -> "MergeBatchNoEffectEvidence":
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
         return self
 
 
@@ -312,14 +286,14 @@ class MergeLandingOutcomeRecord(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self,
             "admission_binding_sha256",
-            _normalize_sha256(self.admission_binding_sha256, "admission_binding_sha256"),
+            normalize_sha256(self.admission_binding_sha256, "admission_binding_sha256"),
         )
-        object.__setattr__(self, "base_branch", _required_token(self.base_branch, "base_branch"))
+        object.__setattr__(self, "base_branch", required_token(self.base_branch, "base_branch"))
         object.__setattr__(self, "prior_outcome_id", self.prior_outcome_id.strip())
         object.__setattr__(self, "provider_request_id", self.provider_request_id.strip())
         object.__setattr__(self, "provider_message", self.provider_message.strip())
@@ -334,7 +308,7 @@ class MergeLandingOutcomeRecord(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
+                normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self, "observed_at", _normalize_timestamp(self.observed_at, "observed_at")
@@ -457,7 +431,7 @@ class MergeLandingOutcomeRecord(BaseModel):
                 raise ValueError("reconcile-required outcome requires an ambiguity reason")
         expected_binding = merge_landing_outcome_binding_sha256(self)
         binding = self.outcome_binding_sha256.strip().lower()
-        if binding and _normalize_sha256(binding, "outcome_binding_sha256") != expected_binding:
+        if binding and normalize_sha256(binding, "outcome_binding_sha256") != expected_binding:
             raise ValueError("landing outcome binding digest does not match payload")
         expected_id = f"merge-landing-outcome-{expected_binding[:24]}"
         outcome_id = self.outcome_id.strip()
@@ -482,14 +456,14 @@ def build_merge_effect_attempt_id(
     if pull_request_number < 1 or queue_position < 1 or attempt_sequence < 1:
         raise ValueError("merge effect attempt identity requires positive numeric fields")
     payload = {
-        "controller_key": _required_token(controller_key, "controller_key"),
-        "lease_owner": _required_token(lease_owner, "lease_owner"),
+        "controller_key": required_token(controller_key, "controller_key"),
+        "lease_owner": required_token(lease_owner, "lease_owner"),
         "lease_acquired_at": _normalize_timestamp(lease_acquired_at, "lease_acquired_at"),
-        "landing_plan_id": _required_token(landing_plan_id, "landing_plan_id"),
+        "landing_plan_id": required_token(landing_plan_id, "landing_plan_id"),
         "pull_request_number": pull_request_number,
         "queue_position": queue_position,
         "attempt_sequence": attempt_sequence,
-        "expected_effect_sha": _normalize_git_sha(expected_effect_sha, "expected_effect_sha"),
+        "expected_effect_sha": normalize_git_sha(expected_effect_sha, "expected_effect_sha"),
     }
     return f"merge-effect-attempt-{_canonical_sha256(payload)[:24]}"
 

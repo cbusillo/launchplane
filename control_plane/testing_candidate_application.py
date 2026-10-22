@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import re
 
+from control_plane.copy_readback_diagnostics import readback_marker_is_safe
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
@@ -37,6 +38,11 @@ class CandidateObservationUnavailable(ValueError):
 
 class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
     """The fixed read-only probe returned a failure, rather than losing its transport."""
+
+    def __init__(self, message: str, *, native_failure: NativeProgramFailed | None = None) -> None:
+        super().__init__(message)
+        self.evidence = native_failure.evidence if native_failure is not None else {}
+        self.code = native_failure.code if native_failure is not None else ""
 
 
 def candidate_private_readiness(
@@ -96,8 +102,10 @@ def candidate_private_readiness(
             receive=frames.append,
             timeout_seconds=120,
         )
-    except NativeProgramFailed:
-        raise CandidatePrivateReadinessFailed("The private probe returned a failure.") from None
+    except NativeProgramFailed as error:
+        raise CandidatePrivateReadinessFailed(
+            "The private probe returned a failure.", native_failure=error
+        ) from None
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
         raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(
@@ -576,7 +584,23 @@ def candidate_restore_terminal(
         raise CandidateObservationUnavailable("Candidate restore is still running or unknown.")
     if require_success and status not in api._DEPLOYMENT_SUCCESS_STATUSES:
         raise ValueError("Candidate restore failed; keep the old copy serving.")
-    return app.restore_schedule_id + ":" + api.deployment_key(new[0]) + ":" + status
+    evidence = app.restore_schedule_id + ":" + api.deployment_key(new[0])
+    if status in api._DEPLOYMENT_FAILURE_STATUSES:
+        markers = post_deploy._read_odoo_post_deploy_log_markers(
+            host=host,
+            token=token,
+            schedule_id=app.restore_schedule_id,
+            schedule_deployment_key=api.deployment_key(new[0]),
+            deployment_id=api.deployment_key(new[0]),
+            deployment=new[0],
+        )
+        predicate = markers.get("readback_failed_predicate", "")
+        kind = markers.get("readback_failure_kind", "")
+        if readback_marker_is_safe(
+            "readback_failed_predicate", predicate
+        ) and readback_marker_is_safe("readback_failure_kind", kind):
+            evidence += f":{predicate}_{kind}"
+    return evidence + ":" + status
 
 
 def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateAllocation) -> str:

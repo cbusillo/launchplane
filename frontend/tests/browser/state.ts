@@ -1,3 +1,5 @@
+import { PROVIDER_HOLD_ATTENTION_ROUTE } from "../../src/api";
+
 import { chromium, expect, test as base, type BrowserContext, type Page } from "@playwright/test";
 
 // Freeze before the first navigation. Clock setup runs on an empty page, so
@@ -6,6 +8,11 @@ import { chromium, expect, test as base, type BrowserContext, type Page } from "
 export const test = base.extend({
   context: async ({ context }, use) => {
     await freezeClock(context);
+    // Existing journeys supply their own lane reads. Keep the independent
+    // service read inert unless a page explicitly supplies attention evidence.
+    await context.route(`**${PROVIDER_HOLD_ATTENTION_ROUTE}**`, route => route.fulfill({
+      status: 503, json: { error: { code: "fixture_unavailable", message: "Service attention is not supplied by this journey." } },
+    }));
     await use(context);
   },
 });

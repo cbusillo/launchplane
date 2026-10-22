@@ -8,14 +8,114 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Native generic-web testing deployment
+
+The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
+Director agent's `local_operator` transport for an active product's exact testing
+lane without a per-product deploy grant. This alternative does not extend the
+mixed production/testing action's policy or other callers' permissions. Explicitly
+authorized administrators retain their existing manual-deployment authority,
+including deliberate deployments during a testing hold.
+
+New standing deployments consume the existing bound, unexpired disposable-lane
+qualification for data custody and production isolation. The existing usage
+rule protects actual use and staff holds; unknown occupancy alone does not
+require an assertion that nobody uses the lane. The service rechecks the current
+profile, lane and safety facts at the first durable provider-effect checkpoint.
+During that live execution, evidence capture, completion and protective rollback
+remain available after facts change. A reacquired execution must qualify again
+before another forward dispatch; inert protective settlement retains its original
+authority. Completed replay and read-only
+original observation do not require fresh execution qualification. An unresolved
+original continues to fence another key or caller.
+
+Every application-testing execution without a recorded provider effect compares
+its captured inventory baseline before proceeding and again at the first-effect
+authority checkpoint. This applies to fresh and same-key operations, with or
+without lifecycle declarations. Same-key lifecycle retries also retain their
+captured declarations and schedule baseline. A changed baseline returns
+`409 testing_deploy_baseline_changed` before effects. Start a fresh operation;
+the old original and its immutable receipt stay recorded. Unchanged-baseline
+same-key retries remain supported. Originals that already have effects retain
+their existing recovery and protective-settlement behavior.
+
+Before releasing a proved no-effect lifecycle refusal, the service records
+`not_started` under its current original lease and record comparison. An empty
+receipt or ordinary evidence correction cannot create that proof; failed
+publication keeps the reconciliation fence. Failure-only evidence publication
+preserves the original reason without creating a provider-effect checkpoint.
+
+A fresh native standing operation retains established lifecycle ownership and
+protective holds, preserves foreign prepared intent for its original recovery,
+and captures its own current schedule baseline. It does not treat another
+operation's prepared declarations as ownership. Live original reservations still
+fence another key or caller. Existing held fix-forward, proved pre-image recovery
+and inverse rollback retain their separate authority.
+Recovery dry-run/apply still require their existing explicit policy;
+[own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)
+is separate source work. Completed native replay and existing observation
+permissions are unchanged.
+
+Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
+an authorization denial. Use the existing disposable-lane observations `inspect`
+and `collect` routes below to review its current binding and authoritative facts.
+The generic collector currently supplies protective holds and target-alias facts;
+positive custody and resource qualification comes from the supported Odoo
+generation inspector. A conventional application without those facts needs the
+authoritative application custody/isolation collector prerequisite
+[#4372](https://github.com/cbusillo/launchplane/issues/4372), related to the broader
+[#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
+saved environment inputs and a failed health check cannot fill that gap. Native
+deployment has no service dry-run mode; preparation is not execution proof.
+
+For an existing application testing recipient, opt into read-only resource
+metadata with `include_application_resources=true` on `collect`, or run the
+repository client with `collect --application-resources`. The client uses the
+installed `operator` helper's transport. Ordinary requests retain their existing
+wire and response shape. The option is unavailable for previews or `inspect`.
+
+The service resolves the recorded application and registered server, then runs
+a fixed read program through the existing private transport. On a verified
+single-local-node Swarm it reports service/task counts, all attributable extant
+containers including stopped containers, configured and referenced named-volume
+counts, and content presence for verified local volume backing. Missing volumes,
+remote drivers, driver options and redirected backing are unavailable, never
+empty. Unsupported mounts are reported by a presence flag without reading their
+contents. Image volume declarations cover only the current immutable local
+service image, not every historical image; unavailable image metadata has a null
+declaration count.
+Unknown or changed inventory supplies no counts.
+Changed inventory includes an optional `changed_component` category identifying
+the first detected difference: Swarm nodes, the owned service, task/container/volume
+membership, or task/container/referenced-volume metadata. Container membership
+and metadata cover the whole local host, including unrelated services. This
+diagnostic supplies no resource identifiers or changed values. It preserves all
+inventory comparisons and the unknown safety verdict; it does not prove that the
+owned application caused the change. Older observations can omit the category.
+Use a compatible repository client to validate this optional diagnostic; an older
+strict client can reject the new field. Preserve an unknown result and use
+supported inspect/readback before considering an explicit new collection.
+
+The response includes no filesystem paths, filenames, file contents, environment
+values or raw provider errors. The reader neither changes resources nor creates
+a schedule. Its counts and `service_quiescent` value describe a sample of the
+selected service, its tasks and its attributable containers. Other volume
+consumers are not excluded. Filesystem data can change independently; service
+quiescence is not an execution fence. The `application_resources` read runs
+before usage collection; `observed_at` and `expires_at` do not timestamp or give
+a validity period to that earlier metadata sample. These observations publish
+no positive custody or production-isolation facts and do not qualify deployment.
+The broader [#4372](https://github.com/cbusillo/launchplane/issues/4372)
+prerequisite remains open until supported sources establish those facts for the
+actual application state.
+
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
-lane with one stable HTTPS address and a separate candidate copy. It is a source
-component: the existing resource/bootstrap endpoints below do not yet call it.
-It exposes no new HTTP operation, UI control or permission. Its tests qualify the
-controller and checkpoint storage, not a real provider, restored data or a live
-lane.
+lane with one stable HTTPS address and a separate candidate copy. The existing
+testing replacement action and durable worker call it without a separate queue
+or permission. Source and fixture tests qualify that behavior; they do not prove
+a particular live lane or restored business data.
 
 The immutable plan binds the existing route/address, old and new target/resource
 identities, the candidate build and a managed source reference. Empty rebuilds,
@@ -33,8 +133,9 @@ at the original address precede metadata adoption and old-copy retirement.
 Retirement drains/stops the old runtime and preserves its storage and custody;
 physical deletion is outside this operation. Public probe URLs must use the
 stable lane origin. Missing, stale, unverified or skipped evidence preserves the
-intent for observation; only a fresh verified failure or identity mismatch
-starts automatic rollback.
+intent for observation. A fresh verified failure or identity mismatch starts
+automatic rollback. An unavailable-origin attempt also reverses its own cutover
+if positively observed predecessor or ingress changes invalidate its admission.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -45,6 +146,83 @@ the original operation and authority-writer lock. An unavailable publication
 outcome cannot be replaced with an assertion that the old metadata still wins.
 The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
+
+A predecessor verified stopped or absent uses an explicit unavailable record.
+It needs the existing lane's address ownership, provider target and registered
+server placement. Complete container IDs, ownership fields, states and mount
+inventory must agree; an incomplete inspection never proves absence. Stopped
+copies keep their actual storage/configuration witness without requiring an old
+runtime identity or starting a process. Fully absent containers leave any old
+storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
+production isolation and unresolved provider effects keep their existing gates.
+
+An unavailable predecessor has no invented private endpoint, runtime identity or
+healthy public observation. The candidate route comes from the original recorded
+template or the provider's converted web-router declaration, checked against the
+current proxy listeners, TLS resolver and applied conflicts. Missing placement or
+ingress declaration is a record/capability prerequisite; repairing or starting
+the old application is not an admission step. Forward checkpoints retain the
+normalized web-ingress declaration and listener witnesses. Unrelated application
+environment, image or Compose formatting changes do not change that declaration
+witness. Listener witnesses cover the entrypoints and certificate resolvers used
+by this lane; unrelated proxy logging and other listeners do not change them.
+Candidate serving readback verifies these dependencies and external redirect
+behavior after the file is selected, as well as before its forward write.
+Candidate preparation, generated
+local credentials, sanitation, immutable build, private identity and public
+health checks use the ordinary lifecycle.
+Transient provider-inventory reads keep the original operation pending; provider
+authorization denials keep their denial boundary. Incomplete inventory never
+proves that placement changed or that an old copy is absent.
+
+Failure restores the captured route file's exact bytes or original absence and
+reverses metadata this publication actually adopted. A planned publication proves
+no adoption and preserves later administrative edits when it is marked reversed.
+The same physical writer lock, generation, CAS and durable
+receipt cover restoration, including removal of only that lane's newly created
+file; a lost response is settled through its original writer. An unavailable
+route preimage covers its public listeners and middleware dependencies, excluding
+unrelated proxy management routes and canonical certificate challenges. Inverse
+restoration uses the current proxy/file CAS; unrelated static configuration edits
+do not require keeping a failed candidate selected. An unavailable
+original is not started or advertised as healthy by rollback. Inverse readback
+waits for exact original bytes or absence and the captured lane-owned applied
+routing before reversing metadata. It reports current stopped, absent or present
+process state separately; a reappeared process has unverified health.
+After successful publication, automatic
+deployment of the old target is disabled and its stop is recorded as undispatched
+because it was already unavailable. That success receipt does not itself request
+rollback after a checkpoint interruption. Forward publication and retirement
+require complete, quiescent old-target deployment and data-workflow observations,
+including before disabling automatic deploys and after that disable. Those jobs
+cannot trap the inverse of our route artifact. Its data is never deleted here.
+
+Stopped custody binds member identities, ownership labels and storage, separately
+from current stopped/absent state. Incidental Docker lifecycle timestamps do not
+invalidate an unchanged stopped copy. The exact admission witness gates the
+original forward writer. Once the candidate is selected, complete current stopped
+or absent evidence is sufficient; pruning stopped containers does not undo a
+verified independent candidate. A bound normal retirement-success receipt and
+its completed disable receipt resume without requalifying later old-side work,
+while the candidate's current ingress and public health are still verified.
+Removing or dead members have an uncertain lifecycle and keep forward work
+pending until complete current evidence proves stopped or absent. Original-file
+readback may report those positively inventoried members as present, without
+claiming health or allowing an incomplete inventory to count as absence.
+Undispatched retirement exclusions retain the actual latched admission or health
+failure cause.
+A changed predecessor before cutover can
+end admission once original artifact custody, no metadata adoption and terminal
+candidate custody are proved. After possible cutover and current recovery-custody
+checks, the worker persists the original admission refusal and
+settles or excludes the original physical writer. That settlement never allocates
+another initializer or sends another forward write, including after a busy call.
+Unknown or busy execution stays pending with the decision latched. Reappeared
+Docker routers are not adopted or modified: the existing inverse may restore
+only the exact original file or the exact candidate document this attempt wrote.
+Foreign file bytes, changed physical custody and metadata CAS conflicts remain
+fenced. The admission-change result retains its actual reason and does not
+invent a health failure.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
@@ -69,7 +247,9 @@ never dispatched and is safe to run. After an interrupted stop, preserve the
 retirement intent: the old copy may already be stopped, so it cannot be
 advertised as a healthy rollback target.
 The supported exception requires an original stop proven terminal and never
-dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+dispatched, plus fresh private readiness for a previously healthy old copy. An
+unavailable-origin rollback instead keeps the exact durable stop-exclusion
+receipt, without asserting the old runtime remains unavailable. The checkpoint keeps
 that recovery proof before moving back; its contract refuses rollback without
 that proof once a stop intent exists. Pending, dispatched and unknown stops
 cannot use this path. A refusal propagates before any inverse action.
@@ -92,7 +272,8 @@ Fresh ordinary Compose lanes and Odoo previews use the same admission check
 before their first provider create, including the project's and environment's
 creation. Ordinary lane creation admits its private default bridge; repository
 Compose source is not yet available, so this is not a guarantee for additional
-networks a later deployment might declare. Generic-web testing activation and independent production recipients
+networks a later deployment might declare. Generic-web testing activation and
+independent production recipients
 check before recording fresh placement custody or dispatching resource work.
 Their known Compose source reserves the default bridge and all declared private
 networks. Explicit partial-placement recovery and an existing preview continue
@@ -112,9 +293,8 @@ provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
 receipt even after a later rebuild moves the lane. They do not reacquire a
 mutation lease or claim current live health; the service caller still authorizes
-the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
-must supply cancellation/abandonment for failed preparation with retained
-candidate custody before this component is activated as a rebuild control.
+the read. Failed preparation retains its candidate custody through the existing
+worker's cancellation/abandonment and original-operation recovery paths.
 
 ## Repair usage rule
 
@@ -343,24 +523,18 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. For an exact owned preview it
-records the Director agent's observed usage, data custody and isolation facts
-as cleanup-only observations. They cannot qualify runtime sync, deploy or other
-ordinary preview mutations. Preview refresh and retirement still read protective
-reports under their existing rules. Recording wakes normal preview reconciliation.
-The existing client supports `record` with `--preview-id`, `--usage`, `--data`,
-`--production-resources` and the `--usage-evidence`, `--data-evidence`,
-`--isolation-evidence` references. Each observation remains bound
-with required evidence references, the current binding and the existing expiry.
-Use `--lifetime-seconds` for a slower queue, within the service's existing
-fifteen-minute cap; expiry still requires fresh facts before another effect.
-Unknown facts stay unknown. Existing protected reports cannot be overwritten by
-an unverified safe assertion. This supplies scheduled preview cleanup's facts
-through the existing service API, without direct record edits.
-Scheduled preview cleanup requires current unused/reproducible facts and a
-confirmed closed PR. It does not require `production_resources: isolated`:
-credentials the preview reads are outside its destroy set. Production lanes,
-inexact preview identities and targets shared with another lane still refuse.
+authenticated actor and current time itself. Preview `record` assertions are refused.
+For testing, caller-supplied usage, custody and isolation values are stored as
+unknown. Observations retain their actor as provenance;
+historical observer names confer no permission. Preview refresh and retirement
+keep their existing protective-report rules.
+
+Scheduled preview cleanup tears down a preview when its PR is confirmed closed
+or merged, without usage, custody, data-origin or isolation observations. An
+open PR keeps its preview. Unknown PR state remains held until the source can be
+read. Cleanup needs no assertion, waiver or preview fact collector.
+Production lanes, inexact preview identities and targets shared with another
+lane still refuse.
 The destroy path remains limited to the preview's own target and storage;
 production-shared targets, volumes or databases are not disposable. Runtime
 sync, rebuild and refresh retain their existing isolation rules. Credential
@@ -808,8 +982,10 @@ A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
 publication or old-copy retirement. The old physical copy must still be qualified
-before switch-back; an already stopped predecessor does not prevent observing the
-current candidate, but cannot authorize an inverse switch.
+before switch-back. A predecessor that was serving at admission still needs its
+fresh private readiness before an excluded-stop inverse. An explicitly unavailable
+predecessor instead restores its captured route preimage and unavailable truth;
+it never supplies healthy rollback evidence.
 
 The supported host capability requires Dokploy's directory-mounted dynamic file
 provider, its private applied API and the existing managed terminal/Docker
@@ -1886,7 +2062,10 @@ and identity. Both source and recipient must use registered remote servers;
 preflight refuses local or missing recipients before testing writes. It refuses
 the provider's local key-generating terminal. Fixed
 commands read `pg_dump` output inside the recorded database container and stream
-the recorded web container's filestore; they create no production dump/archive,
+the recorded web container's filestore. Only the filestore tar may return status
+1, and only when its complete, nonempty C-locale diagnostics contain exclusively
+`file changed as we read it` warnings. Truncated or mixed diagnostics, other
+nonzero statuses and database-dump errors remain failures. The commands create no production dump/archive,
 schedule, attachment pin, password or other persistent source file. A read-only
 probe and source identity checks precede the first testing provider write.
 The source web container's injected runtime identity must match the registered
@@ -1960,9 +2139,23 @@ The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
 the testing filestore. The custom database dump goes through the existing
 SQL-only credential and connection sanitization boundary before a registry
-process runs. Whole-artifact hashes verify copy fidelity. The copy preserves
-pre-existing attachment data and missing-file references as the source export
-contains them; it does not introduce an attachment-repair or completeness policy.
+process runs. Whole-artifact hashes verify copy fidelity. Before recording the
+restored-copy witness or running a registry, the container-export receiver uses
+the rehearsal capture's full attachment validator against the restored database.
+Every file-backed reference must have a safe content-addressed path, its recorded
+size and its SHA-1. Both metadata and content passes share a read-only database
+snapshot and stream the attachment rows. Missing or corrupt references refuse the
+copy; no repair is attempted. Resume rechecks the same integrity gate before
+registry work and preserves an existing copy on refusal. SSH copies retain their
+existing attachment contract. An attachment refusal reports the value-free
+`copy_attachments_verified` predicate with kind `refused` in schedule readback.
+The modern rebuild retains safe schedule diagnostics in its candidate and failure
+evidence when the original provider logs are available; paths, checksums and raw
+logs stay private. Retry reuses the original capture. After original-operation
+readback observes the failed restore as terminal and retains its candidate,
+fix the source and start a fresh rebuild. Legacy generations follow their
+[retirement prerequisites](#retire-an-incomplete-legacy-generation-into-custody).
+Unknown effects remain fenced and never authorize recapture.
 Module, integration and website readback still precede the web gate. Successful
 readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the
@@ -2639,6 +2832,10 @@ rotated. It creates no credential that reaches a live system and grants nobody
 access. No workflow or alternate identity substitutes for a denied service call.
 The source and target copies use the same SQL boundary independently, with a
 sanitized source-version snapshot preserved before the target registry runs.
+Filestore working copies use `cp --reflink=auto` with full-copy fallback where
+reflinks are unsupported; PostgreSQL `CREATE DATABASE ... TEMPLATE` remains a
+full copy, recovery archives and their restoration are unchanged, and capacity
+budgets still cover full copies.
 
 The necessary new boundary is one additive rehearsal record, not another lane or
 release controller. Its compose is reserved under the new context in the existing
@@ -2806,6 +3003,75 @@ execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
 
+### Abandon an unknown validation on a disposable rehearsal
+
+`action: abandon-validation` explicitly abandons only an original
+`validate-business` attempt whose outcome is unknown on a standalone `switched`
+rehearsal. It uses the existing incomplete-retirement executor and reviewed
+inventory, with the unchanged rehearsal intent and original validation key.
+An active reservation lease, host execution lock, container exec, production
+alias, missing or changed INITIAL/FINAL sanitized source tuple, other unsettled
+effect, or a normal or pending validation outcome refuses the action. A person
+using the rehearsal remains a reason to stop under overall direction.
+
+The dry-run verifies both recorded sanitized source tuples against their actual
+bytes, witnesses and capture lineage. Apply stops and removes only the owned
+working runtime, labeled volumes, private network and provider placement. It
+retains the custody directory, both snapshot byte sets, all original markers,
+receipts and diagnostics. The original journal is archived verbatim on the
+rehearsal record, with its keys and provider-attempt identity. Only after native
+resource absence and placement absence are proven does the transaction release
+the old reservation with an abandonment receipt. The old validation key now
+replays that abandonment receipt; its original journal remains verbatim in the
+archive. Completion of the reservation describes abandonment, not a successful
+validation. Historical abandonment readback remains available after rebuilding
+and returns the preserved receipt without inspecting the replacement. Its `original_outcome` remains
+`unknown`; completion of abandonment proves no commit or rollback result for
+the old validation. This route has no production-lane equivalent.
+
+After deployment, use `scripts/odoo-upgrade-rehearsal.py` from that deployed
+revision. Derive private intent files by changing only `action` on the saved
+original intent. For each step run `dry-run`, review the saved evidence, run
+`apply --reviewed-dry-run` with the same payload/key/evidence file, then
+`readback` with that same payload and key:
+
+1. `abandon-validation`, using the original held validation key.
+2. `rebuild-final`, using a new key. This recreates isolated resources from the
+   retained source snapshots, upgrades a fresh working copy of the recorded
+   FINAL tuple, and starts private web only after the existing isolation and
+   health checks. It uses recorded artifact and upgrade settings; it neither
+   recaptures the business host nor replays the initial upgrade. Both source
+   tuples and the abandonment archive remain unchanged. Admission requires the
+   current preserving retirement receipt to match the latest abandonment.
+   Historical abandonment alone cannot authorize rebuilding after a later
+   disposal deleted those tuples.
+3. `validate-business`, using another new key and its own saved review. This
+   validates the newly built working copy. Validation readback needs that
+   attempt's saved evidence file.
+4. `verify`, with its own key and review, to preserve the post-write Odoo tuple
+   for the rollback rehearsal.
+
+Do not reuse an old validation review for the rebuilt copy. The record says
+`rebuilding` while the new placement and working copy are being produced, so
+normal provider ownership checks remain active. Rebuild readback requires that
+attempt's saved review file. If the host has saved its
+completed rebuild receipt but the service response was lost, original-key
+readback and reconciliation adopt that result without replay. A genuinely
+unknown bootstrap or FINAL restoration with no completed receipt stays held
+with both tuples and evidence preserved; this validation-abandonment route does
+not settle it. Before FINAL restoration starts, a capacity refusal retains a
+bound, completed preparation receipt and stopped runtime. Requalify capacity,
+then review a new `rebuild-final` key to reuse that proven preparation. The same
+key replays its refusal. Changed custody, active execution, mismatched placement,
+or an unsettled restoration marker prevents reuse. Read-only precheck failures
+before any new bootstrap or FINAL effect return
+`rehearsal_rebuild_precheck_refused`; requalify the prerequisite before reviewing
+a new key. A started, uncertain bootstrap or FINAL effect stays held. Verify requires a passing
+validation recorded after the latest abandonment; older validation history
+remains evidence. Ordinary
+retirement and every production hold retain their existing contracts.
+
+
 For a held initial execute that never published its recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
@@ -2822,10 +3088,45 @@ source snapshot, with exact witness, capture lineage and database/filestore
 hashes. The review binds that receipt into its native disposal manifest;
 apply and readback retain it as `host_disposal.initial_source_snapshot` after
 disposal. It is initial input evidence, never a final-source, upgraded or
-post-write recovery tuple. The web writer must be stopped. Later-phase incomplete
-runtimes remain held for their qualified disposition. Verified, actively running,
+post-write recovery tuple. The web writer must be stopped. Verified, actively running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
+
+A completed later phase that cannot reach `verified`, for example a superseded
+`switched` rehearsal whose candidate cannot run business validation, uses the
+same `retire-incomplete` action to recover its capacity. Supply the unchanged
+intent and the key of the **completed operation that published the current
+phase**: `execute` for `upgraded`, or the last `simulate-final` or
+`validate-business` for `switched`. Its stored result must equal the current
+record's state, copy receipts and phase timings exactly, so an earlier or
+unrelated key refuses. Any `running` or `reconcile_required` journal on the
+rehearsal refuses, before host inspection and again inside the publication
+transaction; an uncertain writer is never disposed around. The recorded copies
+must be exactly the phase's recovery snapshots (`source`, plus `final_source`
+after the switch). A `final_upgrade` post-write snapshot is never disposed by
+this path.
+
+Natively, the host lock must be free and every `<action>.started` marker must
+have its completed `<action>.json` receipt. One settled receipt must have
+published exactly the recorded copies. The phase-selected runtime may still
+serve its private web; a container with any active exec session is treated as
+a writer and refuses. Each recorded snapshot must be a real directory, not a
+link, with witness, capture lineage and database/filestore bytes matching its
+recorded receipt. An unrecorded snapshot directory or pending capture refuses.
+The review binds those receipts into the native manifest as
+`host_disposal.recovery_snapshots`. Apply then stops and removes the runtime
+and disposes the snapshot bytes under the same absence proofs as below. While
+any owned container, volume or network remains, every attempt, including
+resumption of an admitted manifest, repeats these custody and exec proofs and
+requires the same snapshot receipts as the review. Once all three are proven
+absent, only host custody deletion remains, and an interrupted deletion
+resumes without them.
+Publication marks the rehearsal retired and removes its target registration.
+It leaves the completed original journal unchanged as custody evidence; there
+is no hold to release. The retired record and the receipt keep the copy
+receipts, and any business-validation receipts, as the custody record of what
+was disposed. Readback rebuilds the
+receipt from the persisted host disposal and placement absence.
 
 The dry-run acquires executor exclusion and inspects the exact private placement,
 containers, private network, labeled local volumes and backing identities. It
@@ -2905,6 +3206,13 @@ each next `action` through its own dry-run/review/apply with a distinct stable
 key and new evidence file:
 
 1. `execute` captures the external source through fixed read-only SSH commands.
+   The filestore is content-addressed. Its live tar runs with C-locale diagnostics
+   and may return status 1 only when its complete, nonempty stderr contains
+   exclusively `file changed as we read it` warnings. Truncated, mixed or unknown
+   diagnostics and every other nonzero status refuse capture. No failed-read
+   suppression is used. Extraction rejects links and special files and applies
+   the safe data filter. Full restored-database attachment size and SHA-1
+   validation still gates the recovery tuple; missing or corrupt references fail.
    Database and filestore streams are bounded. Source-copy lineage is hashed,
    referenced attachments are checked against the restored database, and raw
    failure material stays outside all container mounts. The SQL-only
@@ -2959,13 +3267,23 @@ not identify its root cause; compare provider event logs before diagnosing it.
 The disabled server probe schedule and its deployment logs remain as operational
 evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
 original key can retry only after observing an empty placement and an idle
-probe, with the unchanged reviewed record and no credential binding. Unknown
+probe, with the unchanged original reviewed inputs. If credentials were already
+bound before the first placement checkpoint, their retained binding must match
+the current purpose-local bundle; continuation reuses that bundle. Unknown
 observations keep that key held. Partial prepare and host continuation
 keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
-`ODOO_DB_NAME` set to the final upgraded copy. Its stdin is one JSON object:
+`ODOO_DB_NAME` set to the final upgraded copy. The shared Compose environment
+defaults `ODOO_FILESTORE_PATH` to `/volumes/data/filestore` for both web and the
+script-runner, preserving explicitly configured filestore paths on other lanes.
+Copy/upgrade, before-web readback, attachment checks and product validation inherit
+the same rehearsal filestore setting. Copy/upgrade keeps its per-exec flag for
+containers prepared before this environment change. Existing switched containers
+do not gain a new environment from a source deploy; an already held validation
+still requires its separately reviewed original-operation disposition.
+Its stdin is one JSON object:
 `product`, `rehearsal_id`, `artifact_id`, `source_commit`, `database`, and
 `attempt_sha256`. Launchplane establishes these from the stored rehearsal,
 verified candidate and original operation key. The product independently checks
@@ -2982,9 +3300,15 @@ connected database and holds the native workflow lock; it can access other
 rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 
 The product writes exactly one line
-`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
-discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
+`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other stdout,
+including nonzero-exit stdout, is discarded. Stderr is drained concurrently;
+on failure its bounded tail passes through the existing credential and SQL-row
+redactor into the attempt-bound private child diagnostic, alongside any host
+timeout or output-limit reason. Truncated tails discard their first partial line
+before redaction. No stderr is added to
+a successful receipt. Product code must keep copied business values out of its
+error messages; redaction is not a general Client-data classifier.
+Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
 unknown original-key custody; stopping the host observer does not prove the
 in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`
@@ -3232,8 +3556,8 @@ Its fixed `recovery_reason` distinguishes unavailable observation from
 unqualified placement or source/credential prerequisites; provider authorization
 denials retain their HTTP refusal and trace rather than becoming a hold.
 
-`continue_original_prepare` is limited to an interrupted `project_id` effect:
-the original reviewed intent, unchanged source/artifact/placement and existing
+For an interrupted `project_id` effect, the original reviewed intent,
+unchanged source/artifact/placement and existing
 purpose-local credential bindings must agree, and complete provider inventory
 must prove exactly one service-named project with its original description and
 only its empty default environment. Under the original journal and reacquired

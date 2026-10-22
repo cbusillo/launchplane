@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
-from control_plane.advisory_check_projection import write_advisory_check_projection
+from control_plane.advisory_check_projection import (
+    update_existing_advisory_check_projection,
+    write_advisory_check_projection,
+)
 from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
     OWNER_ACCEPTANCE_CHECK_NAME,
@@ -21,7 +24,6 @@ from control_plane.contracts.advisory_check_projection import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    ProductOwnerProfile,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import (
@@ -33,7 +35,7 @@ from control_plane.github_app_identity import (
 from control_plane.client_test_notes import change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
-from control_plane.product_review import ProductReviewStore
+from control_plane.product_review import ProductReviewStore, applicable_product_review_decisions
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
@@ -70,6 +72,7 @@ class _PullRequestFacts:
     head_sha: str
     labels: frozenset[str]
     repository_id: str
+    state: str = ""
     base_branch: str = ""
     body: str = ""
     head_ref: str = ""
@@ -79,29 +82,29 @@ class _PullRequestFacts:
 
 def owner_review_status(
     *,
-    owner: ProductOwnerProfile,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
     head_sha: str,
     decisions: tuple[ProductReviewDecisionRecord, ...],
     base_branch: str = "",
 ) -> OwnerReviewStatus:
     """Return the status for a marked pull request; `decisions` are newest first."""
 
+    owner = profile.owner
     if not owner.is_set:
         return OwnerReviewStatus(state="pending", description=NO_OWNER_DESCRIPTION)
-    current_head = head_sha.strip().lower()
-    # The Owner reviews what is actually previewed, so a decision for another head
-    # says nothing about this one.
     decision = next(
-        (record for record in decisions if record.head_sha.strip().lower() == current_head),
+        iter(
+            applicable_product_review_decisions(
+                decisions=decisions,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=base_branch,
+            )
+        ),
         None,
     )
-    if (
-        decision is not None
-        and decision.carried_from is not None
-        and decision.base_branch != base_branch.strip()
-    ):
-        # Carried on another base: retargeting changed the change, so it no longer applies.
-        decision = None
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
@@ -179,6 +182,7 @@ class OwnerReviewStatusPublisher:
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
                 return None
+            closed = facts.state == "closed"
             written: OwnerReviewStatus | None = None
             try:
                 with store.product_review_lock(
@@ -202,41 +206,42 @@ class OwnerReviewStatusPublisher:
                                 "pull_request_number": pull_request_number,
                             },
                         )
-                    intent = change_client_review(
-                        body=facts.body,
-                        labels=facts.labels,
-                        review_label=profile.owner.review_label,
-                        pure_dependency_update=facts.pure_dependency_update,
-                        director_standing=profile.release_on_acceptance == "director_standing",
-                    )
-                    synthetic = not intent.explicit_override and recorded_train_candidate(
-                        store=store,
-                        repository=repository,
-                        head={
-                            "ref": facts.head_ref,
-                            "sha": facts.head_sha,
-                            "repo": {"full_name": facts.head_repository},
-                        },
-                        base_branch=facts.base_branch,
-                    )
-                    if not synthetic and (
-                        profile.owner.is_set
-                        or profile.owner.review_label.strip().casefold() in facts.labels
-                    ):
-                        written = self._write_status(
-                            store=store,
-                            profile=profile,
-                            pull_request_number=pull_request_number,
-                            facts=facts,
-                            token=token,
+                    if not closed:
+                        intent = change_client_review(
+                            body=facts.body,
+                            labels=facts.labels,
+                            review_label=profile.owner.review_label,
+                            pure_dependency_update=facts.pure_dependency_update,
+                            director_standing=profile.release_on_acceptance == "director_standing",
                         )
+                        synthetic = not intent.explicit_override and recorded_train_candidate(
+                            store=store,
+                            repository=repository,
+                            head={
+                                "ref": facts.head_ref,
+                                "sha": facts.head_sha,
+                                "repo": {"full_name": facts.head_repository},
+                            },
+                            base_branch=facts.base_branch,
+                        )
+                        if not synthetic:
+                            written = self._write_status(
+                                store=store,
+                                profile=profile,
+                                pull_request_number=pull_request_number,
+                                facts=facts,
+                                token=token,
+                                existing_only=not profile.owner.is_set
+                                and profile.owner.review_label.strip().casefold()
+                                not in facts.labels,
+                            )
             except Exception:
                 _LOGGER.warning(
                     "Client review status could not be written.",
                     exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
-            if retire_leftovers:
+            if retire_leftovers and not closed:
                 for retire in (self._retire_owner_acceptance_check,):
                     try:
                         retire(repository=repository, facts=facts, token=token)
@@ -331,6 +336,7 @@ class OwnerReviewStatusPublisher:
             payload, read=lambda path: self.api_request(path=path, token=token)
         )
         return _PullRequestFacts(
+            state=str(payload.get("state") or ""),
             pure_dependency_update=dependency_only,
             head_sha=head_sha.strip().lower(),
             labels=labels,
@@ -351,7 +357,8 @@ class OwnerReviewStatusPublisher:
         pull_request_number: int,
         facts: _PullRequestFacts,
         token: str,
-    ) -> OwnerReviewStatus:
+        existing_only: bool = False,
+    ) -> OwnerReviewStatus | None:
         intent = change_client_review(
             body=facts.body,
             labels=facts.labels,
@@ -359,15 +366,23 @@ class OwnerReviewStatusPublisher:
             pure_dependency_update=facts.pure_dependency_update,
             director_standing=profile.release_on_acceptance == "director_standing",
         )
-        if not intent.review_required:
+        if existing_only:
+            status = OwnerReviewStatus(
+                state="neutral", description="No Client preview review required"
+            )
+        elif not intent.review_required:
             decisions = store.list_product_review_decision_records(
                 repository=profile.repository, pull_request_number=pull_request_number
             )
             current = next(
-                (
-                    decision
-                    for decision in decisions
-                    if decision.head_sha.strip().lower() == facts.head_sha
+                iter(
+                    applicable_product_review_decisions(
+                        decisions=decisions,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        head_sha=facts.head_sha,
+                        base_branch=facts.base_branch,
+                    )
                 ),
                 None,
             )
@@ -379,7 +394,8 @@ class OwnerReviewStatusPublisher:
             )
             if current is not None and current.decision == "changes_requested":
                 status = owner_review_status(
-                    owner=profile.owner,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
                     head_sha=facts.head_sha,
                     decisions=decisions,
                     base_branch=facts.base_branch,
@@ -392,7 +408,7 @@ class OwnerReviewStatusPublisher:
                 facts=facts,
                 token=token,
             )
-        if intent.error:
+        if intent.error and not existing_only:
             status = OwnerReviewStatus(state="failure", description=intent.error)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
@@ -416,11 +432,18 @@ class OwnerReviewStatusPublisher:
         )
         installation_token = self._advisory_token(profile.repository, facts.repository_id)
         try:
-            write_advisory_check_projection(
+            writer = (
+                update_existing_advisory_check_projection
+                if existing_only
+                else write_advisory_check_projection
+            )
+            result = writer(
                 projection=projection,
                 installation_token=installation_token,
                 api_request=self.api_request,
             )
+            if result is None:
+                return None
         finally:
             revoke_installation_token(
                 installation_token=installation_token,
@@ -464,7 +487,8 @@ class OwnerReviewStatusPublisher:
                 },
             )
         return owner_review_status(
-            owner=profile.owner,
+            profile=profile,
+            pull_request_number=pull_request_number,
             head_sha=facts.head_sha,
             decisions=store.list_product_review_decision_records(
                 repository=profile.repository,

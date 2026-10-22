@@ -9,7 +9,9 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane.odoo_connection_isolation import (
+    CONNECTION_ISOLATION_PARAMETERS,
     CONNECTION_ISOLATION_PROGRAM,
+    NEUTRALIZED_FLAG,
     connection_isolation_library,
 )
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -61,6 +63,18 @@ def seed(connection: Any) -> None:
         "INSERT INTO ir_config_parameter VALUES ('shopify.api_token', 'development-store-key')"
     )
     connection.commit()
+
+
+def stored_by_settings_addon(value: str) -> str:
+    return {"true": str(True), "false": str(False)}.get(value.strip().lower(), value)
+
+
+def store_parameter(connection: sqlite3.Connection, key: str, value: str) -> None:
+    connection.execute(
+        "INSERT INTO ir_config_parameter (key, value) VALUES (?, ?)"
+        " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
 
 
 class ConnectionIsolationTests(unittest.TestCase):
@@ -316,6 +330,42 @@ class ConnectionIsolationTests(unittest.TestCase):
         connection.execute("INSERT INTO iap_account VALUES ('new-key')")
         self.assertIn("iap/iap_account", repair(cursor, apply=False))
         self.assertEqual(repair(cursor, apply=True), [])
+
+    def test_settings_addon_startup_keeps_isolated_copy_qualified(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        seed(connection)
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        repair = namespace["connection_isolation"]
+        cursor = SqliteCursor(connection)
+        self.assertEqual(repair(cursor, apply=True), [])
+        for key, value in CONNECTION_ISOLATION_PARAMETERS.items():
+            store_parameter(connection, key, stored_by_settings_addon(value))
+        self.assertEqual(repair(cursor, apply=False), [])
+
+    def test_unsafe_isolation_parameters_refuse(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        seed(connection)
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        repair = namespace["connection_isolation"]
+        cursor = SqliteCursor(connection)
+        unsafe = [(NEUTRALIZED_FLAG, value) for value in (str(False), "false", "1", "")]
+        unsafe += [
+            (key, value.upper())
+            for key, value in CONNECTION_ISOLATION_PARAMETERS.items()
+            if key != NEUTRALIZED_FLAG
+        ]
+        for key, value in unsafe:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(repair(cursor, apply=True), [])
+                store_parameter(connection, key, value)
+                self.assertIn("customer_sms/isolation_parameters", repair(cursor, apply=False))
+        self.assertEqual(repair(cursor, apply=True), [])
+        connection.execute("DELETE FROM ir_config_parameter WHERE key = ?", (NEUTRALIZED_FLAG,))
+        self.assertIn("customer_sms/isolation_parameters", repair(cursor, apply=False))
 
     def test_production_program_never_connects(self) -> None:
         transport = Mock()

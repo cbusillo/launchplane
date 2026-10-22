@@ -17,6 +17,7 @@ import tomllib
 import tokenize
 from typing import Protocol, cast
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -31,6 +32,10 @@ ALLOW_REASON_THIN_CONNECTOR_INPUT = "thin_connector_input"
 ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
+RENOVATE_METADATA_KEY_PATTERN = re.compile(
+    r"\$schema|extends\[\d+]|(?:packageRules\[\d+]\.)?description"
+    r"|packageRules\[\d+]\.match(?:PackageNames|DepNames|Datasources|Managers|FileNames|UpdateTypes)\[\d+]"
+)
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
@@ -150,7 +155,6 @@ GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN = re.compile(
 GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:github|steps\.[A-Za-z0-9_-]+\.outputs)\.[A-Za-z0-9_.-]+$"
 )
-GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
@@ -510,8 +514,6 @@ PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS = frozenset(
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
-        "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
-        "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": frozenset(
             ("${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}",)
         ),
@@ -2856,13 +2858,6 @@ def _allow_context_for_candidates(
     return allow_context
 
 
-def _checkout_candidate_block(key: str) -> str:
-    match = re.search(r"\[(?P<block>\d+)]$", key)
-    if match is None:
-        return ""
-    return match.group("block")
-
-
 def _leading_space_count(text: str) -> int:
     return len(text) - len(text.lstrip(" "))
 
@@ -3141,6 +3136,8 @@ def _allow_reason(
     normalized = path.replace("\\", "/")
     key_text = _semantic_full_key_text(key)
     if _is_codeowners_path(normalized):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if _is_renovate_config_path(normalized) and _is_renovate_metadata_key(key):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized.startswith("docs/")
@@ -4058,7 +4055,7 @@ def _launchplane_config_authority_workflow_revision(value: object) -> str:
     if match is None:
         return ""
     revision = match.group("revision")
-    return revision if GIT_COMMIT_SHA_PATTERN.fullmatch(revision) is not None else ""
+    return revision if GIT_SHA1_PATTERN.fullmatch(revision) is not None else ""
 
 
 def _is_launchplane_config_authority_connector(
@@ -4240,6 +4237,14 @@ def _is_codeowners_path(path: str) -> bool:
     return path in {".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
 
 
+def _is_renovate_config_path(path: str) -> bool:
+    return path in {"renovate.json", ".github/renovate.json"}
+
+
+def _is_renovate_metadata_key(key: str) -> bool:
+    return RENOVATE_METADATA_KEY_PATTERN.fullmatch(key) is not None
+
+
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:
     offset = 0
     while match := OWNER_REPO_PATTERN.search(value, offset):
@@ -4288,10 +4293,6 @@ def _git_file_state(root: Path) -> dict[str, dict[str, str]]:
         entry.setdefault("head_blob_sha", _git_output(root, "rev-parse", f"HEAD:{relative_path}"))
         entry.setdefault("index_blob_sha", _git_output(root, "rev-parse", f":{relative_path}"))
     return state
-
-
-def _git_tracked_files(root: Path) -> list[Path]:
-    return [root / relative_path for relative_path in _git_tracked_relative_paths(root)]
 
 
 def _git_tracked_relative_paths(root: Path) -> list[str]:

@@ -7,6 +7,11 @@ import re
 from typing import Any, Literal, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import (
+    SHA256_PATTERN,
+    normalize_decimal_id,
+    required_token,
+)
 
 
 PRODUCT_OWNER_POLICY_READ_ACTION = "product_owner_policy.read"
@@ -47,26 +52,11 @@ PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH: dict[str, int] = {
     "no_product_data": 3,
 }
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
-def _normalize_decimal_id(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
-    if not normalized.isdecimal() or int(normalized) < 1:
-        raise ValueError(f"{field_name} must be a positive decimal identity")
-    return str(int(normalized))
-
-
 def _normalize_utc_timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -88,13 +78,13 @@ def _canonical_sha256(payload: object) -> str:
 
 def _normalize_digest(value: str, field_name: str) -> str:
     normalized = value.strip().lower()
-    if not _SHA256_PATTERN.fullmatch(normalized):
+    if not SHA256_PATTERN.fullmatch(normalized):
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return normalized
 
 
 def _normalize_tokens(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
-    normalized = tuple(sorted({_required_token(value, field_name) for value in values}))
+    normalized = tuple(sorted({required_token(value, field_name) for value in values}))
     if not normalized:
         raise ValueError(f"{field_name} must contain at least one value")
     return normalized
@@ -103,7 +93,7 @@ def _normalize_tokens(values: tuple[str, ...], field_name: str) -> tuple[str, ..
 def _normalize_repository_ids(values: tuple[str, ...]) -> tuple[str, ...]:
     normalized = tuple(
         sorted(
-            {_normalize_decimal_id(value, "repository_ids") for value in values},
+            {normalize_decimal_id(value, "repository_ids") for value in values},
             key=int,
         )
     )
@@ -129,7 +119,7 @@ class ProductOwnerIdentity(BaseModel):
         object.__setattr__(
             self,
             "provider_subject_id",
-            _normalize_decimal_id(
+            normalize_decimal_id(
                 self.provider_subject_id,
                 "provider_subject_id",
             ),
@@ -139,7 +129,7 @@ class ProductOwnerIdentity(BaseModel):
             provider_subject_id=self.provider_subject_id,
         )
         if self.identity_id:
-            normalized_identity_id = _required_token(self.identity_id, "identity_id")
+            normalized_identity_id = required_token(self.identity_id, "identity_id")
             if normalized_identity_id != computed_identity_id:
                 raise ValueError(
                     "product Owner identity_id does not match immutable provider identity"
@@ -180,7 +170,7 @@ class ProductOwnerActorIdentity(BaseModel):
         object.__setattr__(
             self,
             "provider_subject_id",
-            _normalize_decimal_id(
+            normalize_decimal_id(
                 self.provider_subject_id,
                 "provider_subject_id",
             ),
@@ -190,7 +180,7 @@ class ProductOwnerActorIdentity(BaseModel):
             provider_subject_id=self.provider_subject_id,
         )
         if self.identity_id:
-            normalized_identity_id = _required_token(self.identity_id, "identity_id")
+            normalized_identity_id = required_token(self.identity_id, "identity_id")
             if normalized_identity_id != computed_identity_id:
                 raise ValueError("product Owner actor identity_id does not match provider identity")
             object.__setattr__(self, "identity_id", normalized_identity_id)
@@ -234,7 +224,7 @@ class ProductOwnerGrant(BaseModel):
         )
         computed_grant_id = build_product_owner_grant_id(self)
         if self.grant_id:
-            normalized_grant_id = _required_token(self.grant_id, "grant_id")
+            normalized_grant_id = required_token(self.grant_id, "grant_id")
             if normalized_grant_id != computed_grant_id:
                 raise ValueError("product Owner grant_id does not match grant scope")
             object.__setattr__(self, "grant_id", normalized_grant_id)
@@ -388,8 +378,8 @@ class ProductOwnerPolicyRecord(BaseModel):
     def _validate_policy(self) -> "ProductOwnerPolicyRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported product Owner policy schema version.")
-        self.product = _required_token(self.product, "product")
-        self.system = _required_token(self.system, "system")
+        self.product = required_token(self.product, "product")
+        self.system = required_token(self.system, "system")
         if not self.owners:
             raise ValueError("product Owner policy requires at least one Owner")
         identity_ids = tuple(owner.identity.identity_id for owner in self.owners)
@@ -397,14 +387,14 @@ class ProductOwnerPolicyRecord(BaseModel):
             raise ValueError("product Owner policy cannot repeat an immutable provider identity")
         self.owners = tuple(sorted(self.owners, key=lambda owner: owner.identity.identity_id))
         self.effective_at = _normalize_utc_timestamp(self.effective_at, "effective_at")
-        self.source = _required_token(self.source, "source")
-        self.reason = _required_token(self.reason, "reason")
+        self.source = required_token(self.source, "source")
+        self.reason = required_token(self.reason, "reason")
         if self.policy_revision == 1 and self.supersedes_record_id is not None:
             raise ValueError("initial product Owner policy cannot supersede another record")
         if self.policy_revision > 1 and not self.supersedes_record_id:
             raise ValueError("successor product Owner policy must name supersedes_record_id")
         if self.supersedes_record_id is not None:
-            self.supersedes_record_id = _required_token(
+            self.supersedes_record_id = required_token(
                 self.supersedes_record_id,
                 "supersedes_record_id",
             )
@@ -414,7 +404,7 @@ class ProductOwnerPolicyRecord(BaseModel):
             policy_revision=self.policy_revision,
         )
         if self.record_id:
-            self.record_id = _required_token(self.record_id, "record_id")
+            self.record_id = required_token(self.record_id, "record_id")
             if self.record_id != computed_record_id:
                 raise ValueError("product Owner policy record_id does not match scope and revision")
         else:
@@ -442,7 +432,7 @@ class ProductOwnerRequirement(BaseModel):
     def _validate_requirement(self) -> "ProductOwnerRequirement":
         if self.schema_version != 1:
             raise ValueError("Unsupported product Owner requirement schema version.")
-        self.action = _required_token(self.action, "action")
+        self.action = required_token(self.action, "action")
         if _ACTION_PATTERN.fullmatch(self.action) is None:
             raise ValueError("product Owner requirement action must be a stable lowercase token")
         if self.action.startswith(("authz_policy", "product_owner_")):
@@ -474,8 +464,8 @@ class ProductOwnerRequirementRecord(BaseModel):
     def _validate_requirement_record(self) -> "ProductOwnerRequirementRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported product Owner requirement record schema version.")
-        self.product = _required_token(self.product, "product")
-        self.system = _required_token(self.system, "system")
+        self.product = required_token(self.product, "product")
+        self.system = required_token(self.system, "system")
         keys = tuple(
             (requirement.action, requirement.repository_ids, requirement.environments)
             for requirement in self.requirements
@@ -488,15 +478,15 @@ class ProductOwnerRequirementRecord(BaseModel):
             sorted(self.requirements, key=lambda item: keys_for_requirement(item))
         )
         self.effective_at = _normalize_utc_timestamp(self.effective_at, "effective_at")
-        self.source = _required_token(self.source, "source")
-        self.reason = _required_token(self.reason, "reason")
+        self.source = required_token(self.source, "source")
+        self.reason = required_token(self.reason, "reason")
         _validate_supersedes(
             revision=self.requirement_revision,
             supersedes_record_id=self.supersedes_record_id,
             label="product Owner requirement",
         )
         if self.supersedes_record_id is not None:
-            self.supersedes_record_id = _required_token(
+            self.supersedes_record_id = required_token(
                 self.supersedes_record_id,
                 "supersedes_record_id",
             )
@@ -541,26 +531,26 @@ class ProductOwnerRoutingRecord(BaseModel):
     def _validate_routing_record(self) -> "ProductOwnerRoutingRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported product Owner routing record schema version.")
-        self.product = _required_token(self.product, "product")
-        self.system = _required_token(self.system, "system")
+        self.product = required_token(self.product, "product")
+        self.system = required_token(self.system, "system")
         self.preferred_owner_identity_ids = tuple(
             sorted(
                 {
-                    _required_token(identity_id, "preferred_owner_identity_ids")
+                    required_token(identity_id, "preferred_owner_identity_ids")
                     for identity_id in self.preferred_owner_identity_ids
                 }
             )
         )
         self.effective_at = _normalize_utc_timestamp(self.effective_at, "effective_at")
-        self.source = _required_token(self.source, "source")
-        self.reason = _required_token(self.reason, "reason")
+        self.source = required_token(self.source, "source")
+        self.reason = required_token(self.reason, "reason")
         _validate_supersedes(
             revision=self.routing_revision,
             supersedes_record_id=self.supersedes_record_id,
             label="product Owner routing",
         )
         if self.supersedes_record_id is not None:
-            self.supersedes_record_id = _required_token(
+            self.supersedes_record_id = required_token(
                 self.supersedes_record_id,
                 "supersedes_record_id",
             )
@@ -598,11 +588,11 @@ class ProductOwnerActionContext(BaseModel):
     def _validate_context(self) -> "ProductOwnerActionContext":
         if self.schema_version != 1:
             raise ValueError("Unsupported product Owner action context schema version.")
-        self.product = _required_token(self.product, "product")
-        self.system = _required_token(self.system, "system")
-        self.repository_id = _normalize_decimal_id(self.repository_id, "repository_id")
-        self.environment = _required_token(self.environment, "environment")
-        self.action = _required_token(self.action, "action")
+        self.product = required_token(self.product, "product")
+        self.system = required_token(self.system, "system")
+        self.repository_id = normalize_decimal_id(self.repository_id, "repository_id")
+        self.environment = required_token(self.environment, "environment")
+        self.action = required_token(self.action, "action")
         return self
 
 
@@ -630,10 +620,10 @@ class ProductOwnerAuthorityEvaluation(BaseModel):
 
 
 def build_product_owner_identity_id(*, provider: str, provider_subject_id: str) -> str:
-    normalized_provider = _required_token(provider, "provider").lower()
+    normalized_provider = required_token(provider, "provider").lower()
     if normalized_provider != "github":
         raise ValueError("product Owner identity provider must be github")
-    normalized_subject = _normalize_decimal_id(provider_subject_id, "provider_subject_id")
+    normalized_subject = normalize_decimal_id(provider_subject_id, "provider_subject_id")
     digest = _canonical_sha256(
         {"provider": normalized_provider, "provider_subject_id": normalized_subject}
     )
@@ -654,8 +644,8 @@ def build_product_owner_grant_id(grant: ProductOwnerGrant) -> str:
 def _scope_record_id(*, kind: str, product: str, system: str, revision: int) -> str:
     if revision < 1:
         raise ValueError(f"{kind} revision must be positive")
-    normalized_product = _required_token(product, "product")
-    normalized_system = _required_token(system, "system")
+    normalized_product = required_token(product, "product")
+    normalized_system = required_token(system, "system")
     scope_digest = _canonical_sha256({"product": normalized_product, "system": normalized_system})
     return f"product-owner-{kind}-{scope_digest[:16]}-r{revision}"
 
@@ -741,7 +731,7 @@ def _validate_supersedes(*, revision: int, supersedes_record_id: str | None, lab
 def _validate_or_assign_record_id(*, current: str, computed: str, label: str) -> str:
     if not current:
         return computed
-    normalized = _required_token(current, "record_id")
+    normalized = required_token(current, "record_id")
     if normalized != computed:
         raise ValueError(f"{label} record_id does not match scope and revision")
     return normalized
@@ -783,13 +773,13 @@ def product_owner_scoped_policy_fingerprint(
             "fingerprint_version": PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION,
             "dimension": dimension,
             "scope": {
-                "product": _required_token(context.product, "product"),
-                "system": _required_token(context.system, "system"),
-                "repository_id": _normalize_decimal_id(context.repository_id, "repository_id"),
-                "environment": _required_token(context.environment, "environment"),
-                "action": _required_token(context.action, "action"),
+                "product": required_token(context.product, "product"),
+                "system": required_token(context.system, "system"),
+                "repository_id": normalize_decimal_id(context.repository_id, "repository_id"),
+                "environment": required_token(context.environment, "environment"),
+                "action": required_token(context.action, "action"),
             },
-            "record_id": _required_token(record_id, "record_id"),
+            "record_id": required_token(record_id, "record_id"),
             "revision": revision,
             "payload": payload,
         }

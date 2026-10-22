@@ -18,6 +18,7 @@ from control_plane.dokploy.testing_retained_copy import (
     retained_copy_host_program,
 )
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+from control_plane.copy_readback_diagnostics import CopyReadbackRefused, ReadbackPredicate
 
 
 class RetainedTestingCopyTests(unittest.TestCase):
@@ -87,8 +88,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.containers[1]["State"]["Status"] = "exited"
         self.assertTrue(qualify_retained_copy(self.containers, original)["stopped"])
         self.containers[1]["Mounts"][0]["Name"] = "foreign-data"
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused) as raised:
             qualify_retained_copy(self.containers, original)
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.CUSTODY)
 
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
@@ -103,31 +105,36 @@ class RetainedTestingCopyTests(unittest.TestCase):
         )
 
     def test_foreign_storage_consumers_or_another_lane_in_the_project_refuse(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(
                 [*self.containers, {"Mounts": deepcopy(self.containers[1]["Mounts"])}], self.spec
             )
         self.containers[1]["Config"]["Env"] = ["PLATFORM_INSTANCE=prod"]
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(self.containers, self.spec)
 
     def test_foreign_identity_or_database_refuses(self) -> None:
         for update in ({"context": "foreign"}, {"identity": {**self.identity, "instance": "prod"}}):
-            with self.subTest(update=update), self.assertRaises(ValueError):
+            with self.subTest(update=update), self.assertRaises(CopyReadbackRefused):
                 qualify_retained_copy(self.containers, {**self.spec, **update})
 
     def test_unowned_service_in_project_cannot_be_included_in_stack_retirement(self) -> None:
         extra = deepcopy(self.containers[1])
         extra["Id"] = "another-application"
         extra["Config"]["Labels"]["com.docker.compose.service"] = "another-application"
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy([*self.containers, extra], self.spec)
         self.containers[0]["Config"]["Env"].append("ODOO_DB_HOST=production-database")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CopyReadbackRefused):
             qualify_retained_copy(self.containers, self.spec)
 
     def run_host(
-        self, *, mode: str = "read", deny: bool = False, extra: dict[str, Any] | None = None
+        self,
+        *,
+        mode: str = "read",
+        deny: bool = False,
+        extra: dict[str, Any] | None = None,
+        inspect_result: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
         payload = {**self.spec, "mode": mode, "identity": self.identity, **(extra or {})}
         commands: list[list[str]] = []
@@ -142,7 +149,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 output = "\n".join(item["Id"] for item in self.containers).encode()
             elif command[1] == "inspect":
                 output = json.dumps(
-                    [item for item in self.containers if item["Id"] in command[2:]]
+                    inspect_result
+                    if inspect_result is not None
+                    else [item for item in self.containers if item["Id"] in command[2:]]
                 ).encode()
             elif command[1:3] == ["volume", "inspect"]:
                 name = command[-1]
@@ -193,6 +202,15 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertTrue(frame["healthy"])
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))
         self.assertEqual(frame["physical_binding"], read["physical_binding"])
+        frame, _ = self.run_host(extra={"physical_binding": "changed"})
+        self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
+        self.assertEqual(frame["kind"], "refused")
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(
+            mode="readiness", extra={"physical_binding": read["physical_binding"]}
+        )
+        self.assertEqual(frame["predicate"], ReadbackPredicate.RUNTIME)
+        self.assertEqual(frame["kind"], "refused")
 
     def test_host_read_refuses_a_bind_alias_of_the_testing_data(self) -> None:
         self.containers.append(
@@ -209,5 +227,84 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(frame, {"type": "denied"})
         self.assertEqual(len(commands), 1)
         frame, commands = self.run_host(mode="stop")
-        self.assertEqual(frame, {"type": "failed"})
+        self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))
+
+    def test_stopped_inventory_is_bound_without_starting_a_copy_or_reading_health(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        read, commands = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(read["availability"], "stopped")
+        self.assertEqual(read["identity"], self.identity)
+        self.assertTrue(read["physical_binding"])
+        self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0],
+            read,
+        )
+        for item in self.containers:
+            item["State"].update(
+                Pid=0,
+                ExitCode=1,
+                StartedAt="2026-10-20T11:00:00Z",
+                FinishedAt="2026-10-20T11:01:00Z",
+            )
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0],
+            read,
+        )
+        self.containers[0]["Id"] = "different-stopped-web"
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0]["type"],
+            "failed",
+        )
+
+    def test_absence_requires_complete_inventory_and_never_invents_old_resources(self) -> None:
+        self.assertEqual(
+            self.run_host(extra={"allow_unavailable": True}, inspect_result=[])[0]["type"], "failed"
+        )
+        self.containers = []
+        read, commands = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(read["availability"], "absent")
+        for field in ("identity", "web_id", "physical_binding", "resource_binding"):
+            self.assertNotIn(field, read)
+        self.assertTrue(read["observation_sha256"])
+        self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
+        with self.assertRaises(CopyReadbackRefused) as raised:
+            qualify_retained_copy([], self.spec)
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.SERVICES)
+
+    def test_matching_ids_with_missing_inspect_fields_cannot_establish_absence_or_isolation(
+        self,
+    ) -> None:
+        for field in ("Config", "Mounts", "State"):
+            with self.subTest(field=field):
+                incomplete = deepcopy(self.containers)
+                for item in incomplete:
+                    item.pop(field)
+                self.assertEqual(
+                    self.run_host(extra={"allow_unavailable": True}, inspect_result=incomplete)[0][
+                        "type"
+                    ],
+                    "failed",
+                )
+
+    def test_stopped_legacy_copy_needs_no_fabricated_runtime_identity(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        self.containers[0]["Config"]["Env"] = [
+            item
+            for item in self.containers[0]["Config"]["Env"]
+            if not item.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+        ]
+        read, commands = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.assertEqual(read["type"], "complete")
+        self.assertEqual(read["availability"], "stopped")
+        self.assertIsNone(read["identity"])
+        self.assertFalse(any(command[1] == "exec" for command in commands))

@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    build_odoo_stable_target_replacement_operation_id,
 )
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -54,7 +55,7 @@ from control_plane.workflows.odoo_post_deploy import (
     _prefix_post_deploy_readback_evidence,
 )
 from tests.test_product_reconcile import _profile, _inventory
-from typing import cast
+from typing import Any, cast
 
 
 def stamp(offset: int = 0) -> str:
@@ -414,6 +415,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         for store, root in self.stores():
             self.running(store)
             fenced = self.fence(store)
+            if isinstance(store, PostgresRecordStore):
+                self.assertEqual(
+                    run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(), notify=False
+                    ).open_incident_count,
+                    1,
+                )
             retained_target = store.read_dokploy_target_id_record(
                 context_name=fenced.context, instance_name=fenced.instance
             ).target_id
@@ -473,6 +481,14 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 fenced.operation_id
             )
             self.assertEqual(replaced.status, "superseded")
+            if isinstance(store, PostgresRecordStore):
+                self.assertEqual(
+                    run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(1), notify=False
+                    ).resolved_incident_count,
+                    1,
+                )
+
             self.assertEqual(replaced.request, fenced.request)
             self.assertIsNone(replaced.cancellation)
             self.assertIsNone(replaced.recovery_journal)
@@ -566,6 +582,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 self.assertFalse(supersede(fenced))
             production = fenced.model_copy(
                 update={
+                    "operation_id": "production-" + fenced.operation_id,
                     "instance": "prod",
                     "request": fenced.request.model_copy(update={"instance": "prod"}),
                     "authorization": None,
@@ -575,21 +592,16 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             getattr(store, "write_odoo_stable_target_replacement_operation_record")(production)
             self.assertFalse(supersede(production))
             self.assertEqual(
-                store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id),
+                store.read_odoo_stable_target_replacement_operation_record(production.operation_id),
                 production,
             )
 
     def test_legacy_read_observes_retained_target_and_schedules_without_release(self) -> None:
         for store, root in self.stores():
-            operation = self.running(store)
-            operation = operation.model_copy(
-                update={
-                    "request": operation.request.model_copy(
-                        update={"artifact_id": "original-artifact", "source_git_ref": "a" * 40}
-                    )
-                }
+            operation = self.running(
+                store,
+                request_overrides={"artifact_id": "original-artifact", "source_git_ref": "a" * 40},
             )
-            getattr(store, "write_odoo_stable_target_replacement_operation_record")(operation)
             deployment = DeploymentRecord.model_validate(
                 {
                     "record_id": "original-pending",
@@ -758,15 +770,10 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
 
     def test_legacy_read_inspects_the_retained_schedule_run_without_releasing(self) -> None:
         for store, root in self.stores():
-            operation = self.running(store)
-            operation = operation.model_copy(
-                update={
-                    "request": operation.request.model_copy(
-                        update={"artifact_id": "original-artifact", "source_git_ref": "a" * 40}
-                    )
-                }
+            operation = self.running(
+                store,
+                request_overrides={"artifact_id": "original-artifact", "source_git_ref": "a" * 40},
             )
-            getattr(store, "write_odoo_stable_target_replacement_operation_record")(operation)
             deployment = DeploymentRecord.model_validate(
                 {
                     "record_id": "original-deployment",
@@ -1140,29 +1147,43 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 )
                 yield cast(TestingRecoveryStore, store), root
 
-    def running(self, store: TestingRecoveryStore) -> OdooStableTargetReplacementOperationRecord:
+    def running(
+        self,
+        store: TestingRecoveryStore,
+        *,
+        request_overrides: dict[str, str] | None = None,
+        instance: str = "testing",
+    ) -> OdooStableTargetReplacementOperationRecord:
+        created_at = stamp()
         operation = OdooStableTargetReplacementOperationRecord(
             schema_version=2,
-            operation_id="op-testing",
+            operation_id=build_odoo_stable_target_replacement_operation_id(
+                product="site",
+                context="cm",
+                instance=instance,
+                created_at=created_at,
+                idempotency_key="launchplane-reconcile:site:cm:testing:artifact",
+                idempotency_scope="launchplane-reconcile:site",
+            ),
             product="site",
             context="cm",
-            instance="testing",
+            instance=instance,
             idempotency_key="launchplane-reconcile:site:cm:testing:artifact",
             idempotency_scope="launchplane-reconcile:site",
             request_fingerprint="request",
             request=OdooStableTargetReplacementApplyRequest(
                 product="site",
-                instance="testing",
+                instance=instance,
                 strategy="recreate-in-place",
                 data_source_mode="existing",
                 allow_empty_data=True,
-            ),
+            ).model_copy(update=request_overrides or {}),
             authorization=build_launchplane_reconcile_authorization(
                 product="site", context="cm", authorized_at=stamp()
-            ),
+            ).model_copy(update={"instances": (instance,)}),
             status="running",
             phase="running",
-            created_at=stamp(),
+            created_at=created_at,
             updated_at=stamp(),
             started_at=stamp(),
             lease_owner="worker",
@@ -1174,14 +1195,16 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         return operation
 
     def fence(self, store: TestingRecoveryStore) -> OdooStableTargetReplacementOperationRecord:
-        current = store.read_odoo_stable_target_replacement_operation_record("op-testing")
+        current = store.list_odoo_stable_target_replacement_operation_records(
+            statuses=("running",)
+        )[0]
         getattr(store, "write_odoo_stable_target_replacement_operation_record")(
             current.model_copy(update={"lease_expires_at": stamp(-1)})
         )
         getattr(store, "recover_expired_odoo_stable_target_replacement_operation_records")(
             now=stamp(), safe_phases=("created",), max_attempts=3
         )
-        fenced = store.read_odoo_stable_target_replacement_operation_record("op-testing")
+        fenced = store.read_odoo_stable_target_replacement_operation_record(current.operation_id)
         self.assertEqual(fenced.status, "reconciliation_required")
         return fenced
 
@@ -1278,6 +1301,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                             payload={"composeId": "compose-123"},
                         )
                     dispatch.assert_not_called()
+            if isinstance(store, PostgresRecordStore):
+                self.assertEqual(
+                    run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(), notify=False
+                    ).open_incident_count,
+                    1,
+                )
             with self.provider():
                 self.assertEqual(
                     recover_stranded_testing_replacements(store, root), (operation.operation_id,)
@@ -1287,6 +1317,47 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 operation.operation_id
             )
             self.assertEqual(cancelled.status, "cancelled")
+            if isinstance(store, PostgresRecordStore):
+                assert cancelled.cancellation is not None
+                attestation = cancelled.cancellation.reconciliation_attestation
+                assert attestation is not None
+                changed_proof = cancelled.model_copy(
+                    update={
+                        "cancellation": cancelled.cancellation.model_copy(
+                            update={
+                                "reconciliation_attestation": attestation.model_copy(
+                                    update={
+                                        "evidence_reference": attestation.evidence_reference
+                                        + ":refreshed-inspection"
+                                    }
+                                )
+                            }
+                        )
+                    }
+                )
+                transition = store.write_public_ingress_transition_with_outbox
+
+                def change_terminal_proof(**kwargs: Any) -> Any:
+                    store.write_odoo_stable_target_replacement_operation_record(changed_proof)
+                    return transition(**kwargs)
+
+                with patch.object(
+                    store,
+                    "write_public_ingress_transition_with_outbox",
+                    side_effect=change_terminal_proof,
+                ):
+                    stale = run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(1), notify=False
+                    )
+                self.assertEqual(stale.resolved_incident_count, 0)
+                self.assertEqual(stale.skipped_count, 1)
+                self.assertEqual(
+                    run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(2), notify=False
+                    ).resolved_incident_count,
+                    1,
+                )
+
             assert cancelled.cancellation is not None
             assert cancelled.cancellation.reconciliation_attestation is not None
             self.assertGreaterEqual(
@@ -1593,18 +1664,30 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             DurableOperationCallerIdentity,
         )
 
-        for store, root in self.stores():
-            operation = self.running(store)
-            with guard_testing_replacement(
-                store, operation, "worker", lambda _: None
-            ) as checkpoint:
-                checkpoint("first-write")
-            fenced = self.fence(store)
-            for instance, grant in (
-                ("testing", "policy_rule"),
-                ("prod", "launchplane_reconcile"),
-                ("testing", "client_release_acceptance"),
-            ):
+        for instance, grant in (
+            ("testing", "policy_rule"),
+            ("prod", "launchplane_reconcile"),
+            ("testing", "client_release_acceptance"),
+        ):
+            for store, root in self.stores():
+                if instance == "prod":
+                    getattr(store, "write_dokploy_target_record")(
+                        DokployTargetRecord(context="cm", instance=instance, updated_at=stamp())
+                    )
+                    getattr(store, "write_dokploy_target_id_record")(
+                        DokployTargetIdRecord(
+                            context="cm",
+                            instance=instance,
+                            target_id="compose-prod",
+                            updated_at=stamp(),
+                        )
+                    )
+                operation = self.running(store, instance=instance)
+                with guard_testing_replacement(
+                    store, operation, "worker", lambda _: None
+                ) as checkpoint:
+                    checkpoint("first-write")
+                fenced = self.fence(store)
                 authorization = fenced.authorization
                 assert authorization is not None
                 if grant == "policy_rule":

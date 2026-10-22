@@ -70,6 +70,10 @@ new record, account, policy change or alternate identity:
 | `testing_task_generation_unverified` | Generation qualification could not read or verify queue receipt, target, credential separation, resource allocation, use/route hold or exclusive ownership. This code alone does not identify which subcheck failed. |
 | `testing_task_use_protected` | Staff hold or recorded use, only-copy custody or shared resources protect the lane, or that protection could not be read. Read existing hold and safety evidence. |
 | `testing_task_physical_copy_unverified` | Fixed host inspection could not qualify the exact copy, storage, network, image or login-history read. Preserve the copy and inspect the original operation. |
+| `runner_running` | `blocked` means the selected physical-copy script runner was observed stopped; `unknown` means its state could not be read. Inspect its lifecycle and logs before a separately authorized runtime recovery; no SQL or sign-in verdict was observed. |
+| `cleanup_database_present` | The task cleanup database was observed missing. Preserve the original task, generation and operation evidence before reconciling its custody. |
+| `resources_qualified`, `copy_*`, `database_*`, `backing_*`, `storage_*` | The fixed physical-copy reader identifies its individual resource predicate. `blocked` means an observed negative; `unknown` means that predicate could not be read. The description carries the same value-free observation. |
+| `native_inspection_complete`, `runner_capabilities_available` | The native transport or selected runner probe returned no usable evidence. This observation supplies no isolation or usage verdict. Independent steps keep their own observations; preserve the copy and original operation. |
 | `testing_task_runtime_unavailable` | The current provider runtime or recipient could not be verified. Compare recorded and observed testing identity. |
 | `testing_task_origin_unverified` | The recorded HTTPS origin could not be verified on the selected testing target. Read its route/domain evidence. |
 | `testing_task_database_unverified` | Recorded and running testing database names are missing, unreadable or disagree. Read configuration metadata without credential values. |
@@ -81,7 +85,11 @@ new record, account, policy change or alternate identity:
 | `testing_task_protected_signin_observed` | A successful sign-in since preparation, by anyone except a natively witnessed task account on this copy, was observed. Preserve that use; do not clear history. |
 | `testing_task_credential_custody_unavailable` | Task secret metadata is unreadable, closed, expired or missing for a browser run. Follow this task's supported lifecycle; do not read or replace passwords. |
 
-Each code identifies the checkpoint that could not complete, including
+Native predicate errors from execution append `_refused` or `_unavailable` to
+the predicate; path-check carries that distinction in its `blocked` or `unknown`
+state. A predicate names the observation, never permission to repair or repeat an effect.
+
+Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It
 does not establish a specific bad record or defect. The isolation and
 protected sign-in read is the exception: it names the first negative

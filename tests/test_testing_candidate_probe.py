@@ -56,6 +56,7 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.image_ok = True
         self.container_probe: CandidateContainerProbeTests | None = None
         self.integration_error: bytes | None = None
+        self.integration_refused = False
         namespace: dict[str, Any] = {"__name__": "probe_test"}
         exec(compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"), namespace)
         self.program = namespace["probe"]
@@ -74,9 +75,18 @@ class CandidateHostProbeTests(unittest.TestCase):
                 if self.integration_error is not None:
                     self.fixture.calls.append(command)
                     return subprocess.CompletedProcess(
-                        command, 1, stdout=b"", stderr=self.integration_error
+                        command,
+                        1,
+                        stdout=b"integration_readback_ok=false\n"
+                        if self.integration_refused
+                        else b"",
+                        stderr=self.integration_error,
                     )
-                result = b"integration_readback_ok=true\n"
+                result = (
+                    b"integration_readback_ok=false\n"
+                    if self.integration_refused
+                    else b"integration_readback_ok=true\n"
+                )
             elif (
                 "-c" in command
                 and command[command.index("-c") + 1] == probe.CANDIDATE_CONTAINER_PROBE
@@ -88,17 +98,17 @@ class CandidateHostProbeTests(unittest.TestCase):
                         result = self.container_probe.run_probe().encode()
                     except Exception:
                         return subprocess.CompletedProcess(
-                            command, 1, stdout=b"", stderr=traceback.format_exc().encode()
+                            command,
+                            1,
+                            stdout=self.container_probe.last_output.encode(),
+                            stderr=traceback.format_exc().encode(),
                         )
                 else:
                     result = (
                         b"candidate_credentials_verified=true\n" if self.credentials_ok else b""
                     )
             elif command[2:4] == [self.fixture.containers["script-runner"]["Id"], "python3"]:
-                if not self.gate_ok:
-                    return subprocess.CompletedProcess(
-                        command, 1, stdout=b"", stderr=b"private gate error"
-                    )
+                result = b"True\n" if self.gate_ok else b"False\n"
             else:
                 self.fail("Unexpected candidate docker exec")
         else:
@@ -160,7 +170,32 @@ class CandidateHostProbeTests(unittest.TestCase):
             "password authentication failed for user fixture"
         )
         self.container_probe = container_probe
-        self.assertEqual(self.failure_frame(), {"type": "failed"})
+        self.assertEqual(self.failure_frame()["kind"], "unavailable")
+
+    def test_completed_negative_child_and_sql_reads_keep_honest_boundary_predicates(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.integration_refused = True
+        frame = self.failure_frame()
+        self.assertEqual(frame["predicate"], ReadbackPredicate.INTEGRATIONS)
+        self.assertEqual(frame["kind"], "refused")
+        self.integration_refused = False
+        container = CandidateContainerProbeTests()
+        container.setUp()
+        self.addCleanup(container.doCleanups)
+        self.container_probe = container
+        container.health_identity = {"deployment_record_id": "other"}
+        frame = self.failure_frame()
+        self.assertEqual(frame["predicate"], ReadbackPredicate.CANDIDATE_READINESS)
+        self.assertEqual(frame["kind"], "refused")
+
+    def test_observed_gate_mismatch_preserves_its_predicate_and_kind(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.gate_ok = False
+        frame = self.failure_frame()
+        self.assertEqual(frame["predicate"], ReadbackPredicate.WEB_GATE)
+        self.assertEqual(frame["kind"], "refused")
 
     def test_integration_readback_errors_fail_before_the_credential_program(self) -> None:
         for error in (
@@ -171,7 +206,7 @@ class CandidateHostProbeTests(unittest.TestCase):
             with self.subTest(error=error):
                 self.integration_error = error
                 self.fixture.calls.clear()
-                self.assertEqual(self.failure_frame(), {"type": "failed"})
+                self.assertEqual(self.failure_frame()["kind"], "unavailable")
                 self.assertFalse(
                     any(
                         probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls
@@ -179,6 +214,7 @@ class CandidateHostProbeTests(unittest.TestCase):
                 )
 
     def test_docker_daemon_refusal_during_readback_remains_denied(self) -> None:
+        self.integration_refused = True
         for error in (
             b"permission denied while trying to connect to the Docker daemon socket",
             b"permission denied while trying to connect to the docker API at unix:///socket",
@@ -194,8 +230,11 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.fixture.containers["web"]["HostConfig"]["PortBindings"] = {
             "8069/tcp": [{"HostPort": "8069"}]
         }
-        with self.assertRaises(RuntimeError):
-            self.run_probe()
+        frame = self.failure_frame()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(frame["predicate"], ReadbackPredicate.PORTS)
+        self.assertEqual(frame["kind"], "refused")
         self.assertFalse(
             any(probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls)
         )
@@ -236,6 +275,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
             }
         )
         self.requests: list[Request] = []
+        self.last_output = ""
 
     def response(self, request: Any, **kwargs: Any) -> Any:
         self.requests.append(request)
@@ -286,7 +326,10 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 os.environ.pop("ODOO_ADMIN_LOGIN", None)
             else:
                 os.environ["ODOO_ADMIN_LOGIN"] = admin_login
-            exec(compile(probe.CANDIDATE_CONTAINER_PROBE, "<candidate-container>", "exec"), {})
+            try:
+                exec(compile(probe.CANDIDATE_CONTAINER_PROBE, "<candidate-container>", "exec"), {})
+            finally:
+                self.last_output = output.getvalue()
         return output.getvalue()
 
     def test_health_and_local_credentials_use_only_loopback_with_stable_host(self) -> None:

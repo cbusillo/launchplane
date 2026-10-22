@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import base64
 import json
 import secrets
@@ -23,6 +25,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.preview_resource_destroy import (
+    PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
 )
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -33,6 +36,9 @@ from control_plane.workflows.generic_web_application_lifecycle import (
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
+from control_plane.dokploy import memory_capacity
+from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
+
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -196,21 +202,6 @@ class VeriReelPreviewInventoryRequest(BaseModel):
         return self
 
 
-class VeriReelPreviewInventoryItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    applicationId: str
-    applicationName: str
-    previewSlug: str
-
-
-class VeriReelPreviewInventoryResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    previews: tuple[VeriReelPreviewInventoryItem, ...]
-
-
 class _DatabaseParts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -229,14 +220,6 @@ def _preview_application_name(
     preview_slug: str, prefix: str = PREVIEW_APP_PREFIX, suffix: str = "-app"
 ) -> str:
     return f"{_preview_app_name(preview_slug, prefix)}{suffix}"
-
-
-def _preview_slug_from_application_name(application_name: str) -> str:
-    prefix = f"{PREVIEW_APP_PREFIX}-"
-    suffix = "-app"
-    if not application_name.startswith(prefix) or not application_name.endswith(suffix):
-        return ""
-    return application_name[len(prefix) : -len(suffix)]
 
 
 def _preview_database_identifiers(
@@ -523,43 +506,6 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
                 )
             return {**application, "applicationId": application_id}
     return None
-
-
-def execute_verireel_preview_inventory(
-    *,
-    control_plane_root: Path,
-    request: VeriReelPreviewInventoryRequest,
-) -> VeriReelPreviewInventoryResult:
-    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-    raw_projects = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/project.all",
-    )
-    preview_items: list[VeriReelPreviewInventoryItem] = []
-    for application in dokploy_api.iter_dokploy_applications(raw_projects):
-        application_name = str(application.get("name") or "").strip()
-        preview_slug = _preview_slug_from_application_name(application_name)
-        if not preview_slug:
-            continue
-        application_id = str(
-            application.get("applicationId") or application.get("id") or ""
-        ).strip()
-        if not application_id:
-            raise click.ClickException(
-                "Dokploy project inventory has incomplete application identity."
-            )
-        preview_items.append(
-            VeriReelPreviewInventoryItem(
-                applicationId=application_id,
-                applicationName=application_name,
-                previewSlug=preview_slug,
-            )
-        )
-    return VeriReelPreviewInventoryResult(
-        context=request.context,
-        previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
-    )
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:
@@ -1213,6 +1159,13 @@ def execute_verireel_preview_refresh(
             if _is_dokploy_provider_failure(exc):
                 raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
             raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+    if existing_snapshot is None:
+        memory_capacity.require_preview_host_memory_capacity(
+            host=host,
+            token=token,
+            server_id=str(template_application.get("serverId") or "").strip(),
+            record_store=cast(RuntimeEnvironmentRecordStore | None, record_store),
+        )
     database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     existing_database = _resolve_existing_preview_database(
         existing_snapshot,
@@ -1459,6 +1412,7 @@ def execute_verireel_preview_destroy(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewDestroyRequest,
+    record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewDestroyResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1529,12 +1483,25 @@ def execute_verireel_preview_destroy(
     cleanup_errors: list[str] = []
     if application_id:
         destroy_result = destroy_dokploy_preview_resource(
+            record_store=record_store,
+            context=profile.preview.context if profile is not None else request.context,
+            instance=request.preview_slug,
             host=host,
             token=token,
             resource_type="application",
             resource_id=application_id,
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
+        if cleanup_errors and cleanup_errors[0].startswith(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"):
+            return VeriReelPreviewDestroyResult(
+                destroy_status="fail",
+                destroy_started_at=started_at,
+                destroy_finished_at=utc_now_timestamp(),
+                application_name=application_name,
+                application_id=application_id,
+                preview_url=preview_url,
+                error_message=cleanup_errors[0],
+            )
     try:
         _run_application_command_with_retries(
             host=host,

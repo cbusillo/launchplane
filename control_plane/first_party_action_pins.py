@@ -6,10 +6,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
+
 
 LAUNCHPLANE_REQUEST_ACTION_PATH = Path(".github/actions/launchplane-request")
 FIRST_PARTY_ACTION_PROVENANCE = "launchplane-request"
-FULL_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_REPOSITORY_PATTERN = re.compile(
     r"^(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)$"
 )
@@ -166,7 +167,7 @@ def build_action_pin_report(
     revisions: set[str] = set()
     revision_evidence: dict[str, tuple[str | None, bool | None, str | None]] = {}
     for reference in references:
-        if FULL_SHA_PATTERN.fullmatch(reference.revision) is None:
+        if GIT_SHA1_PATTERN.fullmatch(reference.revision) is None:
             violations.append(
                 _site_violation(
                     reference,
@@ -264,7 +265,7 @@ def update_action_pins(
     action_source = launchplane_request_action_source(root)
     update_source = action_source if source is None else source
     _validate_update_source(update_source, expected_source=action_source)
-    if FULL_SHA_PATTERN.fullmatch(release_sha) is None:
+    if GIT_SHA1_PATTERN.fullmatch(release_sha) is None:
         raise ActionPinError("release_sha must be a lowercase 40-character commit SHA.")
     if _path_is_dirty(root, LAUNCHPLANE_REQUEST_ACTION_PATH):
         raise ActionPinError(
@@ -399,7 +400,7 @@ def _git(repo_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 def _resolve_commit(repo_root: Path, revision: str) -> str:
     result = _git(repo_root, "rev-parse", "--verify", f"{revision}^{{commit}}")
     resolved = result.stdout.strip()
-    if result.returncode != 0 or FULL_SHA_PATTERN.fullmatch(resolved) is None:
+    if result.returncode != 0 or GIT_SHA1_PATTERN.fullmatch(resolved) is None:
         raise ActionPinError(
             f"Git commit {revision!r} is unavailable locally; fetch full history before checking pins."
         )

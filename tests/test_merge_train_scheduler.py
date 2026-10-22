@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
@@ -26,6 +27,8 @@ from control_plane.contracts.merge_train_policy import (
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_pr_feedback import write_merge_train_pr_feedback_record
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
 from control_plane.merge_train_wake import (
     MergeTrainWake,
@@ -521,6 +524,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_mutating_controller_pass_delivers_feedback(self) -> None:
+        diagnostic = "missing-security-gate"
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
         )
@@ -528,7 +532,38 @@ class MergeTrainSchedulerPassTests(TestCase):
             "admitted"
         )
 
-        (result,) = self._run()
+        observed = _controller_result()
+        observed.accepted_result["candidate"] = {
+            "entries": [{"pull_request_number": 7}],
+            "required_checks_observation_error": diagnostic,
+        }
+        self.mocks["execute_merge_train_controller_run_once"].return_value = observed
+        self.mocks[
+            "write_merge_train_pr_feedback_record"
+        ].side_effect = write_merge_train_pr_feedback_record
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            for name in (
+                "merge_train_feedback_delivery_lock",
+                "list_merge_train_pr_feedback_records",
+                "write_merge_train_pr_feedback_record",
+            ):
+                getattr(self.record_store, name).side_effect = getattr(store, name)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                return_value={
+                    "action": "created",
+                    "comment_id": 9,
+                    "comment_url": "https://github.com/cbusillo/alpha/issues/7#issuecomment-9",
+                },
+            ):
+                (result,) = self._run()
+            reloaded = FilesystemRecordStore(Path(directory)).list_merge_train_pr_feedback_records(
+                repository="cbusillo/alpha", base_branch="main", pr_number=7
+            )
+            self.assertEqual(len(reloaded), 1)
+            self.assertIn(diagnostic, reloaded[0].comment_markdown)
+            self.assertEqual(reloaded[0].delivery_status, "delivered")
 
         self.assertTrue(
             self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"].mutate

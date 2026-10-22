@@ -24,6 +24,7 @@ from control_plane.merge_train_github import (
     RecordingMergeTrainGitHubTransport,
 )
 from control_plane.product_config_authority_events import request_product_config_authority_event
+from control_plane.github_required_checks import CheckRequirement
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_config_authority_audit import CLI_MAIN
 from tests.test_github_app_webhook import _inventory
@@ -114,6 +115,29 @@ class CurrentComparisonTests(unittest.TestCase):
             app_id=app_id,
         )
 
+    def test_base_config_exclusion_requires_the_independent_comparison_facet(self) -> None:
+        name = f"{CONFIG_AUTHORITY_CHECK_NAME}/current-comparison/main"
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", name, app_id=None),
+                        [],
+                        _combined_status(statuses=()),
+                        {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+                    )
+                )
+                observation = GitHubMergeTrainClient(
+                    transport=transport,
+                    branch_refresh_store=self.store if configured else None,
+                ).read_base_check_observation(
+                    candidate=self.candidate(),
+                    attribution_requirements=(CheckRequirement("ci-gate"),),
+                )
+                self.assertEqual(observation.status, "pass" if configured else "pending")
+                if not configured:
+                    self.assertIn(name, observation.diagnostic)
+
     def test_missing_queued_stale_untrusted_and_neutral_are_not_passing(self) -> None:
         cases: list[list[object]] = [
             [],
@@ -190,9 +214,11 @@ class CurrentComparisonTests(unittest.TestCase):
                         *source,
                     ]
                     transport = RecordingMergeTrainGitHubTransport(
-                        responses=tuple(
-                            ([_protected_branch_with_checks()] if candidate else [])
-                            + [_combined_status(), {"check_runs": runs}]
+                        responses=(
+                            _protected_branch_with_checks(),
+                            [],
+                            _combined_status(),
+                            {"check_runs": runs},
                         )
                     )
                     with patch(
@@ -215,6 +241,7 @@ class CurrentComparisonTests(unittest.TestCase):
                                 transport=transport
                             )._required_checks_status(
                                 repository_path=self.repository,
+                                base_branch="main",
                                 head_sha=self.head,
                                 config_comparison=_config_comparison(
                                     self.store,
@@ -225,6 +252,53 @@ class CurrentComparisonTests(unittest.TestCase):
                                 ),
                             )
                     self.assertEqual(result, expected)
+
+    def test_passing_config_cannot_replace_unknown_required_checks(self) -> None:
+        from control_plane.merge_train_github import (
+            _config_comparison,
+            _required_checks_observation,
+        )
+
+        for candidate in (False, True):
+            with self.subTest(candidate=candidate):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", app_id=None),
+                        [],
+                        _combined_status(statuses=()),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", "unrecognized"),
+                                self.check(),
+                            ]
+                        },
+                    )
+                )
+                with patch(
+                    "control_plane.merge_train_github._owner_review_advisory_app_id",
+                    return_value=self.app_id,
+                ):
+                    if candidate:
+                        observed = GitHubMergeTrainClient(
+                            transport=transport, branch_refresh_store=self.store
+                        ).observe_batch_candidate_checks(candidate=self.candidate())
+                        status = observed.required_checks_status
+                        self.assertEqual(observed.status, "ready_for_checks")
+                    else:
+                        status, _ = _required_checks_observation(
+                            transport=transport,
+                            repository_path=self.repository,
+                            encoded_head_sha=self.head,
+                            base_branch="main",
+                            config_comparison=_config_comparison(
+                                self.store,
+                                repository=self.repository,
+                                base_branch="main",
+                                base_sha=self.base,
+                                head_sha=self.head,
+                            ),
+                        )
+                self.assertEqual(status, "unknown")
 
     def test_recorded_candidate_creation_queues_original_base_to_final_head(self) -> None:
         candidate = self.candidate()

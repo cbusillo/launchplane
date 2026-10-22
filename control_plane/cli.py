@@ -1279,12 +1279,6 @@ def _launchplane_service_env_alias_value(
     return ""
 
 
-def _launchplane_service_env_alias_present(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> bool:
-    return bool(_launchplane_service_env_alias_value(env_map=env_map, env_keys=env_keys))
-
-
 def _launchplane_service_any_env_keys_present(
     *, env_map: dict[str, str], env_keys: tuple[str, ...]
 ) -> bool:
@@ -1292,16 +1286,6 @@ def _launchplane_service_any_env_keys_present(
         _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
         for env_key in env_keys
     )
-
-
-def _launchplane_present_env_keys(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> list[str]:
-    return [
-        env_key
-        for env_key in env_keys
-        if _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
-    ]
 
 
 def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
@@ -1816,13 +1800,6 @@ def _resolve_dokploy_target(
     return resolved_target, deploy_timeout_seconds
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
-    return promotion_ship_resolution.resolve_deploy_mode(
-        configured_ship_mode=configured_ship_mode,
-        target_type=target_type,
-    )
-
-
 def _load_runtime_environment_values(*, context_name: str, instance_name: str) -> dict[str, str]:
     try:
         return control_plane_runtime_environments.resolve_runtime_environment_values(
@@ -1997,14 +1974,7 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-        override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
-        )
+        override_runtime_store = PostgresRecordStore(database_url=database_url)
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -2026,8 +1996,7 @@ def _run_compose_post_deploy_update(
             )
             raise
         finally:
-            if override_runtime_store is not None:
-                override_runtime_store.close()
+            override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
@@ -2940,22 +2909,6 @@ def _build_environment_overview_payloads(
             instance_name=inventory_record.instance,
         )
         for inventory_record in inventory_records
-    ]
-
-
-def _build_runtime_environment_rows(
-    *,
-    entries: dict[str, object],
-    source_name: str,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "key": key_name,
-            "value": str(entries[key_name]),
-            "source": source_name,
-            "overrides": (),
-        }
-        for key_name in sorted(entries)
     ]
 
 

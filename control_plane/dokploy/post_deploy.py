@@ -55,6 +55,12 @@ from control_plane.integration_readback import (
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
+from control_plane.copy_readback_diagnostics import (
+    READBACK_FAILURE_MARKERS,
+    ReadbackPredicate,
+    readback_failure_evidence,
+    readback_marker_is_safe,
+)
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     FreshRestoreScriptArguments,
@@ -76,6 +82,8 @@ def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
     lock_path = ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY / f"launchplane-odoo-{digest}.lock"
     return f"""exec 9>{shlex.quote(str(lock_path))}
 if ! flock -n 9; then
+    readback_predicate={ReadbackPredicate.EXECUTION_LOCK}
+    readback_failure_kind=refused
     printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
     exit 1
 fi
@@ -89,6 +97,8 @@ def odoo_testing_idle_runner_script(container_variable: str) -> str:
     runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
     case "$runner_execs" in null|'[]') break ;; esac
     if [ "$runner_probe" = 3 ]; then
+        readback_predicate={ReadbackPredicate.RUNNER_IDLE}
+        readback_failure_kind=refused
         printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2
         exit 1
     fi
@@ -225,6 +235,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {"website_settings_sha256"}
+    | READBACK_FAILURE_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -376,6 +387,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
             for key, value in evidence.items()
             if _safe_odoo_post_deploy_marker(key, value)
         }
+        if not any(key != "log_available" for key in self.evidence):
+            self.evidence = readback_failure_evidence(self.evidence)
         for key in ("schedule_id", "schedule_deployment_key", "schedule_deployment_id"):
             value = _bounded_dokploy_evidence_id(evidence.get(key, ""))
             if value:
@@ -383,6 +396,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if readback_marker_is_safe(key, value):
+        return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
         return bool(
             re.fullmatch(

@@ -15,6 +15,10 @@ from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensi
 APPLICATION_LIFECYCLE_EVIDENCE_KEY = "generic_web_application_lifecycle"
 
 
+class ApplicationLifecycleBaselineChanged(ValueError):
+    pass
+
+
 class ApplicationLifecycleSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -33,7 +37,9 @@ class ApplicationLifecycleSnapshot(BaseModel):
     managed_names: tuple[str, ...] = ()
     mode: Literal["deploy", "rollback"] = "deploy"
     reset: bool = False
-    state: Literal["prepared", "held", "qualified", "restored", "restore_failed"] = "prepared"
+    state: Literal["prepared", "not_started", "held", "qualified", "restored", "restore_failed"] = (
+        "prepared"
+    )
     previous_owned_names: tuple[str, ...] = ()
     current_originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
     restore_current_on_pre_image_failure: bool = False
@@ -45,7 +51,7 @@ class ApplicationLifecycleSnapshot(BaseModel):
 
     @property
     def owned_names(self) -> tuple[str, ...]:
-        if self.state in {"restored", "restore_failed"}:
+        if self.state in {"not_started", "restored", "restore_failed"}:
             return self.previous_owned_names
         if self.mode == "rollback":
             return tuple(name for name, payload in self.originals.items() if payload is not None)
@@ -99,6 +105,8 @@ def application_snapshot_for_deploy(
     extensions: GenericWebLaneExtensions,
     rollback: bool,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
     previous_deployment_record_id: str = "",
@@ -125,6 +133,10 @@ def application_snapshot_for_deploy(
             )
         return value
 
+    same_attempt = read_snapshot(deployment_record_id)
+    excluded_predecessor_states = {"not_started"}
+    if established_testing_predecessor and not rollback and same_attempt is None:
+        excluded_predecessor_states.add("prepared")
     previous_artifact = previous_source = ""
     prior: ApplicationLifecycleSnapshot | None = None
     if callable(getattr(store, "read_environment_inventory", None)):
@@ -163,6 +175,8 @@ def application_snapshot_for_deploy(
         prior = read_snapshot(previous_deployment_record_id)
         if prior is not None:
             previous_artifact, previous_source = prior.artifact_id, prior.source_git_ref
+    if prior is not None and prior.state in excluded_predecessor_states:
+        prior = None
     receipts: list[ApplicationLifecycleSnapshot] = []
     if callable(getattr(store, "list_deployment_records", None)):
         # A paused attempt may not have deployed an image or written inventory.
@@ -172,11 +186,16 @@ def application_snapshot_for_deploy(
             instance_name=instance,
         ):
             candidate = recorded_application_lifecycle(record)
-            if candidate is not None and (
-                candidate.product,
-                candidate.provider_id,
-                candidate.target_id,
-            ) == (product, provider_id, target_id):
+            if (
+                candidate is not None
+                and candidate.state not in excluded_predecessor_states
+                and (
+                    candidate.product,
+                    candidate.provider_id,
+                    candidate.target_id,
+                )
+                == (product, provider_id, target_id)
+            ):
                 receipts.append(candidate)
         latest = max(receipts, key=lambda item: item.captured_at, default=None)
         if (
@@ -185,7 +204,6 @@ def application_snapshot_for_deploy(
             and (prior is None or latest.captured_at >= prior.captured_at)
         ):
             prior = latest
-    same_attempt = read_snapshot(deployment_record_id)
     if same_attempt is not None:
         if same_attempt.extensions != extensions and not rollback:
             raise click.ClickException(
@@ -194,10 +212,14 @@ def application_snapshot_for_deploy(
         if (same_attempt.artifact_id, same_attempt.source_git_ref) != (artifact_id, source_git_ref):
             raise click.ClickException("Application lifecycle attempt identity changed.")
         prior = same_attempt
+        if proved_no_effect_retry:
+            return same_attempt.model_copy(deep=True, update={"state": "prepared"})
         if proved_pre_image_retry:
             return same_attempt.model_copy(deep=True)
 
     source = read_snapshot(rollback_source_deployment_record_id) or prior
+    if source is not None and source.state == "not_started":
+        source = prior
     if rollback:
         target = read_snapshot(rollback_target_deployment_record_id)
         if source is None and target is None and not receipts:

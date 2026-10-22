@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import Mock, patch
 
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    generic_web_source_target_key,
+)
+from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation
 
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -24,6 +28,156 @@ from tests.test_generic_web_promotion import _request, _store_with_production
 # This branch-only fake supplies profile/inventory/deployment reads, not the
 # unrelated Odoo and decision-publication methods of the full review protocol.
 class GenericWebSourceQualificationTests(unittest.TestCase):
+    def test_current_binding_and_unresolved_current_recipient_gate_both_source_callers(
+        self,
+    ) -> None:
+        for change in ("held", "renamed_held", "rebound", "retired_held", "replacement_qualified"):
+            with self.subTest(change=change):
+                store = _store_with_production()
+                lane = store.profile.lanes[0]
+                inventory = store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
+                )
+                assert inventory.runtime_identity is not None
+                store.write_qualified_testing_inventory(
+                    inventory.model_copy(
+                        update={
+                            "source_git_ref": "b" * 40,
+                            "runtime_identity": inventory.runtime_identity.model_copy(
+                                update={"source_git_ref": "b" * 40}
+                            ),
+                        }
+                    )
+                )
+                binding = store.provider_targets[(lane.context, lane.instance)]
+                record = store.read_deployment_record(inventory.deployment_record_id)
+                assert record.deployed_target is not None and record.resolved_target is not None
+                held = build_launchplane_mutation_reservation(
+                    scope="testing-source",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="uncertain-original",
+                    request_fingerprint="f" * 64,
+                    lease_owner="old-worker",
+                    lease_expires_at="2026-05-01T22:00:00Z",
+                    reserved_at="2026-05-01T21:00:00Z",
+                    reconciliation_key="original-target",
+                    provider_target_key=generic_web_source_target_key(
+                        binding, record.deploy.target_type
+                    ),
+                )
+                store.held_reservations = (held,)
+                if change == "renamed_held":
+                    store.provider_targets[(lane.context, lane.instance)] = binding.model_copy(
+                        update={"display_name": "renamed current recipient"}
+                    )
+                elif change == "retired_held":
+                    store.held_reservations = (
+                        held.model_copy(
+                            update={
+                                "provider_target_key": generic_web_source_target_key(
+                                    binding.model_copy(update={"target_id": "retired-target"}),
+                                    record.deploy.target_type,
+                                )
+                            }
+                        ),
+                    )
+                elif change in {"rebound", "replacement_qualified"}:
+                    store.provider_targets[(lane.context, lane.instance)] = binding.model_copy(
+                        update={"target_id": "replacement-target"}
+                    )
+                    if change == "replacement_qualified":
+                        store.write_deployment_record(
+                            record.model_copy(
+                                update={
+                                    "deployed_target": record.deployed_target.model_copy(
+                                        update={"target_id": "replacement-target"}
+                                    ),
+                                    "resolved_target": record.resolved_target.model_copy(
+                                        update={"target_id": "replacement-target"}
+                                    ),
+                                }
+                            )
+                        )
+                if change in {"retired_held", "replacement_qualified"}:
+                    version = release_version(
+                        store=cast(ReleaseReviewStore, cast(object, store)),
+                        profile=store.profile,
+                        instance="testing",
+                    )
+                    self.assertEqual(version.source_commit, "b" * 40)
+                    execute_generic_web_prod_promotion(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(dry_run=True, source_git_ref="b" * 40),
+                    )
+                else:
+                    with self.assertRaises(ReleaseEvidenceUnavailable):
+                        release_version(
+                            store=cast(ReleaseReviewStore, cast(object, store)),
+                            profile=store.profile,
+                            instance="testing",
+                        )
+                    with self.assertRaises(GenericWebPromotionSourceRefused):
+                        execute_generic_web_prod_promotion(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=_request(dry_run=True),
+                        )
+                self.assertEqual(store.held_reservations[0].provider_effect_started_at, "")
+
+    def test_filesystem_source_snapshot_reads_the_real_binding_and_held_operations(self) -> None:
+        from tempfile import TemporaryDirectory
+        from control_plane.storage.filesystem import FilesystemRecordStore
+        from control_plane.generic_web_source_qualification import (
+            qualified_generic_web_source_inventory,
+        )
+
+        fixture = _store_with_production()
+        lane = fixture.profile.lanes[0]
+        inventory = fixture.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        )
+        deployment = fixture.read_deployment_record(inventory.deployment_record_id)
+        target = fixture.provider_targets[(lane.context, lane.instance)]
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_product_profile_record(fixture.profile)
+            store.write_environment_inventory(inventory)
+            store.write_deployment_record(deployment)
+            store.write_provider_target_record(target)
+            self.assertEqual(
+                qualified_generic_web_source_inventory(
+                    store=store, profile=fixture.profile, lane=lane
+                ),
+                inventory,
+            )
+            held = build_launchplane_mutation_reservation(
+                scope="testing-source",
+                route_path="/v1/drivers/generic-web/deploy",
+                idempotency_key="unresolved",
+                request_fingerprint="f" * 64,
+                lease_owner="worker",
+                reserved_at="2026-05-01T21:00:00Z",
+                lease_expires_at="2026-05-01T22:00:00Z",
+                reconciliation_key="source",
+                provider_target_key=generic_web_source_target_key(
+                    target, deployment.deploy.target_type
+                ),
+            )
+            store.write_idempotency_record(held)
+            with self.assertRaises(GenericWebPromotionSourceRefused):
+                execute_generic_web_prod_promotion(
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    request=_request(dry_run=True),
+                )
+            self.assertEqual(
+                store.read_environment_inventory(
+                    context_name=lane.context, instance_name=lane.instance
+                ),
+                inventory,
+            )
+
     def test_cached_candidate_profile_cannot_reuse_a_removed_rebound_or_replaced_source(
         self,
     ) -> None:
@@ -331,6 +485,16 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
             record.model_copy(update={"deploy": deploy, "deployed_target": target})
         )
         store.write_environment_inventory(inventory.model_copy(update={"deploy": deploy}))
+        store.provider_targets[(lane.context, lane.instance)] = store.provider_targets[
+            (lane.context, lane.instance)
+        ].model_copy(
+            update={
+                "provider_id": target.provider_id,
+                "target_category": target.target_category,
+                "provider_target_type": target.provider_target_type,
+                "display_name": target.display_name,
+            }
+        )
         result = execute_generic_web_prod_promotion(
             control_plane_root=Path("."), record_store=store, request=_request(dry_run=True)
         )

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerQueueWaitStatus = Literal["unknown", "not_capacity_constrained", "capacity_constrained"]
@@ -31,12 +32,10 @@ class RunnerQueueWaitJob(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_job(self) -> "RunnerQueueWaitJob":
-        self.repository = _required_text(
-            self.repository, "runner queue wait job requires repository"
-        )
+        self.repository = require_text(self.repository, "runner queue wait job requires repository")
         self.workflow_name = self.workflow_name.strip()
-        self.job_name = _required_text(self.job_name, "runner queue wait job requires job_name")
-        self.status = _required_text(self.status, "runner queue wait job requires status").lower()
+        self.job_name = require_text(self.job_name, "runner queue wait job requires job_name")
+        self.status = require_text(self.status, "runner queue wait job requires status").lower()
         self.conclusion = self.conclusion.strip().lower()
         self.labels = tuple(sorted({label.strip() for label in self.labels if label.strip()}))
         self.runner_name = self.runner_name.strip()
@@ -45,7 +44,7 @@ class RunnerQueueWaitJob(BaseModel):
         self.created_at = self.created_at.strip()
         self.started_at = self.started_at.strip()
         self.completed_at = self.completed_at.strip()
-        self.queue_wait_reason = _required_text(
+        self.queue_wait_reason = require_text(
             self.queue_wait_reason, "runner queue wait job requires queue_wait_reason"
         )
         return self
@@ -73,13 +72,13 @@ class RunnerQueueWaitSummary(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_summary(self) -> "RunnerQueueWaitSummary":
-        self.repository = _required_text(
+        self.repository = require_text(
             self.repository, "runner queue wait summary requires repository"
         )
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at, "runner queue wait summary requires observed_at"
         )
-        self.capacity_reason = _required_text(
+        self.capacity_reason = require_text(
             self.capacity_reason, "runner queue wait summary requires capacity_reason"
         )
         self.inventory_capacity_reason = self.inventory_capacity_reason.strip()
@@ -213,10 +212,3 @@ def _parse_github_timestamp(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

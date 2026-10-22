@@ -175,6 +175,18 @@ class PrivateTestingActivationTests(unittest.TestCase):
         plan = self.prepare()
         result = self.execute(plan)
         self.assertEqual(result.status, "completed")
+        capsule = self.store.read_provider_target_origin(result.record)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (plan.product, plan.request.context, plan.request.instance, plan.intent["target_id"]),
+        )
+        self.assertEqual(self.store.read_original_mutation_intent(result.record), plan.intent)
         self.assertEqual(self.fixture.placement["env"], self.before["env"])
         self.assertEqual(self.execute(plan).status, "replayed")
         self.assertEqual(len(self.calls), 1)

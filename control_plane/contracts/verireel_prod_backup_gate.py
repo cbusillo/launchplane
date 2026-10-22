@@ -25,16 +25,6 @@ class VeriReelProdBackupGateRequest(BaseModel):
         return self
 
 
-class VeriReelProdBackupGateWorkerRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    instance: str
-    backup_record_id: str
-    timeout_seconds: int = Field(default=DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS, ge=1)
-
-
 class VeriReelProdBackupGateWorkerResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

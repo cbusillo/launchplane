@@ -40,6 +40,9 @@ class ExecutionReceipt(BaseModel):
 
     schema_version: Literal[1] = 1
     inventory_baseline_digest: str = Field(default="", pattern=r"^$|^[0-9a-f]{64}$")
+    settled_image_deployment_id: str = Field(
+        default="", max_length=256, exclude_if=lambda value: not value
+    )
     entries: tuple[ExecutionEntry, ...] = ()
 
 
@@ -51,6 +54,11 @@ def execution_receipt(record: DeploymentRecord) -> ExecutionReceipt | None:
 def require_receipt_extension(previous: ExecutionReceipt, current: ExecutionReceipt) -> None:
     if previous.inventory_baseline_digest != current.inventory_baseline_digest:
         raise ValueError("Original execution inventory baseline changed.")
+    if (
+        previous.settled_image_deployment_id
+        and previous.settled_image_deployment_id != current.settled_image_deployment_id
+    ):
+        raise ValueError("Original image settlement proof changed.")
     if len(current.entries) < len(previous.entries):
         raise ValueError("Original execution evidence cannot be removed.")
     for old, new in zip(previous.entries, current.entries, strict=False):
@@ -189,6 +197,16 @@ class ExecutionRecorder:
 
     def evidence(self) -> dict[str, str]:
         return {EXECUTION_EVIDENCE_KEY: self.receipt.model_dump_json()}
+
+    def record_settled_image(self, deployment_id: str) -> None:
+        if not deployment_id.strip():
+            raise ValueError("Original image settlement requires its provider deployment ID.")
+        updated = ExecutionReceipt.model_validate(
+            {**self.receipt.model_dump(), "settled_image_deployment_id": deployment_id}
+        )
+        require_receipt_extension(self.receipt, updated)
+        self.receipt = updated
+        self.save()
 
     def write_pending(self, record: DeploymentRecord) -> None:
         record = record.model_copy(
