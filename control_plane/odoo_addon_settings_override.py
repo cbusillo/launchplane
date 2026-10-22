@@ -41,6 +41,7 @@ from control_plane.odoo_instance_overrides import (
     odoo_instance_is_production,
     shopify_store_key_is_protected,
 )
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 ODOO_ADDON_SETTINGS_APPLY_ROUTE = "/v1/product-config/odoo-addon-settings/apply"
 ODOO_ADDON_SETTINGS_SOURCE_LABEL: Literal["service:odoo-addon-settings"] = (
@@ -68,7 +69,6 @@ _SHOPIFY_STORE_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{0,254}$")
 # Shopify credential prefixes. A value with one of these in a literal or binding field is
 # a pasted secret, so refuse it without echoing it back.
 _SHOPIFY_CREDENTIAL_PREFIXES = ("shpat_", "shpss_", "shpca_", "shppa_", "shpua_")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class OdooAddonSettingsRefusal(ValueError):
@@ -201,7 +201,7 @@ class OdooAddonSettingsApplyRequest(BaseModel):
                 raise ValueError(f"Odoo addon settings request requires {field_name}.")
         if self.mode == "dry-run" and self.reviewed_plan_sha256:
             raise ValueError("Odoo addon settings dry-run rejects reviewed_plan_sha256.")
-        if self.mode == "apply" and not _SHA256_PATTERN.fullmatch(self.reviewed_plan_sha256):
+        if self.mode == "apply" and not SHA256_PATTERN.fullmatch(self.reviewed_plan_sha256):
             raise ValueError(
                 "Odoo addon settings apply requires the reviewed 64-character plan SHA-256."
             )

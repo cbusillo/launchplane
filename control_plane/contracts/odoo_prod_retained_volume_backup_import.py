@@ -9,11 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 _DOCKER_VOLUME_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _DOCKER_IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_CONFIRMATION = (
@@ -209,7 +209,7 @@ class OdooProdRetainedVolumeBackupImportApplyRequest(OdooProdRetainedVolumeBacku
         )
         self.plan_fingerprint = self.plan_fingerprint.strip().lower()
         self.confirmation = self.confirmation.strip().lower()
-        if not _SHA256_PATTERN.fullmatch(self.plan_fingerprint):
+        if not SHA256_PATTERN.fullmatch(self.plan_fingerprint):
             raise ValueError(
                 "Odoo retained-volume backup import apply requires a SHA-256 plan_fingerprint."
             )
@@ -376,7 +376,7 @@ class OdooProdRetainedVolumeBackupImportPlan(BaseModel):
             raise ValueError(
                 "Ready Odoo retained-volume backup import plans cannot include blockers."
             )
-        if not _SHA256_PATTERN.fullmatch(self.plan_fingerprint):
+        if not SHA256_PATTERN.fullmatch(self.plan_fingerprint):
             raise ValueError(
                 "Ready Odoo retained-volume backup import plans require a fingerprint."
             )
@@ -420,11 +420,11 @@ class OdooProdRetainedVolumeBackupImportPlan(BaseModel):
             raise ValueError(
                 "Ready Odoo retained-volume backup import plans require a cleanly shut down source cluster."
             )
-        if not _SHA256_PATTERN.fullmatch(self.source_pg_control_sha256):
+        if not SHA256_PATTERN.fullmatch(self.source_pg_control_sha256):
             raise ValueError(
                 "Ready Odoo retained-volume backup import plans require a pg_control SHA-256 fingerprint."
             )
-        if not _SHA256_PATTERN.fullmatch(self.inspection_nonce):
+        if not SHA256_PATTERN.fullmatch(self.inspection_nonce):
             raise ValueError(
                 "Ready Odoo retained-volume backup import plans require a request-bound inspection nonce."
             )

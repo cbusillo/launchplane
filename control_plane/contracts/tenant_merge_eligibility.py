@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import GIT_SHA_PATTERN, SHA256_PATTERN
 
 TenantRepositoryClassificationKind = Literal["engineering", "tenant_ui"]
 TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "ambiguous", "unknown"]
@@ -30,9 +30,6 @@ TenantMergeEligibilityReasonCode = Literal[
     "classification_ambiguous",
     "classification_identity_drift",
 ]
-
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class TenantMergeCandidate(BaseModel):
@@ -468,14 +465,14 @@ def _normalize_repository(value: str, label: str) -> str:
 
 def _normalize_git_sha(value: str, label: str) -> str:
     normalized = _required_token(value, label).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
+    if GIT_SHA_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"tenant merge eligibility {label} must be an exact Git SHA")
     return normalized
 
 
 def _normalize_sha256(value: str, label: str) -> str:
     normalized = _required_token(value, label).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"tenant merge eligibility {label} must be a lowercase SHA-256")
     return normalized
 
