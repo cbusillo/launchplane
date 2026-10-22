@@ -1,12 +1,171 @@
 import json
 import unittest
+from email.message import Message
+from http.cookiejar import Cookie, CookieJar
+from http.cookies import SimpleCookie
+from io import BytesIO
 from pprint import pformat
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+
+import requests
 
 from control_plane.dokploy import api
 
 
+def _cookie_representations() -> tuple[str, ...]:
+    cookie = Cookie(
+        0,
+        "sid",
+        "made-up-jar",
+        None,
+        False,
+        "example.invalid",
+        False,
+        False,
+        "/",
+        True,
+        False,
+        None,
+        True,
+        None,
+        None,
+        {},
+    )
+    jar = CookieJar()
+    jar.set_cookie(cookie)
+    request_jar = requests.cookies.RequestsCookieJar()
+    request_jar.set_cookie(cookie)
+    simple = SimpleCookie()
+    simple["sid"] = "made-up-simple"
+    headers = Message()
+    headers["Set-Cookie"] = "sid=made-up-pair"
+    return (
+        repr(headers.items()),
+        repr([(b"Set-Cookie", b"sid=made-up-bytes"), (b"X-Request-Id", b"req-123")]),
+        json.dumps({"rawHeaders": ["Set-Cookie", "sid=made-up-raw", "X-Request-Id", "req-123"]}),
+        "rawHeaders: [\n  'Set-Cookie',\n  'sid=made-up-raw',\n  'X-Request-Id', 'req-123'\n]",
+        *(
+            representation(value)
+            for value in (cookie, jar, request_jar, simple, simple["sid"])
+            for representation in (str, repr)
+        ),
+        *(
+            f"{key}: sid=made-up-alias"
+            for key in ("HTTP_COOKIE", "cookies", "Cookie2", "Set-Cookie2")
+        ),
+        *(
+            json.dumps({key: ["sid=made-up-alias", "other=made-up-second"], "status": 502})
+            for key in ("HTTP_COOKIE", "cookies", "Cookie2", "Set-Cookie2")
+        ),
+        'Cookie: "sid=made-up-prefix"; other=made-up-tail',
+        "Cookie: 'sid=made-up-prefix'; other=made-up-tail",
+        'Set-Cookie: "sid=made-up-prefix", other=made-up-tail',
+        'Cookie: "sid=made-up-prefix" other=made-up-tail',
+    )
+
+
 class DokployCookieLogTests(unittest.TestCase):
+    def test_representations_redact_whole_bodies_and_batches(self) -> None:
+        for representation in _cookie_representations():
+            body = f"status=502\n{representation}\nretry scheduled"
+            for text in (body, json.dumps({"message": body})):
+                with self.subTest(representation=representation, text=text):
+                    output = api.redact_dokploy_log_line(text)
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn("status=502", output)
+                    self.assertIn("retry scheduled", output)
+            payloads: list[api.JsonValue] = [
+                body,
+                list(body.splitlines()),
+                [{"message": line} for line in body.splitlines()],
+            ]
+            for payload in payloads:
+                with self.subTest(representation=representation, payload=payload):
+                    output = "\n".join(api.normalize_dokploy_log_payload(payload))
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn("status=502", output)
+                    self.assertIn("retry scheduled", output)
+
+    def test_representation_redaction_preserves_neighboring_structured_diagnostics(self) -> None:
+        for representation in (
+            "[('Set-Cookie', 'sid=made-up-pair'), ('X-Request-Id', 'req-123')]",
+            '["Cookie", "sid=made-up-raw", "X-Request-Id", "req-123"]',
+            "<Cookie sid=made-up-jar for example.invalid/>",
+            "Cookie(version=0, name='sid', value='made-up-jar')",
+            "<SimpleCookie: sid='made-up-simple'>",
+            "{'cookies': {'sid': 'made-up-map'}, 'request': 'req-123'}",
+        ):
+            with self.subTest(representation=representation):
+                output = api.redact_dokploy_log_line(f"{representation}, status=502")
+                self.assertNotIn("made-up-", output)
+                self.assertIn("status=502", output)
+                if "req-123" in representation:
+                    self.assertIn("req-123", output)
+
+    def test_representation_redaction_runs_on_provider_errors(self) -> None:
+        for representation in _cookie_representations():
+            for error in (
+                HTTPError(
+                    "https://provider.example/api/test",
+                    502,
+                    "failed",
+                    Message(),
+                    BytesIO(f"status=502\n{representation}\nretry scheduled".encode()),
+                ),
+                URLError(f"status=502\n{representation}\nretry scheduled"),
+            ):
+                with self.subTest(representation=representation, error=type(error).__name__):
+                    with patch("control_plane.dokploy.api.urlopen", side_effect=error):
+                        with self.assertRaises(api.DokployRequestFailed) as raised:
+                            api.dokploy_request(
+                                host="https://provider.example",
+                                token="test-token",
+                                path="/api/test",
+                            )
+                    output = raised.exception.format_message()
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn("status=502", output)
+                    self.assertIn("retry scheduled", output)
+
+    def test_representation_redaction_runs_before_provider_log_tail(self) -> None:
+        for representation in _cookie_representations():
+            for reader, target in (
+                (api.fetch_dokploy_application_logs, {"application_id": "test-app"}),
+                (api.fetch_dokploy_compose_logs, {"compose_id": "test-compose"}),
+                (api.fetch_dokploy_deployment_logs, {"deployment_id": "test-deployment"}),
+            ):
+                with self.subTest(representation=representation, reader=reader.__name__):
+                    with patch(
+                        "control_plane.dokploy.api.dokploy_request",
+                        return_value={"logs": representation.splitlines() + ["status=502"]},
+                    ):
+                        output = "\n".join(
+                            reader(
+                                host="https://provider.example",
+                                token="test-token",
+                                line_count=2,
+                                **target,
+                            )
+                        )
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn("status=502", output)
+
+    def test_truncated_representations_fail_closed(self) -> None:
+        for representation in (
+            "[('Set-Cookie', 'sid=made-up-pair",
+            '["Cookie", "sid=made-up-raw',
+            "<Cookie sid=made-up-jar",
+            "Cookie(version=0, name='sid', value='made-up-jar",
+            "<SimpleCookie: sid='made-up-simple",
+            "{'cookies': {'sid': 'made-up-map",
+        ):
+            with self.subTest(representation=representation):
+                text = f"status=502\n{representation}\nmade-up-continuation"
+                output = api.redact_dokploy_log_line(text)
+                self.assertNotIn("made-up-", output)
+                self.assertIn("status=502", output)
+
     def test_cookie_containers_and_concatenated_strings_keep_adjacent_diagnostics(self) -> None:
         for value in (
             "[\n  'sid=made-up-one; Path=/; HttpOnly',\n  'other=made-up-two; Secure'\n]",

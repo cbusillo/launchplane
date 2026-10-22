@@ -2825,6 +2825,9 @@ Conventional onboarding creates new products only.
   when no lines match. Real provider errors still fail the read.
 - Cookie and Set-Cookie values are redacted across each complete returned batch
   or provider-error body before local tailing, filtering, or error truncation.
+  This includes string/byte header pairs, flat rawHeaders arrays, HTTP_COOKIE,
+  cookies fields, Cookie2/Set-Cookie2, Python cookie and cookie-jar representations,
+  and additional cookie data following a quoted prefix on the same line.
   Quoted values, nested containers and string concatenations retain context
   across lines; unclosed quoted values or containers suppress the rest of the
   available batch or error body, including later diagnostics and result markers.
