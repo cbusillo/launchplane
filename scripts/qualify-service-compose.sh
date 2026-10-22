@@ -180,11 +180,12 @@ try:
         assert completed.state == "delivered" and completed.attempt == 1, completed
         assert not completed.provider_operation_key, completed
     if phase == "replacement":
-        dispatch_id = build_outbox_delivery_id(kind="github_workflow_dispatch", dedupe_key=incident_id)
+        dispatch_dedupe_key = f"workflow:{incident_id}"
+        dispatch_id = build_outbox_delivery_id(kind="github_workflow_dispatch", dedupe_key=dispatch_dedupe_key)
         store.write_outbox_delivery_record(OutboxDeliveryRecord(
             delivery_id=dispatch_id, kind="github_workflow_dispatch",
             aggregate_type="generic_web_promotion_workflow", aggregate_id=incident_id,
-            dedupe_key=f"workflow:{incident_id}", created_at=now, updated_at=now, next_attempt_at=now,
+            dedupe_key=dispatch_dedupe_key, created_at=now, updated_at=now, next_attempt_at=now,
             payload={"repository": "qualification/fixture", "workflow_id": "fixture.yml", "ref": "main",
                      "credential_context": "qualification-fixture", "inputs": {}},
         ))

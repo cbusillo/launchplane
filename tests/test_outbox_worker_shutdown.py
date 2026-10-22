@@ -50,7 +50,7 @@ class OutboxWorkerShutdownTests(unittest.TestCase):
                 nonlocal steps
                 steps += 1
                 if steps > 1:
-                    raise KeyboardInterrupt()
+                    raise RuntimeError("Worker claimed again after SIGTERM")
                 return run_outbox_worker_once(**kwargs)
 
             drivers = PublicIngressNotificationDriverSet(
@@ -76,6 +76,8 @@ class OutboxWorkerShutdownTests(unittest.TestCase):
                         store.database_url,
                         "--state-dir",
                         directory,
+                        "--max-consecutive-errors",
+                        "1",
                     ],
                 )
             self.assertEqual(result.exit_code, 0, result.output)
