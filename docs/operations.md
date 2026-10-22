@@ -377,8 +377,14 @@ cannot have committed the atomic profile write.
 ## Transactional Outbox Workers
 
 External deliveries now use PostgreSQL outbox rows instead of request-thread
-provider calls when the business transition must commit before the effect. Run
-outbox workers only against Launchplane shared storage:
+provider calls when the business transition must commit before the effect.
+The normal Compose deployment owns the `launchplane-outbox-workers` service,
+which runs the existing dispatcher against shared storage after the API is
+healthy. It uses the same image, bootstrap database wiring, runtime volume and
+managed destination resolver as the service. SIGTERM finishes the current
+delivery and durable attempt before exiting; the container has a five-minute
+stop grace for bounded provider/reconciliation calls and loop waits.
+Standalone workers also require Launchplane shared storage:
 
 ```bash
 uv run launchplane service outbox-workers run \
@@ -404,6 +410,8 @@ read is a bounded census, not a transactionally frozen activation approval.
 Destination references still need ownership verification before sending.
 Discussion reminders and workflow dispatches need their own routing review;
 notification-policy ownership alone does not settle those effects.
+Starting or replacing this composition immediately attempts due queued work;
+deploying it is activation, not a diagnostic read.
 
 Queued incident deliveries whose incident is already resolved complete without
 a provider call. Their terminal outbox action and durable skipped attempt record
@@ -427,6 +435,14 @@ exponential backoff and retain any provider marker so the next attempt
 reconciles before resending. Attempts are bounded by the row's `max_attempts`;
 invalid payloads and exhausted retries become terminal failures. Do not update
 outbox rows manually or clear provider markers to force a retry.
+
+Release-affecting workflow-dispatch claims share the existing service-deploy
+admission fence. Replacement waits for an admitted dispatch to finish. New
+unstarted dispatches stay queued until the matching replacement image and
+deployment marker confirm startup; an old image cannot resume them. Marked
+deliveries can still reconcile, and notifications can still progress. An expired
+claim without a provider-start marker cannot start a provider and does not hold
+replacement indefinitely. No separate outbox replacement fence is used.
 
 Generic-web promotion workflow dispatches are queued by
 the automation route `POST /v1/drivers/generic-web/prod-promotion-workflow` or

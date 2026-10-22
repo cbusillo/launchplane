@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
+from tests import test_outbox_deploy_drain as outbox_deploy_tests
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
@@ -1492,6 +1493,14 @@ class RealPostgresIntegratedProductRetirementTests(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
 class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresOutboxDeployDrainTests(outbox_deploy_tests.OutboxDeployDrainTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 

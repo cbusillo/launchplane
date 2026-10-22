@@ -8312,7 +8312,9 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Outbox delivery claim requires lease_owner.")
         observed_at = now.strip()
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
             if not observed_at:
                 observed_at = self._database_mutation_timestamp(session)
             lease_expires_at = self._mutation_lease_expiry(
@@ -8340,6 +8342,13 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 .limit(1)
             )
+            if not admission_allowed(session, observed_at):
+                statement = statement.where(
+                    or_(
+                        LaunchplaneOutboxDeliveryRow.kind != "github_workflow_dispatch",
+                        LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
+                    )
+                )
             if not self.database_url.startswith("sqlite"):
                 statement = statement.with_for_update(skip_locked=True)
             row = session.scalar(statement)
