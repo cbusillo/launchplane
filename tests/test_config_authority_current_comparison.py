@@ -229,6 +229,53 @@ class CurrentComparisonTests(unittest.TestCase):
                             )
                     self.assertEqual(result, expected)
 
+    def test_passing_config_cannot_replace_unknown_required_checks(self) -> None:
+        from control_plane.merge_train_github import (
+            _config_comparison,
+            _required_checks_observation,
+        )
+
+        for candidate in (False, True):
+            with self.subTest(candidate=candidate):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", app_id=None),
+                        [],
+                        _combined_status(statuses=()),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", "unrecognized"),
+                                self.check(),
+                            ]
+                        },
+                    )
+                )
+                with patch(
+                    "control_plane.merge_train_github._owner_review_advisory_app_id",
+                    return_value=self.app_id,
+                ):
+                    if candidate:
+                        observed = GitHubMergeTrainClient(
+                            transport=transport, branch_refresh_store=self.store
+                        ).observe_batch_candidate_checks(candidate=self.candidate())
+                        status = observed.required_checks_status
+                        self.assertEqual(observed.status, "ready_for_checks")
+                    else:
+                        status, _ = _required_checks_observation(
+                            transport=transport,
+                            repository_path=self.repository,
+                            encoded_head_sha=self.head,
+                            base_branch="main",
+                            config_comparison=_config_comparison(
+                                self.store,
+                                repository=self.repository,
+                                base_branch="main",
+                                base_sha=self.base,
+                                head_sha=self.head,
+                            ),
+                        )
+                self.assertEqual(status, "unknown")
+
     def test_recorded_candidate_creation_queues_original_base_to_final_head(self) -> None:
         candidate = self.candidate()
         record = build_merge_train_batch_candidate_record(

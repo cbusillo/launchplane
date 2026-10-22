@@ -421,8 +421,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                             status_payload={"statuses": []},
                             check_runs_payload=healthy,
                         )
-                        self.assertEqual(status, "unknown" if unavailable else "pass")
-                        self.assertEqual(bool(healthy["actions_observation_error"]), unavailable)
+                        self.assertEqual(status, "pass")
+                        self.assertFalse(healthy["actions_observation_error"])
                 if unavailable:
                     self.assertFalse(actions_reads)
                 else:

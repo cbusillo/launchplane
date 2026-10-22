@@ -881,16 +881,17 @@ expected-commit comparison; exhaustion still fails closed as stale state.
 
 The GitHub adapter uses the shared workflow execution selector to distinguish
 current Actions executions from superseded runs and independent suites.
-Identity-verified terminal Actions jobs, including successful jobs, trigger a
-bounded, complete exact-head workflow inventory. A job is removed only when a
+Identity-verified failing Actions jobs trigger a bounded, complete exact-head
+workflow inventory. A job is removed only when a
 proved newer execution supersedes its workflow, event, branch, source repository
 and PR target family, with matching head, job link, run and suite identities.
 Other workflows remain independent; their pending jobs do not preserve a
-superseded failure. A current required execution that is still running remains
-pending, including when its required job has not appeared. An old success cannot
-stand in for that missing current job. Current successful, neutral or skipped
-jobs count as passing; incomplete or unavailable execution evidence cannot
-establish a current Actions pass.
+superseded failure. A reported current required job that is still running remains
+pending. Removing a superseded failure without finding its required replacement
+also leaves that requirement pending. Successful, neutral or skipped reported
+checks count as passing. Otherwise-green reported requirements retain their
+existing path without a workflow-history dependency; these reads do not prove
+that every newly dispatched workflow has reported its jobs.
 The native token selects Actions read only when the policy's verified installation
 already advertises it, and verifies the issued token against that exact selection.
 It never requests Actions write or changes installation grants. Its issued scopes
@@ -899,11 +900,13 @@ recovery readers, including cache hits. For a proved private repository, a known
 absent Actions read skips the inventory request and records `actions_read_not_granted`. Public or unknown
 visibility keeps the provider-read path with the same credential, since public
 workflow history needs no Actions grant. Visibility comes from the exact issued
-token's repository response. Pending-only polls retain their existing read path.
+token's repository response. Pending-only and otherwise-green polls retain their
+existing read path.
 Cached tokens retain their verified scopes until normal refresh; no additional
 capability is inferred. Unavailable execution metadata emits a bounded warning
-and an original-head queue diagnostic. Affected Actions evidence cannot qualify
-a pass; existing failure or pending evidence retains its appropriate state.
+and a head/candidate diagnostic. Unproved supersession retains the failing
+blocker. An unrelated optional failure or its missing history cannot invalidate
+passing required checks.
 The diagnostic does not create extra dependency-hold reasons.
 Provider refusals include the HTTP status and a redacted route, without provider
 bodies or credentials. A refused or invalid mint still fails closed without an
@@ -937,7 +940,11 @@ a live required name and its App binding determine the required-check verdict.
 Same-name commit statuses and check runs both participate when they match that
 requirement; one source's pass cannot erase another matching failure or pending
 signal. A required check with no matching evidence remains pending. Optional
-checks do not fail the required verdict.
+checks do not fail the required verdict. Passing owner/configuration facets
+cannot replace an unavailable required verdict. Missing names are retained in
+head/candidate records and waiting feedback. Stacked children use the train
+base's technical requirements while preserving their actual parent branch and
+comparison/review bindings.
 
 Check-run attempts are superseded within their proved provider identity, with
 Actions execution selection as described above. Identical names from different
@@ -983,9 +990,11 @@ validation.
 
 Unprotected branches, missing protection metadata, unreadable or incomplete
 policy, and an empty enforced native check list fail closed; observation requests
-no administration access. A pinned App requirement needs matching check-run
-evidence. Commit statuses can satisfy only unpinned or `app_id = -1` any-App
-requirements. A missing named or pinned check is explicitly pending even after
+no administration access. A pinned App requirement needs explicit matching App
+identity on its check run or commit status; a creator login cannot supply that
+identity. Commit statuses without verified App attribution can satisfy unpinned
+or `app_id = -1` any-App requirements. Tenant admission records an unprotected
+policy as unavailable. A missing named or pinned check is explicitly pending even after
 unrelated checks finish. Failed, pending, stale or unavailable required evidence
 cannot qualify a candidate.
 

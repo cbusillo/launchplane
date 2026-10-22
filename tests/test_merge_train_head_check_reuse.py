@@ -257,10 +257,13 @@ class HeadCheckReuseTests(unittest.TestCase):
                 self.assertIn(built.candidate_ref.removeprefix("refs/heads/"), self.transport.refs)
 
     def test_observation_rechecks_head_and_current_required_policy(self) -> None:
-        built = self.build()
+        built = self.build().model_copy(
+            update={"required_checks_observation_error": "prior missing requirement"}
+        )
         self.transport.requests.clear()
         observed = self.client.observe_batch_candidate_checks(candidate=built)
         self.assertEqual(observed.status, "passed")
+        self.assertFalse(observed.required_checks_observation_error)
         self.assertTrue(any("/check-runs" in request.path for request in self.transport.requests))
         self.transport.required_names += ("new-check",)
         fallback = self.client.observe_batch_candidate_checks(candidate=observed)

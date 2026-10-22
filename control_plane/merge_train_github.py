@@ -189,6 +189,10 @@ class MergeTrainGitHubError(RuntimeError):
         self.primary_quota_exhausted = primary_quota_exhausted
 
 
+class MergeTrainGitHubPolicyUnavailableError(MergeTrainGitHubError):
+    pass
+
+
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub state no longer matches guarded merge evidence."""
 
@@ -955,6 +959,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     candidate,
                     head_check_reuse=reuse,
                     required_checks_status="pass",
+                    required_checks_observation_error="",
                     status="passed",
                 )
             # Reuse is no longer provable. Publish the same completed candidate
@@ -996,6 +1001,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 candidate_ref=canonical_ref,
                 head_check_reuse=None,
                 required_checks_status="pending",
+                required_checks_observation_error="",
                 status="ready_for_checks",
             )
         repository_path = _repository_path(candidate.repository)
@@ -1003,7 +1009,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate.candidate_sha,
             "Merge train batch candidate SHA is required before observing checks.",
         )
-        check_status = _candidate_required_checks_status(
+        check_status, check_error = _required_checks_observation(
             transport=self.transport,
             repository_path=repository_path,
             base_branch=candidate.base_branch,
@@ -1024,6 +1030,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         return _validated_model_update(
             candidate,
             required_checks_status=check_status,
+            required_checks_observation_error=check_error,
             status=candidate_status,
         )
 
@@ -1045,7 +1052,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
         )
         check_runs = _list_check_runs(
-            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+            required_checks=required_checks + tuple((name, None) for name in failed_check_names),
         )
         required_status, _ = _required_check_evidence_status(
             required_checks=required_checks, status_payload=statuses, check_runs_payload=check_runs
@@ -1070,6 +1080,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             _combined_status_state(matching_statuses),
             _check_runs_status(matching_runs),
         )
+        if required_status == "unknown" and status == "pass":
+            return "unknown"
         return status
 
     def read_candidate_check_failures(
@@ -1097,6 +1109,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_sha,
+            required_checks=tuple((check.name, check.app_id) for check in requirements),
         )["check_runs"]
         statuses = _list_commit_statuses(
             transport=self.transport,
@@ -1447,6 +1460,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport,
             repository_path=_repository_path(repository),
             encoded_head_sha=quote(head_sha, safe=""),
+            required_checks=(),
         )
         state = comparison.status(payload)
         name = CONFIG_AUTHORITY_CURRENT_CHECK_NAME
@@ -2418,6 +2432,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     transport=self.transport,
                     repository_path=repository_path,
                     encoded_head_sha=quote(head_sha, safe=""),
+                    required_checks=(),
                 ),
                 head_sha=head_sha,
                 advisory_app_id=_owner_review_advisory_app_id(self._branch_refresh_store),
@@ -2685,6 +2700,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 transport=self.transport,
                 repository_path=repository_path,
                 encoded_head_sha=quote(head_sha, safe=""),
+                required_checks=(),
             ),
             head_sha=head_sha,
             advisory_app_id=_owner_review_advisory_app_id(self._branch_refresh_store),
@@ -3248,7 +3264,11 @@ class GitHubMergeTrainSnapshotReader:
             repository_path=repository_path,
             base_branch=normalized_base_branch,
             pull_requests=tuple(
-                self._pull_request_snapshot(repository_path=repository_path, pull_request=pr)
+                self._pull_request_snapshot(
+                    repository_path=repository_path,
+                    pull_request=pr,
+                    required_checks_base_branch=normalized_base_branch,
+                )
                 for pr in enriched
             ),
         )
@@ -3387,6 +3407,9 @@ class GitHubMergeTrainSnapshotReader:
         snapshot = self._pull_request_snapshot(
             repository_path=repository_path,
             pull_request={"number": pull_request_number},
+            required_checks_base_branch=(
+                self._repository_policy.base_branch if self._repository_policy is not None else ""
+            ),
         )
         if not snapshot.base_ref:
             return snapshot
@@ -3475,6 +3498,7 @@ class GitHubMergeTrainSnapshotReader:
         repository_path: str,
         pull_request: dict[str, object],
         enrich: bool = True,
+        required_checks_base_branch: str = "",
     ) -> MergeTrainPullRequestSnapshot:
         pull_request_number = _required_int(
             pull_request.get("number"), "GitHub pull request entry requires number."
@@ -3579,7 +3603,8 @@ class GitHubMergeTrainSnapshotReader:
             else self._required_checks_observation(
                 repository_path=repository_path,
                 head_sha=head_sha,
-                base_branch=_required_text(base.get("ref"), "Source base branch is required."),
+                base_branch=required_checks_base_branch
+                or _required_text(base.get("ref"), "Source base branch is required."),
                 owner_review_required=owner_review_required,
                 config_comparison=_config_comparison(
                     self._branch_refresh_store,
@@ -4997,6 +5022,7 @@ def _required_checks_observation(
         transport=transport,
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
+        required_checks=required_checks,
     )
     filtered_requirements = tuple(
         check
@@ -5004,7 +5030,7 @@ def _required_checks_observation(
         if not is_launchplane_projected_check(check[0])
         and (config_comparison is None or not is_config_authority_check(check[0]))
     )
-    required_status, _ = (
+    required_status, missing = (
         _required_check_evidence_status(
             required_checks=filtered_requirements,
             status_payload=status_payload,
@@ -5024,9 +5050,18 @@ def _required_checks_observation(
                 advisory_app_id=owner_review_app_id,
             )
         )
-    return _combine_check_statuses(*statuses), str(
-        check_runs_payload.get("actions_observation_error") or ""
+    status = _combine_check_statuses(*statuses)
+    if required_status == "unknown" and status == "pass":
+        status = "unknown"
+    diagnostic = "; ".join(
+        detail
+        for detail in (
+            "Missing required checks: " + ", ".join(missing) if missing else "",
+            str(check_runs_payload.get("actions_observation_error") or ""),
+        )
+        if detail
     )
+    return status, diagnostic
 
 
 @runtime_checkable
@@ -5416,7 +5451,9 @@ def _required_branch_check_policy(
         raise
     branch = _json_object(raw_payload, "GitHub protected branch response")
     if branch.get("protected") is not True:
-        raise MergeTrainGitHubError("Merge train candidate validation requires a protected branch.")
+        raise MergeTrainGitHubPolicyUnavailableError(
+            "Merge train candidate validation requires a protected branch."
+        )
     protection = _json_object(branch.get("protection"), "GitHub branch protection")
     payload = _json_object(
         protection.get("required_status_checks"), "GitHub required status checks response"
@@ -5565,7 +5602,10 @@ def _required_check_evidence_status(
         seen_contexts.add(normalized_context)
         signals.append(
             CheckSignal(
-                "commit_status", context, None, commit_status_state(str(status.get("state") or ""))
+                "commit_status",
+                context,
+                _check_payload_app_id(status),
+                commit_status_state(str(status.get("state") or "")),
             )
         )
     for item in raw_check_runs:
@@ -5583,12 +5623,7 @@ def _required_check_evidence_status(
                 "check_run",
                 name,
                 app_id,
-                check_run_state(
-                    check_run,
-                    execution_observation_error=str(
-                        check_runs_payload.get("actions_observation_error") or ""
-                    ),
-                ),
+                check_run_state(check_run),
             )
         )
     verdict = evaluate_required_checks(
@@ -5596,6 +5631,16 @@ def _required_check_evidence_status(
         signals=signals,
     )
     return ("unknown" if verdict.status == "unavailable" else verdict.status), verdict.missing
+
+
+def _check_payload_app_id(payload: dict[str, object]) -> int | None:
+    app = payload.get("app")
+    raw_app_id = app.get("id") if isinstance(app, dict) else None
+    return (
+        raw_app_id
+        if isinstance(raw_app_id, int) and not isinstance(raw_app_id, bool) and raw_app_id > 0
+        else None
+    )
 
 
 def _list_commit_statuses(
@@ -5651,6 +5696,7 @@ def _list_check_runs(
     transport: MergeTrainGitHubTransport,
     repository_path: str,
     encoded_head_sha: str,
+    required_checks: tuple[tuple[str, int | None], ...] | None = None,
 ) -> dict[str, object]:
     check_runs: list[object] = []
     page = 1
@@ -5693,6 +5739,7 @@ def _list_check_runs(
         repository_path=repository_path,
         head_sha=encoded_head_sha,
         check_runs=latest,
+        required_checks=required_checks,
     )
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
@@ -5733,6 +5780,7 @@ def _without_superseded_actions_checks(
     repository_path: str,
     head_sha: str,
     check_runs: list[object],
+    required_checks: tuple[tuple[str, int | None], ...] | None = None,
 ) -> tuple[list[object], str]:
     """Retain blockers unless complete execution evidence proves they are history."""
     from github_plan_status.workflow_runs import current_workflow_runs
@@ -5742,7 +5790,20 @@ def _without_superseded_actions_checks(
         for check in check_runs
     ]
     if not any(
-        identity is not None and _check_run_status(cast(dict[str, object], check)) != "pending"
+        identity is not None
+        and _check_run_status(cast(dict[str, object], check)) == "fail"
+        and (
+            required_checks is None
+            or any(
+                matches_required_check(
+                    requirement=CheckRequirement(name, app_id),
+                    name=str(cast(dict[str, object], check).get("name") or ""),
+                    app_id=_check_payload_app_id(cast(dict[str, object], check)),
+                    source="check_run",
+                )
+                for name, app_id in required_checks
+            )
+        )
         for check, identity in zip(check_runs, identities, strict=True)
     ):
         return check_runs, ""

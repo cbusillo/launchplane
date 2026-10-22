@@ -1063,12 +1063,12 @@ def _next_action_for_selected_pr(
             "block",
             f"Add {repository_policy.blocked_label}; pull request has merge conflicts.",
         )
+    diagnostic = (
+        f" Check evidence: {selected_pr.required_checks_observation_error}."
+        if selected_pr.required_checks_observation_error
+        else ""
+    )
     if selected_pr.required_checks_status == "fail":
-        diagnostic = (
-            f" Check history unavailable: {selected_pr.required_checks_observation_error}."
-            if selected_pr.required_checks_observation_error
-            else ""
-        )
         if selected_pr.owner_review_required:
             return (
                 "block",
@@ -1085,13 +1085,16 @@ def _next_action_for_selected_pr(
         return (
             "wait_for_checks",
             "Wait for current-head Client review and required checks on pull request "
-            f"#{selected_pr.number}.",
+            f"#{selected_pr.number}." + diagnostic,
         )
     if selected_pr.mergeable == "unknown" or selected_pr.required_checks_status in {
         "pending",
         "unknown",
     }:
-        return "wait_for_checks", "Wait for mergeability and required checks on the head SHA."
+        return (
+            "wait_for_checks",
+            "Wait for mergeability and required checks on the head SHA." + diagnostic,
+        )
     return (
         "merge",
         f"Merge with {repository_policy.merge_method} after confirming current head checks.",

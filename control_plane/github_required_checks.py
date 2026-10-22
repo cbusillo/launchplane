@@ -56,7 +56,7 @@ def matches_required_check(
     source: Literal["commit_status", "check_run"],
 ) -> bool:
     return name.casefold() == requirement.name.casefold() and (
-        requirement.app_id is None or (source == "check_run" and app_id == requirement.app_id)
+        requirement.app_id is None or app_id == requirement.app_id
     )
 
 
@@ -102,9 +102,7 @@ def commit_status_state(value: str) -> RequiredCheckState:
     return "pending" if normalized == "pending" else "unavailable"
 
 
-def check_run_state(
-    check_run: dict[str, object], *, execution_observation_error: str = ""
-) -> RequiredCheckState:
+def check_run_state(check_run: dict[str, object]) -> RequiredCheckState:
     status = str(check_run.get("status") or "").strip().lower()
     if status != "completed":
         return (
@@ -114,13 +112,6 @@ def check_run_state(
         )
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
-        app = check_run.get("app")
-        if (
-            execution_observation_error
-            and isinstance(app, dict)
-            and app.get("slug") == "github-actions"
-        ):
-            return "unavailable"
         return "pass"
     if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"

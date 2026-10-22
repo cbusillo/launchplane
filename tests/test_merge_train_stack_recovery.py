@@ -37,6 +37,8 @@ class _Provider:
 
     def __init__(self, plan: MergeTrainStackCollapsePlan) -> None:
         self.heads = {entry.head_ref: entry.head_sha for entry in plan.entries}
+        self.base_branch = plan.base_branch
+        self.base_sha = plan.entries[0].base_sha
         self.refs = {entry.pull_request_number: entry.head_ref for entry in plan.entries}
         self.commits: dict[str, dict[str, Any]] = {
             entry.head_sha: {
@@ -66,9 +68,16 @@ class _Provider:
         if method == "GET" and "/rules/branches/" in path:
             return []
         if method == "GET" and "/branches/" in path:
+            branch = unquote(path.split("/branches/")[1])
             return {
-                "commit": {"sha": self.heads[unquote(path.split("/branches/")[1])]},
-                **_protected_branch_with_checks("ci-status", app_id=None),
+                "commit": {
+                    "sha": self.base_sha if branch == self.base_branch else self.heads[branch]
+                },
+                **(
+                    _protected_branch_with_checks("ci-status", app_id=None)
+                    if branch == self.base_branch
+                    else {"protected": False}
+                ),
             }
         if method == "GET" and "/compare/" in path:
             child, head = unquote(path.split("/compare/")[1]).split("...")

@@ -13,6 +13,7 @@ from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
     TenantAdmissionControllerError,
     TenantAdmissionControllerStaleCandidateError,
+    TenantAdmissionControllerGitHubClient,
     read_technical_checks_for_requirements,
 )
 from tests.test_merge_train_github import (
@@ -20,6 +21,7 @@ from tests.test_merge_train_github import (
     _combined_status,
     _protected_branch_with_checks,
     _required_check_run,
+    _owner_review_check,
 )
 
 HEAD = "candidate-sha"
@@ -79,6 +81,29 @@ def _superseded_with_unrelated_running() -> tuple[list[dict[str, object]], dict[
 
 
 class GitHubRequiredCheckVerdictTests(unittest.TestCase):
+    def test_unprotected_tenant_policy_remains_unavailable(self) -> None:
+        for strict in (False, True, None):
+            with self.subTest(strict=strict):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        MergeTrainGitHubError("no classic protection", status_code=404)
+                        if strict is None
+                        else {"strict": strict, "checks": [], "contexts": []},
+                        {"protected": False},
+                    )
+                )
+                observed = TenantAdmissionControllerGitHubClient(
+                    transport=transport
+                ).read_technical_checks(
+                    repository="example/tool",
+                    base_branch="main",
+                    base_sha="base-sha",
+                    head_sha=HEAD,
+                    evaluated_at="2026-01-01T10:03:00Z",
+                )
+                self.assertEqual(observed.status, "unavailable")
+                self.assertFalse(observed.required_checks)
+
     def test_check_run_head_binding_agrees_across_readers(self) -> None:
         for consumer in ("head", "candidate", "admission"):
             for present, returned_head in (
@@ -215,7 +240,11 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                         _protected_branch_with_checks("ci-gate"),
                         [],
                         {"check_runs": checks},
-                        {"total_count": len(runs), "workflow_runs": runs},
+                        *(
+                            ({"total_count": len(runs), "workflow_runs": runs},)
+                            if gate_conclusion == "failure"
+                            else ()
+                        ),
                         {**_combined_status(statuses=()), "sha": HEAD},
                         *annotations,
                     )
@@ -357,9 +386,9 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
         )
         self.assertEqual(status, "pass")
 
-    def test_new_execution_without_required_job_cannot_borrow_old_success(self) -> None:
+    def test_replaced_failure_with_missing_required_job_stays_pending(self) -> None:
         checks, runs = _superseded_with_unrelated_running()
-        old_success = {**checks[0], "conclusion": "success"}
+        old_failure = checks[0]
         inventory = runs["workflow_runs"]
         assert isinstance(inventory, list)
         current = inventory[0]
@@ -376,7 +405,7 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                                 else ()
                             ),
                             {**_combined_status(statuses=()), "sha": HEAD},
-                            {"check_runs": [old_success]},
+                            {"check_runs": [old_failure]},
                             MergeTrainGitHubError("workflow evidence unavailable", status_code=403)
                             if unavailable
                             else runs,
@@ -403,12 +432,99 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
                                 TenantAdmissionRequiredTechnicalCheck(name="ci-gate"),
                             ),
                         ).status
-                    expected = (
-                        ("unknown" if consumer == "head" else "unavailable")
-                        if unavailable
-                        else "pending"
-                    )
+                    expected = "fail" if unavailable else "pending"
                     self.assertEqual(status, expected)
+
+    def test_passing_auxiliary_evidence_cannot_replace_unknown_required_checks(self) -> None:
+        unknown = _required_check_run("ci-gate", "completed", "unrecognized")
+        for consumer in ("owner", "base"):
+            with self.subTest(consumer=consumer):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate", app_id=None),
+                        [],
+                        _combined_status(statuses=()),
+                        {
+                            "check_runs": [
+                                unknown,
+                                _owner_review_check("success", head_sha=HEAD)
+                                if consumer == "owner"
+                                else _required_check_run("implicated", "completed", "success"),
+                            ]
+                        },
+                    )
+                )
+                if consumer == "owner":
+                    status = _required_checks_status(
+                        transport=transport,
+                        repository_path="example/tool",
+                        encoded_head_sha=HEAD,
+                        base_branch="main",
+                        owner_review_required=True,
+                        owner_review_app_id=77,
+                    )
+                else:
+                    status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate().model_copy(
+                            update={"repository": "example/tool"}
+                        ),
+                        failed_check_names=("implicated",),
+                    )
+                self.assertEqual(status, "unknown")
+
+    def test_app_pinned_commit_status_requires_explicit_matching_app_identity(self) -> None:
+        for app_id in (None, 77, 78):
+            for consumer in ("head", "candidate", "admission"):
+                with self.subTest(app_id=app_id, consumer=consumer):
+                    status_payload: dict[str, object] = {
+                        "context": "ci-gate",
+                        "state": "success",
+                        "creator": {"login": "example-app[bot]"},
+                        **({"app": {"id": app_id}} if app_id is not None else {}),
+                    }
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            *(
+                                (_protected_branch_with_checks("ci-gate", app_id=77), [])
+                                if consumer != "admission"
+                                else ()
+                            ),
+                            {**_combined_status(statuses=(status_payload,)), "sha": HEAD},
+                            {"check_runs": []},
+                        )
+                    )
+                    status: str
+                    if consumer == "head":
+                        status = _required_checks_status(
+                            transport=transport,
+                            repository_path="example/tool",
+                            encoded_head_sha=HEAD,
+                            base_branch="main",
+                        )
+                    elif consumer == "candidate":
+                        status = (
+                            GitHubMergeTrainClient(transport=transport)
+                            .observe_batch_candidate_checks(
+                                candidate=_batch_candidate().model_copy(
+                                    update={"repository": "example/tool", "candidate_sha": HEAD}
+                                )
+                            )
+                            .required_checks_status
+                        )
+                    else:
+                        status = read_technical_checks_for_requirements(
+                            transport=transport,
+                            merge_client=GitHubMergeTrainClient(transport=transport),
+                            repository="example/tool",
+                            base_sha="base-sha",
+                            head_sha=HEAD,
+                            evaluated_at="2026-01-01T10:03:00Z",
+                            strict=False,
+                            required_checks=(
+                                TenantAdmissionRequiredTechnicalCheck(name="ci-gate", app_id=77),
+                            ),
+                        ).status
+                    self.assertEqual(status, "pass" if app_id == 77 else "pending")
 
     def test_candidate_ignores_superseded_failure_beside_unrelated_running_workflow(self) -> None:
         checks, runs = _superseded_with_unrelated_running()
@@ -432,6 +548,32 @@ class GitHubRequiredCheckVerdictTests(unittest.TestCase):
             candidate=candidate
         )
         self.assertEqual(observed.required_checks_status, "pass")
+
+    def test_optional_actions_failure_cannot_require_history_for_a_green_head(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                [],
+                {**_combined_status(statuses=()), "sha": HEAD},
+                {
+                    "check_runs": [
+                        _actions_check("ci-gate", 11, 101, 10, "completed", "success"),
+                        _actions_check("optional", 12, 102, 20, "completed", "failure"),
+                    ]
+                },
+                MergeTrainGitHubError("workflow evidence unavailable", status_code=500),
+            )
+        )
+        self.assertEqual(
+            _required_checks_status(
+                transport=transport,
+                repository_path="example/tool",
+                encoded_head_sha=HEAD,
+                base_branch="main",
+            ),
+            "pass",
+        )
+        self.assertFalse(any("/actions/runs" in request.path for request in transport.requests))
 
     def test_head_ignores_optional_failing_status(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

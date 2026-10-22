@@ -36,6 +36,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
+    MergeTrainGitHubPolicyUnavailableError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
     _list_check_runs,
@@ -485,9 +486,19 @@ class TenantAdmissionControllerGitHubClient:
                 raise
             required_checks_payload = {"strict": False, "checks": [], "contexts": []}
         strict, _ = _required_technical_checks(required_checks_payload)
-        policy = _required_branch_check_policy(
-            transport=self.transport, repository_path=repository_path, base_branch=base_branch
-        )
+        try:
+            policy = _required_branch_check_policy(
+                transport=self.transport, repository_path=repository_path, base_branch=base_branch
+            )
+        except MergeTrainGitHubPolicyUnavailableError:
+            return TenantAdmissionTechnicalChecks(
+                head_sha=head_sha,
+                base_sha=base_sha,
+                strict=strict,
+                base_up_to_date=False if strict else None,
+                status="unavailable",
+                evaluated_at=evaluated_at,
+            )
         required_checks = tuple(
             TenantAdmissionRequiredTechnicalCheck(name=name, app_id=app_id)
             for name, app_id in policy.checks
@@ -577,6 +588,7 @@ def read_technical_checks_for_requirements(
             transport=transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_head_sha,
+            required_checks=tuple((check.name, check.app_id) for check in required_checks),
         )
     except MergeTrainGitHubStaleHeadError as error:
         raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
@@ -584,9 +596,6 @@ def read_technical_checks_for_requirements(
         _technical_check_run_signals(
             cast(list[object], check_runs_payload["check_runs"]),
             expected_head_sha=head_sha,
-            execution_observation_error=str(
-                check_runs_payload.get("actions_observation_error") or ""
-            ),
         )
     )
     normalized_signals = tuple(
@@ -1078,7 +1087,6 @@ def _technical_check_run_signals(
     raw_check_runs: list[object],
     *,
     expected_head_sha: str,
-    execution_observation_error: str = "",
 ) -> tuple[TenantAdmissionTechnicalCheckSignal, ...]:
     signals: list[TenantAdmissionTechnicalCheckSignal] = []
     for raw_check_run in raw_check_runs:
@@ -1118,9 +1126,7 @@ def _technical_check_run_signals(
                 source="check_run",
                 name=name,
                 app_id=app_id,
-                state=check_run_state(
-                    check_run, execution_observation_error=execution_observation_error
-                ),
+                state=check_run_state(check_run),
             )
         )
     return tuple(signals)

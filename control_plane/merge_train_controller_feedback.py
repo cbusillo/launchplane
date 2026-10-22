@@ -353,12 +353,15 @@ def _feedback_message(
         if result.get("reason_code") == "base_checks_not_green":
             return f"Launchplane is waiting for the base checks: {_blocking_detail(result)}"
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        candidate = _as_dict(result.get("candidate"))
+        diagnostic = _string((candidate or selected).get("required_checks_observation_error"))
+        detail = f" Check evidence: {diagnostic}." if diagnostic else ""
         if selected.get("owner_review_required") is True and "candidate" not in result:
             return (
                 "Launchplane is waiting for current-head Client review and required checks "
-                "on this pull request."
+                "on this pull request." + detail
             )
-        return "Launchplane is waiting for required checks or fresh GitHub state."
+        return "Launchplane is waiting for required checks or fresh GitHub state." + detail
     if controller_record_id:
         return f"Launchplane is advancing `{controller_action}` with `{controller_record_id}`."
     return f"Launchplane is advancing `{controller_action}` for this train pass."
