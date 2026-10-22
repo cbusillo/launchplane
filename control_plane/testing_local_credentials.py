@@ -4,7 +4,7 @@ import hmac
 from typing import Literal, Protocol
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import (
@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.secret_record import SecretSharingKind
+from control_plane.contracts.testing_external_resources import TestingExternalResourceAudit
 from control_plane.product_secret_copy import ProductSecretCopyStore, require_product_lanes
 from control_plane.product_config import ProductConfigStore
 from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
@@ -33,6 +34,7 @@ def local_credential_keys(profile: LaunchplaneProductProfileRecord, context: str
         requirement.binding_key
         for requirement in profile.expected_config.managed_secret_bindings
         if requirement.testing_local_credential
+        and requirement.external_provider is None
         and product_config_requirement_applies_to_lane(
             requirement_context=requirement.context,
             requirement_instance=requirement.instance,
@@ -43,7 +45,17 @@ def local_credential_keys(profile: LaunchplaneProductProfileRecord, context: str
         from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
 
         keys.update(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)
-    return frozenset(keys)
+    external_keys = {
+        requirement.binding_key
+        for requirement in profile.expected_config.managed_secret_bindings
+        if requirement.external_provider is not None
+        and product_config_requirement_applies_to_lane(
+            requirement_context=requirement.context,
+            requirement_instance=requirement.instance,
+            lane=lane,
+        )
+    }
+    return frozenset(keys - external_keys)
 
 
 def generation_entries(
@@ -283,6 +295,11 @@ class TestingCredentialAuditResponse(BaseModel):
     trace_id: str
     product: str
     lanes: list[TestingCredentialAudit]
+    external_resources: TestingExternalResourceAudit | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class TestingCredentialInventoryResponse(BaseModel):
@@ -291,6 +308,11 @@ class TestingCredentialInventoryResponse(BaseModel):
     trace_id: str
     products: list[str]
     lanes: list[TestingCredentialAudit]
+    external_resources: TestingExternalResourceAudit | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 def audit_testing_credentials(

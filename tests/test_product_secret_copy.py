@@ -181,8 +181,66 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(binding.declared_secret_class, "shared_safe")
         self.assertEqual(binding.value_source, "copy")
+        record = self.store.read_secret_record(binding.secret_id)
+        self.assertEqual(
+            self.store.read_secret_version(record.current_version_id).value_origin, "supplied"
+        )
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
+
+    def test_copy_origin_is_service_owned_and_propagates_without_fresh_generation_credit(
+        self,
+    ) -> None:
+        template = self.store.read_secret_version(self.source.current_version_id)
+        for origin in ("supplied", "provider", "generated", None):
+            with self.subTest(origin=origin):
+                source_version = template.model_copy(
+                    update={
+                        "version_id": secrets._version_id(secret_id=self.source.secret_id),
+                        "value_origin": origin,
+                    }
+                )
+                self.store.write_secret_version(source_version)
+                self.store.write_secret_record(
+                    self.source.model_copy(update={"current_version_id": source_version.version_id})
+                )
+                requested = {
+                    **self.payload["secrets"][0],
+                    "copy_from": {
+                        **self.payload["secrets"][0]["copy_from"],
+                        "version_id": source_version.version_id,
+                    },
+                }
+                for depth in range(2):
+                    entry = {**requested, "value_origin": "supplied"}
+                    apply_product_config_bundle(
+                        record_store=self.store,
+                        payload={**self.payload, "secrets": [entry]},
+                        mode="apply",
+                        actor="fixture",
+                        source_label="test",
+                    )
+                    destination = next(
+                        binding
+                        for binding in self.store.list_secret_bindings(limit=None)
+                        if binding.instance == "testing"
+                    )
+                    self.assertEqual(destination.value_source, "copy")
+                    target_record = self.store.read_secret_record(destination.secret_id)
+                    self.assertEqual(
+                        self.store.read_secret_version(
+                            target_record.current_version_id
+                        ).value_origin,
+                        origin,
+                    )
+                    requested = {
+                        **entry,
+                        "copy_from": {
+                            "context": "example-site",
+                            "instance": "testing",
+                            "version_id": target_record.current_version_id,
+                        },
+                    }
 
     async def test_read_role_cannot_replace_explicit_secret_copy_source_grant(self) -> None:
         app = self.make_app(source_read=False, standing_read=True)

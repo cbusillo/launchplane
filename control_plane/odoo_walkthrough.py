@@ -581,6 +581,7 @@ class WalkthroughAdapter:
                     instance_name="testing",
                     actor=self.actor,
                     source_label="service_testing_task",
+                    value_origin="generated",
                 )
                 secret = self.store.find_secret_record(
                     scope="context_instance",

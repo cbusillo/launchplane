@@ -117,6 +117,17 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+The expected-config declaration path remains additive for the authenticated
+Director agent. It may add a positive external-provider purpose to an existing
+nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
+or retiring existing generation intent, or adding a provider declaration that
+shadows a local key requires the existing `product_profile.expected_config.apply`
+authority; a live product also retains its admin boundary. Inert planning retains
+its existing read/plan permission. Completed exact-key receipts replay before
+current-state retirement checks, while a new write compares the same captured
+profile that passed those checks. Odoo's driver-owned local passwords cannot
+be declared external through any profile input path. No grant is added here.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials retain their read-only transport boundary.

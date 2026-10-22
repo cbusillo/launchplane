@@ -23,6 +23,7 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretScope,
     SecretVersion,
+    SecretValueOrigin,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -707,6 +708,7 @@ def write_secret_value(
     description: str = "",
     actor: str = "",
     source_label: str = "manual",
+    value_origin: SecretValueOrigin = "supplied",
 ) -> dict[str, str]:
     if not plaintext_value.strip():
         raise click.ClickException(
@@ -759,6 +761,7 @@ def write_secret_value(
             created_by=actor,
             key_id=key_id,
             ciphertext=ciphertext,
+            value_origin=value_origin,
         )
     )
     created_at = existing_record.created_at if existing_record is not None else now
@@ -1182,6 +1185,7 @@ def reencrypt_secrets(
             created_by=actor,
             key_id=new_key_id,
             ciphertext=ciphertext,
+            value_origin=current_version.value_origin,
         )
         updated_record = record.model_copy(
             update={"current_version_id": version_id, "updated_at": now, "updated_by": actor}
