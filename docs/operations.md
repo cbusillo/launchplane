@@ -4962,9 +4962,15 @@ identified the exact independently running schedule job. While draining, the
 observer stops its lease and atomically records that job, the reviewed rehearsal
 and original journal identity. The HTTP request returns accepted with
 `result.state: checkpointed` and `original_key_required: true`. The remote job
-continues under its existing host lock and custody. No capture, upgrade or
-provider trigger is repeated, and no remote process is cancelled. The drain
-checks executor exclusion and can dispatch replacement without waiting for that
+continues under its existing host lock and custody. The supported
+`scripts/odoo-upgrade-rehearsal.py` client reports `status: checkpointed`, the
+bounded `trace_id`, opaque `operation_id`, and `original_key_required: true`.
+It exits 1 because the rehearsal is pending, without claiming completion or
+sending another request. Preserve the original intent, saved review and execute
+key; use supported original-key readback to observe the same operation. Do not
+start another capture or upgrade or substitute a new key.
+No capture, upgrade or provider trigger is repeated, and no remote process is
+cancelled. The drain checks executor exclusion and can dispatch replacement without waiting for that
 job to finish or for new traffic to become idle.
 If checkpoint admission loses its lease or cannot store the continuation, the
 request instead retains the original journal with the existing typed
