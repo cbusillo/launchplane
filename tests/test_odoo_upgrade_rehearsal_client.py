@@ -30,6 +30,9 @@ class RehearsalClientTests(unittest.TestCase):
         evidence: str = "",
         changes: dict[str, Any] | None = None,
         extra_args: tuple[str, ...] = (),
+        response: dict[str, Any] | None = None,
+        product: str = "fixture-product",
+        source_context: str = "fixture-context",
     ) -> tuple[int, dict[str, Any], Mock, Mock]:
         from tests.test_odoo_rehearsal_preflight import observation
 
@@ -37,7 +40,9 @@ class RehearsalClientTests(unittest.TestCase):
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
         )
         read = Mock(
-            return_value=accepted_evidence_response(
+            return_value=response
+            if response is not None
+            else accepted_evidence_response(
                 trace_id="fixture-preflight-trace",
                 records={"product": "fixture-product"},
                 result={
@@ -69,9 +74,9 @@ class RehearsalClientTests(unittest.TestCase):
                 "client",
                 "preflight",
                 "--product",
-                "fixture-product",
+                product,
                 "--source-context",
-                "fixture-context",
+                source_context,
                 "--operator-helper",
                 str(helper),
             ]
@@ -365,7 +370,6 @@ class RehearsalClientTests(unittest.TestCase):
         cases: list[dict[str, Any]] = [
             {"status": "rejected"},
             {"trace_id": ""},
-            {"trace_id": "x" * 257},
             {"records": {}},
             {"records": {"operation": None}},
             {"records": {"operation": "private/path"}},

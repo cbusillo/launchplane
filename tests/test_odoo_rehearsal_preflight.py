@@ -433,6 +433,16 @@ class PreflightHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["result"]["source_context"], self.fixture.context)
         self.assertNotIn("rehearsal_id", result["result"])
         self.assertEqual(result["result"]["database_bytes"], expected["database_bytes"])
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        code, receipt, client_read, client_write = RehearsalClientTests().preflight(
+            response=result, product=self.fixture.product, source_context=self.fixture.context
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["trace_id"], result["trace_id"])
+        client_read.assert_called_once()
+        client_write.assert_not_called()
         self.assertEqual(
             (
                 self.fixture.authority(),

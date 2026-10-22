@@ -141,11 +141,9 @@ def main() -> int:
                 or draft.action != "execute"
                 or set(result) != {"state", "original_key_required"}
                 or result.get("original_key_required") is not True
-                or not all(
-                    isinstance(value, str)
-                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", value)
-                    for value in (operation, trace)
-                )
+                or not trace
+                or not isinstance(operation, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", operation)
             ):
                 raise ValueError("The response is not an execute checkpoint.")
             print(

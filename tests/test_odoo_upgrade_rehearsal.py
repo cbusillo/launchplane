@@ -75,11 +75,16 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(paused.status, "checkpointed")
         from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
 
+        from control_plane.http_routes.mutation_support import AcceptedEvidenceResponse
+
         client = RehearsalClientTests()
+        checkpoint = AcceptedEvidenceResponse.model_validate(paused.response_payload).model_dump(
+            mode="json"
+        )
         code, pending, post = client.call(
             "apply",
             action="execute",
-            response=paused.response_payload,
+            response=checkpoint,
             request=adapter.request,
             product=self.product,
         )
@@ -153,44 +158,20 @@ class RehearsalScenario(unittest.TestCase):
         assert settled is not None
         self.assertEqual(settled.state, "completed")
         self.assertEqual(settled.record_id, paused.record.record_id)
-
-    def test_client_accepts_producer_reviews_completed_applies_and_readbacks(self) -> None:
-        from control_plane.http_routes.mutation_support import accepted_evidence_response
-        from control_plane.provider_operations import provider_operation_response_payload
-        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
-
-        client = RehearsalClientTests()
-        public = OdooRehearsalAdapter.public(self.record)
-        for mode in ("dry-run", "apply", "readback"):
-            with self.subTest(mode=mode):
-                result = dict(public)
-                if mode == "dry-run":
-                    result.update(
-                        plan_sha256=self.record.binding_sha256, action="prepare", applied=False
-                    )
-                if mode == "readback":
-                    result["completed"] = True
-                response = (
-                    provider_operation_response_payload(
-                        trace_id="fixture-trace",
-                        records={"rehearsal": self.identifier},
-                        result=result,
-                    )
-                    if mode == "apply"
-                    else accepted_evidence_response(
-                        trace_id="fixture-trace",
-                        records={"rehearsal": self.identifier},
-                        result=result,
-                    ).model_dump(mode="json")
-                )
-                code, receipt, post = client.call(
-                    mode, response=response, request=self.request, product=self.product
-                )
-                self.assertEqual(code, 0)
-                self.assertEqual(receipt["status"], "verified")
-                self.assertEqual(receipt["rehearsal_id"], self.identifier)
-                self.assertEqual(receipt["trace_id"], response["trace_id"])
-                post.assert_called_once()
+        completed = AcceptedEvidenceResponse.model_validate(settled.response_payload).model_dump(
+            mode="json"
+        )
+        code, receipt, post = client.call(
+            "apply",
+            action="execute",
+            response=completed,
+            request=adapter.request,
+            product=self.product,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["rehearsal_id"], self.identifier)
+        post.assert_called_once()
 
     def test_rehearsal_checkpoint_preserves_live_executor_and_original_binding(self) -> None:
         from control_plane.rehearsal_deploy_resume import resume_rehearsals
@@ -4909,6 +4890,41 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             run_provider_mutation=run_mutation,
         )
         return app
+
+    async def test_client_accepts_actual_dry_run_and_readback_http_responses(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        for mode in ("dry-run", "readback"):
+            with (
+                self.subTest(mode=mode),
+                patch.object(
+                    OdooRehearsalAdapter, "prepare_readback", return_value={"completed": True}
+                ),
+            ):
+                response = await request(
+                    self.read_only_app(),
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(update={"mode": mode}).model_dump(
+                        mode="json"
+                    ),
+                    headers={"Idempotency-Key": "fixture-key"},
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                code, receipt, post = client.call(
+                    mode,
+                    response=response.json(),
+                    request=self.fixture.request,
+                    product=self.fixture.product,
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(receipt["status"], "verified")
+                self.assertEqual(receipt["rehearsal_id"], self.fixture.identifier)
+                self.assertEqual(receipt["trace_id"], response.json()["trace_id"])
+                post.assert_called_once()
 
     async def test_read_role_can_plan_without_changing_any_lane_and_cannot_apply(self) -> None:
         from tests.support.http import request
