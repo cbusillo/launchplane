@@ -428,9 +428,10 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
 
     def test_unknown_maintenance_logs_its_action_without_exception_values(self) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceAction
         from control_plane.workflows.verireel_testing_post_deploy import _maintenance
 
-        action = "grant-sponsored"
+        action: VeriReelAppMaintenanceAction = "grant-sponsored"
         with (
             patch(
                 "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_application",
