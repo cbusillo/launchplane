@@ -421,6 +421,128 @@ class WebCutoverDeploymentTests(unittest.TestCase):
         )
         return store, intent, Provider(intent)
 
+    def test_promotion_checkpoint_keeps_logical_artifact_when_cutover_resolves_image_digest(
+        self,
+    ) -> None:
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+        from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+        from control_plane.provider_operations import (
+            run_durable_provider_operation,
+            ProviderMutationUnknownError,
+        )
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            recorded, intent, _ = self.seed(root, "compose")
+            profile = recorded.read_product_profile_record("fixture")
+            lane = profile.lanes[0]
+            profile = profile.model_copy(
+                update={
+                    "lanes": (ProductLaneProfile(context=lane.context, instance="testing"), lane)
+                }
+            )
+            manifest = intent.candidate.model_copy(deep=True)
+            logical = manifest.image.repository + ":sha-" + manifest.source_commit
+            manifest.artifact_id = logical
+            assert manifest.source_build is not None
+            manifest.source_build.manifest_artifact_id = logical
+            identity = intent.new.runtime_identity.model_copy(
+                update={
+                    "instance": "testing",
+                    "artifact_id": logical,
+                    "deployment_record_id": "testing-logical",
+                }
+            )
+            testing = DeploymentRecord(
+                record_id=identity.deployment_record_id,
+                context=lane.context,
+                instance="testing",
+                artifact_identity=ArtifactIdentityReference(artifact_id=logical),
+                source_git_ref=manifest.source_commit,
+                runtime_identity=identity,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="testing-target", target_name="testing"
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="testing",
+                    target_type="application",
+                    deploy_mode="fixture",
+                    status="pass",
+                ),
+            )
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'native.db'}")
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(profile)
+            store.write_artifact_manifest(manifest)
+            store.write_deployment_record(testing)
+            store.write_environment_inventory(
+                build_environment_inventory(
+                    deployment_record=testing, updated_at=profile.updated_at
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=lane.context,
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    provider_target_type="application",
+                    target_id="testing-target",
+                    display_name="testing",
+                    updated_at=profile.updated_at,
+                )
+            )
+            adapter = GenericWebProdPromotionProviderMutationAdapter(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                lane=lane,
+                promotion_request=GenericWebProdPromotionEnvelope(
+                    product=profile.product,
+                    promotion=GenericWebProdPromotionRequest(
+                        product=profile.product,
+                    ),
+                ),
+                trace_id="cutover-source",
+                validate_before_effect=lambda _: None,
+                deploy_provider=Mock(provider_id="dokploy"),
+            )
+            admitted: list[str] = []
+
+            def stop_after_checkpoint(**kwargs: Any) -> Any:
+                kwargs["provider_effect_checkpoint"]("cutover_first_effect")
+                admitted.append(kwargs["request"].promotion.artifact_id)
+                raise ProviderMutationUnknownError(
+                    "Controlled stop after admission, before provider I/O."
+                )
+
+            with patch(
+                "control_plane.generic_web_promotion_provider_adapter.execute_generic_web_prod_promotion_result",
+                side_effect=stop_after_checkpoint,
+            ):
+                result = run_durable_provider_operation(
+                    store=store,
+                    scope="cutover-source",
+                    route_path="/fixture/promotion",
+                    idempotency_key="logical-cutover",
+                    request_fingerprint="f" * 64,
+                    lease_owner="fixture",
+                    response_trace_id="cutover-source",
+                    adapter=adapter,
+                )
+            self.assertEqual(admitted, [logical])
+            self.assertEqual(
+                adapter.resolve_deploy_target().ship_request.artifact_id,
+                manifest.image.repository + "@" + manifest.image.digest,
+            )
+            assert result.record is not None
+            self.assertTrue(result.record.provider_effect_started_at)
+
     def test_existing_deploy_entrypoint_uses_inactive_slot_and_publishes_inventory(self) -> None:
         for target in ("application", "compose"):
             with self.subTest(target=target), TemporaryDirectory() as folder:
@@ -937,6 +1059,21 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
             resolved_target=ResolvedTargetEvidence(
                 target_type="application", target_id="testing-target", target_name="testing"
             ),
+        )
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+
+        assert testing_record.deployed_target is not None
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing_record.context,
+                instance=testing_record.instance,
+                provider_id=testing_record.deployed_target.provider_id,
+                target_category=testing_record.deployed_target.target_category,
+                provider_target_type=testing_record.deployed_target.provider_target_type,
+                target_id=testing_record.deployed_target.target_id,
+                display_name=testing_record.deployed_target.display_name,
+                updated_at=old_inventory.updated_at,
+            )
         )
         store.write_deployment_record(testing_record)
         store.write_environment_inventory(

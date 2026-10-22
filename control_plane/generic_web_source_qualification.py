@@ -73,20 +73,6 @@ def qualified_generic_web_source_inventory(
         snapshot = store.read_generic_web_source_snapshot(
             product=profile.product, context_name=lane.context, instance_name=lane.instance
         )
-        current_profile = snapshot.profile
-        current_lane = next(
-            (item for item in current_profile.lanes if item.instance.strip() == "testing"), None
-        )
-        if (
-            current_profile.product != profile.product
-            or not product_profile_uses_generic_web_base(current_profile)
-            or current_lane is None
-            or (current_lane.context.strip(), current_lane.instance.strip())
-            != (lane.context, lane.instance)
-        ):
-            raise GenericWebSourceUnqualified(
-                "The product's testing source changed before release."
-            )
         inventory = snapshot.inventory
         record = snapshot.deployment
     except (FileNotFoundError, ValueError) as error:
@@ -94,6 +80,18 @@ def qualified_generic_web_source_inventory(
             "Testing requires current source inventory and its referenced deployment record, "
             "bound to a current product lane."
         ) from error
+    current_profile = snapshot.profile
+    current_lane = next(
+        (item for item in current_profile.lanes if item.instance.strip() == "testing"), None
+    )
+    if (
+        current_profile.product != profile.product
+        or not product_profile_uses_generic_web_base(current_profile)
+        or current_lane is None
+        or (current_lane.context.strip(), current_lane.instance.strip())
+        != (lane.context, lane.instance)
+    ):
+        raise GenericWebSourceUnqualified("The product's testing source changed before release.")
     identity = inventory.runtime_identity
     target = record.deployed_target
     current_target = snapshot.provider_target

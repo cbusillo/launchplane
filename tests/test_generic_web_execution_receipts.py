@@ -210,6 +210,20 @@ class OriginalExecutionTests(unittest.TestCase):
                         updated_at=provider.observation.started_at,
                     )
                 )
+                if failure == "quiesce_lost":
+                    with store._session_factory() as read_session:
+                        pending = store._environment_inventory_row(
+                            baseline.model_copy(update={"context": "uncommitted-observation"})
+                        )
+                        read_session.add(pending)
+                        store._disposable_authority_context.session = read_session
+                        try:
+                            qualified_generic_web_source_inventory(
+                                store=store, profile=profile, lane=lane
+                            )
+                            self.assertIn(pending, read_session.new)
+                        finally:
+                            store._disposable_authority_context.session = None
                 release_version(store=store, profile=profile, instance="testing")
                 resolve_generic_web_promotion_inputs(
                     record_store=store,
@@ -356,6 +370,25 @@ class OriginalExecutionTests(unittest.TestCase):
                         record_store=store,
                         request=GenericWebProdPromotionRequest(product=profile.product),
                     )
+
+                if failure == "quiesce_lost":
+                    from sqlalchemy import update
+                    from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+                    with store._engine.begin() as connection:
+                        connection.execute(
+                            update(LaunchplaneIdempotencyRow)
+                            .where(LaunchplaneIdempotencyRow.record_id == outcome.record.record_id)
+                            .values(lease_owner="drifted-raw-column")
+                        )
+                    self.assertIn(
+                        outcome.record.record_id,
+                        {item.record_id for item in store.list_held_provider_target_reservations()},
+                    )
+                    with self.assertRaises(ValueError):
+                        store.list_held_provider_target_reservations(
+                            provider_target_key=outcome.record.provider_target_key
+                        )
 
     def test_durable_terminal_run_does_not_reobserve_later_cron_history(self) -> None:
         entry = ExecutionEntry(

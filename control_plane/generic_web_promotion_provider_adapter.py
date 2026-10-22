@@ -134,6 +134,9 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 record_store=cast(GenericWebPromotionStore, self._record_store),
                 request=self._promotion_request.promotion,
             )
+            self._promotion_request = self._promotion_request.model_copy(
+                update={"promotion": promotion}
+            )
             if self._lane.generic_web_cutover is not None:
                 from control_plane.generic_web_cutover import (
                     WebCutoverAuthorityStore,
@@ -233,17 +236,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
 
         try:
             target = self.resolve_deploy_target()
-            promotion_request = self._promotion_request.model_copy(
-                update={
-                    "promotion": self._promotion_request.promotion.model_copy(
-                        update={
-                            "artifact_id": target.ship_request.artifact_id,
-                            "source_git_ref": target.ship_request.source_git_ref,
-                            "deploy_reference": target.ship_request.deploy_reference,
-                        }
-                    )
-                }
-            )
+            promotion_request = self._promotion_request
             self._validate_before_effect(target)
             evidence_guard: AbstractContextManager[None]
             if isinstance(self._record_store, PostgresRecordStore):
