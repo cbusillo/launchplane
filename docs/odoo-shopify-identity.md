@@ -28,10 +28,12 @@ unknown. The production query runs after testing's response. Comparing immutable
 shop IDs prevents domain aliases from appearing to be separate stores.
 
 Testing's store and API version come from its stored addon settings. Its managed
-token is decrypted and consumed inside Launchplane by one fixed
+token is decrypted inside Launchplane and consumed by one fixed
 `query { shop { id myshopifyDomain } }` request. Testing needs no running Odoo
 container, runtime inventory or delivered provider environment for this read.
-Its token is never sent to the provider host, Docker, files or result output.
+The query runs in a local child process with a 15-second total deadline, including
+DNS resolution and response reads. Its token travels on stdin, never command
+arguments, environment, files, the provider host, Docker or result output.
 The probe uses HTTPS, refuses redirects and proxy
 inheritance, bounds the response and uses no retry. It returns only the shop-ID
 and canonical-domain hashes. Testing's returned domain must agree with its requested store. Both shop IDs

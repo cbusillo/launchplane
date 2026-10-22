@@ -1,6 +1,8 @@
 import hashlib
 import json
 import re
+import subprocess
+import sys
 from inspect import getsource
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,11 +35,11 @@ from control_plane.odoo_shopify_identity_probe import (
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, _decrypt_secret_value
 
 ROUTE = "/v1/products/{product}/environments/{environment}/shopify-identity"
+TESTING_PROBE_TIMEOUT_SECONDS = 15
 
 IdentityStage = Literal[
     "authority",
     "production_runtime",
-    "testing_runtime",
     "testing_credential",
     "testing_probe",
     "production_probe",
@@ -262,6 +264,21 @@ print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
 
 
+def testing_identity(request: dict[str, object]) -> dict[str, str]:
+    child = subprocess.run(
+        [sys.executable, "-I", str(Path(__file__).with_name("odoo_shopify_identity_probe.py"))],
+        input=json.dumps(request),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=TESTING_PROBE_TIMEOUT_SECONDS,
+        check=True,
+    )
+    if len(child.stdout) > 512:
+        raise ValueError("Identity unavailable")
+    return validate_identity(json.loads(child.stdout))
+
+
 def production_identity(
     connection: reads.OdooRuntimeConnection,
     environment: dict[str, str],
@@ -309,7 +326,10 @@ def production_identity(
     )
     if len(frames) != 1 or set(frames[0]) != {"type", "result"} or frames[0]["type"] != "complete":
         raise ValueError("Identity unavailable")
-    result = frames[0]["result"]
+    return validate_identity(frames[0]["result"])
+
+
+def validate_identity(result: object) -> dict[str, str]:
     if not isinstance(result, dict) or result.get("status") not in {
         "verified",
         "token_rejected",
@@ -367,7 +387,7 @@ def compare_identity(
         stage, reason = "testing_credential", "credential_unavailable"
         token = _decrypt_secret_value(selected.version.ciphertext, selected.version.key_id)
         stage, reason = "testing_probe", "probe_unavailable"
-        observed = read_identity(
+        observed = testing_identity(
             {"domain": selected.domain, "api_version": selected.api_version, "token": token}
         )
         stage, reason = "evidence", "authority_changed"
