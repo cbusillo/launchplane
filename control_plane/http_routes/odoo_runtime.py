@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from pathlib import Path as FilePath
 from typing import Annotated, Iterator, Literal, cast
 
@@ -30,6 +31,8 @@ from control_plane.odoo_product_driver_http import (
 )
 from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,14 +433,22 @@ def register_odoo_runtime_read_routes(
                         code="authorization_denied",
                         message="The caller cannot read both store identities.",
                     )
+            result = shopify.compare_identity(
+                store=cast(shopify.ShopifyIdentityStore, record_store),
+                profile=profile,
+                control_plane_root=dependencies.control_plane_root,
+                database_url=dependencies.database_url,
+            )
+            _logger.info(
+                "Shopify identity read: trace=%s stage=%s reason=%s separation=%s",
+                trace_id,
+                result.stage,
+                result.reason,
+                result.separation,
+            )
             return ShopifyIdentityResponse(
                 trace_id=trace_id,
-                result=shopify.compare_identity(
-                    store=cast(shopify.ShopifyIdentityStore, record_store),
-                    profile=profile,
-                    control_plane_root=dependencies.control_plane_root,
-                    database_url=dependencies.database_url,
-                ),
+                result=result,
             )
 
     for path, endpoint, model, operation_id, summary in (

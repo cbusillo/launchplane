@@ -9,43 +9,56 @@ from control_plane.odoo_instance_overrides import shopify_store_handle
 from control_plane.odoo_shopify_identity_probe import read_identity as read_shopify_identity
 
 
+class IdentityUnavailable(ValueError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def read_identity(spec: dict[str, object]) -> dict[str, str]:
     config = configparser.ConfigParser(interpolation=None)
     path = str(spec["config_path"])
     if config.read(path) != [path]:
-        raise ValueError("Configuration unavailable")
+        raise IdentityUnavailable("configuration_unavailable")
     options = config["options"]
     database = os.environ["ODOO_DB_NAME"]
     if options.get("db_name") != database or options.get("db_host") != "database":
-        raise ValueError("Database identity unavailable")
-    connection = importlib.import_module("psycopg2").connect(
-        host="database",
-        port=options.get("db_port") or "5432",
-        user=options["db_user"],
-        password=options["db_password"],
-        dbname=database,
-        connect_timeout=3,
-        options="-c default_transaction_read_only=on -c statement_timeout=3000",
-    )
+        raise IdentityUnavailable("database_identity_unavailable")
+    try:
+        driver = importlib.import_module("psycopg2")
+    except ImportError:
+        raise IdentityUnavailable("database_driver_unavailable") from None
+    try:
+        connection = driver.connect(
+            host="database",
+            port=options.get("db_port") or "5432",
+            user=options["db_user"],
+            password=options["db_password"],
+            dbname=database,
+            connect_timeout=3,
+            options="-c default_transaction_read_only=on -c statement_timeout=3000",
+        )
+    except Exception:
+        raise IdentityUnavailable("database_unavailable") from None
     try:
         with connection.cursor() as cursor:
             keys = spec["store_keys"]
             if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
-                raise ValueError("Store keys unavailable")
+                raise IdentityUnavailable("settings_unavailable")
             keys = keys + ["shopify.api_token", "shopify.api_version"]
             cursor.execute(
                 "SELECT key, value FROM ir_config_parameter WHERE key = ANY(%s)", (keys,)
             )
             rows = cursor.fetchmany(len(keys) + 1)
         if not rows or len(rows) > len(keys):
-            raise ValueError("Store identity unavailable")
+            raise IdentityUnavailable("settings_unavailable")
         domains = set()
         values: dict[str, str] = {}
         for key, value in rows:
             if key not in keys or not isinstance(value, str) or not value.strip():
-                raise ValueError("Store identity unavailable")
+                raise IdentityUnavailable("settings_unavailable")
             if key in values:
-                raise ValueError("Store identity unavailable")
+                raise IdentityUnavailable("settings_unavailable")
             values[key] = value
             if key in {"shopify.api_token", "shopify.api_version"}:
                 continue
@@ -54,10 +67,10 @@ def read_identity(spec: dict[str, object]) -> dict[str, str]:
                 re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com", domain)
                 is None
             ):
-                raise ValueError("Store identity unavailable")
+                raise IdentityUnavailable("settings_unavailable")
             domains.add(domain)
         if len(domains) != 1:
-            raise ValueError("Store identity unavailable")
+            raise IdentityUnavailable("settings_unavailable")
         result = read_shopify_identity(
             {
                 "domain": next(iter(domains)),
@@ -72,19 +85,26 @@ def read_identity(spec: dict[str, object]) -> dict[str, str]:
             )
             after = cursor.fetchmany(len(keys) + 1)
         if sorted(after) != sorted(rows):
-            raise ValueError("Production settings changed")
+            raise IdentityUnavailable("settings_changed")
         return result
-
+    except IdentityUnavailable:
+        raise
+    except Exception:
+        raise IdentityUnavailable("database_unavailable") from None
     finally:
-        connection.rollback()
-        connection.close()
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
 
 
 def main() -> None:
     try:
         result = read_identity(json.loads(sys.stdin.read(4097)))
+    except IdentityUnavailable as error:
+        result = {"status": "unavailable", "reason": error.reason}
     except Exception:
-        result = {"status": "unavailable"}
+        result = {"status": "unavailable", "reason": "configuration_unavailable"}
     print(json.dumps(result))
 
 

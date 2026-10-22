@@ -15,7 +15,7 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 def read_identity(spec: dict[str, object], *, require_domain_match: bool = True) -> dict[str, str]:
-    unknown = {"status": "unavailable"}
+    unknown = {"status": "unavailable", "reason": "request_invalid"}
     domain, version, token = (spec.get(key) for key in ("domain", "api_version", "token"))
     if (
         not isinstance(domain, str)
@@ -28,6 +28,7 @@ def read_identity(spec: dict[str, object], *, require_domain_match: bool = True)
         or any(character.isspace() for character in token)
     ):
         return unknown
+    unknown = {"status": "unavailable", "reason": "request_failed"}
     request = Request(
         f"https://{domain}/admin/api/{version}/graphql.json",
         data=json.dumps({"query": QUERY}).encode(),
@@ -37,6 +38,7 @@ def read_identity(spec: dict[str, object], *, require_domain_match: bool = True)
     try:
         with build_opener(NoRedirects(), ProxyHandler({})).open(request, timeout=10) as response:
             raw = response.read(8193)
+        unknown = {"status": "unavailable", "reason": "response_invalid"}
         if len(raw) > 8192:
             return unknown
         payload = json.loads(raw)
@@ -61,7 +63,11 @@ def read_identity(spec: dict[str, object], *, require_domain_match: bool = True)
         }
     except HTTPError as error:
         error.close()
-        return {"status": "token_rejected"} if error.code in {401, 403} else unknown
+        return (
+            {"status": "token_rejected", "reason": "token_rejected"}
+            if error.code in {401, 403}
+            else unknown
+        )
     except (OSError, ValueError, TypeError, AttributeError):
         return unknown
 
@@ -71,7 +77,7 @@ def main() -> None:
         spec = json.loads(sys.stdin.read(16385))
         result = read_identity(spec)
     except (OSError, ValueError, TypeError, AttributeError):
-        result = {"status": "unavailable"}
+        result = {"status": "unavailable", "reason": "request_invalid"}
     print(json.dumps(result))
 
 

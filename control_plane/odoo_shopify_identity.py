@@ -4,7 +4,7 @@ import re
 from inspect import getsource
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -34,6 +34,40 @@ from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, _decry
 
 ROUTE = "/v1/products/{product}/environments/{environment}/shopify-identity"
 
+IdentityStage = Literal[
+    "authority",
+    "production_runtime",
+    "testing_runtime",
+    "testing_credential",
+    "testing_probe",
+    "production_probe",
+    "evidence",
+    "complete",
+    "unknown",
+]
+IdentityReason = Literal[
+    "",
+    "authority_unavailable",
+    "authority_changed",
+    "runtime_unavailable",
+    "runtime_changed",
+    "credential_unavailable",
+    "probe_unavailable",
+    "probe_failed",
+    "configuration_unavailable",
+    "database_identity_unavailable",
+    "database_driver_unavailable",
+    "database_unavailable",
+    "settings_unavailable",
+    "settings_changed",
+    "request_invalid",
+    "request_failed",
+    "response_invalid",
+    "token_rejected",
+    "domain_mismatch",
+    "diagnostics_unavailable",
+]
+
 
 class ShopifyIdentityStore(OdooAddonSettingsStore, reads.OdooRuntimeReadStore, Protocol):
     def read_secret_version(self, version_id: str) -> SecretVersion: ...
@@ -45,6 +79,8 @@ class ShopifyIdentityResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     separation: Literal["separate", "same", "unknown"] = "unknown"
     probe: Literal["verified", "token_rejected", "unavailable"] = "unavailable"
+    stage: IdentityStage = "unknown"
+    reason: IdentityReason = "diagnostics_unavailable"
     testing_domain_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_shop_id_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     production_domain_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -187,7 +223,7 @@ HOST_PROGRAM = r"""
 import base64,json,re,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
-result={'status':'unavailable'}
+result={'status':'unavailable','reason':'probe_failed'}
 def inspect():
     raw=subprocess.run(['docker','inspect','--type','container',spec['container']],capture_output=True,check=True,timeout=5)
     values=json.loads(raw.stdout)
@@ -214,11 +250,14 @@ try:
         ['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','15s','python3','-I','-c',spec['program']],
         input=json.dumps(spec['request']),text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,check=False)
     after=inspect()
-    if before!=after or child.returncode!=0 or len(child.stdout)>512:
+    if before!=after:
+        result={'status':'unavailable','reason':'runtime_changed'}
+    elif child.returncode!=0 or len(child.stdout)>512:
         raise ValueError()
-    result=json.loads(child.stdout)
+    else:
+        result=json.loads(child.stdout)
 except Exception:
-    result={'status':'unavailable'}
+    result={'status':'unavailable','reason':'probe_failed'}
 print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
 
@@ -290,10 +329,14 @@ def runtime_identity(
     keys = (
         {"status", "domain_sha256", "shop_id_sha256"}
         if result["status"] == "verified"
-        else {"status"}
+        else {"status", "reason"}
     )
 
-    if set(result) != keys or any(not isinstance(value, str) for value in result.values()):
+    if (
+        set(result) != keys
+        or any(not isinstance(value, str) for value in result.values())
+        or (result["status"] != "verified" and result["reason"] not in get_args(IdentityReason)[1:])
+    ):
         raise ValueError("Identity unavailable")
     return result
 
@@ -305,11 +348,14 @@ def compare_identity(
     control_plane_root: Path,
     database_url: str | None,
 ) -> ShopifyIdentityResult:
+    stage: IdentityStage = "authority"
+    reason: IdentityReason = "authority_unavailable"
     try:
         product = profile.product
         selected = authority(store, product)
         if store.read_product_profile_record(product) != profile:
-            return ShopifyIdentityResult()
+            return ShopifyIdentityResult(stage="authority", reason="authority_changed")
+        stage, reason = "production_runtime", "runtime_unavailable"
         production_selection = reads.select_stable_runtime(store, profile, "prod")
         production_connection = reads.connect_runtime(
             store=store,
@@ -325,6 +371,7 @@ def compare_identity(
             production_connection.app_name,
             production_selection.identity,
         )
+        stage = "testing_runtime"
         selection = reads.select_stable_runtime(store, profile, "testing")
         connection = reads.connect_runtime(
             store=store,
@@ -340,8 +387,11 @@ def compare_identity(
             connection.app_name,
             selection.identity,
         )
+        stage, reason = "testing_credential", "credential_unavailable"
         token = _decrypt_secret_value(selected.version.ciphertext, selected.version.key_id)
+        stage, reason = "testing_probe", "probe_unavailable"
         observed = runtime_identity(connection, selected, environment, token)
+        stage, reason = "evidence", "authority_changed"
         reads.assert_selection_current(store, selection)
         if (
             authority(store, product).snapshot != selected.snapshot
@@ -355,30 +405,40 @@ def compare_identity(
             )
             != environment
         ):
-            return ShopifyIdentityResult()
+            return ShopifyIdentityResult(stage=stage, reason=reason)
         if observed["status"] != "verified":
             return ShopifyIdentityResult(
-                probe=cast(Literal["token_rejected", "unavailable"], observed["status"])
+                probe=cast(Literal["token_rejected", "unavailable"], observed["status"]),
+                stage="testing_probe",
+                reason=cast(IdentityReason, observed.get("reason", "probe_unavailable")),
             )
         reads.assert_selection_current(store, production_selection)
+        stage, reason = "production_probe", "probe_unavailable"
         production = runtime_identity(production_connection, None, production_environment, "")
         if production.get("status") != "verified" or any(
             re.fullmatch(r"[a-f0-9]{64}", production.get(key, "")) is None
             for key in ("domain_sha256", "shop_id_sha256")
         ):
-            return ShopifyIdentityResult()
+            return ShopifyIdentityResult(
+                stage=stage,
+                reason=cast(IdentityReason, production.get("reason", reason)),
+                probe="token_rejected"
+                if production.get("status") == "token_rejected"
+                else "unavailable",
+            )
         production_domain = production["domain_sha256"]
+        stage, reason = "evidence", "authority_changed"
         if authority(store, product).snapshot != selected.snapshot:
-            return ShopifyIdentityResult()
+            return ShopifyIdentityResult(stage=stage, reason=reason)
         reads.assert_selection_current(store, production_selection)
         reads.assert_selection_current(store, selection)
         result = ShopifyIdentityResult(
             probe=cast(Literal["verified", "token_rejected", "unavailable"], observed["status"]),
             production_domain_sha256=production_domain,
             production_shop_id_sha256=production["shop_id_sha256"],
+            stage="complete",
+            reason="",
         )
-        if result.probe != "verified":
-            return result
         testing_domain = observed["domain_sha256"]
         if (
             testing_domain == production_domain
@@ -386,7 +446,7 @@ def compare_identity(
         ):
             return result.model_copy(update={"separation": "same"})
         if testing_domain != digest(selected.domain):
-            return ShopifyIdentityResult()
+            return ShopifyIdentityResult(stage="testing_probe", reason="domain_mismatch")
         return ShopifyIdentityResult(
             separation="separate",
             probe="verified",
@@ -394,10 +454,12 @@ def compare_identity(
             testing_shop_id_sha256=observed["shop_id_sha256"],
             production_domain_sha256=production_domain,
             production_shop_id_sha256=production["shop_id_sha256"],
+            stage="complete",
+            reason="",
         )
     except NativeSourceAuthorizationDenied:
         raise reads.OdooRuntimeReadError(
             "authorization_denied", "The provider refused the Shopify identity read.", 403
         ) from None
     except Exception:
-        return ShopifyIdentityResult()
+        return ShopifyIdentityResult(stage=stage, reason=reason)

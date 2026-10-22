@@ -56,6 +56,28 @@ retain the trace. An unavailable production runtime needs supported runtime
 identity/configuration evidence, not a guessed store identity or grant. A
 rejected testing token requires the Director's credential-entry process.
 
+The result also identifies the failed `stage` and a fixed, value-free `reason`.
+The API logs those same codes with the trace; exceptions and provider responses
+are never included. This synchronous read creates no deployment or queued-operation
+record. Preserve its response as the run receipt and correlate it with retained
+service logs. Older responses without these diagnostics cannot identify which
+prerequisite failed.
+
+| Stage or reason | Supported next check |
+| --- | --- |
+| `authority` | Check the testing hold, dev-store allowance, prepared addon settings and exact-lane managed binding. |
+| `production_runtime` or `testing_runtime` | Check the lane's recorded runtime identity and verified running container. |
+| `testing_credential` | Check the existing managed version and decryption configuration without collecting its value. |
+| `configuration_unavailable` or `database_identity_unavailable` | Check the production runtime's generated Odoo configuration and database identity. |
+| `database_driver_unavailable` or `database_unavailable` | Check the selected runtime's Python database driver and read-only database connectivity. |
+| `settings_unavailable` or `settings_changed` | Check production's applied store settings; changed settings invalidate this read. |
+| `request_invalid`, `request_failed` or `response_invalid` | Check that side's existing store/API settings, connectivity and identity-only response. |
+| `token_rejected` | That side's existing token was rejected; use the Director's credential-entry process. |
+| `probe_failed`, `runtime_changed`, `authority_changed` or `evidence` | Inspect correlated service/runtime evidence; do not replay the identity check or change the hold to diagnose it. |
+
+Completed comparisons use `stage=complete` and an empty reason. Both `same`
+and `separate` are completed comparisons; only `separate` permits exit zero.
+
 A successful comparison proves store separation for this read only. It does not
 prove provider environment delivery, applied testing database settings, export
 qualification or authority for a later operation. The operational issue owns
