@@ -1621,7 +1621,7 @@ class GenericWebDeployProviderMutationAdapter:
         lease: ProviderOperationLease,
         recorder: ExecutionRecorder | None,
         *,
-        require_current_baseline: bool = True,
+        require_current_declarations: bool = True,
     ) -> bool:
         if recorder is None or recorder.expected_record is None:
             return False
@@ -1656,13 +1656,10 @@ class GenericWebDeployProviderMutationAdapter:
             == (target.ship_request.artifact_id, target.ship_request.source_git_ref)
             and snapshot.provider_id == self._deploy_provider.provider_id
         )
-        if not proved_original or not require_current_baseline:
+        if not proved_original or not require_current_declarations:
             return proved_original
-        assert snapshot is not None and receipt is not None
-        return (
-            snapshot.extensions == self._lane.generic_web_extensions
-            and receipt.inventory_baseline_digest == self._current_testing_inventory_digest()
-        )
+        assert snapshot is not None
+        return snapshot.extensions == self._lane.generic_web_extensions
 
     def _current_testing_inventory_digest(self) -> str:
         try:
@@ -1700,7 +1697,7 @@ class GenericWebDeployProviderMutationAdapter:
         if reservation.provider_effect_phase or reservation.provider_effect_started_at:
             return
         if not self._proved_no_effect_lifecycle_retry(
-            operation_key, lease, recorder, require_current_baseline=False
+            operation_key, lease, recorder, require_current_declarations=False
         ):
             raise ProviderMutationUnknownError("Original no-effect retirement is not proved.")
         if snapshot.state == "not_started":
@@ -1833,8 +1830,15 @@ class GenericWebDeployProviderMutationAdapter:
             if self._application_testing(resolved_target)
             else None
         )
-        if recorder is not None and recorder.expected_record is None:
-            self._pre_effect_inventory_digest = recorder.receipt.inventory_baseline_digest
+        if recorder is not None:
+            if not isinstance(lease, ProviderEvidenceLease):
+                raise ProviderMutationUnknownError(
+                    "Original inventory requires its execution lease."
+                )
+            lease.assert_current()
+            reservation = lease.evidence_reservation()
+            if not reservation.provider_effect_phase and not reservation.provider_effect_started_at:
+                self._pre_effect_inventory_digest = recorder.receipt.inventory_baseline_digest
         try:
             expected_inventory = (
                 cast(_ExecutionInventoryReader, self._record_store).read_environment_inventory(
@@ -1909,7 +1913,7 @@ class GenericWebDeployProviderMutationAdapter:
             proved_no_effect_retry = False
             if recorder is not None and recorder.expected_record is not None:
                 historical_no_effect = self._proved_no_effect_lifecycle_retry(
-                    provider_operation_key, lease, recorder, require_current_baseline=False
+                    provider_operation_key, lease, recorder, require_current_declarations=False
                 )
                 if historical_no_effect:
                     if not self._proved_no_effect_lifecycle_retry(
@@ -1918,10 +1922,9 @@ class GenericWebDeployProviderMutationAdapter:
                         raise ApplicationLifecycleBaselineChanged(
                             "The original testing baseline changed."
                         )
-                    receipt = execution_receipt(recorder.expected_record)
-                    assert receipt is not None
-                    self._pre_effect_inventory_digest = receipt.inventory_baseline_digest
                     proved_no_effect_retry = True
+            if self._pre_effect_inventory_digest is not None:
+                self._require_effect_admission()
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -1945,7 +1948,7 @@ class GenericWebDeployProviderMutationAdapter:
                 # provider effect or replacing the last recoverable phase.
                 before_failure_records_commit=(
                     (lambda: checkpoint("provider_dispatch_prepared"))
-                    if resolved_target.testing_runtime_digest
+                    if recorder is not None or resolved_target.testing_runtime_digest
                     else None
                 ),
                 recorded_artifact=self._recorded_artifact,

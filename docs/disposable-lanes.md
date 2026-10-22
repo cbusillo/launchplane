@@ -29,34 +29,29 @@ authority. Completed replay and read-only
 original observation do not require fresh execution qualification. An unresolved
 original continues to fence another key or caller.
 
-For every application-testing caller, an exact pending lifecycle baseline can
-be reused after a proved no-effect refusal only under its current execution
-lease and record comparison. Its declarations and immutable inventory baseline
-must still match; the inventory is rechecked under the first-effect authority
-lock. The service rereads actual application schedules before proceeding. A changed
-baseline returns `409 testing_deploy_baseline_changed` before any forward or
-restore effect; it never rewrites the original receipt or restores stale values.
-Fresh application-testing operations also compare their captured inventory
-baseline at the first-effect checkpoint. This check does not reinterpret
-an original that already has effects as fresh no-effect work.
-Before releasing a proved no-effect refusal, the service records `not_started`
-under the exact current original lease and record comparison. Ordinary evidence
-corrections cannot create that proof. A fresh native standing operation derives
-ownership from established qualified or protective lifecycle state, not another
-operation's prepared declarations. It preserves that earlier intent for its
-original observation/recovery, retains effective
-ownership or protective holds, and captures its own current schedule baseline.
-This is the supported continuation after a changed-baseline refusal; the old
-original and its immutable baseline remain recorded. Failure to publish the
-no-effect fact retains the original's reconciliation fence. Actual held or
-partially restored attempts keep their existing fix-forward behavior.
-This also permits a fresh native operation after a foreign legacy capture without
-switching identity or claiming that capture had no effects. Live native original
-reservations still fence it. An empty receipt alone is never no-effect proof.
-Changed declarations on a proved no-effect original likewise require a fresh
-operation; they do not rewrite its stored intent or manufacture a restore.
-Existing proved pre-image recovery and inverse rollback keep their separate
-authority. Recovery dry-run/apply still require their existing explicit policy;
+Every application-testing execution without a recorded provider effect compares
+its captured inventory baseline before proceeding and again at the first-effect
+authority checkpoint. This applies to fresh and same-key operations, with or
+without lifecycle declarations. Same-key lifecycle retries also retain their
+captured declarations and schedule baseline. A changed baseline returns
+`409 testing_deploy_baseline_changed` before effects. Start a fresh operation;
+the old original and its immutable receipt stay recorded. Unchanged-baseline
+same-key retries remain supported. Originals that already have effects retain
+their existing recovery and protective-settlement behavior.
+
+Before releasing a proved no-effect lifecycle refusal, the service records
+`not_started` under its current original lease and record comparison. An empty
+receipt or ordinary evidence correction cannot create that proof; failed
+publication keeps the reconciliation fence. Failure-only evidence publication
+preserves the original reason without creating a provider-effect checkpoint.
+
+A fresh native standing operation retains established lifecycle ownership and
+protective holds, preserves foreign prepared intent for its original recovery,
+and captures its own current schedule baseline. It does not treat another
+operation's prepared declarations as ownership. Live original reservations still
+fence another key or caller. Existing held fix-forward, proved pre-image recovery
+and inverse rollback retain their separate authority.
+Recovery dry-run/apply still require their existing explicit policy;
 [own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)
 is separate source work. Completed native replay and existing observation
 permissions are unchanged.
