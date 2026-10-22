@@ -24,6 +24,7 @@ from control_plane.product_review import (
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
+    owner_review_status,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
@@ -375,6 +376,103 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(
             github.statuses[0]["description"], "Waiting for @site-owner to review the preview"
         )
+
+    def test_former_client_decisions_neither_accept_nor_veto_for_the_current_client(self) -> None:
+        profile = _profile().model_copy(
+            update={"owner": _profile().owner.model_copy(update={"github_id": "9002"})}
+        )
+        for decision in ("accepted", "changes_requested"):
+            saved = _decision(decision=decision, decided_at="2026-09-20T10:00:00Z").model_copy(
+                update={"feedback_url": "https://github.com/feedback/1"}
+            )
+            self.store.write_product_review_decision_record(saved)
+            for review in ("required", "engineering", "director_standing"):
+                with self.subTest(decision=decision, review=review):
+                    github = _GitHub(labels=() if review == "engineering" else ("owner-review",))
+                    selected_profile = (
+                        profile.model_copy(update={"release_on_acceptance": "director_standing"})
+                        if review == "director_standing"
+                        else profile
+                    )
+                    result = _publisher(github).publish(
+                        store=self.store,
+                        profile=selected_profile,
+                        pull_request_number=_PULL_REQUEST,
+                    )
+                    assert result is not None
+                    self.assertEqual(result.state, "pending" if review == "required" else "neutral")
+                    self.assertEqual(github.statuses[0]["state"], result.state)
+                    self.assertEqual(
+                        self.store.list_product_review_decision_records(
+                            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                        ),
+                        (saved,),
+                    )
+
+    def test_former_client_decision_does_not_mask_the_current_clients_decision(self) -> None:
+        cases: tuple[tuple[ProductReviewDecision, str], ...] = (
+            ("accepted", "success"),
+            ("changes_requested", "failure"),
+        )
+        for decision, expected in cases:
+            self.setUp()
+            current = _decision(decision=decision, decided_at="2026-09-20T10:00:00Z")
+            former = _decision(
+                decision="changes_requested" if decision == "accepted" else "accepted",
+                decided_at="2026-09-20T11:00:00Z",
+            ).model_copy(update={"owner_github_id": "9002"})
+            for saved in (current, former):
+                self.store.write_product_review_decision_record(saved)
+            for review in ("required", "engineering", "director_standing"):
+                with self.subTest(decision=decision, review=review):
+                    github = _GitHub(labels=() if review == "engineering" else ("owner-review",))
+                    profile = _profile()
+                    if review == "director_standing":
+                        profile = profile.model_copy(
+                            update={"release_on_acceptance": "director_standing"}
+                        )
+                    result = _publisher(github).publish(
+                        store=self.store, profile=profile, pull_request_number=_PULL_REQUEST
+                    )
+                    assert result is not None
+                    self.assertEqual(
+                        result.state,
+                        "neutral" if decision == "accepted" and review != "required" else expected,
+                    )
+                    self.assertEqual(github.statuses[0]["state"], result.state)
+
+    def test_unchanged_client_id_still_accepts_after_a_login_change(self) -> None:
+        github = _GitHub()
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        )
+        profile = _profile().model_copy(
+            update={"owner": _profile().owner.model_copy(update={"github_login": "renamed-client"})}
+        )
+        result = _publisher(github).publish(
+            store=self.store, profile=profile, pull_request_number=_PULL_REQUEST
+        )
+        assert result is not None
+        self.assertEqual(result.state, "success")
+
+    def test_decisions_for_another_target_do_not_decide_the_current_status(self) -> None:
+        saved = _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z").model_copy(
+            update={"feedback_url": "https://github.com/feedback/1"}
+        )
+        for update in (
+            {"product": "another-product"},
+            {"repository": "every/another-repository"},
+            {"pull_request_number": _PULL_REQUEST + 1},
+            {"head_sha": _OLDER_HEAD_SHA},
+        ):
+            with self.subTest(update=update):
+                result = owner_review_status(
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    head_sha=_HEAD_SHA,
+                    decisions=(saved.model_copy(update=update),),
+                )
+                self.assertEqual(result.state, "pending")
 
     def test_pure_dependabot_update_publishes_neutral_without_inviting_client(self) -> None:
         class DependabotGitHub(_GitHub):

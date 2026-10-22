@@ -25,6 +25,7 @@ from control_plane.config_authority_comparison import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.product_review import applicable_product_review_decisions
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -4445,14 +4446,13 @@ class GitHubMergeTrainSnapshotReader:
                 repository=profile.repository, pull_request_number=pull_request_number
             )
             current = next(
-                (
-                    decision
-                    for decision in decisions
-                    if decision.product == profile.product
-                    and repository_key(decision.repository) == repository_key(repository)
-                    and decision.pull_request_number == pull_request_number
-                    and decision.head_sha.strip().casefold() == head_sha.strip().casefold()
-                    and decision.owner_github_id == profile.owner.github_id
+                iter(
+                    applicable_product_review_decisions(
+                        decisions=decisions,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        head_sha=head_sha,
+                    )
                 ),
                 None,
             )

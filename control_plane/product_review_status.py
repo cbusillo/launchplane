@@ -21,7 +21,6 @@ from control_plane.contracts.advisory_check_projection import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    ProductOwnerProfile,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import (
@@ -33,7 +32,7 @@ from control_plane.github_app_identity import (
 from control_plane.client_test_notes import change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
-from control_plane.product_review import ProductReviewStore
+from control_plane.product_review import ProductReviewStore, applicable_product_review_decisions
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
@@ -79,29 +78,29 @@ class _PullRequestFacts:
 
 def owner_review_status(
     *,
-    owner: ProductOwnerProfile,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
     head_sha: str,
     decisions: tuple[ProductReviewDecisionRecord, ...],
     base_branch: str = "",
 ) -> OwnerReviewStatus:
     """Return the status for a marked pull request; `decisions` are newest first."""
 
+    owner = profile.owner
     if not owner.is_set:
         return OwnerReviewStatus(state="pending", description=NO_OWNER_DESCRIPTION)
-    current_head = head_sha.strip().lower()
-    # The Owner reviews what is actually previewed, so a decision for another head
-    # says nothing about this one.
     decision = next(
-        (record for record in decisions if record.head_sha.strip().lower() == current_head),
+        iter(
+            applicable_product_review_decisions(
+                decisions=decisions,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=base_branch,
+            )
+        ),
         None,
     )
-    if (
-        decision is not None
-        and decision.carried_from is not None
-        and decision.base_branch != base_branch.strip()
-    ):
-        # Carried on another base: retargeting changed the change, so it no longer applies.
-        decision = None
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
@@ -364,10 +363,14 @@ class OwnerReviewStatusPublisher:
                 repository=profile.repository, pull_request_number=pull_request_number
             )
             current = next(
-                (
-                    decision
-                    for decision in decisions
-                    if decision.head_sha.strip().lower() == facts.head_sha
+                iter(
+                    applicable_product_review_decisions(
+                        decisions=decisions,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        head_sha=facts.head_sha,
+                        base_branch=facts.base_branch,
+                    )
                 ),
                 None,
             )
@@ -379,7 +382,8 @@ class OwnerReviewStatusPublisher:
             )
             if current is not None and current.decision == "changes_requested":
                 status = owner_review_status(
-                    owner=profile.owner,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
                     head_sha=facts.head_sha,
                     decisions=decisions,
                     base_branch=facts.base_branch,
@@ -464,7 +468,8 @@ class OwnerReviewStatusPublisher:
                 },
             )
         return owner_review_status(
-            owner=profile.owner,
+            profile=profile,
+            pull_request_number=pull_request_number,
             head_sha=facts.head_sha,
             decisions=store.list_product_review_decision_records(
                 repository=profile.repository,

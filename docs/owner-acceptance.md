@@ -73,6 +73,13 @@ recording a Client decision or sending a review invitation. A later review label
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
+Both acceptance and rejection projections use the newest applicable decision
+for the product's current immutable Client ID, product, repository, pull request
+and current head. A changed login with the same ID keeps the decision applicable.
+A former Client's decision stays saved with its feedback, but neither accepts,
+vetoes nor masks the current Client's decision. Carried decisions must also match
+the current base branch. The same Client and target selection applies when
+recording a decision's first base branch or choosing an acceptance to carry.
 The train independently reads saved current-head decisions for the product's
 current Client at admission and immediately before merging. A Request changes
 decision blocks even after notes are edited to engineering-only or while its

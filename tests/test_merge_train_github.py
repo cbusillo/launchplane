@@ -3736,6 +3736,28 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ((rejection.model_copy(update={"head_sha": "old-head"}),), "pass", False),
             ((rejection.model_copy(update={"owner_github_id": "902"}),), "pass", False),
             ((rejection.model_copy(update={"product": "another-site"}),), "pass", False),
+            (
+                (rejection.model_copy(update={"repository": "cbusillo/another-site"}),),
+                "pass",
+                False,
+            ),
+            ((rejection.model_copy(update={"pull_request_number": 43}),), "pass", False),
+            (
+                (
+                    rejection.model_copy(update={"owner_github_id": "902", "decision": "accepted"}),
+                    rejection,
+                ),
+                "fail",
+                True,
+            ),
+            (
+                (
+                    rejection.model_copy(update={"owner_github_id": "902"}),
+                    rejection.model_copy(update={"decision": "accepted"}),
+                ),
+                "pass",
+                False,
+            ),
             ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
             ((), "pass", False),
         )
