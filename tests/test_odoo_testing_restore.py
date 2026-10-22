@@ -1,12 +1,14 @@
 import base64
 from contextlib import closing, redirect_stdout
 import io
+import hashlib
+import tarfile
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Any
 import unittest
 import yaml
@@ -148,6 +150,28 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
+        original = self.command
+        marker = f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}"
+
+        def refuse(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if kwargs.get("input") == self.spec["runner"].encode():
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout=f"{marker}\nreadback_failure_kind=refused\nprivate attachment detail\n".encode(),
+                    stderr=b"private traceback",
+                )
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=refuse):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertIn(marker, output.splitlines())
+        self.assertIn("readback_failure_kind=refused", output.splitlines())
+        self.assertNotIn("private", output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_real_restore_renderer_fits_schedule_transport_for_ssh_and_native_copy(self) -> None:
         from control_plane.dokploy.api import validate_dokploy_schedule_script
         from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
@@ -1107,6 +1131,18 @@ class FreshTestingHostProgramTests(unittest.TestCase):
 
 
 class TestingCopyBoundaryTests(unittest.TestCase):
+    def test_native_receiver_validates_every_reference_before_registry_or_copy_witness(
+        self,
+    ) -> None:
+        for attachment in ("valid", "missing", "size", "hash", "metadata"):
+            for phase in ("fresh", "resume"):
+                with self.subTest(attachment=attachment, phase=phase):
+                    self.boundary_case(
+                        "normal" if attachment == "valid" else "attachment",
+                        phase=phase,
+                        native_attachment=attachment,
+                    )
+
     def test_rehearsal_source_is_sanitized_without_starting_a_registry(self) -> None:
         self.boundary_case("normal", instance="rehearsal", sanitize_only=True)
 
@@ -1138,6 +1174,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         phase: str = "fresh",
         instance: str = "testing",
         sanitize_only: bool = False,
+        native_attachment: str = "",
     ) -> None:
         import logging
         import sqlite3
@@ -1150,7 +1187,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         self.addCleanup(logging.disable, logging.root.manager.disable)
         self.enterContext(patch.object(sys, "path", list(sys.path)))
         with TemporaryDirectory() as directory:
-            database = Path(directory) / "fresh.db"
+            fixture_root = Path(directory).resolve()
+            database = fixture_root / "fresh.db"
             connection = sqlite3.connect(database)
             seed(connection)
             connection.executescript("""
@@ -1160,6 +1198,81 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 INSERT INTO website VALUES ('live-analytics');
                 INSERT INTO ir_config_parameter VALUES ('google_analytics.client_secret', 'live-secret');
             """)
+            filestore = fixture_root / "filestore"
+            if native_attachment:
+                from control_plane.odoo_testing_restore import NATIVE_TESTING_FILES_PROGRAM
+
+                content = b"fixture attachment"
+                checksum = hashlib.sha1(content).hexdigest()
+                name = checksum[:2] + "/" + checksum
+                connection.execute(
+                    "CREATE TABLE ir_attachment (store_fname TEXT, checksum TEXT, file_size INTEGER)"
+                )
+                connection.execute(
+                    "INSERT INTO ir_attachment VALUES (?, ?, ?)",
+                    (name, checksum, len(content) + (native_attachment == "size")),
+                )
+                if native_attachment == "metadata":
+                    connection.execute("UPDATE ir_attachment SET store_fname='../outside'")
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w:gz") as handle:
+                    if native_attachment != "missing":
+                        member = tarfile.TarInfo(name)
+                        member.size = len(content)
+                        handle.addfile(
+                            member,
+                            io.BytesIO(
+                                b"x" * len(content) if native_attachment == "hash" else content
+                            ),
+                        )
+                staging = fixture_root / "tmp"
+                staging.mkdir()
+                identity = "f" * 32
+                artifacts = {"database": b"fixture verified dump", "filestore": archive.getvalue()}
+                capture = {
+                    "capture_id": identity,
+                    **{
+                        part: {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+                        for part, value in artifacts.items()
+                    },
+                }
+                for part, value in artifacts.items():
+                    (staging / f"lp-native-{identity}-{part}-0").write_bytes(value)
+                dump_path = "/tmp/lp-testing-" + "a" * 32 + "-" + "b" * 32 + "-database.dump"
+
+                def receiver_path(*segments: str) -> Path:
+                    path = Path(*segments)
+                    if path.is_relative_to(fixture_root):
+                        return path
+                    if path == Path("/tmp") or path.is_relative_to("/tmp"):
+                        return staging / path.relative_to("/tmp")
+                    if path.is_relative_to("/volumes/data/filestore"):
+                        return filestore / path.relative_to("/volumes/data/filestore")
+                    return path
+
+                def temporary_file(**kwargs: Any) -> Any:
+                    kwargs["dir"] = receiver_path(str(kwargs["dir"]))
+                    return NamedTemporaryFile(**kwargs)
+
+                spec = {
+                    "mode": "prepare",
+                    "capture": capture,
+                    "database_name": "fresh",
+                    "dump_path": dump_path,
+                }
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["receiver", base64.b64encode(json.dumps(spec).encode()).decode()],
+                    ),
+                    patch("pathlib.Path", side_effect=receiver_path),
+                    patch("tempfile.NamedTemporaryFile", side_effect=temporary_file),
+                ):
+                    exec(compile(NATIVE_TESTING_FILES_PROGRAM, "<native-receiver>", "exec"), {})
+                (Path(directory) / "fixture.dump").write_bytes(
+                    receiver_path(dump_path).read_bytes()
+                )
             if phase == "resume":
                 connection.execute(
                     "INSERT INTO ir_config_parameter VALUES (?, ?)",
@@ -1178,6 +1291,9 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 def __exit__(self, *args: object) -> None:
                     self.cursor.close()
 
+                def __iter__(self) -> Any:
+                    return iter(self.cursor)
+
                 def execute(self, query: str, params: Any = ()) -> None:
                     if query == "SET TRANSACTION READ ONLY":
                         return
@@ -1191,8 +1307,11 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     self.conn = conn
                     self.writer = writer
 
-                def cursor(self) -> Cursor:
+                def cursor(self, name: str | None = None) -> Cursor:
                     return Cursor(self.conn)
+
+                def set_session(self, **kwargs: Any) -> None:
+                    pass
 
                 def commit(self) -> None:
                     if fault != "rollback" or not self.writer:
@@ -1286,6 +1405,13 @@ class TestingCopyBoundaryTests(unittest.TestCase):
             artifact.OdooDataWorkflowRunner = NativeRunner
             (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
+
+            def runtime_path(*segments: str) -> Path:
+                path = Path(*segments)
+                if path.is_relative_to("/volumes/data/filestore"):
+                    return filestore / path.relative_to("/volumes/data/filestore")
+                return path
+
             with (
                 patch.dict(sys.modules, {artifact.__name__: artifact}),
                 patch.dict(
@@ -1295,6 +1421,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         "ODOO_KEY": "",
                         "ODOO_ADMIN_PASSWORD": "testing-password",
                         "ODOO_UPDATE_MODULES": "website",
+                        "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
                     },
                 ),
                 patch.object(
@@ -1308,6 +1435,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         base64.b64encode(b"fixture readback").decode(),
                         phase,
                         "fixture-copy-binding",
+                        "container-export" if native_attachment else "ssh",
                     ],
                 ),
                 patch(
@@ -1319,6 +1447,10 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         if fault == "readback"
                         else b"integration_readback_ok=true",
                     ),
+                ),
+                patch(
+                    "pathlib.Path",
+                    side_effect=runtime_path,
                 ),
                 redirect_stdout(output),
             ):
@@ -1346,6 +1478,18 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 else:
                     self.assertNotIn("drop-fresh", events)
                 self.assertNotIn("testing_copy_sanitized=true", output.getvalue())
+            if native_attachment and fault != "normal":
+                self.assertIn(
+                    f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+                    output.getvalue().splitlines(),
+                )
+            if native_attachment and fault != "normal" and phase == "fresh":
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT value FROM ir_config_parameter WHERE key=?",
+                        (TESTING_COPY_COMPLETION_PARAMETER,),
+                    ).fetchone()
+                )
             if phase == "resume":
                 self.assertNotIn("restore-fresh", events)
             self.assertEqual(events[0], "lock")
