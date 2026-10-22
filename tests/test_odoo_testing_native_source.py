@@ -95,6 +95,7 @@ class NativeSourceTransportTests(unittest.TestCase):
             (ReadbackPredicate.RUNNER_RUNNING, "refused"),
             (ReadbackPredicate.DATABASE_READ, "unavailable"),
             ("private-password", "private-provider-value"),
+            ("private-password", "refused"),
         ):
             with self.subTest(predicate=predicate):
                 connection = Connection({"type": "failed", "predicate": predicate, "kind": kind})
@@ -112,7 +113,9 @@ class NativeSourceTransportTests(unittest.TestCase):
                     predicate in ReadbackPredicate and kind in {"refused", "unavailable"},
                 )
                 self.assertIn(error.predicate, ReadbackPredicate)
-                self.assertEqual(error.unavailable, kind != "refused")
+                self.assertEqual(
+                    error.unavailable, predicate not in ReadbackPredicate or kind != "refused"
+                )
                 self.assertNotIn("private-", json.dumps(error.evidence))
 
     def test_failed_frame_is_distinct_from_missing_transport_evidence(self) -> None:

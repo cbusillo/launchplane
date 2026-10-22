@@ -94,29 +94,6 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(api.DokployScheduleExecutionFailed):
                 self.run_isolation(error, mode="apply")
 
-    def test_resource_negative_and_unavailable_findings_stay_distinct(self) -> None:
-        for reason, predicate, kind in (
-            ("shared_storage", ReadbackPredicate.RESOURCES, "refused"),
-            ("review_binding", ReadbackPredicate.REVIEW_BINDING, "refused"),
-            ("workflow_active", ReadbackPredicate.EXECUTION_LOCK, "refused"),
-            ("runner_exec_active", ReadbackPredicate.RUNNER_IDLE, "refused"),
-            ("inventory_unverified", ReadbackPredicate.RESOURCES, "unavailable"),
-            ("inventory_changed", ReadbackPredicate.RESOURCES, "unavailable"),
-            ("future_read_unavailable", ReadbackPredicate.RESOURCES, "unavailable"),
-        ):
-            with self.subTest(reason=reason):
-                raw = {
-                    "connection_isolation_resources_ok": "false",
-                    "integration_readback_refused": "testing_resources/" + reason,
-                    "readback_failed_predicate": predicate,
-                    "readback_failure_kind": kind,
-                }
-                with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised:
-                    self.run_isolation(raw)
-                evidence = raised.exception.evidence
-                self.assertEqual(evidence["readback_failed_predicate"], predicate)
-                self.assertEqual(evidence["readback_failure_kind"], kind)
-
     def test_legacy_inventory_reason_cannot_invent_an_observed_negative(self) -> None:
         from control_plane.copy_readback_diagnostics import readback_failure_evidence
 
@@ -129,6 +106,23 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
             )
             self.assertEqual(evidence["readback_failure_kind"], "unavailable")
 
+    def test_interrupted_dry_run_preserves_sql_findings_without_blaming_them(self) -> None:
+        cause = post_deploy.OdooPostDeployReadbackFailure(
+            "incomplete job",
+            evidence={
+                "connection_isolation_resources_ok": "true",
+                "connection_isolation_ok": "false",
+            },
+        )
+        with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised:
+            self.run_isolation(cause)
+        self.assertEqual(
+            raised.exception.evidence["readback_failed_predicate"],
+            ReadbackPredicate.SCHEDULE_EVIDENCE,
+        )
+        self.assertEqual(raised.exception.evidence["readback_failure_kind"], "unavailable")
+        self.assertEqual(raised.exception.evidence["connection_isolation_ok"], "false")
+
     def test_qualifier_refusal_survives_outer_shell_trap(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -140,9 +134,15 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                 "  *com.docker.compose.service=web*) echo web ;;\n"
                 "  *ExecIDs*) echo null ;;\n"
                 "  *State.Running*) echo true ;;\n"
-                "  'ps -aq') echo runner ;;\n"
+                '  \'ps -aq\') if [ "$FIXTURE_OUTCOME" = changed ] && [ -f "$FIXTURE_POLL" ]; then echo changed; else touch "$FIXTURE_POLL"; echo runner; fi ;;\n'
                 "  'volume ls -q'|'network ls -q') exit 0 ;;\n"
-                f"  exec*) printf 'readback_failed_predicate={ReadbackPredicate.REVIEW_BINDING}\\nreadback_failure_kind=refused\\n' >&2; exit 1 ;;\n"
+                "  *'python3 -I -c'*) case \"$FIXTURE_OUTCOME\" in\n"
+                "    warning) echo harmless-warning >&2; printf '%s 172.18.0.2\\n' \"$FIXTURE_DIGEST\" ;;\n"
+                "    markerless) exit 1 ;;\n"
+                "    invalid) echo invalid-digest ;;\n"
+                f"    *) printf 'readback_failed_predicate={ReadbackPredicate.REVIEW_BINDING}\\nreadback_failure_kind=refused\\n'; exit 1 ;;\n"
+                "  esac ;;\n"
+                "  exec*) printf 'connection_isolation_ok=true\\nintegration_readback_ok=true\\n' ;;\n"
                 "  inspect*) echo '{}' ;;\n"
                 "  *) exit 1 ;;\n"
                 "esac\n"
@@ -159,19 +159,43 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                     mode="dry-run",
                     readback_spec="fixture",
                 )
-            result = subprocess.run(
-                ["bash", "-c", script],
-                capture_output=True,
-                text=True,
-                env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]},
-                check=False,
-            )
-            markers = post_deploy.extract_odoo_post_deploy_readback_markers(
-                {"logs": result.stdout + result.stderr}
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(markers["readback_failed_predicate"], ReadbackPredicate.REVIEW_BINDING)
-            self.assertEqual(markers["readback_failure_kind"], "refused")
+            import hashlib
+
+            for outcome in ("refused", "markerless", "invalid", "changed", "warning"):
+                with self.subTest(outcome=outcome):
+                    poll = root / outcome
+                    result = subprocess.run(
+                        ["bash", "-c", script],
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                            "FIXTURE_OUTCOME": outcome,
+                            "FIXTURE_POLL": str(poll),
+                            "FIXTURE_DIGEST": hashlib.sha256(b"fixture").hexdigest(),
+                        },
+                        check=False,
+                    )
+                    markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                        {"logs": result.stdout + result.stderr}
+                    )
+                    if outcome == "warning":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(markers["connection_isolation_resources_ok"], "true")
+                        self.assertNotIn("readback_failed_predicate", markers)
+                        continue
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(
+                        markers["readback_failed_predicate"],
+                        ReadbackPredicate.REVIEW_BINDING
+                        if outcome == "refused"
+                        else ReadbackPredicate.RESOURCES,
+                    )
+                    self.assertEqual(
+                        markers["readback_failure_kind"],
+                        "refused" if outcome == "refused" else "unavailable",
+                    )
 
     def test_stopped_runner_refuses_before_exec_with_safe_evidence(self) -> None:
         with TemporaryDirectory() as directory:

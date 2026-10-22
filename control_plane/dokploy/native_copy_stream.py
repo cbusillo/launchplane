@@ -52,7 +52,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
                 "readback_failed_predicate": predicate
                 if predicate in ReadbackPredicate
                 else ReadbackPredicate.NATIVE_READ,
-                "readback_failure_kind": kind,
+                "readback_failure_kind": kind if self.has_diagnostic else "unavailable",
             }
         )
         self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])

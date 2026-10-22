@@ -593,8 +593,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": payload}),
                     patch.object(sys, "argv", ["gate", self.database, str(gate)]),
                 ):
-                    exec(command[command.index("-c") + 1], {})
-                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                    with redirect_stdout(io.StringIO()) as gate_output:
+                        exec(command[command.index("-c") + 1], {})
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=gate_output.getvalue().encode(), stderr=b""
+                )
             return original(command, **kwargs)
 
         with patch.object(self, "command", side_effect=read):
@@ -619,6 +622,10 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     gate.write_text("wrong" if fault == "gate" else self.gate_hash)
                     status, output = self.run_program()
                     self.assertNotEqual(status, 0)
+                    if fault == "gate":
+                        frame = json.loads(output.strip().removeprefix("fixture:"))
+                        self.assertEqual(frame["predicate"], ReadbackPredicate.WEB_GATE)
+                        self.assertEqual(frame["kind"], "refused")
                     if fault == "image-read":
                         frame = json.loads(output.strip().removeprefix("fixture:"))
                         self.assertEqual(frame["predicate"], ReadbackPredicate.IMAGE_DIGEST)

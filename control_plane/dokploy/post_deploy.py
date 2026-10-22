@@ -215,7 +215,6 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         ODOO_PREVIEW_RESOURCES_OK_MARKER,
         TESTING_RESOURCES_INCOMPLETE_MARKER,
         "connection_isolation_resources_ok",
-        "log_available",
         "testing_copy_runtime_isolated",
         "testing_copy_pre_registry_sanitized",
         "testing_copy_sanitized",

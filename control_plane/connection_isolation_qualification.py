@@ -215,10 +215,10 @@ except (KeyError, TypeError, ValueError) as error:
         name = "testing_resources/inventory_unverified"
     predicate = ReadbackPredicate.REVIEW_BINDING if name == "testing_resources/review_binding" else ReadbackPredicate.RESOURCES
     kind = "refused" if isinstance(error, ResourceQualificationRefused) else "unavailable"
-    print("readback_failed_predicate=" + predicate, file=sys.stderr)
-    print("readback_failure_kind=" + kind, file=sys.stderr)
-    print("connection_isolation_resources_ok=false", file=sys.stderr)
-    print("integration_readback_refused=" + name, file=sys.stderr)
+    print("readback_failed_predicate=" + predicate)
+    print("readback_failure_kind=" + kind)
+    print("connection_isolation_resources_ok=false")
+    print("integration_readback_refused=" + name)
     raise SystemExit(1)
 """
 )
@@ -252,7 +252,7 @@ snapshot=$(set -e
 """ + (
         'qualification=$(printf \'%s\n\' "$snapshot" | docker exec -i "$runner" python3 -I -c '
         + shlex.quote(program)
-        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources" 2>&1) || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate='
+        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources") || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate='
         + ReadbackPredicate.RESOURCES
         + '\\nreadback_failure_kind=unavailable\\n" >&2; printf \'%s\\n\' "$qualification" >&2; readback_failure_reported=true; exit 1; }\n'
         + 'read -r resource_digest database_address <<< "$qualification"\n'

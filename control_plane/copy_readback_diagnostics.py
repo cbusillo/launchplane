@@ -27,6 +27,8 @@ class ReadbackPredicate(StrEnum):
     INSTANCE = "copy_instance_valid"
     NAMESPACE = "copy_namespace_valid"
     SERVICES = "copy_services_exact"
+    CUSTODY = "copy_custody_matches"
+    PRIVATE_ENDPOINT = "copy_private_endpoint_exclusive"
     CAPABILITIES = "copy_host_capabilities_absent"
     PORTS = "copy_host_ports_absent"
     MOUNTS = "copy_mounts_exact"
@@ -57,6 +59,12 @@ class ReadbackPredicate(StrEnum):
     USAGE = "copy_usage_readable"
 
 
+class CopyReadbackRefused(RuntimeError):
+    def __init__(self, predicate: str) -> None:
+        self.predicate = predicate
+        super().__init__(predicate)
+
+
 READBACK_FAILURE_MARKERS = frozenset({"readback_failed_predicate", "readback_failure_kind"})
 
 
@@ -80,15 +88,6 @@ def readback_failure_evidence(evidence: Mapping[str, str]) -> dict[str, str]:
     if predicate not in ReadbackPredicate:
         predicate = ReadbackPredicate.SCHEDULE_EVIDENCE
         kind = "unavailable"
-        for marker, failed in (
-            ("connection_isolation_resources_ok", ReadbackPredicate.RESOURCES),
-            ("connection_isolation_ok", ReadbackPredicate.ISOLATION),
-            ("integration_readback_ok", ReadbackPredicate.INTEGRATIONS),
-        ):
-            if evidence.get(marker) == "false":
-                predicate = failed
-                kind = "unavailable" if failed is ReadbackPredicate.RESOURCES else "refused"
-                break
     if (
         predicate == ReadbackPredicate.ISOLATION
         and evidence.get("connection_isolation_ok") == "false"

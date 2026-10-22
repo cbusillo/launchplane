@@ -965,9 +965,13 @@ def restore_main():
                 if identity != spec['runtime_identity']:
                     raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
             inspection_predicate = ReadbackPredicate.WEB_GATE
-            docker('exec',runner,'python3','-c',
-                "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",
-                database,spec['web_gate_path'])
+            gate = docker('exec',runner,'python3','-c',
+                "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();print(Path(sys.argv[2]).read_text()==expected)",
+                database,spec['web_gate_path']).decode().strip()
+            if gate not in {'True','False'}:
+                raise RuntimeError('Testing web gate is unreadable')
+            if gate == 'False':
+                raise CopyReadbackRefused(ReadbackPredicate.WEB_GATE)
             print(prefix+json.dumps(__LP_COPY_VERIFICATION_FRAME__),flush=True)
             return
         if spec.get('task_account_cleanup') is True:

@@ -1,14 +1,13 @@
 """Runtime inspection shared by lane copies and standalone upgrade rehearsals."""
 
-from control_plane.copy_readback_diagnostics import readback_predicate_library
+import inspect
+
+from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
 
 VOLUME_BACKING_INSPECTION_LIBRARY = (
     readback_predicate_library()
+    + inspect.getsource(CopyReadbackRefused)
     + r"""
-class CopyReadbackRefused(RuntimeError):
-    def __init__(self, predicate: str) -> None:
-        self.predicate = predicate
-        super().__init__(predicate)
 
 def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, str]:
     return {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,

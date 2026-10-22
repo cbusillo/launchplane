@@ -511,7 +511,7 @@ def execute_odoo_post_deploy(
                     raise click.ClickException(
                         "Native testing copy predicate "
                         + error.code
-                        + "; retain the original generation and capture receipt."
+                        + "; integrity or recovery is unverified; retain the original generation and capture receipt."
                     ) from None
                 except ValueError:
                     raise click.ClickException(

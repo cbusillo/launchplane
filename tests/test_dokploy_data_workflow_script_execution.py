@@ -96,6 +96,11 @@ def main(argv):
                 active = True
             print('["orphaned-exec"]' if active else "null")
             return 0
+        if ".State.Running" in template:
+            path = state_path(container_id)
+            status = path.read_text().strip() if path.exists() else "running"
+            print("true" if status == "running" else "false")
+            return 0
         if '"kind"' in template:
             kind = "environment" if '"environment"' in template else "container"
             rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
@@ -799,6 +804,18 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertIn("customer_sms/isolation_parameters", refused.stdout)
         self.assertIn("printnode/printnode.api_key", refused.stdout)
         self.assertFalse(refused.web_restarted)
+        from control_plane.copy_readback_diagnostics import (
+            ReadbackPredicate,
+            readback_failure_evidence,
+        )
+
+        evidence = readback_failure_evidence(
+            dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+                {"logs": refused.stdout + refused.stderr}
+            )
+        )
+        self.assertEqual(evidence["readback_failed_predicate"], ReadbackPredicate.ISOLATION)
+        self.assertEqual(evidence["readback_failure_kind"], "refused")
 
     def setUp(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()

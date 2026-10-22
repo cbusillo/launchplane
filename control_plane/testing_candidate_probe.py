@@ -102,32 +102,42 @@ def one_inspection(identifier):
     return values[0]
 
 def probe(spec):
+    global inspection_predicate
+    inspection_predicate = ReadbackPredicate.RESOURCES
     containers = inspect_copy_runtime(spec, expected_instance='testing')
-    if any(item[1].get('State', {}).get('Status') != 'running' for item in containers.values()):
-        raise RuntimeError('Candidate containers are not running')
+    inspection_predicate = ReadbackPredicate.RUNTIME
+    states = [item[1].get('State', {}).get('Status') for item in containers.values()]
+    if any(state not in {'created','restarting','running','removing','paused','exited','dead'} for state in states):
+        raise RuntimeError('Candidate container state is unreadable')
+    if any(state != 'running' for state in states):
+        raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
     runner = containers['script-runner'][0]
     web, observed = containers['web']
     labels = observed['Config'].get('Labels') or {}
     if labels.get('traefik.enable') != 'false' or any(key.startswith('traefik.http.routers.') for key in labels):
-        raise RuntimeError('Candidate acquired a public router')
+        raise CopyReadbackRefused(ReadbackPredicate.PORTS)
     namespace = spec['generation']['namespace']
     aliases = observed['NetworkSettings']['Networks']['dokploy-network'].get('Aliases')
-    if not isinstance(aliases, list) or namespace not in aliases:
-        raise RuntimeError('Candidate private endpoint is unavailable')
+    if not isinstance(aliases, list):
+        raise RuntimeError('Candidate endpoint aliases are unreadable')
+    if namespace not in aliases:
+        raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     for identifier in docker('ps','-aq').decode().splitlines():
         other = one_inspection(identifier)
         if other['Id'] == observed['Id']:
             continue
         if namespace in other.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases',[]):
-            raise RuntimeError('Candidate private endpoint is ambiguous')
+            raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     if observed['Image'] != containers['script-runner'][1]['Image']:
-        raise RuntimeError('Candidate web and runner images differ')
+        raise CopyReadbackRefused(ReadbackPredicate.IMAGE)
+    inspection_predicate = ReadbackPredicate.IMAGE_DIGEST
     image = json.loads(docker('image','inspect',observed['Image']))[0]
     if spec['image_reference'] not in image.get('RepoDigests', []):
-        raise RuntimeError('Candidate installed image differs')
+        raise CopyReadbackRefused(ReadbackPredicate.IMAGE_DIGEST)
     for _, observed in containers.values():
         if observed.get('HostConfig', {}).get('AutoRemove'):
-            raise RuntimeError('Candidate custody is transient')
+            raise CopyReadbackRefused(ReadbackPredicate.CUSTODY)
+    inspection_predicate = ReadbackPredicate.RUNTIME_IDENTITY
     for service in ('web','script-runner'):
         environment = dict(item.split('=',1) for item in containers[service][1]['Config'].get('Env',[]) if '=' in item)
         identity = json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON', 'null'))
@@ -135,22 +145,31 @@ def probe(spec):
             raise RuntimeError('Candidate runtime identity missing')
         identity.pop('deployed_at', None)
         if identity != spec['runtime_identity']:
-            raise RuntimeError('Candidate runtime identity differs')
+            raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
         if environment.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','') != spec['expected_overrides_payload']:
-            raise RuntimeError('Candidate override intent differs')
-    docker('exec', runner, 'python3','-c', "import hashlib,os,sys;from pathlib import Path;expected=hashlib.sha256((sys.argv[1]+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",spec['database_name'],spec['web_gate_path'])
+            raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
+    inspection_predicate = ReadbackPredicate.WEB_GATE
+    gate = docker('exec', runner, 'python3','-c', "import hashlib,os,sys;from pathlib import Path;expected=hashlib.sha256((sys.argv[1]+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest();print(Path(sys.argv[2]).read_text()==expected)",spec['database_name'],spec['web_gate_path']).decode().strip()
+    if gate not in {'True','False'}:
+        raise RuntimeError('Candidate web gate is unreadable')
+    if gate == 'False':
+        raise CopyReadbackRefused(ReadbackPredicate.WEB_GATE)
+    inspection_predicate = ReadbackPredicate.COPY_WITNESS
     if spec['copy_binding_sha256']:
         actual = docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',spec['database_name'],stdin=spec['witness_sql'].encode()).decode().strip()
         if actual != spec['copy_binding_sha256']:
-            raise RuntimeError('Candidate copy witness differs')
+            raise CopyReadbackRefused(ReadbackPredicate.COPY_WITNESS)
+    inspection_predicate = ReadbackPredicate.INTEGRATIONS
     readback = docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],stdin=base64.b64decode(spec['readback_program'])).decode()
     if 'integration_readback_ok=true' not in readback.splitlines():
         raise RuntimeError('Candidate connections remain configured')
+    inspection_predicate = ReadbackPredicate.CREDENTIALS
     credentials = docker('exec','-i',web,'python3','-c',base64.b64decode(spec['credential_program']).decode(),stdin=json.dumps(spec).encode()).decode().splitlines()
     if credentials != ['candidate_credentials_verified=true']:
         raise RuntimeError('Candidate local credentials are unverified')
     return {'type':'complete','private_readiness_verified':True}
 
+inspection_predicate = ReadbackPredicate.NATIVE_READ
 if __name__ == '__main__':
     try:
         spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
@@ -159,7 +178,7 @@ if __name__ == '__main__':
         print(sys.argv[2] + json.dumps({'type':'denied'}), flush=True)
         sys.exit(1)
     except Exception as error:
-        print(sys.argv[2] + json.dumps(copy_readback_failure_frame(error)), flush=True)
+        print(sys.argv[2] + json.dumps(copy_readback_failure_frame(error, inspection_predicate)), flush=True)
         sys.exit(1)
 """
 )
