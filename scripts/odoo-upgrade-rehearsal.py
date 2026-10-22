@@ -111,10 +111,10 @@ def main() -> int:
             return 0
         assert draft is not None
         if args.mode == "apply" or (
-            draft.action == "validate-business" and args.mode == "readback"
+            draft.action in {"validate-business", "rebuild-final"} and args.mode == "readback"
         ):
             if evidence is None:
-                raise ValueError("Business readback requires its original saved review.")
+                raise ValueError("This readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
             if saved["intent"] != intent or saved["plan"]["applied"] is not False:
                 raise ValueError("Review belongs to another intent.")

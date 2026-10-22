@@ -1005,6 +1005,7 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 "host",
                 side_effect=[
                     {"refusal_code": "rehearsal_rebuild_capacity_insufficient"},
+                    {"refusal_code": "rehearsal_rebuild_precheck_refused"},
                     {
                         "state": "switched",
                         "copies": [copy.model_dump(mode="json") for copy in retired.copies],
@@ -1027,6 +1028,9 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 "control_plane.dokploy.sandbox_placement.created_placement",
                 return_value=(prepared.project_id, prepared.environment_id, prepared.compose_id),
             ):
+                refused = self.fixture.run_operation(adapter, "reuse-precheck")
+                self.assertEqual(refused.response_status_code, 409)
+                self.assertFalse(self.store.list_held_provider_target_reservations())
                 outcome = self.fixture.run_operation(adapter, "new-final-copy")
             allocation.assert_called_once()
         self.assertEqual(outcome.status, "completed")
@@ -1048,6 +1052,24 @@ class LaterPhaseRetirementTests(unittest.TestCase):
             side_effect=AssertionError("Historical readback must not inspect the replacement"),
         ):
             self.assertEqual(abandonment.readback()["original_outcome"], "unknown")
+
+    def test_retired_abandonment_history_does_not_skip_current_ownership(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.odoo_upgrade_rehearsal import require_unaliased_rehearsal
+
+        self.test_unknown_validation_retires_working_copy_and_archives_original()
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert retired is not None
+        ordinarily_retired = retired.model_copy(update={"incomplete_retirement": None})
+        with patch.object(
+            self.store,
+            "read_provider_target_record",
+            return_value=SimpleNamespace(
+                target_id=retired.compose_id, source_label="foreign-owner"
+            ),
+        ):
+            with self.assertRaises(RehearsalRefused):
+                require_unaliased_rehearsal(self.store, ordinarily_retired)
 
     def test_rebuild_determinate_prechecks_leave_retired_record_and_no_hold(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
@@ -1829,7 +1851,19 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         unknown = self.root / (
             "rebuild-final-" + canonical_json_sha256({"unknown": "attempt"}) + ".started"
         )
-        for unsafe in ("active", "unknown-final", "binding", "unknown-bootstrap"):
+        snapshot = self.root / copies[0]["database"] / "database.dump"
+        snapshot_bytes = snapshot.read_bytes()
+        native_inspection = host["inspection"]
+        capacity = host["rehearsal_storage_capacity"]
+        for unsafe in (
+            "active",
+            "unknown-final",
+            "binding",
+            "unknown-bootstrap",
+            "snapshot",
+            "inspection",
+            "capacity",
+        ):
             with self.subTest(unsafe=unsafe):
                 if unsafe == "active":
                     self.fixture.fixture.containers["script-runner"]["ExecIDs"] = ["active"]
@@ -1837,16 +1871,37 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                     unknown.touch()
                 elif unsafe == "binding":
                     prepared.write_bytes(b"{}")
-                else:
+                elif unsafe == "unknown-bootstrap":
                     prepared.unlink()
-                with self.assertRaises(RuntimeError):
-                    self.fixture.run_host(self.spec)
+                elif unsafe == "snapshot":
+                    snapshot.write_bytes(b"changed")
+                elif unsafe == "inspection":
+                    host["inspection"] = Mock(side_effect=RuntimeError("restarting"))
+                else:
+                    host["rehearsal_storage_capacity"] = Mock(
+                        side_effect=RuntimeError("unavailable")
+                    )
+                self.spec["attempt_sha256"] = canonical_json_sha256({"refused": unsafe})
+                if unsafe in {"active", "binding", "snapshot", "inspection", "capacity"}:
+                    refused = self.fixture.run_host(self.spec)
+                    self.assertEqual(refused["refusal_code"], "rehearsal_rebuild_precheck_refused")
+                    self.spec["mode"] = "observe"
+                    self.assertEqual(
+                        self.fixture.run_host(self.spec)["refusal_code"], refused["refusal_code"]
+                    )
+                    self.spec["mode"] = "apply"
+                else:
+                    with self.assertRaises(RuntimeError):
+                        self.fixture.run_host(self.spec)
                 restore.assert_not_called()
                 upgrade.assert_not_called()
                 self.fixture.fixture.containers["script-runner"]["ExecIDs"] = None
                 unknown.unlink(missing_ok=True)
                 prepared.write_bytes(saved)
                 prepared.chmod(0o600)
+                snapshot.write_bytes(snapshot_bytes)
+                host["inspection"] = native_inspection
+                host["rehearsal_storage_capacity"] = capacity
         self.spec["attempt_sha256"] = canonical_json_sha256({"new": "reviewed-key"})
         result = self.fixture.run_host(self.spec)
         self.assertEqual(host["compose"].call_count, prepared_calls + 1)

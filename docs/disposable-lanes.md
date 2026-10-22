@@ -2954,7 +2954,8 @@ original intent. For each step run `dry-run`, review the saved evidence, run
 
 Do not reuse an old validation review for the rebuilt copy. The record says
 `rebuilding` while the new placement and working copy are being produced, so
-normal provider ownership checks remain active. If the host has saved its
+normal provider ownership checks remain active. Rebuild readback requires that
+attempt's saved review file. If the host has saved its
 completed rebuild receipt but the service response was lost, original-key
 readback and reconciliation adopt that result without replay. A genuinely
 unknown bootstrap or FINAL restoration with no completed receipt stays held
@@ -2963,7 +2964,10 @@ not settle it. Before FINAL restoration starts, a capacity refusal retains a
 bound, completed preparation receipt and stopped runtime. Requalify capacity,
 then review a new `rebuild-final` key to reuse that proven preparation. The same
 key replays its refusal. Changed custody, active execution, mismatched placement,
-or an unsettled restoration marker refuses reuse. Verify requires a passing
+or an unsettled restoration marker prevents reuse. Read-only precheck failures
+before any new bootstrap or FINAL effect return
+`rehearsal_rebuild_precheck_refused`; requalify the prerequisite before reviewing
+a new key. A started, uncertain bootstrap or FINAL effect stays held. Verify requires a passing
 validation recorded after the latest abandonment; older validation history
 remains evidence. Ordinary
 retirement and every production hold retain their existing contracts.

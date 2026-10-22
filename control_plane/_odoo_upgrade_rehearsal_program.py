@@ -531,6 +531,7 @@ def refusal_receipt(spec, root, code):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
         'rehearsal_rebuild_capacity_insufficient':'rebuild-capacity',
+        'rehearsal_rebuild_precheck_refused':'rebuild-precheck',
         'rehearsal_precheck_refused':'precheck'}[code]
     return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
 
@@ -565,7 +566,7 @@ def emit_refusal(spec,root,code):
 
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_precheck_refused'):
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_rebuild_precheck_refused','rehearsal_precheck_refused'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -781,6 +782,10 @@ def prepare_runtime(spec,root,database):
     return containers
 
 
+class RebuildPrecheckRefused(RuntimeError):
+    pass
+
+
 def prepared_rebuild_runtime(spec,root,database):
     generation=spec['record']['abandoned_validations'][-1]['attempt_sha256']
     if not re.fullmatch(r'[a-f0-9]{64}',generation):
@@ -796,15 +801,18 @@ def prepared_rebuild_runtime(spec,root,database):
     if receipt.is_symlink() or marker.is_symlink() or pending.exists() or pending.is_symlink():
         raise RuntimeError('Rebuild preparation custody is unverified')
     if receipt.exists():
-        metadata=receipt.stat()
-        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
-                or metadata.st_size>4096 or json.loads(receipt.read_text())!=expected):
-            raise RuntimeError('Rebuild preparation binding is unverified')
-        containers=inspection(spec,database,spec['source_image'])
-        if (containers['web'][1].get('State',{}).get('Running') is not False
-                or any(item[1].get('ExecIDs') for item in containers.values())):
-            raise RuntimeError('Prepared rebuild runtime is active')
-        sql(containers,'SELECT 1')
+        try:
+            metadata=receipt.stat()
+            if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+                    or metadata.st_size>4096 or json.loads(receipt.read_text())!=expected):
+                raise RuntimeError('Rebuild preparation binding is unverified')
+            containers=inspection(spec,database,spec['source_image'])
+            if (containers['web'][1].get('State',{}).get('Running') is not False
+                    or any(item[1].get('ExecIDs') for item in containers.values())):
+                raise RuntimeError('Prepared rebuild runtime is active')
+            sql(containers,'SELECT 1')
+        except Exception as error:
+            raise RebuildPrecheckRefused('Rebuild reuse precheck refused') from error
         return containers
     if marker.exists():
         raise RuntimeError('Uncertain rebuild preparation retains its custody')
@@ -890,20 +898,33 @@ def main():
         database,image=current(spec)
         if action in {'prepare','rebuild-final'}:
             if action=='rebuild-final':
-                archived=record.get('abandoned_validations',[])
-                if (record['state']!='rebuilding' or not archived
-                        or archived[-1]['host_disposal'].get('recovery_snapshots_preserved') is not True
-                        or archived[-1]['host_disposal']['recovery_snapshots']!=record['copies']):
-                    raise RuntimeError('A verified retained FINAL tuple is required')
-                validate_snapshots(spec,root,{},record['copies'],retired=True)
+                try:
+                    archived=record.get('abandoned_validations',[])
+                    if (record['state']!='rebuilding' or not archived
+                            or archived[-1]['host_disposal'].get('recovery_snapshots_preserved') is not True
+                            or archived[-1]['host_disposal']['recovery_snapshots']!=record['copies']):
+                        raise RuntimeError('A verified retained FINAL tuple is required')
+                    validate_snapshots(spec,root,{},record['copies'],retired=True)
+                except Exception:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
             selected=names['final_upgrade'] if action=='rebuild-final' else names['source']
             if action=='prepare':
                 (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
                 containers=prepare_runtime(spec,root,selected)
                 state='prepared'; copies=[]
             else:
-                containers=prepared_rebuild_runtime(spec,root,selected)
-                if not rehearsal_storage_capacity(spec,root,containers,'rebuild-final'):
+                try:
+                    containers=prepared_rebuild_runtime(spec,root,selected)
+                except RebuildPrecheckRefused:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                try:
+                    capacity=rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
+                except Exception:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                if not capacity:
                     emit_refusal(spec,root,'rehearsal_rebuild_capacity_insufficient')
                     return
                 (root/(spec['receipt_action']+'.started')).touch(mode=0o600)

@@ -405,7 +405,12 @@ def require_unaliased_rehearsal(
         for item in store.list_physical_provider_target_records()
     ):
         raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-    if record.compose_id and not (record.state == "retired" and record.abandoned_validations):
+    if record.compose_id and not (
+        record.state == "retired"
+        and record.abandoned_validations
+        and record.incomplete_retirement is not None
+        and record.copies == record.abandoned_validations[-1].host_disposal.recovery_snapshots
+    ):
         owned = store.read_provider_target_record(
             context_name=record.rehearsal_id, instance_name="rehearsal"
         )

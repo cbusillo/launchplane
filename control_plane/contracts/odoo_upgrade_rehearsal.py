@@ -26,6 +26,7 @@ REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": 
 INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
+    "rehearsal_rebuild_precheck_refused": "FINAL restoration has not started. Rebuild resources and evidence are retained. Requalify the prerequisite and review a new rebuild operation key.",
     "rehearsal_rebuild_capacity_insufficient": "FINAL restoration has not started. Prepared rebuild resources are retained. Requalify storage capacity and review a new rebuild operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
@@ -459,6 +460,7 @@ class RehearsalHostResult(BaseModel):
         "",
         "rehearsal_storage_capacity_insufficient",
         "rehearsal_rebuild_capacity_insufficient",
+        "rehearsal_rebuild_precheck_refused",
         "rehearsal_precheck_refused",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
