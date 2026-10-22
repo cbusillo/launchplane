@@ -181,8 +181,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         conflicts: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
         observe_checks: bool = False,
         failure_evidence: CandidateCheckFailures | None = None,
-        base_status: str = "pass",
+        base_status: str | MergeTrainGitHubError = "pass",
         label_prepared: bool = True,
+        lease: Mock | None = None,
     ) -> dict[str, Any]:
         record = build_merge_train_batch_candidate_record(
             candidate=candidate, source="test", updated_at="2026-10-03T12:00:00Z"
@@ -192,9 +193,12 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client.candidate_block_label_events.return_value = []
         client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
         client.read_merge_train_snapshot.return_value = self.snapshot
-        client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
-            cast(MergeTrainCheckStatus, base_status)
-        )
+        if isinstance(base_status, MergeTrainGitHubError):
+            client.read_base_check_observation.side_effect = base_status
+        else:
+            client.read_base_check_observation.return_value = MergeTrainBaseCheckObservation(
+                cast(MergeTrainCheckStatus, base_status)
+            )
         client.probe_batch_entry_conflicts.return_value = conflicts
         client.add_pull_request_label.return_value = None
         client.ensure_repository_label.return_value = label_prepared
@@ -215,7 +219,6 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             active_candidate_record=record,
             policy=self.policy,
             policy_sha256="policy-digest",
-            transport=self.provider,
             github_client=cast(GitHubMergeTrainClient, client),
             repository=self.snapshot.repository,
             base_branch=self.snapshot.base_branch,
@@ -223,7 +226,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             recorded_at="2026-10-03T12:01:00Z",
             trace_id="recovery",
             mutate=mutate,
-            lease=Mock(
+            lease=lease
+            or Mock(
                 record=Mock(
                     updated_at=self.candidate.updated_at, step_payload={}, ordinary_job_binding=None
                 )
@@ -378,6 +382,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             "preparation",
             "unsupported_without_repair",
             "preparation_without_repair",
+            "lease_lost_before_stack_persist",
+            "crash_after_stack_persist",
         ):
             with self.subTest(case=case), TemporaryDirectory() as directory:
                 self._prepare()
@@ -454,13 +460,59 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         "required_checks_status": "fail",
                     }
                 )
+                if case in {"lease_lost_before_stack_persist", "crash_after_stack_persist"}:
+                    lease = Mock(
+                        record=Mock(
+                            updated_at=self.candidate.updated_at,
+                            step_payload={},
+                            ordinary_job_binding=None,
+                        )
+                    )
+                    phase = (
+                        "persist_stack_collapse_plan"
+                        if case == "lease_lost_before_stack_persist"
+                        else "stack_collapse_plan_recorded"
+                    )
+                    failure = (
+                        MergeTrainControllerLeaseLostError("Lease adopted by another pass")
+                        if case == "lease_lost_before_stack_persist"
+                        else RuntimeError("Process interrupted after plan write")
+                    )
+
+                    def checkpoint(**updates: object) -> None:
+                        if updates.get("active_phase") == phase:
+                            raise failure
+
+                    lease.checkpoint.side_effect = checkpoint
+                    with self.assertRaises(type(failure)):
+                        self._reflow(store, failed, base_status="fail", lease=lease)
+                    store = FilesystemRecordStore(state_dir=Path(directory))
+                    self.assertTrue(
+                        any(
+                            record.candidate.candidate_sha == failed.candidate_sha
+                            for record in store.list_merge_train_batch_candidate_records(
+                                status="active"
+                            )
+                        )
+                    )
+                    retained = store.list_merge_train_stack_collapse_plan_records(status="active")
+                    if case == "lease_lost_before_stack_persist":
+                        self.assertFalse(retained)
+                    else:
+                        self.assertTrue(retained)
+                        retained_identity = {record.plan.collapse_id for record in retained}
+                    self.reflow_client.add_pull_request_label.assert_not_called()
                 result = self._reflow(
                     store,
                     failed,
                     base_status="fail",
                     label_prepared=not case.startswith("preparation"),
                 )
-                if case == "ready":
+                if case in {
+                    "ready",
+                    "lease_lost_before_stack_persist",
+                    "crash_after_stack_persist",
+                }:
                     self.assertEqual(result["controller_action"], "plan_stack_collapse")
                     plan = result["stack_collapse_plan"]
                     self.assertEqual(
@@ -469,6 +521,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     self.assertTrue(
                         store.list_merge_train_stack_collapse_plan_records(status="active")
                     )
+                    if case == "crash_after_stack_persist":
+                        self.assertEqual({plan["collapse_id"]}, retained_identity)
                     self.assertEqual(
                         store.list_merge_train_batch_candidate_records(status="active"), ()
                     )
@@ -1841,6 +1895,28 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             ]
             self.assertTrue(messages)
             self.assertTrue(all("conflicts with #1, #2" in str(message) for message in messages))
+            events = {
+                row["pull_request_number"]: row["event"]
+                for row in build_feedback_payloads(response={"result": result})
+            }
+            with self.subTest(base_read="fail"):
+                self.assertEqual(events[3], "blocked")
+                self.assertEqual(events[2], "waiting")
+            with self.subTest(base_read="exception"), TemporaryDirectory() as failed_read_directory:
+                failed_read = self._reflow(
+                    FilesystemRecordStore(state_dir=Path(failed_read_directory)),
+                    self.candidate,
+                    conflicts=(hold,),
+                    base_status=MergeTrainGitHubError("Required base evidence unavailable"),
+                )
+                self.assertEqual(failed_read["reason_code"], "base_checks_not_green")
+                held_payloads = [
+                    row
+                    for row in build_feedback_payloads(response={"result": failed_read})
+                    if row["pull_request_number"] == hold.pull_request_number
+                ]
+                self.assertTrue(held_payloads)
+                self.assertEqual({row["event"] for row in held_payloads}, {"blocked"})
             restarted = FilesystemRecordStore(state_dir=Path(directory))
             later = self._reflow(
                 restarted,

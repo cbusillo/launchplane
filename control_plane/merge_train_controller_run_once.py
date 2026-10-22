@@ -61,6 +61,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunResult,
     MergeTrainDryRunSnapshot,
     MergeTrainQueueEntry,
+    MergeTrainStackDiscoveryResult,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
@@ -3033,7 +3034,6 @@ def _advance_active_candidate_record(
             active_candidate_record=active_candidate_record,
             policy=policy,
             policy_sha256=policy_sha256,
-            transport=transport,
             repository=request.repository,
             base_branch=request.base_branch,
             merge_method=repository_policy.merge_method,
@@ -3440,7 +3440,6 @@ def _reflow_stale_candidate_record(
         # before the ordinary observation path sees the closed PR as a failure.
         recovery = _resume_known_failed_batch(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             candidate_store=candidate_store,
             github_client=github_client,
             policy=policy,
@@ -4570,6 +4569,73 @@ def _prepare_new_stack_disposition(
     }
 
 
+def _plan_discovered_stack_collapse(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    repository_policy: MergeTrainRepositoryPolicy,
+    policy_sha256: str,
+    dry_run_result: MergeTrainDryRunResult,
+    stack_discovery: MergeTrainStackDiscoveryResult,
+    github_client: GitHubMergeTrainClient,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    trace_id: str,
+    recorded_at: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    preparation_block = _prepare_new_stack_disposition(
+        request=request,
+        repository_policy=repository_policy,
+        github_client=github_client,
+        lease=lease,
+    )
+    if preparation_block is not None:
+        preparation_block["stack_discovery"] = stack_discovery.model_dump(mode="json")
+        return preparation_block
+    controller_action = "plan_stack_collapse"
+    stack_collapse_plan = build_merge_train_stack_collapse_plan(
+        discovery_result=stack_discovery,
+        policy_key=dry_run_result.policy_key,
+        policy_sha256=policy_sha256,
+        created_at=recorded_at,
+    )
+    result: dict[str, object] = {
+        "repository": stack_collapse_plan.repository,
+        "base_branch": stack_collapse_plan.base_branch,
+        "mode": "dry-run" if not request.mutate else controller_action,
+        "controller_action": controller_action,
+        "dry_run_result": dry_run_result.model_dump(mode="json"),
+        "stack_discovery": stack_discovery.model_dump(mode="json"),
+        "stack_collapse_plan": stack_collapse_plan.model_dump(mode="json"),
+    }
+    if request.mutate:
+        lease.checkpoint(
+            active_action=controller_action,
+            active_phase="persist_stack_collapse_plan",
+            active_record_id="",
+            active_pull_request_number=stack_collapse_plan.root_pull_request_number,
+            step_payload={"collapse_id": stack_collapse_plan.collapse_id},
+        )
+        stack_collapse_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
+            plan=stack_collapse_plan,
+            source=f"service:controller:stack-collapse-plan:{trace_id}",
+            updated_at=recorded_at,
+        )
+        stack_collapse_store.write_merge_train_stack_collapse_plan_record(stack_collapse_record)
+        result["merge_train_stack_collapse_plan_record_id"] = stack_collapse_record.record_id
+        lease.checkpoint(
+            active_action=controller_action,
+            active_phase="stack_collapse_plan_recorded",
+            active_record_id=stack_collapse_record.record_id,
+            active_pull_request_number=stack_collapse_plan.root_pull_request_number,
+            step_payload={
+                "stack_collapse_plan_record_id": stack_collapse_record.record_id,
+                "collapse_id": stack_collapse_plan.collapse_id,
+            },
+        )
+    return result
+
+
 def _advance_from_live_snapshot(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -4730,60 +4796,20 @@ def _advance_from_live_snapshot(
     else:
         stack_discovery = None
     if stack_discovery is not None and stack_discovery.status == "ready_for_collapse":
-        preparation_block = _prepare_new_stack_disposition(
+        return _plan_discovered_stack_collapse(
             request=request,
             repository_policy=policy.find_repository_policy(
                 repository=request.repository, base_branch=request.base_branch
             ),
+            policy_sha256=policy_sha256,
+            dry_run_result=dry_run_result,
+            stack_discovery=stack_discovery,
             github_client=github_client,
+            stack_collapse_store=stack_collapse_store,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
             lease=lease,
         )
-        if preparation_block is not None:
-            preparation_block["stack_discovery"] = stack_discovery.model_dump(mode="json")
-            return preparation_block
-        controller_action = "plan_stack_collapse"
-        stack_collapse_plan = build_merge_train_stack_collapse_plan(
-            discovery_result=stack_discovery,
-            policy_key=dry_run_result.policy_key,
-            policy_sha256=policy_sha256,
-            created_at=recorded_at,
-        )
-        result: dict[str, object] = {
-            "repository": stack_collapse_plan.repository,
-            "base_branch": stack_collapse_plan.base_branch,
-            "mode": "dry-run" if not request.mutate else controller_action,
-            "controller_action": controller_action,
-            "dry_run_result": dry_run_result.model_dump(mode="json"),
-            "stack_discovery": stack_discovery.model_dump(mode="json"),
-            "stack_collapse_plan": stack_collapse_plan.model_dump(mode="json"),
-        }
-        if request.mutate:
-            lease.checkpoint(
-                active_action=controller_action,
-                active_phase="persist_stack_collapse_plan",
-                active_record_id="",
-                active_pull_request_number=stack_collapse_plan.root_pull_request_number,
-                step_payload={"collapse_id": stack_collapse_plan.collapse_id},
-            )
-            stack_collapse_record = build_merge_train_stack_collapse_plan_record(
-                ordinary_job_binding=lease.record.ordinary_job_binding,
-                plan=stack_collapse_plan,
-                source=f"service:controller:stack-collapse-plan:{trace_id}",
-                updated_at=recorded_at,
-            )
-            stack_collapse_store.write_merge_train_stack_collapse_plan_record(stack_collapse_record)
-            result["merge_train_stack_collapse_plan_record_id"] = stack_collapse_record.record_id
-            lease.checkpoint(
-                active_action=controller_action,
-                active_phase="stack_collapse_plan_recorded",
-                active_record_id=stack_collapse_record.record_id,
-                active_pull_request_number=stack_collapse_plan.root_pull_request_number,
-                step_payload={
-                    "stack_collapse_plan_record_id": stack_collapse_record.record_id,
-                    "collapse_id": stack_collapse_plan.collapse_id,
-                },
-            )
-        return result
     if stack_discovery is not None and stack_discovery.status == "unsupported":
         return {
             "repository": request.repository,
@@ -4856,7 +4882,6 @@ def _advance_from_live_snapshot(
     if lease.record.ordinary_job_binding is None:
         recovery = _resume_known_failed_batch(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             candidate_store=candidate_store,
             github_client=github_client,
             policy=policy,
@@ -4884,7 +4909,7 @@ def _advance_from_live_snapshot(
         created_at=recorded_at,
         held_out=probe.held_out,
     )
-    result = {
+    result: dict[str, object] = {
         "repository": candidate.repository,
         "base_branch": candidate.base_branch,
         "mode": "dry-run" if not request.mutate else controller_action,
@@ -4948,7 +4973,6 @@ def try_reflow_failed_merge_train_candidate(
     active_candidate_record: MergeTrainBatchCandidateRecord,
     policy: MergeTrainPolicy,
     policy_sha256: str,
-    transport: MergeTrainGitHubTransport,
     github_client: GitHubMergeTrainClient,
     repository: str,
     base_branch: str,
@@ -5034,7 +5058,6 @@ def try_reflow_failed_merge_train_candidate(
         ):
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
-                transport=transport,
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,
                 github_client=github_client,
@@ -5055,7 +5078,6 @@ def try_reflow_failed_merge_train_candidate(
             # Real failures must shrink the batch before any generated-body retry.
             recovery = _recover_failed_merge_train_candidate(
                 stack_collapse_store=stack_collapse_store,
-                transport=transport,
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,
                 github_client=github_client,
@@ -5100,7 +5122,6 @@ def try_reflow_failed_merge_train_candidate(
                 return reobserved
             return _recover_failed_merge_train_candidate(
                 stack_collapse_store=stack_collapse_store,
-                transport=transport,
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,
                 github_client=github_client,
@@ -5170,7 +5191,6 @@ def try_reflow_failed_merge_train_candidate(
     if active_candidate_record.ordinary_job_binding is None:
         recovery = _resume_known_failed_batch(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             candidate_store=candidate_store,
             github_client=github_client,
             policy=policy,
@@ -5301,7 +5321,6 @@ def _candidate_history_on_base(
 def _resume_known_failed_batch(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    transport: MergeTrainGitHubTransport,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     policy: MergeTrainPolicy,
@@ -5498,7 +5517,6 @@ def _resume_known_failed_batch(
     ):
         recovered = _retry_closed_candidate_after_passing_checks(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             candidate_store=candidate_store,
             active_candidate_record=failed_record,
             github_client=github_client,
@@ -5530,7 +5548,6 @@ def _resume_known_failed_batch(
         )
     recovery = recovered or _recover_failed_merge_train_candidate(
         stack_collapse_store=stack_collapse_store,
-        transport=transport,
         candidate_store=candidate_store,
         active_candidate_record=failed_record,
         github_client=github_client,
@@ -5623,7 +5640,6 @@ def _persist_replacement_candidate(
 def _retry_closed_candidate_after_passing_checks(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    transport: MergeTrainGitHubTransport,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     active_candidate_record: MergeTrainBatchCandidateRecord,
     github_client: GitHubMergeTrainClient,
@@ -5719,7 +5735,6 @@ def _retry_closed_candidate_after_passing_checks(
             ):
                 return _plan_failed_candidate_replacement(
                     stack_collapse_store=stack_collapse_store,
-                    transport=transport,
                     reason_code="closed_batch_body_changed",
                     candidate_store=candidate_store,
                     github_client=github_client,
@@ -5750,7 +5765,6 @@ def _retry_closed_candidate_after_passing_checks(
         }
     return _plan_failed_candidate_replacement(
         stack_collapse_store=stack_collapse_store,
-        transport=transport,
         reason_code="candidate_checks_recovered",
         candidate_store=candidate_store,
         github_client=github_client,
@@ -5772,7 +5786,6 @@ def _retry_closed_candidate_after_passing_checks(
 def _recover_failed_merge_train_candidate(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    transport: MergeTrainGitHubTransport,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     active_candidate_record: MergeTrainBatchCandidateRecord,
     github_client: GitHubMergeTrainClient,
@@ -5832,7 +5845,6 @@ def _recover_failed_merge_train_candidate(
             }
         return _plan_failed_candidate_replacement(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             reason_code="infrastructure_retry",
             candidate_store=candidate_store,
             github_client=github_client,
@@ -5869,7 +5881,6 @@ def _recover_failed_merge_train_candidate(
         ):
             exploration = _explore_nonpassing_base_candidates(
                 stack_collapse_store=stack_collapse_store,
-                transport=transport,
                 candidate_store=candidate_store,
                 github_client=github_client,
                 active_candidate_record=active_candidate_record,
@@ -5927,7 +5938,6 @@ def _recover_failed_merge_train_candidate(
         waiting = failed.entries[len(retested) :]
         return _plan_failed_candidate_replacement(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             reason_code="failure_isolation",
             candidate_store=candidate_store,
             github_client=github_client,
@@ -5974,7 +5984,6 @@ def _recover_failed_merge_train_candidate(
 def _explore_nonpassing_base_candidates(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    transport: MergeTrainGitHubTransport,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
     active_candidate_record: MergeTrainBatchCandidateRecord,
@@ -6061,7 +6070,6 @@ def _explore_nonpassing_base_candidates(
         if latest_outcome is not None and latest_outcome.candidate.required_checks_status == "fail":
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
-                transport=transport,
                 candidate_store=candidate_store,
                 active_candidate_record=latest_outcome,
                 github_client=github_client,
@@ -6120,48 +6128,44 @@ def _explore_nonpassing_base_candidates(
             if discovery.status == "unsupported":
                 continue
             if discovery.status == "ready_for_collapse":
-                progress = _advance_from_live_snapshot(
+                progress = _plan_discovered_stack_collapse(
                     request=MergeTrainControllerRunOnceEnvelope(
                         repository=snapshot.repository,
                         base_branch=snapshot.base_branch,
                         mutate=mutate,
                     ),
-                    policy=policy,
+                    repository_policy=policy.find_repository_policy(
+                        repository=snapshot.repository, base_branch=snapshot.base_branch
+                    ),
                     policy_sha256=policy_sha256,
-                    transport=transport,
+                    dry_run_result=trial,
+                    stack_discovery=discovery,
                     github_client=github_client,
-                    candidate_store=candidate_store,
                     stack_collapse_store=stack_collapse_store,
                     trace_id=trace_id,
                     recorded_at=recorded_at,
                     lease=lease,
-                    snapshot=trial_snapshot,
-                    held_out=trial_holds,
                 )
-                if progress["controller_action"] not in {
-                    "plan_stack_collapse",
-                    "execute_stack_collapse",
-                    "admit_collapsed_root",
-                    "plan_candidate",
-                }:
+                if progress["controller_action"] == "block":
                     continue
                 if mutate:
-                    replacement_id = progress.get("merge_train_batch_candidate_record_id")
                     lease.checkpoint(
                         active_action="reflow_candidate",
                         active_phase="retire_reflowed_failed_lineage",
                         active_record_id=active_candidate_record.record_id,
                         active_pull_request_number=None,
-                        step_payload={"replacement_record_id": replacement_id},
+                        step_payload={
+                            "stack_collapse_plan_record_id": progress[
+                                "merge_train_stack_collapse_plan_record_id"
+                            ]
+                        },
                     )
                     _supersede_active_merge_train_batch_candidate_records(
                         record_store=candidate_store,
                         repository=snapshot.repository,
                         base_branch=snapshot.base_branch,
                         batch_id=failed.batch_id,
-                        replacement_record_id=(
-                            replacement_id if isinstance(replacement_id, str) else None
-                        ),
+                        replacement_record_id=None,
                     )
                 return progress
         candidate = build_merge_train_batch_candidate(
@@ -6241,7 +6245,6 @@ def _infrastructure_retry_used(
 def _plan_failed_candidate_replacement(
     *,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    transport: MergeTrainGitHubTransport,
     reason_code: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     github_client: GitHubMergeTrainClient,
@@ -6279,7 +6282,6 @@ def _plan_failed_candidate_replacement(
     if reason_code == "failure_isolation":
         recovery = _resume_known_failed_batch(
             stack_collapse_store=stack_collapse_store,
-            transport=transport,
             candidate_store=candidate_store,
             github_client=github_client,
             policy=policy,

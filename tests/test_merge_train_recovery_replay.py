@@ -262,6 +262,12 @@ class RecoveryReplayTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(builds), exhausted_build_count)
                     self.assertEqual(landed, set())
                     self.assertEqual(blocked, [])
+                    feedback = build_feedback_payloads(response=response.json())
+                    self.assertEqual(
+                        {row["pull_request_number"] for row in feedback},
+                        {entry["pull_request_number"] for entry in result["candidate"]["entries"]},
+                    )
+                    self.assertEqual({row["event"] for row in feedback}, {"waiting"})
                     exhausted_polls += 1
                     if exhausted_polls == 5:
                         break

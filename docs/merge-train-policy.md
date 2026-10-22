@@ -1264,10 +1264,17 @@ unrelated optional workflows cannot change its classification:
   candidate uses the existing bounded replacement-ref recovery and retry budget.
   Exploration does not dispatch a CI rerun itself. Unsupported stacks and stacks
   awaiting preparation or other evidence defer to later eligible roots; their
-  failed parent is retired only when replacement work makes progress. When no
+  failed parent is retired only after the replacement candidate or stack plan is
+  persisted. Fresh stack discovery uses the ordinary disposition preparation and
+  fenced plan persistence, without running unrelated block recovery or restoring
+  retired stack work inside exploration. When no
   further singleton probe is currently plannable, `base_failure_exploration_exhausted`
   reports a non-blaming wait without claiming that every root failed or launching
-  more unchanged probes. A new eligible head, added repair, changed base or incompatible policy supplies new inputs;
+  more unchanged probes. Deferred roots receive a waiting message while the base
+  is unproved; repeated exhausted polls retain the existing probe scope rather
+  than resending that message to every deferred root. A surviving conflict hold
+  still reports blocked and asks its author to resolve the conflict. A new
+  eligible head, added repair, changed base or incompatible policy supplies new inputs;
   operational policy changes that retain the existing authority binding retain
   their history. Fresh successful base evidence permits ordinary green-base
   isolation. This finite sweep does not promise to find repairs that require an

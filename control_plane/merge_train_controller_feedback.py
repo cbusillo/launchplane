@@ -79,15 +79,13 @@ def build_feedback_payloads(
                 "repository": repository,
                 "base_branch": base_branch,
                 "pull_request_number": pull_request_number,
-                "event": "waiting"
-                if _as_dict(result.get("details")).get("base_checks_status") in {"fail", "unknown"}
-                else "blocked",
+                "event": held_out_event,
                 "controller_action": controller_action,
                 "controller_record_id": controller_record_id,
                 "message": held_out_message,
                 "source": source,
             }
-            for pull_request_number, held_out_message in _held_out_messages(
+            for pull_request_number, held_out_event, held_out_message in _held_out_feedback(
                 result=result,
                 base_branch=base_branch,
                 stopped=controller_action == "candidate_failed",
@@ -420,16 +418,16 @@ def _blocking_detail(result: dict[str, Any]) -> str:
     return ""
 
 
-def _held_out_messages(
+def _held_out_feedback(
     *, result: dict[str, Any], base_branch: str, stopped: bool
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
     """Tell each held-out pull request why it waits outside the batch.
 
     A stopped failed batch reports only the pull requests its own probe just held
     out, so later passes do not repeat the message.
     """
     probed: set[object] | None = None
-    if stopped and result.get("reason_code") != "base_failure_exploration_exhausted":
+    if stopped:
         probe = _as_dict(result.get("conflict_probe"))
         probed = {
             _as_dict(entry).get("pull_request_number")
@@ -443,7 +441,7 @@ def _held_out_messages(
         if stopped
         else "The rest of the queue continues without it."
     )
-    messages: list[tuple[int, str]] = []
+    messages: list[tuple[int, str, str]] = []
     for held_out in _as_list(_as_dict(result.get("candidate")).get("held_out")):
         held_out_entry = _as_dict(held_out)
         number = held_out_entry.get("pull_request_number")
@@ -459,17 +457,19 @@ def _held_out_messages(
                 messages.append(
                     (
                         number,
+                        "waiting",
                         _blocking_detail(result)
                         if stopped
-                        else "Launchplane is testing eligible changes separately while the base "
-                        "checks are unproved. No queued pull request is blamed; nothing is needed "
-                        "from its author while another candidate runs.",
+                        else "Launchplane held this pull request while the base checks are "
+                        "unproved. Eligible changes may be tested separately. No queued pull "
+                        "request is blamed; nothing is needed from its author.",
                     )
                 )
                 continue
             messages.append(
                 (
                     number,
+                    "blocked",
                     "Launchplane is waiting with this pull request while it retests the "
                     "pull requests ahead of it on their own, to find which change broke "
                     "their merge-train batch. It rejoins the queue once that test "
@@ -490,6 +490,7 @@ def _held_out_messages(
         messages.append(
             (
                 number,
+                "blocked",
                 f"Launchplane left this pull request out of the merge-train batch: it "
                 f"{conflict}. {queue_state} It rejoins the queue when its head changes; "
                 "resolve the conflict, typically after the others land.",

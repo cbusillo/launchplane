@@ -213,7 +213,6 @@ class _TrainSimulation:
                     active_candidate_record=failed_record,
                     policy=self.policy,
                     policy_sha256="policy-digest",
-                    transport=object(),  # type: ignore[arg-type]
                     github_client=cast(GitHubMergeTrainClient, client),
                     repository=self.snapshot.repository,
                     base_branch=self.snapshot.base_branch,
@@ -411,7 +410,10 @@ class CulpritIsolationTests(unittest.TestCase):
         self.assertEqual(train.stopped["reason_code"], "base_failure_exploration_exhausted")
         self.assertEqual(train.stopped["details"]["base_sha"], train.snapshot.base_sha)
         feedback = build_feedback_payloads(response={"result": train.stopped})
-        self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
+        self.assertEqual(
+            {payload["pull_request_number"] for payload in feedback},
+            {entry["pull_request_number"] for entry in train.stopped["candidate"]["entries"]},
+        )
         self.assertTrue(all(payload["event"] == "waiting" for payload in feedback))
         self.assertTrue(
             all(
@@ -566,7 +568,6 @@ class CulpritIsolationTests(unittest.TestCase):
                 active_candidate_record=failed_child,
                 policy=train.policy,
                 policy_sha256="policy-digest",
-                transport=object(),  # type: ignore[arg-type]
                 github_client=cast(GitHubMergeTrainClient, client),
                 repository=train.snapshot.repository,
                 base_branch=train.snapshot.base_branch,
@@ -614,7 +615,6 @@ class CulpritIsolationTests(unittest.TestCase):
                     active_candidate_record=failed_record,
                     policy=train.policy,
                     policy_sha256="policy-digest",
-                    transport=object(),  # type: ignore[arg-type]
                     github_client=cast(GitHubMergeTrainClient, client),
                     repository=train.snapshot.repository,
                     base_branch=train.snapshot.base_branch,
@@ -682,7 +682,6 @@ class CulpritIsolationTests(unittest.TestCase):
                     active_candidate_record=failed_record,
                     policy=train.policy,
                     policy_sha256="policy-digest",
-                    transport=object(),  # type: ignore[arg-type]
                     github_client=cast(GitHubMergeTrainClient, client),
                     repository=train.snapshot.repository,
                     base_branch=train.snapshot.base_branch,
