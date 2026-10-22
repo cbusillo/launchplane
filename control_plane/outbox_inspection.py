@@ -4,7 +4,10 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentRecord,
+    PublicIngressNotificationPolicyRecord,
+)
 
 
 class OutboxInspectionStore(Protocol):
@@ -16,6 +19,10 @@ class OutboxInspectionStore(Protocol):
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[PublicIngressNotificationPolicyRecord, ...]: ...
 
+    def read_public_ingress_incident_record(
+        self, incident_id: str
+    ) -> PublicIngressIncidentRecord: ...
+
 
 class OutboxInspection(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -26,13 +33,11 @@ class OutboxInspection(BaseModel):
     notification_policies: tuple[dict[str, object], ...]
 
 
-def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspection:
-    records = store.list_outbox_delivery_records(
-        states=("pending", "running", "reconcile_required"), limit=limit + 1
-    )
-    policies = store.list_public_ingress_notification_policy_records(
-        status="enabled", limit=limit + 1
-    )
+def _delivery_routing(
+    store: OutboxInspectionStore,
+    record: OutboxDeliveryRecord,
+    incident_statuses: dict[str, str],
+) -> dict[str, object]:
     routing_keys = {
         "repository",
         "workflow_id",
@@ -43,7 +48,38 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
         "policy_id",
         "destination_id",
         "alert",
+        "credential_context",
     }
+    routing = {key: value for key, value in record.payload.items() if key in routing_keys}
+    if record.kind == "github_workflow_dispatch":
+        routing["inputs"] = record.payload.get("inputs", {})
+    if record.kind == "public_ingress_notification":
+        attempt = record.payload.get("attempt")
+        if isinstance(attempt, dict):
+            routing.update(
+                (key, value)
+                for key, value in attempt.items()
+                if key in {"policy_id", "incident_id", "event"}
+            )
+        routing["existing_issue_url"] = record.payload.get("existing_issue_url", "")
+        if record.aggregate_id not in incident_statuses:
+            try:
+                incident = store.read_public_ingress_incident_record(record.aggregate_id)
+            except FileNotFoundError:
+                incident_statuses[record.aggregate_id] = "unknown"
+            else:
+                incident_statuses[record.aggregate_id] = incident.status
+        routing["incident_status"] = incident_statuses[record.aggregate_id]
+    return routing
+
+
+def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspection:
+    records = store.list_outbox_delivery_records(
+        states=("pending", "running", "reconcile_required"), limit=limit + 1
+    )
+    policies = store.list_public_ingress_notification_policy_records(
+        status="enabled", limit=limit + 1
+    )
     destination_keys = {
         "destination_id",
         "kind",
@@ -54,6 +90,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
         "discord_webhook_secret",
     }
     deliveries: list[dict[str, object]] = []
+    incident_statuses: dict[str, str] = {}
     for record in records[:limit]:
         destination = record.payload.get("destination")
         deliveries.append(
@@ -66,9 +103,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
                 "created_at": record.created_at,
                 "attempt": record.attempt,
                 "provider_started": bool(record.provider_operation_key),
-                "routing": {
-                    key: value for key, value in record.payload.items() if key in routing_keys
-                },
+                "routing": _delivery_routing(store, record, incident_statuses),
                 "queued_destination": {
                     key: value for key, value in destination.items() if key in destination_keys
                 }

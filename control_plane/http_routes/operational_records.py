@@ -497,6 +497,7 @@ def register_inventory_operation_read_routes(
             for name in (
                 "list_outbox_delivery_records",
                 "list_public_ingress_notification_policy_records",
+                "read_public_ingress_incident_record",
             )
         ):
             raise dependencies.http_error(

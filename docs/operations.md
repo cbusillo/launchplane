@@ -402,7 +402,11 @@ and credential values. `limit` defaults to 1000 and may be raised to 5000;
 `complete: false` means counts and destination coverage are incomplete. The
 read is a bounded census, not a transactionally frozen activation approval.
 Destination references still need ownership verification before sending.
-Discussion reminders and workflow dispatches need their own routing review;
+Incident rows include their policy reference, event, existing GitHub issue URL
+and current incident status. Missing incidents remain `unknown`. Workflow rows
+include their queued inputs and credential context name, so a reviewer can
+distinguish dry runs from production effects. These are routing inputs, not
+credential values. Discussion reminders still need their own routing review;
 notification-policy ownership alone does not settle those effects.
 
 Queued incident deliveries whose incident is already resolved complete without
@@ -411,6 +415,7 @@ say `superseded_incident_resolved`. This includes queued recovery messages.
 An existing provider-start marker remains an unknown outcome instead of being
 reported as superseded. Still-open incidents retain the existing send, lease,
 retry and completion rules.
+Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 
 Historical provider retirement records may retain an empty target list. They
 remain skipped reconciliation evidence with `monitoring_intent_changed`, never
