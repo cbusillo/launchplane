@@ -122,7 +122,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   allocation consumption, retained custody and supported hold/rebuild continuation.
 - [stored-record-preflight.md](stored-record-preflight.md) — scrubbed service export,
   isolated candidate rehearsal and ordered self-deploy gate activation.
-- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo lane
+- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo or generic-web lane
   service on its current artifact through Product Ops or the bounded helper.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.

@@ -340,6 +340,17 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
     ),
     actions=(
         _action(
+            "service_restart",
+            "Restart a service (same version)",
+            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
+            safety="mutation",
+            scope="instance",
+            route_path=SERVICE_RESTART_ROUTE,
+            authz_action="live_target_runtime.apply",
+            alternate_authz_actions=("live_target_runtime.plan",),
+            writes_records=("service_restart",),
+        ),
+        _action(
             "stable_deploy",
             "Deploy lane",
             "Deploy an immutable container image to a configured generic-web product lane.",
@@ -558,17 +569,6 @@ ODOO_DRIVER = DriverDescriptor(
             authz_action=WALKTHROUGH_ACTION,
             alternate_authz_actions=(WALKTHROUGH_PLAN_ACTION,),
             writes_records=("secret", "odoo_testing_task"),
-        ),
-        _action(
-            "service_restart",
-            "Restart a service (same version)",
-            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
-            safety="mutation",
-            scope="instance",
-            route_path=SERVICE_RESTART_ROUTE,
-            authz_action="live_target_runtime.apply",
-            alternate_authz_actions=("live_target_runtime.plan",),
-            writes_records=("service_restart",),
         ),
         _action(
             "post_deploy",
