@@ -32,8 +32,6 @@ DurableOperationIdentityType = Literal[
 # "temporary_hotfix": the Director started a temporary hotfix; no policy rule. It names
 # the decision, and the worker re-checks that the decision is still the product's newest
 # and that the active policy still names its caller as administrator.
-# "director_testing_rebuild": source-owned standing permission for a native testing
-# rebuild, bound to the original authenticated operator and rechecked by that worker.
 DurableOperationGrant = Literal[
     "policy_rule",
     "launchplane_reconcile",

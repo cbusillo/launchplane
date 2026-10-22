@@ -1,5 +1,3 @@
-"""Standing authority for the Director's native testing rebuild, never the mixed action."""
-
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,

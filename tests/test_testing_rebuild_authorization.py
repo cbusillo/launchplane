@@ -1,5 +1,3 @@
-"""The Director's existing transport queues only a native testing operation."""
-
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import unittest
