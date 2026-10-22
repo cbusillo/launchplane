@@ -73,7 +73,8 @@ required checks.
 
 Each gate checks the change's entire contribution; missing or unprovable
 history fails. An already protected candidate proves an empty contribution,
-but its scanner/audit and independent required gates still run. The
+but its scanner/audit and independent required gates still run. PR comment checks
+exclude protected changes newer than the event base. The
 [CI comment step](../../.github/workflows/ci.yml) and
 [transitional config-authority workflow](../../.github/workflows/reusable-product-repo-config-authority.yml)
 own event-range selection and validation.
