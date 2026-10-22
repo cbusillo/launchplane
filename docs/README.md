@@ -46,6 +46,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   without the product repository calling Launchplane.
 - [testing-deploy-retry.md](testing-deploy-retry.md) — reviewed exact-artifact
   recovery of an exhausted Odoo testing retry budget with retained data.
+- [preview-memory-admission.md](preview-memory-admission.md) — service-owned host
+  memory floors and read-only preview-start admission.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,

@@ -266,10 +266,6 @@ reservation. The webhook request never waits on a deploy.
     generations retain the verified `source_build`; legacy generations without
     that proof receive a normal verified refresh rather than claiming an exact
     build match. Forward-only build checks still refuse older runs and ancestors.
-  - Before allocating a new Odoo Compose or generic-web application preview,
-    check the selected execution host's memory admission policy. Existing
-    preview refreshes and teardown keep their current paths. See
-    [preview memory admission](#preview-memory-admission).
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
@@ -941,42 +937,3 @@ Unresolved service-owned testing fences are monitored as `launchplane-deploy-fen
 provider incidents on the ordinary products/environment incident surfaces. The
 monitor resolves that provider occurrence after recovery; runtime identity and
 health incidents still require their normal passing observations.
-
-## Preview memory admission
-
-The global DB-backed runtime-environment record may set
-`LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS` to a JSON object mapping provider server
-IDs to positive integer byte floors, for example
-`{"synthetic-execution-host":5368709120}`. Configure real server IDs and values
-through the existing service runtime-environment settings surface. No process
-environment, checked-in host list, or numeric default supplies this policy.
-An absent key or an empty object selects no protected hosts; deploying this
-source alone does not activate a floor. Unreadable records or malformed policy
-refuse new allocation. Only global scope supplies the host policy, so product
-or instance overlays cannot lower it.
-
-For each selected host, the existing registered-server terminal reader runs a
-fixed read-only memory observation immediately before provider creation. It
-uses the smaller of Linux `MemAvailable` and the remaining bytes under every
-visible cgroup-v2 memory limit, counting anonymous, shared and kernel memory
-through `memory.current`. Physical-host spare memory cannot override a guest
-cap. Missing or invalid observations refuse admission; a provider authorization
-denial retains its original identity. No alternate transport or credential is
-selected.
-
-At or above the floor, creation continues. Below it, the refusal names the host,
-configured floor and observed current headroom in bytes; an unavailable read
-names the floor and marks headroom unavailable. A later request can retry after
-headroom recovers. Refusal precedes provider allocation and never stops or
-evicts running workloads. It does not change testing or production admission,
-host limits, swap, or preview teardown.
-
-The initial CT106 activation should record **5 GiB (5368709120 bytes)** against
-its actual provider server ID, derived from
-[incident accounting PR #629](https://github.com/cbusillo/shiny-infra-ops/pull/629):
-19 GiB total cgroup current under the existing 24 GiB cap leaves 5 GiB.
-[Director decision Q654](https://github.com/cbusillo/shiny-infra-ops/issues/628#issuecomment-6342021925)
-approves this preview-start floor. Activation is a separate service-record
-mutation; this source change performs none. The observation is a point-in-time
-admission check, not a memory reservation or a measured preview peak, and does
-not establish a safe concurrency count for heavy rehearsals.

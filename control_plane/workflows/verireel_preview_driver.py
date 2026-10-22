@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import base64
 import json
 import secrets
@@ -33,6 +35,9 @@ from control_plane.workflows.generic_web_application_lifecycle import (
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
+from control_plane.dokploy import memory_capacity
+from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
+
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -1153,6 +1158,13 @@ def execute_verireel_preview_refresh(
             if _is_dokploy_provider_failure(exc):
                 raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
             raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+    if existing_snapshot is None:
+        memory_capacity.require_preview_host_memory_capacity(
+            host=host,
+            token=token,
+            server_id=str(template_application.get("serverId") or "").strip(),
+            record_store=cast(RuntimeEnvironmentRecordStore | None, record_store),
+        )
     database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     existing_database = _resolve_existing_preview_database(
         existing_snapshot,

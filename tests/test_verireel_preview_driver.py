@@ -74,6 +74,9 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
+        )
         self.lifecycle = MagicMock()
         self.lifecycle_factory = self.enterContext(
             patch(

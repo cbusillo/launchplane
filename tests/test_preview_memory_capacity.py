@@ -54,6 +54,19 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
             self.assertEqual(run_program()["result"], 1024)
             (cgroup / "memory.current").unlink()
             self.assertEqual(run_program()["type"], "failed")
+            (cgroup / "memory.current").write_text("20000")
+            (cgroup / "memory.max").write_text("max")
+            (cgroup / "worker/memory.max").write_text("max")
+            (proc / "meminfo").write_text("MemTotal: 24 kB\nMemAvailable: 100 kB\nMemFree: 4 kB\n")
+            (proc / "self/mountinfo").write_text(
+                f"1 0 0:1 /proc/meminfo {proc / 'meminfo'} rw - fuse.lxcfs lxcfs rw\n"
+            )
+            self.assertEqual(run_program()["result"], 4096)
+            (proc / "self/mountinfo").write_text("")
+            self.assertEqual(run_program()["type"], "failed")
+            (cgroup / "memory.max").unlink()
+            (cgroup / "memory.current").unlink()
+            self.assertEqual(run_program()["result"], 100 * 1024)
 
     def test_service_record_floor_controls_selected_host_and_boundary(self) -> None:
         with TemporaryDirectory() as directory:
@@ -63,7 +76,8 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
             store.ensure_schema()
             store.write_runtime_environment_record(
                 RuntimeEnvironmentRecord(
-                    scope="global",
+                    scope="context",
+                    context="launchplane",
                     env={memory_capacity.PREVIEW_MEMORY_FLOORS_KEY: '{"host-a": 5000}'},
                     updated_at="2026-10-22T13:00:00Z",
                 )
@@ -98,27 +112,70 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 read.assert_not_called()
 
     def test_invalid_service_policy_refuses_without_host_read(self) -> None:
-        from control_plane.runtime_environments import RuntimeEnvironmentDefinition
-
         for raw in ('{"host-a":0}', '{"host-a":true}', "[]", "invalid", 5000):
+            store = Mock()
+            store.list_runtime_environment_records.return_value = (
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="launchplane",
+                    env={memory_capacity.PREVIEW_MEMORY_FLOORS_KEY: raw},
+                    updated_at="fixture",
+                ),
+            )
             with (
                 self.subTest(raw=raw),
-                patch.object(
-                    memory_capacity,
-                    "load_runtime_environment_definition",
-                    return_value=RuntimeEnvironmentDefinition(
-                        schema_version=1,
-                        shared_env={memory_capacity.PREVIEW_MEMORY_FLOORS_KEY: raw},
-                        contexts={},
-                    ),
-                ),
                 patch.object(memory_capacity, "read_host_memory_headroom") as read,
             ):
                 with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
                     memory_capacity.require_preview_host_memory_capacity(
-                        host="provider", token="fixture", server_id="host-a"
+                        host="provider", token="fixture", server_id="host-a", record_store=store
                     )
                 read.assert_not_called()
+
+    def test_verireel_refuses_before_database_bootstrap(self) -> None:
+        from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
+        from tests.test_verireel_preview_driver import _template_target, _refresh_request
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("provider", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "serverId": "host-a",
+                        "env": "DATABASE_URL=postgresql://fixture:fixture@db:5432/testing",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._resolve_preview_url",
+                return_value="https://preview.invalid",
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value=None,
+            ),
+            patch.object(
+                memory_capacity,
+                "require_preview_host_memory_capacity",
+                side_effect=memory_capacity.PreviewMemoryCapacityRefused("short"),
+            ) as admit,
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as bootstrap,
+            patch("control_plane.workflows.verireel_preview_driver._ensure_application") as create,
+        ):
+            with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path("."), request=_refresh_request()
+                )
+            bootstrap.assert_not_called()
+            create.assert_not_called()
+            self.assertEqual(admit.call_args.kwargs["server_id"], "host-a")
 
     def test_remote_observation_is_complete_and_preserves_denial(self) -> None:
         for frames in (
