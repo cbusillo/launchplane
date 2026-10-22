@@ -4,6 +4,7 @@ import base64
 import gzip
 import inspect
 import json
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
@@ -145,6 +146,7 @@ TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
 TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
 TESTING_COPY_RUNNER = (
     ATTACHMENT_VALIDATION_LIBRARY
+    + f"NATIVE_ATTACHMENT_FAILURE_MARKER = {'readback_failed_predicate=' + ReadbackPredicate.ATTACHMENTS!r}\n"
     + """import base64
 import logging
 import os
@@ -222,6 +224,8 @@ class CopyRunner(OdooDataWorkflowRunner):
                         Path('/volumes/data/filestore')/self.local.db_name, None,
                         check_content=check_content)
                     if reason != 'verified':
+                        print(NATIVE_ATTACHMENT_FAILURE_MARKER, flush=True)
+                        print('readback_failure_kind=refused', flush=True)
                         raise RuntimeError('Native attachment validation refused: '+reason)
         finally:
             connection.close()
@@ -820,6 +824,8 @@ def command(arguments, *, stdin=None, stdout=None):
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
+        if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
+            raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""
 
@@ -1226,6 +1232,9 @@ except Exception as error:
         frame = copy_readback_failure_frame(error, inspection_predicate) if inspection_only or isinstance(error, CopyReadbackRefused) else {'type':'failed'}
         print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
+    if isinstance(error, CopyReadbackRefused):
+        print('readback_failed_predicate='+error.predicate)
+        print('readback_failure_kind=refused')
     print("odoo_restore_completed=false")
     print("testing_copy_sanitized=false")
     # Failed copies and their stopped web remain for exact-generation recovery.

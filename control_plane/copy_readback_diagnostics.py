@@ -50,6 +50,7 @@ class ReadbackPredicate(StrEnum):
     RUNNER_CAPABILITIES = "runner_capabilities_available"
     DATABASE_READ = "copy_database_readable"
     FILES_READ = "copy_native_files_readable"
+    ATTACHMENTS = "copy_attachments_verified"
     COPY_WITNESS = "copy_generation_witness_matches"
     RUNTIME = "copy_runtime_running"
     IMAGE_DIGEST = "copy_image_digest_matches"

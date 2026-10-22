@@ -150,6 +150,28 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
+        original = self.command
+        marker = f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}"
+
+        def refuse(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if kwargs.get("input") == self.spec["runner"].encode():
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout=f"{marker}\nreadback_failure_kind=refused\nprivate attachment detail\n".encode(),
+                    stderr=b"private traceback",
+                )
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=refuse):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertIn(marker, output.splitlines())
+        self.assertIn("readback_failure_kind=refused", output.splitlines())
+        self.assertNotIn("private", output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_real_restore_renderer_fits_schedule_transport_for_ssh_and_native_copy(self) -> None:
         from control_plane.dokploy.api import validate_dokploy_schedule_script
         from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
@@ -1217,8 +1239,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     (staging / f"lp-native-{identity}-{part}-0").write_bytes(value)
                 dump_path = "/tmp/lp-testing-" + "a" * 32 + "-" + "b" * 32 + "-database.dump"
 
-                def receiver_path(value: str) -> Path:
-                    path = Path(value)
+                def receiver_path(*segments: str) -> Path:
+                    path = Path(*segments)
                     if path == Path("/tmp") or path.is_relative_to("/tmp"):
                         return staging / path.relative_to("/tmp")
                     if path.is_relative_to("/volumes/data/filestore"):
@@ -1380,6 +1402,13 @@ class TestingCopyBoundaryTests(unittest.TestCase):
             artifact.OdooDataWorkflowRunner = NativeRunner
             (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
+
+            def runtime_path(*segments: str) -> Path:
+                path = Path(*segments)
+                if path.is_relative_to("/volumes/data/filestore"):
+                    return filestore / path.relative_to("/volumes/data/filestore")
+                return path
+
             with (
                 patch.dict(sys.modules, {artifact.__name__: artifact}),
                 patch.dict(
@@ -1389,6 +1418,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         "ODOO_KEY": "",
                         "ODOO_ADMIN_PASSWORD": "testing-password",
                         "ODOO_UPDATE_MODULES": "website",
+                        "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
                     },
                 ),
                 patch.object(
@@ -1417,9 +1447,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 ),
                 patch(
                     "pathlib.Path",
-                    side_effect=lambda value: (
-                        filestore if str(value) == "/volumes/data/filestore" else Path(value)
-                    ),
+                    side_effect=runtime_path,
                 ),
                 redirect_stdout(output),
             ):
@@ -1447,6 +1475,11 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 else:
                     self.assertNotIn("drop-fresh", events)
                 self.assertNotIn("testing_copy_sanitized=true", output.getvalue())
+            if native_attachment and fault != "normal":
+                self.assertIn(
+                    f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+                    output.getvalue().splitlines(),
+                )
             if native_attachment and fault != "normal" and phase == "fresh":
                 self.assertIsNone(
                     connection.execute(
