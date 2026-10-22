@@ -492,7 +492,6 @@ class IncompleteRehearsalRetirement:
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if self.abandoning:
-            progress = record.incomplete_retirement
             archived = next(
                 (
                     item
@@ -501,16 +500,29 @@ class IncompleteRehearsalRetirement:
                 ),
                 None,
             )
+            saved = adapter.store.read_idempotency_record(
+                scope=record.principal,
+                route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
+                idempotency_key=self.original_key,
+            )
+            result = saved.response_payload.get("result") if saved else None
             if (
-                record.state != "retired"
-                or archived is None
-                or progress is None
-                or progress.host_disposal != archived.host_disposal
+                archived is None
+                or saved is None
+                or saved.state != "completed"
+                or saved.request_fingerprint != archived.original.request_fingerprint
                 or record.intent_sha256 != canonical_json_sha256(adapter.request.intent())
-                or not self.placement()
+                or not isinstance(result, dict)
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
-            return self.receipt(record, archived.host_disposal.model_dump(mode="json"))
+            receipt = IncompleteRehearsalRetirementReceipt.model_validate(result)
+            if (
+                receipt.action != "abandon-validation"
+                or receipt.rehearsal_id != record.rehearsal_id
+                or receipt.host_disposal != archived.host_disposal
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            return receipt.model_dump(mode="json")
         if record.copies:
             return self.later_readback(record)
         original = adapter.store.read_idempotency_record(

@@ -39,7 +39,9 @@ RehearsalAction = Literal[
     "abandon-validation",
     "rebuild-final",
 ]
-RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
+RehearsalState = Literal[
+    "planned", "prepared", "upgraded", "rebuilding", "switched", "verified", "retired"
+]
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
 ]

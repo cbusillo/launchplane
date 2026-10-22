@@ -909,8 +909,19 @@ class LaterPhaseRetirementTests(unittest.TestCase):
             operation.adapter.request = operation.adapter.request.model_copy(
                 update={"reviewed_plan_sha256": plan["plan_sha256"]}
             )
+            publish = self.store.complete_incomplete_rehearsal_retirement
+
+            def lost_reply(**kwargs: Any) -> None:
+                publish(**kwargs)
+                raise TimeoutError("Abandonment publication reply was lost")
+
+            with patch.object(
+                self.store, "complete_incomplete_rehearsal_retirement", side_effect=lost_reply
+            ):
+                with self.assertRaises(TimeoutError):
+                    self.run_retirement(operation)
             result = self.run_retirement(operation)
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.status, "adopted")
             self.assertEqual(result.response_payload["result"]["original_outcome"], "unknown")
             retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
             assert retired is not None
@@ -970,6 +981,7 @@ class LaterPhaseRetirementTests(unittest.TestCase):
 
         def resources(record: Any, script: str, checkpoint: Any) -> dict[str, str]:
             checkpoint()
+            self.assertEqual(record.state, "rebuilding")
             return {
                 "testing_resources_ok": "true",
                 "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
@@ -1011,6 +1023,16 @@ class LaterPhaseRetirementTests(unittest.TestCase):
         self.assertEqual(rebuilt.abandoned_validations, retired.abandoned_validations)
         self.assertIsNone(rebuilt.incomplete_retirement)
         self.assertEqual(self.fixture.authority(), before)
+        abandonment = self.retirement("uncertain-validation")
+        abandonment.adapter.request = abandonment.adapter.request.model_copy(
+            update={"action": "abandon-validation"}
+        )
+        with patch.object(
+            type(abandonment),
+            "placement",
+            side_effect=AssertionError("Historical readback must not inspect the replacement"),
+        ):
+            self.assertEqual(abandonment.readback()["original_outcome"], "unknown")
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
@@ -1643,7 +1665,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         copies = self.later_phase()
         self.spec.update(action="rebuild-final", mode="apply")
         self.spec["record"].update(
-            state="retired",
+            state="rebuilding",
             abandoned_validations=[
                 {
                     "host_disposal": {
@@ -1678,6 +1700,13 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         )
         upgrade.assert_called_once()
         self.assertEqual(upgrade.call_args.args[2], names["final_upgrade"])
+        self.fixture.fixture.containers["web"]["State"]["Running"] = True
+        self.spec["mode"] = "observe"
+        host["sql"] = lambda containers, statement, database="postgres": host["witness"](
+            self.spec, database
+        )
+        observed = self.fixture.run_host(self.spec)
+        self.assertEqual(observed["state"], "switched")
         for copy in copies:
             self.assertTrue((self.root / copy["database"] / "database.dump").is_file())
 

@@ -749,7 +749,7 @@ def observe(spec, root, receipt, lock_held=False):
     result=json.loads(receipt.read_text())
     if result['intent_sha256']!=record['intent_sha256']:
         raise RuntimeError('Another rehearsal owns this receipt')
-    states=['planned','prepared','upgraded','switched','verified','retired']
+    states=['planned','prepared','upgraded','rebuilding','switched','verified','retired']
     historical=states.index(record['state'])>states.index(result['state'])
     observed_state=record['state'] if historical else result['state']
     database,image=current({**spec,'record':{**record,'state':observed_state}})
@@ -825,7 +825,7 @@ def main():
         if action in {'prepare','rebuild-final'}:
             if action=='rebuild-final':
                 archived=record.get('abandoned_validations',[])
-                if (record['state']!='retired' or not archived
+                if (record['state']!='rebuilding' or not archived
                         or archived[-1]['host_disposal'].get('recovery_snapshots_preserved') is not True
                         or archived[-1]['host_disposal']['recovery_snapshots']!=record['copies']):
                     raise RuntimeError('A verified retained FINAL tuple is required')

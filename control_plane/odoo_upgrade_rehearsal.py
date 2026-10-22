@@ -379,7 +379,7 @@ def require_rehearsal_transition(record: OdooUpgradeRehearsalRecord, action: str
         "validate-business": {"switched"},
         "verify": {"switched"},
         "retire": {"verified"},
-        "rebuild-final": {"retired"},
+        "rebuild-final": {"retired", "rebuilding"},
     }
     if action == "rebuild-final" and (
         not record.abandoned_validations
@@ -1677,7 +1677,12 @@ class OdooRehearsalAdapter:
                     checkpoint()
                     lease.checkpoint_effect("rebuild_final_placement")
                     updated = record.model_copy(
-                        update={"project_id": "", "environment_id": "", "compose_id": ""}
+                        update={
+                            "state": "rebuilding",
+                            "project_id": "",
+                            "environment_id": "",
+                            "compose_id": "",
+                        }
                     )
                     self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                     record = updated

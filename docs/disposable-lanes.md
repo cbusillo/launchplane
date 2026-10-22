@@ -2925,7 +2925,11 @@ retains the custody directory, both snapshot byte sets, all original markers,
 receipts and diagnostics. The original journal is archived verbatim on the
 rehearsal record, with its keys and provider-attempt identity. Only after native
 resource absence and placement absence are proven does the transaction release
-the old reservation with an abandonment receipt. Its `original_outcome` remains
+the old reservation with an abandonment receipt. The old validation key now
+replays that abandonment receipt; its original journal remains verbatim in the
+archive. Completion of the reservation describes abandonment, not a successful
+validation. Historical abandonment readback remains available after rebuilding
+and returns the preserved receipt without inspecting the replacement. Its `original_outcome` remains
 `unknown`; completion of abandonment proves no commit or rollback result for
 the old validation. This route has no production-lane equivalent.
 
@@ -2948,9 +2952,14 @@ original intent. For each step run `dry-run`, review the saved evidence, run
 4. `verify`, with its own key and review, to preserve the post-write Odoo tuple
    for the rollback rehearsal.
 
-Do not reuse an old validation review for the rebuilt copy. A lost response or
-refusal still uses that action's original key and supported readback; it never
-authorizes replay or another rebuild around an unknown effect. Ordinary
+Do not reuse an old validation review for the rebuilt copy. The record says
+`rebuilding` while the new placement and working copy are being produced, so
+normal provider ownership checks remain active. If the host has saved its
+completed rebuild receipt but the service response was lost, original-key
+readback and reconciliation adopt that result without replay. A genuinely
+unknown rebuild with no completed receipt stays held with both tuples and
+evidence preserved; this validation-abandonment route does not settle it. A
+refusal or unknown observation never authorizes replay or another rebuild. Ordinary
 retirement and every production hold retain their existing contracts.
 
 
