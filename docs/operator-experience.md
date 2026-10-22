@@ -31,6 +31,10 @@ values. Disabled bindings and production lanes do not produce this warning.
 Runtime key families share the credential-safety marker catalog, so mail and
 payment provider names count too. An active policy's custom marker produces an
 explicit warning when its credential cannot be matched to a named allowance.
+Each matching custom marker is checked independently. A marker that cannot name
+an allowance produces a classification advisory; it does not block operations
+or grant access. Launchplane's own testing-state, diagnostic and walkthrough
+credentials are not external integration credentials.
 
 ## Primary User And Job
 

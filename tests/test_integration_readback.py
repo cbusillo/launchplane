@@ -81,41 +81,53 @@ class IntegrationReadbackPolicyTests(unittest.TestCase):
                 )
 
     def test_custom_policy_marker_warns_when_integration_cannot_be_matched(self) -> None:
-        binding = SecretBinding(
-            binding_id="binding",
-            secret_id="secret",
-            integration="runtime_environment",
-            binding_key="ACCOUNTING_API_TOKEN",
-            context="example",
-            instance="testing",
-            created_at="2026-10-21T00:00:00Z",
-            updated_at="2026-10-21T00:00:00Z",
+        cases = (
+            ("ACCOUNTING_QB_TOKEN", ("__ACCOUNTING__", "QB"), ("accounting",), True),
+            ("ACCOUNTING_QB_TOKEN", ("__ACCOUNTING__", "QB"), ("accounting", "qb"), False),
+            ("SHOPIFY_ACCOUNTING_TOKEN", ("ACCOUNTING",), ("shopify",), True),
+            ("SHOPIFY_ACCOUNTING_TOKEN", ("ACCOUNTING",), ("shopify", "accounting"), False),
+            ("SMTP_PASSWORD", ("SMTP",), ("outgoing_mail",), False),
+            ("MAIL_WEB_PUSH_VAPID_PRIVATE_KEY", ("MAIL",), ("web_push",), False),
+            ("123VENDOR_TOKEN", ("123VENDOR",), (), True),
+            ("ACCOUNTING_TOKEN", (), (), False),
         )
-        policy = RuntimeKeySafetyPolicyRecord(
-            record_id="policy",
-            source="test",
-            updated_at=binding.updated_at,
-            rules=(
-                RuntimeSecretSafetyRule(binding_key=binding.binding_key, secret_class="testing"),
-            ),
-            integration_key_markers=("ACCOUNTING",),
-        )
-        store = SimpleNamespace(list_runtime_key_safety_policy_records=lambda **_: (policy,))
-        summary = LaunchplaneLaneSummary(
-            context="example", instance="testing", secret_bindings=(binding,)
-        )
-        self.assertTrue(integration_credential_warnings(summary, record_store=store))
-        target = DokployTargetRecord(
-            context="example",
-            instance="testing",
-            policies=_policies("accounting"),
-            updated_at=binding.updated_at,
-        )
-        self.assertFalse(
-            integration_credential_warnings(
-                summary.model_copy(update={"dokploy_target": target}), record_store=store
-            )
-        )
+        for key, markers, allowed, warned in cases:
+            with self.subTest(key=key, markers=markers, allowed=allowed):
+                binding = SecretBinding(
+                    binding_id="binding",
+                    secret_id="secret",
+                    integration="runtime_environment",
+                    binding_key=key,
+                    context="example",
+                    instance="testing",
+                    created_at="2026-10-21T00:00:00Z",
+                    updated_at="2026-10-21T00:00:00Z",
+                )
+                policy = RuntimeKeySafetyPolicyRecord(
+                    record_id="policy",
+                    source="test",
+                    updated_at=binding.updated_at,
+                    rules=(RuntimeSecretSafetyRule(binding_key=key, secret_class="testing"),),
+                    integration_key_markers=markers,
+                )
+                store = SimpleNamespace(
+                    list_runtime_key_safety_policy_records=lambda **_: (policy,)
+                )
+                target = DokployTargetRecord(
+                    context="example",
+                    instance="testing",
+                    policies=_policies(*allowed),
+                    updated_at=binding.updated_at,
+                )
+                summary = LaunchplaneLaneSummary(
+                    context="example",
+                    instance="testing",
+                    secret_bindings=(binding,),
+                    dokploy_target=target,
+                )
+                self.assertEqual(
+                    bool(integration_credential_warnings(summary, record_store=store)), warned
+                )
 
     def test_credential_warnings_use_configured_in_scope_integrations_only(self) -> None:
         binding = SecretBinding(
@@ -138,6 +150,10 @@ class IntegrationReadbackPolicyTests(unittest.TestCase):
             {"instance": "prod"},
             {"binding_key": "DATABASE_PASSWORD"},
             {"binding_key": "NOTSHOPIFY_TOKEN"},
+            {"binding_key": "WEB_PUSH_TOKEN"},
+            {"integration": "testing_application_state"},
+            {"integration": "odoo_walkthrough"},
+            {"integration": "odoo_diagnostics"},
         ):
             with self.subTest(update=update):
                 self.assertFalse(

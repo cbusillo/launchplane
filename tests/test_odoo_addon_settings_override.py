@@ -34,6 +34,7 @@ from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
     build_post_deploy_environment,
+    shopify_store_key_is_protected,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -205,7 +206,8 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
                 setting = setting.model_copy(
                     update={
                         "value": OdooOverrideValue(
-                            source="literal", value=f"{_DEV_STORE_KEY}.myshopify.com"
+                            source="literal",
+                            value=f"https://admin.shopify.com/store/{_DEV_STORE_KEY}/products",
                         )
                     }
                 )
@@ -534,6 +536,15 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
 
 
 class OdooShopifyResolverTests(unittest.TestCase):
+    def test_admin_urls_compare_the_store_identity_instead_of_the_shared_host(self) -> None:
+        protected = (f"https://admin.shopify.com/store/{_PROTECTED_KEY}/products",)
+        self.assertTrue(shopify_store_key_is_protected(_PROTECTED_KEY, protected))
+        self.assertFalse(
+            shopify_store_key_is_protected(
+                f"https://admin.shopify.com/store/{_DEV_STORE_KEY}", protected
+            )
+        )
+
     @staticmethod
     def _record(instance: str) -> OdooInstanceOverrideRecord:
         return _existing_record(instance)

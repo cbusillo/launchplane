@@ -25,7 +25,9 @@ from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS, shopify_store_handle
 from control_plane.runtime_key_safety import (
-    is_integration_runtime_key,
+    DEFAULT_INTEGRATION_KEY_MARKERS,
+    INTEGRATION_KEY_MARKERS,
+    runtime_key_matching_markers,
     runtime_key_integrations,
     runtime_key_safety_environment_class,
 )
@@ -170,20 +172,15 @@ def integration_credential_warnings(
             or binding.instance not in {"", summary.instance}
         ):
             continue
-        if binding.integration != "runtime_environment":
+        if binding.integration in INTEGRATION_KEY_MARKERS:
             integrations.add(binding.integration)
             continue
-        families = runtime_key_integrations(binding.binding_key)
-        integrations.update(families)
-        unknown_integration |= (
-            not families
-            and is_integration_runtime_key(binding.binding_key, extra_markers=extra_markers)
-            and not any(
-                marker.lower() in allowed
-                and is_integration_runtime_key(binding.binding_key, extra_markers=(marker,))
-                for marker in extra_markers
-            )
-        )
+        if binding.integration != "runtime_environment":
+            continue
+        integrations.update(runtime_key_integrations(binding.binding_key))
+        for marker in runtime_key_matching_markers(binding.binding_key, extra_markers):
+            if marker not in DEFAULT_INTEGRATION_KEY_MARKERS and marker.lower() not in allowed:
+                unknown_integration = True
     return tuple(
         f"Stored {integration} credentials have no integration allowance for this non-production lane."
         for integration in sorted(integrations - allowed)

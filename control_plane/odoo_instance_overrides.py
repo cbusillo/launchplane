@@ -1,6 +1,7 @@
 import base64
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from control_plane.odoo_preview_import_source import FishbowlPreviewSource
@@ -84,10 +85,12 @@ def _render_literal_payload_override(*, value: ScalarValue) -> OdooPostDeployRen
 def shopify_store_handle(raw_key: str) -> str:
     """Reduce a store key, myshopify domain or admin URL to its bare store handle."""
 
-    handle = raw_key.strip().lower()
-    if "://" in handle:
-        handle = handle.split("://", 1)[1]
-    handle = handle.split("/", 1)[0].rstrip(".")
+    normalized = raw_key.strip().lower()
+    parsed = urlsplit(normalized if "://" in normalized else f"https://{normalized}")
+    handle = (parsed.hostname or "").rstrip(".")
+    path = parsed.path.strip("/").split("/")
+    if handle == "admin.shopify.com" and len(path) >= 2 and path[0] == "store":
+        handle = path[1]
     if handle.endswith(".myshopify.com"):
         handle = handle[: -len(".myshopify.com")]
     return handle

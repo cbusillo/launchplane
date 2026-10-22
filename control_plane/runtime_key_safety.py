@@ -74,33 +74,37 @@ def is_credential_runtime_value(key_name: str, value: str) -> bool:
     )
 
 
-def _runtime_key_has_marker(key_name: str, marker: str) -> bool:
+def runtime_key_matching_markers(key_name: str, markers: Iterable[str]) -> tuple[str, ...]:
     key_parts = _key_parts(key_name)
-    marker_parts = _key_parts(marker)
-    width = len(marker_parts)
-    return bool(width) and any(
-        key_parts[index : index + width] == marker_parts
-        for index in range(len(key_parts) - width + 1)
-    )
+    matched: list[str] = []
+    for marker in markers:
+        marker_parts = _key_parts(marker)
+        width = len(marker_parts)
+        if width and any(
+            key_parts[index : index + width] == marker_parts
+            for index in range(len(key_parts) - width + 1)
+        ):
+            matched.append("_".join(marker_parts))
+    return tuple(matched)
 
 
 def runtime_key_integrations(key_name: str) -> tuple[str, ...]:
-    integrations = tuple(
+    matched = set(runtime_key_matching_markers(key_name, DEFAULT_INTEGRATION_KEY_MARKERS))
+    if not matched:
+        return ()
+    if matched == {"MAIL"} and runtime_key_matching_markers(key_name, ("INCOMING_MAIL",)):
+        return ("incoming_mail",)
+    specific = matched - {"MAIL"}
+    return tuple(
         integration
         for integration, markers in INTEGRATION_KEY_MARKERS.items()
-        if any(
-            _runtime_key_has_marker(key_name, marker)
-            for marker in (*markers, integration)
-            if marker != "MAIL"
-        )
+        if (specific or matched).intersection(markers)
     )
-    return integrations or (("outgoing_mail",) if _runtime_key_has_marker(key_name, "MAIL") else ())
 
 
 def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
-    return any(
-        _runtime_key_has_marker(key_name, marker)
-        for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers)
+    return bool(
+        runtime_key_matching_markers(key_name, (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers))
     )
 
 
