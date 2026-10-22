@@ -5269,12 +5269,13 @@ preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts the common predecessor, either branch revision,
 their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
-or the new empty join `da72490fce13`, and retains expiry/key-retirement,
+its existing held-path join `da72490fce13`, and the prepared hostname revisions
+and compatibility joins described below. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
 These are recognized revision paths; the HTTP service also requires the topics
 table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed topics/retirement join. A later schema change must
+head has advanced beyond the reviewed compatibility join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
@@ -5342,3 +5343,76 @@ rows. Recovery requires a separately approved restore of the verified full
 pre-migration backup with its matching image and writer quiescence. Images
 before this preparation accept only the old revision and cannot simply restart
 against the contracted database. Keep the Protection App/access decision separate.
+
+### Hostname schema compatibility prelude
+
+Issue #4229 publishes schema knowledge before #4005 activates canonical hostname
+fences. The compatibility image retains the approved discussion-topics startup
+target `b81ca763d924` and existing hostname comparisons. Its migration entrypoint
+keeps the earlier explicit targets, including the independently approved delivery
+drop and existing topics/retirement join `da72490fce13`. The held-drop approval
+procedure above remains independent.
+
+The prepared hostname revision `f0a4c8e2b6d9` still follows the preview revision
+`e8d2f6a0b4c7`; its prepared held-path join is `f1b5d9a3c7e0`. Empty join
+`f2c6e0a4b8d1` reconciles the topics and hostname branches without the held drop.
+Empty join `f3d7a1b5c9e2` reconciles that join with both existing held-path joins,
+providing one graph head. None of these four prepared revisions is an accepted
+target of this image's migration entrypoint, even for an empty database.
+Graph knowledge does not authorize applying hostname fences or the held drop.
+
+Startup from the predecessor or preview revision adds only approved topics.
+An already-applied delivery drop or original retirement join follows the existing
+route to `da72490fce13`; the explicit delivery/preview crossing also retains that
+route. These paths never apply hostname fences. An already-applied hostname-only
+schema adds topics through `f2c6e0a4b8d1`, retaining all held history. An
+already-applied hostname/retirement join adds topics through `f3d7a1b5c9e2`,
+including when explicitly requesting the historical topics/retirement join.
+Topics and compatible-ahead joins remain unchanged. Every route leaves one
+recorded revision and preserves discussion history and stored target payloads.
+
+A hostname-only schema, including its topics join, cannot request the delivery
+drop or either historical held-path join through this entrypoint: joining those
+branches would newly apply the held drop. An already-applied hostname/retirement
+join or final compatibility join accepts earlier ancestor targets without a
+downgrade. Image rollback to this compatibility image keeps compatible-ahead
+schemas and payloads unchanged; a hostname schema that predates topics first
+receives the already-approved additive topics migration.
+
+The held-drop procedure above remains available from the earlier approved
+schemas. Before hostname activation reaches main, its release must also qualify
+an explicit held-drop application path for the hostname-only schemas it can
+leave behind, including image rollback. After activation, use that separately
+qualified release and its reviewed mapping for an independently approved drop;
+this compatibility entrypoint continues to refuse that transition. Do not bypass
+the refusal with direct Alembic or manual SQL.
+
+Before the first explicit public-host authority-key call, runtime provider
+operations acquire a shared transaction advisory schema-transition lock outside
+the validation savepoint. They retain it across provider I/O and reacquire it
+after every checkpoint commit. The prepared hostname migration takes the
+matching exclusive transaction lock in both upgrade and downgrade, then a
+NOWAIT SHARE lock on `launchplane_dokploy_targets` before replacing key
+derivation. This excludes ordinary and prepared target writes that invoke the
+key function through table triggers, including an uncommitted new context.
+Independent provider operations continue concurrently under shared locks.
+
+A busy advisory transition lock raises the migration's busy RuntimeError;
+target-table contention raises a database lock error with SQLSTATE `55P03`.
+VACUUM/ANALYZE can also cause the table-lock refusal. The transaction commits
+no partial DDL or revision change. Retry the supported migration after the
+conflicting activity settles; do not cancel maintenance or use a live SQL
+fallback. Runtime reacquisition contention stops further effects while keeping
+the preceding checkpoint committed; retry from a fresh plan.
+
+Source delivery alone does not establish rollback compatibility for #4005.
+An authorized deployment session must record the immutable compatibility image,
+verify that every earlier HTTP replica and worker has been replaced, and retain
+that qualified image as activation's previous-image rollback target. A drain
+marker alone does not prove older hostname writers have gone. All four new
+migration files remain byte-identical between the final qualified compatibility
+and activation changes, preserving the compatibility graph as an exact prefix.
+A release that changes startup's migration target can activate the transition
+during automatic deployment. Complete the deployed-image qualification before
+that release reaches main. Image rollback then returns to this qualified
+compatibility image without downgrading the hostname schema.
