@@ -427,7 +427,9 @@ class ServiceRestartAdapter:
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
-                        same_artifact_restart=not fresh.before.running,
+                        same_artifact_restart_service=fresh.service
+                        if not fresh.before.running
+                        else "",
                     )
             except DisposableLaneSafetyUnknown as error:
                 raise ProviderMutationRejectedError(error) from error

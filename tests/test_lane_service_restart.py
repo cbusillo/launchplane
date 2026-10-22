@@ -790,7 +790,9 @@ class ServiceRestartTests(unittest.TestCase):
                     "testing",
                     production_resources=resources,
                 )
-                self.assertEqual(self.invoke(key=f"shared-{resources}")[0], 409)
+                status, response = self.invoke(key=f"shared-{resources}")
+                self.assertEqual(status, 409, response)
+                self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
                 self.assertEqual(self.provider.writes, [])
 
     def test_stopped_restart_resolves_positive_use_only_with_recorded_downtime(self) -> None:
@@ -804,9 +806,25 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
         record_lane_health(
-            self.store, self.expected.product, self.expected.context, datetime.now(timezone.utc)
+            self.store,
+            self.expected.product,
+            self.expected.context,
+            datetime.now(timezone.utc),
+            status=404,
         )
-        self.assertEqual(self.invoke(key="down-restart")[1]["result"]["status"], "pass")
+        self.payload.update(mode="dry-run", reviewed_plan_sha256="", service="script-runner")
+        self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "script-runner"
+        self.review()
+        status, response = self.invoke(key="stopped-non-web")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(self.provider.writes, [])
+        self.payload.update(mode="dry-run", reviewed_plan_sha256="", service="web")
+        self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "web"
+        self.review()
+        status, response = self.invoke(key="down-restart")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
 
     def test_director_grant_does_not_bypass_testing_hold_or_target_alias(self) -> None:
         self.provider.config["State"]["Running"] = False
