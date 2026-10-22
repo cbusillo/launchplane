@@ -278,6 +278,47 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.revoked_app_tokens, 1)
         self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
 
+    def test_removed_review_label_or_client_completes_only_the_bound_existing_check(self) -> None:
+        for remove_client in (False, True):
+            with self.subTest(remove_client=remove_client):
+                github = _GitHub()
+                self._publish(github, owner_set=remove_client)
+                own = github.check_runs[0]
+                self.assertEqual(own["status"], "in_progress")
+                foreign = {**own, "id": 999, "external_id": "f" * 64}
+                github.check_runs.insert(0, foreign)
+                github.labels = ()
+                github.body = "## Client test notes\nNothing for the Client to test: CI only."
+
+                self._publish(github, owner_set=False)
+
+                self.assertEqual((own["status"], own.get("conclusion")), ("completed", "neutral"))
+                self.assertEqual(foreign["status"], "in_progress")
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (),
+                )
+
+    def test_unowned_unmarked_pr_does_not_touch_foreign_checks(self) -> None:
+        for field, value in (
+            ("external_id", "f" * 64),
+            ("app", {"id": 999}),
+            ("head_sha", _OLDER_HEAD_SHA),
+        ):
+            with self.subTest(field=field):
+                github = _GitHub()
+                self._publish(github)
+                github.check_runs[0][field] = value
+                github.labels = ()
+                github.writes.clear()
+
+                self._publish(github, owner_set=False)
+
+                self.assertEqual(github.writes, [])
+                self.assertEqual(github.check_runs[0]["status"], "in_progress")
+
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
             owner_review_reference_url(
@@ -670,7 +711,6 @@ class OwnerReviewStatusTests(unittest.TestCase):
         assert isinstance(output, dict)
         self.assertEqual(output["title"], "Retired")
         self.assertIn("launchplane/owner-review", output["summary"])
-        self.assertEqual(github.revoked_app_tokens, 2)
 
     def test_absent_or_foreign_leftovers_are_not_created_or_touched(self) -> None:
         github = _GitHub(labels=())

@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
-from control_plane.advisory_check_projection import write_advisory_check_projection
+from control_plane.advisory_check_projection import (
+    update_existing_advisory_check_projection,
+    write_advisory_check_projection,
+)
 from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
     OWNER_ACCEPTANCE_CHECK_NAME,
@@ -218,16 +221,15 @@ class OwnerReviewStatusPublisher:
                         },
                         base_branch=facts.base_branch,
                     )
-                    if not synthetic and (
-                        profile.owner.is_set
-                        or profile.owner.review_label.strip().casefold() in facts.labels
-                    ):
+                    if not synthetic:
                         written = self._write_status(
                             store=store,
                             profile=profile,
                             pull_request_number=pull_request_number,
                             facts=facts,
                             token=token,
+                            existing_only=not profile.owner.is_set
+                            and profile.owner.review_label.strip().casefold() not in facts.labels,
                         )
             except Exception:
                 _LOGGER.warning(
@@ -350,7 +352,8 @@ class OwnerReviewStatusPublisher:
         pull_request_number: int,
         facts: _PullRequestFacts,
         token: str,
-    ) -> OwnerReviewStatus:
+        existing_only: bool = False,
+    ) -> OwnerReviewStatus | None:
         intent = change_client_review(
             body=facts.body,
             labels=facts.labels,
@@ -358,7 +361,11 @@ class OwnerReviewStatusPublisher:
             pure_dependency_update=facts.pure_dependency_update,
             director_standing=profile.release_on_acceptance == "director_standing",
         )
-        if not intent.review_required:
+        if existing_only:
+            status = OwnerReviewStatus(
+                state="neutral", description="No Client preview review required"
+            )
+        elif not intent.review_required:
             decisions = store.list_product_review_decision_records(
                 repository=profile.repository, pull_request_number=pull_request_number
             )
@@ -396,7 +403,7 @@ class OwnerReviewStatusPublisher:
                 facts=facts,
                 token=token,
             )
-        if intent.error:
+        if intent.error and not existing_only:
             status = OwnerReviewStatus(state="failure", description=intent.error)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
@@ -420,11 +427,18 @@ class OwnerReviewStatusPublisher:
         )
         installation_token = self._advisory_token(profile.repository, facts.repository_id)
         try:
-            write_advisory_check_projection(
+            writer = (
+                update_existing_advisory_check_projection
+                if existing_only
+                else write_advisory_check_projection
+            )
+            result = writer(
                 projection=projection,
                 installation_token=installation_token,
                 api_request=self.api_request,
             )
+            if result is None:
+                return None
         finally:
             revoke_installation_token(
                 installation_token=installation_token,
