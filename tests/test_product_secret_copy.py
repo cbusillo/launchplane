@@ -396,7 +396,15 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     narrower.json()["lane_binding_resolution"]["coverage"]["status"], "complete"
                 )
-                self.assertIn(self.source.name, narrower.text)
+                selected_lane = next(
+                    lane
+                    for lane in narrower.json()["lane_binding_resolution"]["lanes"]
+                    if (lane["context"], lane["instance"])
+                    == (self.source.context, self.source.instance)
+                )
+                self.assertIn(
+                    self.source.name, {binding["name"] for binding in selected_lane["bindings"]}
+                )
 
     @scoped_agent_test
     async def test_explicit_context_and_instance_reads_prove_complete_copy_coverage(self) -> None:
