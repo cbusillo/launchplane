@@ -152,7 +152,7 @@ def require_application_route_selected(root: Path, record: TestingActivationReco
     frame = transport.read()
     owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
     admitted = {readiness.backend}
-    if not record.published:
+    if not record.published and readiness.route.old_backend is not None:
         # The caller supplies only original activation progress; physical effects
         # still own their normal native fence. A pending forward child can be
         # observed at either of its exact admitted endpoints.

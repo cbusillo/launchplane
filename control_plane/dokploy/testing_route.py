@@ -126,6 +126,7 @@ class TestingRoutePending(ValueError):
 
 
 class TestingRouteAuthorityChanged(ValueError):
+    pass
 
 
 class UnavailableTestingRoutePreimage(FrozenRecord):
