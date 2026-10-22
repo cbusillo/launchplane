@@ -32,6 +32,7 @@ ALLOW_REASON_THIN_CONNECTOR_INPUT = "thin_connector_input"
 ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
+RENOVATE_METADATA_FIELDS = frozenset(("$schema", "extends", "description"))
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
@@ -3133,7 +3134,7 @@ def _allow_reason(
     key_text = _semantic_full_key_text(key)
     if _is_codeowners_path(normalized):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
-    if _is_renovate_config_path(normalized) and not _is_renovate_written_content(key_text):
+    if _is_renovate_config_path(normalized) and _is_renovate_metadata_key(key):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized.startswith("docs/")
@@ -4237,8 +4238,9 @@ def _is_renovate_config_path(path: str) -> bool:
     return path in {"renovate.json", ".github/renovate.json"}
 
 
-def _is_renovate_written_content(key_text: str) -> bool:
-    return "AUTOREPLACESTRINGTEMPLATE" in key_text or "POSTUPGRADETASKS" in key_text
+def _is_renovate_metadata_key(key: str) -> bool:
+    field = re.sub(r"\[\d+]", "", key).rsplit(".", 1)[-1]
+    return field in RENOVATE_METADATA_FIELDS or field.startswith("match")
 
 
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:

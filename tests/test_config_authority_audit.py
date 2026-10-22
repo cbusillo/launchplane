@@ -1086,7 +1086,13 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "$schema": "https://docs.renovatebot.com/renovate-schema.json",
                         "extends": ["github>example-owner/shared-config//renovate/default"],
                         "packageRules": [
-                            {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False}
+                            {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False},
+                            {
+                                "matchDatasources": ["docker"],
+                                "replacementNameTemplate": (
+                                    "registry.production.example.com/team/{{{packageName}}}"
+                                ),
+                            },
                         ],
                         "customManagers": [
                             {
@@ -1098,6 +1104,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "postUpgradeTasks": {
                             "commands": ["curl https://deploy.production.example.com"]
                         },
+                        "env": {"API_BASE_URL": "https://api.production.example.com"},
+                        "registryUrls": ["https://registry.production.example.com"],
                     }
                 ),
                 encoding="utf-8",
@@ -1117,8 +1125,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "$schema": "repo_metadata_ergonomics",
                 "extends[0]": "repo_metadata_ergonomics",
                 "packageRules[0].matchPackageNames[1]": "repo_metadata_ergonomics",
+                "packageRules[1].replacementNameTemplate": "",
                 "customManagers[0].autoReplaceStringTemplate": "",
                 "postUpgradeTasks.commands[0]": "",
+                "env.API_BASE_URL": "",
+                "registryUrls[0]": "",
             },
         )
 
