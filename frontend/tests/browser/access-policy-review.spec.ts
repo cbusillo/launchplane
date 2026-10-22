@@ -74,17 +74,23 @@ test("read-only browser does not render principal display", async ({ page }) => 
   await expect(page.getByRole("region", { name: "People and access changes" })).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("fixture-alex");
   await expect(page.locator("body")).not.toContainText("secret-value-must-not-render");
+  await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
 });
 
 for (const scheduler of [false, true]) {
-  test(`stale ${scheduler ? "scheduler" : "authorization"} policy explains the fresh-plan continuation`, { tag: "@responsive" }, async ({ page }, testInfo) => {
-    await openReview(page, "stale", false, scheduler);
-    const warning = page.locator(".privileged-operation-warning");
-    await expect(warning).toContainText(/stale/i);
-    await expect(warning).toContainText(/new plan|replan/i);
-    await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("stale-policy-review.png"), fullPage: true });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  });
+  for (const readOnly of [false, true]) {
+    test(`stale ${scheduler ? "scheduler" : "authorization"} policy explains uncertainty to ${readOnly ? "readers" : "administrators"}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
+      await openReview(page, "stale", readOnly, scheduler);
+      const warning = page.locator(".privileged-operation-warning");
+      await expect(warning).toContainText(/stale/i);
+      await expect(warning).toContainText(/evidence.*could not be verified/i);
+      await expect(warning).toContainText(/refresh/i);
+      await expect(warning).toContainText(/if.*policy.*changed.*administrator/i);
+      await expect(warning).toContainText(/prepare a new/i);
+      await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(readOnly ? 0 : 1);
+      await page.screenshot({ path: testInfo.outputPath("stale-policy-review.png"), fullPage: true });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
 }

@@ -476,7 +476,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "managed_set_id": "review.non-administrator",
                 "managed_rule_id": "human-reader",
                 "github_ids": [999],
-                "roles": ["admin"],
+                "roles": ["admin", "read_only"],
                 "actions": [AUTHZ_POLICY_OPERATION_READ_ACTION],
                 "products": ["launchplane"],
                 "contexts": ["launchplane"],
@@ -539,6 +539,15 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         (operator, 200),
                         (replace(_human(), role="read_only"), 403),
                         (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
+                        (
+                            replace(
+                                _human(),
+                                github_id=999,
+                                login="fixture-policy-reader",
+                                role="read_only",
+                            ),
+                            200,
+                        ),
                     ):
                         async with lifespan_client(
                             self._app(
@@ -566,6 +575,19 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                                         )
                                 self.assertNotIn("access_policy", response.text)
                                 self.assertNotIn("fixture-affected-person", response.text)
+                            if (
+                                isinstance(identity, GitHubHumanIdentity)
+                                and identity.role == "read_only"
+                            ):
+                                for action in ("approve", "cancel"):
+                                    refused = await client.post(
+                                        f"/v1/privileged-operations/plans/{operation_id}/{action}",
+                                        json={
+                                            "source_event_id": f"reader-{action}-{stale}",
+                                            "reason": "A read rule does not authorize transitions.",
+                                        },
+                                    )
+                                    self.assertEqual(refused.status_code, 403, refused.text)
 
                 await check_redacted_reads(stale=False)
                 revised = policy.model_copy(update={"administrator_quorum": 2})
@@ -2919,6 +2941,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_unavailable_policy_planning_blocks_only_pending_review_and_preserves_withdrawal(
         self,
     ) -> None:
+        from sqlalchemy import delete
+        from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
+
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
@@ -2976,13 +3001,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                                     projected["blockers"]["codes"],
                                 )
                         if not approved:
-                            with patch(
-                                "control_plane.privileged_operation_registry.plan_managed_authz_policy_reconcile",
-                                side_effect=ValueError(
-                                    "Current eligibility evidence became unavailable"
-                                ),
-                            ):
-                                conflicting = await client.get(f"{path}/review")
+                            with store._engine.begin() as connection:
+                                connection.execute(delete(LaunchplaneAuthzPolicyRow))
+                            conflicting = await client.get(f"{path}/review")
                             self.assertEqual(conflicting.status_code, 200, conflicting.text)
                             projected = conflicting.json()["review"]
                             self.assertFalse(projected["can_approve"])
@@ -2991,6 +3012,21 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                             )
                             self.assertEqual(projected["access_policy"]["state"], "unavailable")
                             self.assertEqual(projected["access_policy"]["rules"], [])
+                            refused = await client.post(
+                                f"{path}/approve",
+                                json={
+                                    "source_event_id": "approve-without-current-policy",
+                                    "reason": "Current evidence cannot be verified.",
+                                },
+                            )
+                            self.assertEqual(refused.status_code, 409, refused.text)
+                            self.assertEqual(
+                                refused.json()["detail"]["code"], "privileged_operation_plan_stale"
+                            )
+                            store.seed_authz_policy_if_absent(active)
+                            restored = await client.get(f"{path}/review")
+                            self.assertEqual(restored.status_code, 200, restored.text)
+                            self.assertTrue(restored.json()["review"]["can_approve"])
                         with patch.object(store, "list_authz_policy_records", None):
                             review = await client.get(f"{path}/review")
                             listing = await client.get(
@@ -3057,10 +3093,13 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_storage_fault_keeps_pending_reviews_readable(self) -> None:
         from sqlalchemy import Table
         from sqlalchemy.exc import OperationalError
-        from control_plane.storage.postgres import LaunchplaneMergeTrainPolicyRow
+        from control_plane.storage.postgres import (
+            LaunchplaneAuthzPolicyRow,
+            LaunchplaneMergeTrainPolicyRow,
+        )
 
-        for database in (False, True):
-            with self.subTest(database=database), TemporaryDirectory() as directory:
+        for database, authz in ((False, False), (True, False), (True, True)):
+            with self.subTest(database=database, authz=authz), TemporaryDirectory() as directory:
                 store = (
                     PostgresRecordStore(
                         database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
@@ -3074,19 +3113,28 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 active = build_test_merge_train_policy_record(
                     repository="cbusillo/sellyouroutboard", record_id="merge-train-policy-active"
                 )
-                store.write_merge_train_policy_record(active)
+                if authz:
+                    assert isinstance(store, PostgresRecordStore)
+                    store.seed_authz_policy_if_absent(_policy_record(_policy()))
+                else:
+                    store.write_merge_train_policy_record(active)
+                descriptor = (
+                    "managed-authz-policy-set" if authz else "managed-merge-train-policy-import"
+                )
+                payload = _managed_authz_plan_payload if authz else _merge_train_policy_plan_payload
                 app = self._app(store=store, policy=_policy())
                 async with lifespan_client(app, raise_server_exceptions=False) as client:
                     planned = await client.post(
                         "/v1/privileged-operations/plans",
-                        json=_merge_train_policy_plan_payload(f"storage-fault-{database}"),
+                        json=payload(f"storage-fault-{database}-{authz}"),
                     )
                     self.assertEqual(planned.status_code, 200, planned.text)
                     operation_id = planned.json()["record"]["operation_id"]
                     original = store.read_privileged_operation_record(operation_id)
                     expected_error: type[Exception]
                     if isinstance(store, PostgresRecordStore):
-                        cast(Table, LaunchplaneMergeTrainPolicyRow.__table__).drop(store._engine)
+                        row = LaunchplaneAuthzPolicyRow if authz else LaunchplaneMergeTrainPolicyRow
+                        cast(Table, row.__table__).drop(store._engine)
                         expected_error = OperationalError
                     else:
                         policy_file = next(Path(directory).rglob(f"{active.record_id}.json"))
@@ -3094,12 +3142,15 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         policy_file.mkdir()
                         expected_error = IsADirectoryError
                     with self.assertRaises(expected_error):
-                        store.list_merge_train_policy_records(status="active", limit=2)
+                        if authz:
+                            store.list_authz_policy_records(status="active", limit=2)
+                        else:
+                            store.list_merge_train_policy_records(status="active", limit=2)
                     path = f"/v1/privileged-operations/plans/{operation_id}"
                     detail = await client.get(f"{path}/review")
                     listing = await client.get(
                         "/v1/privileged-operations/plans",
-                        params={"descriptor_id": "managed-merge-train-policy-import"},
+                        params={"descriptor_id": descriptor},
                     )
                     self.assertEqual(detail.status_code, 200, detail.text)
                     self.assertEqual(listing.status_code, 200, listing.text)

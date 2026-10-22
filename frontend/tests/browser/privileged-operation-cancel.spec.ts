@@ -166,13 +166,17 @@ test("an approved operation offers revocation rather than pending-plan cancellat
   expect(state.mutations).toEqual([]);
 });
 
-test("a read-only browser session has no cancellation control", async ({ page }) => {
-  const state = await fixture(page, { readOnly: true });
-  await expect(page.locator(".privileged-operation-status")).toHaveText("planned");
-  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
-  await expect(page.getByLabel("Reason for cancellation")).toHaveCount(0);
-  expect(state.mutations).toEqual([]);
-});
+for (const status of ["planned", "approved"]) {
+  test(`a read-only browser session has no ${status} operation controls`, async ({ page }) => {
+    const state = await fixture(page, { readOnly: true, status });
+    await expect(page.locator(".privileged-operation-status")).toHaveText(status);
+    await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Revoke approval", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Reason for cancellation")).toHaveCount(0);
+    expect(state.mutations).toEqual([]);
+  });
+}
 
 test("an uncertain cancellation preserves its reason and source event for retry", async ({ page }) => {
   const state = await fixture(page, { loseFirstResponse: true });

@@ -758,7 +758,7 @@ function PrivilegedOperationPlanCard({
           <ShieldAlert size={18} aria-hidden="true" />
           <span>
             {review.blockers.codes?.includes("privileged_operation_plan_stale")
-              ? "This plan is stale and cannot be approved. Cancel it and prepare a new plan against the current policy."
+              ? "This plan may be stale, or current policy evidence could not be verified. Approval is disabled. Refresh the review to check again. If the policy has changed, an administrator can cancel this plan and prepare a new one."
               : review.blockers.codes?.includes("privileged_operation_planning_unavailable")
                 ? "Current policy planning is unavailable. Approval is disabled. Refresh the review to check again."
                 : review.blockers.state === "error"
@@ -899,7 +899,7 @@ function PrivilegedOperationPlanCard({
         </section>
       ) : null}
 
-      {!cancelled && (review.can_approve || review.can_revoke) ? (
+      {admin && !cancelled && (review.can_approve || review.can_revoke) ? (
         <div className="privileged-operation-actions">
           {review.can_approve ? (
             <button type="button" disabled={pendingMutation || cancelEventId.current !== null || (isAgentPolicyProposal && !proposalMatches)} onClick={() => void mutate("approve")}>
