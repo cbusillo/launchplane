@@ -681,9 +681,9 @@ class DokployConfigTests(unittest.TestCase):
     def test_redact_dokploy_log_line_redacts_structured_cookie_fields(self) -> None:
         self.assertEqual(
             control_plane_dokploy.redact_dokploy_log_line(
-                '{"Cookie":"session_id=abc123","set-cookie":["sid=abc123; Path=/"],"status":502}'
+                '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
             ),
-            '{"Cookie":"[redacted]","set-cookie":[redacted],"status":502}',
+            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]',
         )
         self.assertEqual(
             control_plane_dokploy.redact_dokploy_log_line(
@@ -692,8 +692,16 @@ class DokployConfigTests(unittest.TestCase):
             "{'Set-Cookie': '[redacted]', 'path': '/web'}",
         )
 
+    def test_redact_dokploy_log_line_redacts_truncated_cookie_values(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                '{"status":502,"Cookie":"sid=abc123; x=ab'
+            ),
+            '{"status":502,"Cookie":[redacted]',
+        )
+
     def test_redact_dokploy_log_line_keeps_cookie_settings_diagnostics(self) -> None:
-        line = "SESSION_COOKIE_SECURE=true cookie consent banner shown"
+        line = "SESSION_COOKIE_SECURE=true prefer-secure-cookie=false cookie consent banner shown"
 
         self.assertEqual(control_plane_dokploy.redact_dokploy_log_line(line), line)
 
