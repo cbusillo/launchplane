@@ -67,6 +67,11 @@ class SecretVersion(BaseModel):
     cipher_alg: Literal["fernet-v1"] = "fernet-v1"
     key_id: str = "launchplane-master-key"
     ciphertext: str
+    value_origin: SecretValueOrigin | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "SecretVersion":
@@ -132,25 +137,14 @@ class SecretBinding(BaseModel):
     # Set by the value-writing service, never by caller-supplied classification.
     # Legacy bindings have no origin proof and retain key-name policy precedence.
     value_source: SecretValueSource | None = None
-    copied_value_source: SecretValueOrigin | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
     # Why the declared class is safe, for a production integration key shared
     # with a non-production lane. Metadata only; never part of the value.
     sharing_reason: SecretSharingReason | None = None
     created_at: str
     updated_at: str
 
-    @property
-    def value_origin(self) -> SecretValueOrigin | None:
-        return self.copied_value_source if self.value_source == "copy" else self.value_source
-
     @model_validator(mode="after")
     def _validate_record(self) -> "SecretBinding":
-        if self.copied_value_source is not None and self.value_source != "copy":
-            raise ValueError("Copied value origin requires a copied binding.")
         if not self.binding_id.strip():
             raise ValueError("secret binding requires binding_id")
         if not self.secret_id.strip():

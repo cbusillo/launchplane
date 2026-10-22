@@ -307,7 +307,6 @@ def plan_product_config_authority_bundle(
             raise ProductConfigError("Product changed during secret copy planning.")
         copy_profile = profile
         copy_sources[index] = version
-        secret["copied_value_source"] = binding.value_origin
         copy_contexts.add((product, record.context))
         copy_expectations.append(SecretCopySourceExpectation(record=record, binding=binding))
 
@@ -403,9 +402,9 @@ def plan_product_config_authority_bundle(
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 sharing_reason=_product_config_sharing_reason(secret, actor=actor),
                 value_source=cast(SecretValueSource, secret["value_source"]),
-                copied_value_source=cast(
-                    SecretValueOrigin | None, secret.get("copied_value_source")
-                ),
+                copied_value_origin=copy_sources[index].value_origin
+                if index in copy_sources
+                else None,
                 actor=actor,
                 source_label=source_label,
             )
@@ -1070,7 +1069,7 @@ def _plan_product_config_secret_write(
     declared_secret_class: RuntimeSecretClass | None = None,
     sharing_reason: SecretSharingReason | None = None,
     value_source: SecretValueSource | None = None,
-    copied_value_source: SecretValueOrigin | None = None,
+    copied_value_origin: SecretValueOrigin | None = None,
     actor: str = "",
     source_label: str = "manual",
 ) -> _ProductConfigSecretWritePlan:
@@ -1120,7 +1119,6 @@ def _plan_product_config_secret_write(
         instance=instance_name,
         declared_secret_class=declared_secret_class,
         value_source=value_source,
-        copied_value_source=copied_value_source,
         sharing_reason=sharing_reason,
         created_at=existing_generated_binding.created_at
         if existing_generated_binding
@@ -1137,6 +1135,7 @@ def _plan_product_config_secret_write(
         created_by=actor,
         key_id=key_id,
         ciphertext=ciphertext,
+        value_origin=(copied_value_origin if value_source == "copy" else value_source),
     )
     record = SecretRecord(
         secret_id=secret_id,
@@ -1292,9 +1291,6 @@ def _planned_runtime_secret_bindings(
                 status="configured",
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 value_source=cast(SecretValueSource, secret["value_source"]),
-                copied_value_source=cast(
-                    SecretValueOrigin | None, secret.get("copied_value_source")
-                ),
                 sharing_reason=_product_config_sharing_reason(secret, actor="", recorded_at=now),
                 created_at=existing_binding.created_at if existing_binding is not None else now,
                 updated_at=now,

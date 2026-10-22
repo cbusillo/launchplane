@@ -23,14 +23,10 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretScope,
     SecretVersion,
+    SecretValueOrigin,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import (
-    ProductAuthorityBundle,
-    ProductAuthorityBundleStore,
-    SecretBindingSetExpectation,
-)
 from control_plane.workflows.ship import utc_now_timestamp
 
 LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR = "LAUNCHPLANE_SECRET_KEYS_JSON"
@@ -103,7 +99,7 @@ class SecretBindingSelectionStore(Protocol):
     ) -> tuple[SecretBinding, ...]: ...
 
 
-class SecretWriteStore(SecretReadStore, ProductAuthorityBundleStore, Protocol):
+class SecretWriteStore(SecretReadStore, Protocol):
     def find_secret_record(
         self,
         *,
@@ -712,6 +708,7 @@ def write_secret_value(
     description: str = "",
     actor: str = "",
     source_label: str = "manual",
+    value_origin: SecretValueOrigin = "supplied",
 ) -> dict[str, str]:
     if not plaintext_value.strip():
         raise click.ClickException(
@@ -735,30 +732,12 @@ def write_secret_value(
             instance=instance_name,
         )
     )
-    existing_bindings = tuple(
-        binding
-        for binding in record_store.list_secret_bindings(limit=None)
-        if binding.secret_id == secret_id
-    )
-    binding_expectation = SecretBindingSetExpectation(
-        secret_id=secret_id, bindings=existing_bindings
-    )
     if existing_record is not None:
         current_version = record_store.read_secret_version(existing_record.current_version_id)
         if (
             _decrypt_secret_value(current_version.ciphertext, current_version.key_id)
             == plaintext_value
         ):
-            existing_binding = next(
-                (
-                    binding
-                    for binding in existing_bindings
-                    if binding.binding_id
-                    == _binding_id(secret_id=secret_id, binding_key=binding_key)
-                    and binding.secret_id == secret_id
-                ),
-                None,
-            )
             binding = SecretBinding(
                 binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
                 secret_id=secret_id,
@@ -766,80 +745,65 @@ def write_secret_value(
                 binding_key=binding_key,
                 context=context_name,
                 instance=instance_name,
-                value_source=existing_binding.value_source if existing_binding else None,
-                copied_value_source=existing_binding.copied_value_source
-                if existing_binding
-                else None,
-                declared_secret_class=existing_binding.declared_secret_class
-                if existing_binding
-                else None,
-                sharing_reason=existing_binding.sharing_reason if existing_binding else None,
                 created_at=existing_record.created_at,
                 updated_at=now,
             )
-            record_store.write_product_authority_bundle(
-                ProductAuthorityBundle(
-                    expected_secret_records=(existing_record,),
-                    secret_bindings=(binding,),
-                    secret_binding_sets=(binding_expectation,),
-                )
-            )
+            record_store.write_secret_binding(binding)
             return {"status": "ok", "secret_id": secret_id, "action": "unchanged"}
     action: SecretWriteAction = "created" if existing_record is None else "rotated"
     version_id = _version_id(secret_id=secret_id)
     ciphertext, key_id = _encrypt_secret_value(plaintext_value)
-    version = SecretVersion(
-        version_id=version_id,
-        secret_id=secret_id,
-        created_at=now,
-        created_by=actor,
-        key_id=key_id,
-        ciphertext=ciphertext,
+    record_store.write_secret_version(
+        SecretVersion(
+            version_id=version_id,
+            secret_id=secret_id,
+            created_at=now,
+            created_by=actor,
+            key_id=key_id,
+            ciphertext=ciphertext,
+            value_origin=value_origin,
+        )
     )
     created_at = existing_record.created_at if existing_record is not None else now
-    record = SecretRecord(
-        secret_id=secret_id,
-        scope=scope,
-        integration=integration,
-        name=name,
-        context=context_name,
-        instance=instance_name,
-        description=description,
-        current_version_id=version_id,
-        created_at=created_at,
-        updated_at=now,
-        updated_by=actor,
-        last_validated_at=existing_record.last_validated_at if existing_record is not None else "",
+    record_store.write_secret_record(
+        SecretRecord(
+            secret_id=secret_id,
+            scope=scope,
+            integration=integration,
+            name=name,
+            context=context_name,
+            instance=instance_name,
+            description=description,
+            current_version_id=version_id,
+            created_at=created_at,
+            updated_at=now,
+            updated_by=actor,
+            last_validated_at=existing_record.last_validated_at
+            if existing_record is not None
+            else "",
+        )
     )
-    binding = SecretBinding(
-        binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
-        secret_id=secret_id,
-        integration=integration,
-        binding_key=binding_key,
-        context=context_name,
-        instance=instance_name,
-        value_source="supplied",
-        created_at=created_at,
-        updated_at=now,
+    record_store.write_secret_binding(
+        SecretBinding(
+            binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
+            secret_id=secret_id,
+            integration=integration,
+            binding_key=binding_key,
+            context=context_name,
+            instance=instance_name,
+            created_at=created_at,
+            updated_at=now,
+        )
     )
-    event = SecretAuditEvent(
-        event_id=_audit_event_id(secret_id=secret_id, event_type=action),
-        secret_id=secret_id,
-        event_type="created" if action == "created" else "rotated",
-        recorded_at=now,
-        actor=actor,
-        detail=f"Launchplane {action} managed secret from {source_label}.",
-        metadata={"source": source_label, "binding_key": binding_key},
-    )
-    record_store.write_product_authority_bundle(
-        ProductAuthorityBundle(
-            secret_records=(record,),
-            secret_versions=(version,),
-            secret_bindings=(binding,),
-            secret_audit_events=(event,),
-            expected_secret_records=(existing_record,) if existing_record else (),
-            absent_secret_ids=() if existing_record else (secret_id,),
-            secret_binding_sets=(binding_expectation,),
+    record_store.write_secret_audit_event(
+        SecretAuditEvent(
+            event_id=_audit_event_id(secret_id=secret_id, event_type=action),
+            secret_id=secret_id,
+            event_type="created" if action == "created" else "rotated",
+            recorded_at=now,
+            actor=actor,
+            detail=f"Launchplane {action} managed secret from {source_label}.",
+            metadata={"source": source_label, "binding_key": binding_key},
         )
     )
     return {"status": "ok", "secret_id": secret_id, "action": action, "version_id": version_id}
@@ -906,48 +870,37 @@ def relabel_secret_binding(
         raise click.ClickException(f"Secret binding {normalized_binding_id!r} is not configured.")
 
     now = utc_now_timestamp()
-    replacement = existing_binding.model_copy(
-        update={
-            "binding_id": desired_binding_id,
-            "binding_key": normalized_binding_key,
-            "status": "configured",
-            "created_at": target_binding.created_at if target_binding is not None else now,
-            "updated_at": now,
-        }
+    record_store.write_secret_binding(
+        existing_binding.model_copy(update={"status": "disabled", "updated_at": now})
     )
-    event = SecretAuditEvent(
-        event_id=_audit_event_id(secret_id=existing_binding.secret_id, event_type="relabelled"),
-        secret_id=existing_binding.secret_id,
-        event_type="relabelled",
-        recorded_at=now,
-        actor=actor,
-        detail=f"Launchplane relabelled managed secret binding from {source_label}.",
-        metadata={
-            "source": source_label,
-            "old_binding_id": existing_binding.binding_id,
-            "old_binding_key": existing_binding.binding_key,
-            "new_binding_id": desired_binding_id,
-            "new_binding_key": normalized_binding_key,
-        },
+    record_store.write_secret_binding(
+        SecretBinding(
+            binding_id=desired_binding_id,
+            secret_id=existing_binding.secret_id,
+            integration=existing_binding.integration,
+            binding_key=normalized_binding_key,
+            context=existing_binding.context,
+            instance=existing_binding.instance,
+            status="configured",
+            created_at=target_binding.created_at if target_binding is not None else now,
+            updated_at=now,
+        )
     )
-    record_store.write_product_authority_bundle(
-        ProductAuthorityBundle(
-            expected_secret_records=(record_store.read_secret_record(existing_binding.secret_id),),
-            secret_bindings=(
-                existing_binding.model_copy(update={"status": "disabled", "updated_at": now}),
-                replacement,
-            ),
-            secret_audit_events=(event,),
-            secret_binding_sets=(
-                SecretBindingSetExpectation(
-                    secret_id=existing_binding.secret_id,
-                    bindings=tuple(
-                        binding
-                        for binding in bindings
-                        if binding.secret_id == existing_binding.secret_id
-                    ),
-                ),
-            ),
+    record_store.write_secret_audit_event(
+        SecretAuditEvent(
+            event_id=_audit_event_id(secret_id=existing_binding.secret_id, event_type="relabelled"),
+            secret_id=existing_binding.secret_id,
+            event_type="relabelled",
+            recorded_at=now,
+            actor=actor,
+            detail=f"Launchplane relabelled managed secret binding from {source_label}.",
+            metadata={
+                "source": source_label,
+                "old_binding_id": existing_binding.binding_id,
+                "old_binding_key": existing_binding.binding_key,
+                "new_binding_id": desired_binding_id,
+                "new_binding_key": normalized_binding_key,
+            },
         )
     )
     return {
@@ -1232,6 +1185,7 @@ def reencrypt_secrets(
             created_by=actor,
             key_id=new_key_id,
             ciphertext=ciphertext,
+            value_origin=current_version.value_origin,
         )
         updated_record = record.model_copy(
             update={"current_version_id": version_id, "updated_at": now, "updated_by": actor}

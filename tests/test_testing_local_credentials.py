@@ -470,6 +470,96 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertNotIn(key, report.json()["lanes"][0]["local_keys"])
 
+    async def test_generated_alias_cannot_disclose_a_shared_value_record(self) -> None:
+        self.external_fixture()
+        self.profile.expected_config.managed_secret_bindings += (
+            ProductSecretConfigRequirement(
+                binding_key="LOCAL_ACCESS", testing_local_credential=True
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings(instance_name="testing")
+            if row.binding_key == "BOT_ACCESS"
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "testing",
+                "secrets": [
+                    {
+                        "binding_key": "LOCAL_ACCESS",
+                        "name": record.name,
+                        "value": "synthetic-external-token",
+                        "secret_class": "testing",
+                    }
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": self.profile.product,
+                "instance": "testing",
+                "secrets": [
+                    {
+                        "binding_key": "LOCAL_ACCESS",
+                        "name": record.name,
+                        "generate": "testing_local",
+                        "secret_class": "testing",
+                    }
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        from datetime import datetime, timedelta
+
+        current = self.store.read_secret_record(record.secret_id)
+        later = (
+            datetime.fromisoformat(current.updated_at.replace("Z", "+00:00")) + timedelta(seconds=1)
+        ).isoformat()
+        with patch.object(secrets, "utc_now_timestamp", return_value=later):
+            secrets.relabel_secret_binding(
+                record_store=self.store,
+                binding_id=binding.binding_id,
+                binding_key="BOT_ACCESS_RENAMED",
+            )
+        self.profile.expected_config.managed_secret_bindings = tuple(
+            row.model_copy(update={"binding_key": "BOT_ACCESS_RENAMED"})
+            if row.binding_key == "BOT_ACCESS"
+            else row
+            for row in self.profile.expected_config.managed_secret_bindings
+        )
+        self.store.write_product_profile_record(self.profile)
+        from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
+
+        self.assertIn(
+            "BOT_ACCESS_RENAMED",
+            site_delivered_secret_bindings_from_store(
+                record_store=self.store, context_name=self.profile.product, instance_name="testing"
+            ),
+        )
+        for inventory in (False, True):
+            with (
+                self.subTest(inventory=inventory),
+                patch("control_plane.discord_external_resources.request_public_http") as provider,
+            ):
+                report = await self.audit(inventory=inventory, external=True)
+            self.assertFalse(provider.called)
+            self.assertEqual(
+                report.json()["external_resources"]["failure_code"], "configuration_unavailable"
+            )
+
     async def test_external_observation_requires_known_non_generated_value_origin(self) -> None:
         self.external_fixture()
         binding = next(
@@ -477,17 +567,26 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             for row in self.store.list_secret_bindings(instance_name="testing")
             if row.binding_key == "BOT_ACCESS"
         )
+        record = self.store.read_secret_record(binding.secret_id)
+        template = self.store.read_secret_version(record.current_version_id)
         for method, origin, eligible in (
-            (None, None, False),
-            ("copy", None, False),
-            ("copy", "generated", False),
+            ("supplied", None, False),
+            ("supplied", "generated", False),
+            (None, "supplied", True),
+            ("generated", "provider", True),
             ("copy", "supplied", True),
-            ("copy", "provider", True),
-            ("provider", None, True),
         ):
-            self.store.write_secret_binding(
-                binding.model_copy(update={"value_source": method, "copied_value_source": origin})
+            version = template.model_copy(
+                update={
+                    "version_id": secrets._version_id(secret_id=record.secret_id),
+                    "value_origin": origin,
+                }
             )
+            self.store.write_secret_version(version)
+            self.store.write_secret_record(
+                record.model_copy(update={"current_version_id": version.version_id})
+            )
+            self.store.write_secret_binding(binding.model_copy(update={"value_source": method}))
             for inventory in (False, True):
                 with (
                     self.subTest(method=method, origin=origin, inventory=inventory),

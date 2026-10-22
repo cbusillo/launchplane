@@ -18,12 +18,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
-    SecretCopySourceConflictError,
 )
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
-    plan_product_onboarding_authority_bundle,
 )
 from tests.support.workflows import load_workflow
 
@@ -1230,48 +1228,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(len(secret_bindings), 1)
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "configured")
-
-    def test_configured_onboarding_preserves_copy_origin_and_refuses_concurrent_changes(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary:
-            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(temporary) / "db"))
-            self.addCleanup(store.close)
-            store.ensure_schema()
-            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
-            result = apply_product_onboarding_manifest(record_store=store, manifest=manifest)
-            existing = result.secret_bindings[0].model_copy(
-                update={
-                    "status": "configured",
-                    "value_source": "copy",
-                    "copied_value_source": "generated",
-                }
-            )
-            store.write_secret_binding(existing)
-            configured = manifest.model_copy(
-                update={
-                    "secret_bindings": tuple(
-                        row.model_copy(update={"status": "configured"})
-                        for row in manifest.secret_bindings
-                    )
-                }
-            )
-            apply_product_onboarding_manifest(record_store=store, manifest=configured)
-            preserved = next(
-                row
-                for row in store.list_secret_bindings(limit=None)
-                if row.binding_id == existing.binding_id
-            )
-            self.assertEqual(preserved.value_source, "copy")
-            self.assertEqual(preserved.copied_value_source, "generated")
-            _, bundle = plan_product_onboarding_authority_bundle(
-                record_store=store, manifest=configured
-            )
-            changed = preserved.model_copy(update={"copied_value_source": "supplied"})
-            store.write_secret_binding(changed)
-            with self.assertRaises(SecretCopySourceConflictError):
-                store.write_product_authority_bundle(bundle)
-            self.assertIn(changed, store.list_secret_bindings(limit=None))
 
     def test_apply_product_onboarding_manifest_retires_placeholder_when_context_binding_satisfies_instance(
         self,

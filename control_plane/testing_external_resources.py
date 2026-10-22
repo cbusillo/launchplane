@@ -127,7 +127,7 @@ def capture_external_resource_inputs(
                 if (
                     record.status != "configured"
                     or binding.status != "configured"
-                    or binding.value_origin not in {"supplied", "provider"}
+                    or version.value_origin not in {"supplied", "provider"}
                     or record.integration != "runtime_environment"
                     or binding.integration != record.integration
                     or record.scope not in {"context", "context_instance"}

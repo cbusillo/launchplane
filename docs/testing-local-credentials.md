@@ -148,10 +148,12 @@ that option, the existing response and outbound behavior stay unchanged. With th
 option, only purpose-declared, delivered bindings are used for external reads.
 An existing service-generated value, a copy of one, or an unknown value origin
 is never used as an external credential. Reclassification does not change origin.
-Managed copies retain service-written `copied_value_source`; legitimate supplied
-and provider-origin copies remain eligible. Historical copies without that proof
-remain unavailable until a provider credential is supplied through the existing
-managed value-writing path. No metadata declaration certifies an unknown value.
+Each immutable managed version retains its service-written `value_origin`;
+copies and re-encryption preserve the exact source version's origin. Legitimate
+supplied and provider-origin copies remain eligible. Historical versions without
+that proof remain unavailable until a provider credential is supplied through
+product-config's existing private value-writing path. No metadata declaration
+certifies an unknown value. All binding names for one value use the same origin.
 All participating products and production/testing lanes must first be authorized.
 The service alone decrypts the captured managed version and sends it to Discord's
 fixed HTTPS API using bot authentication. Responses contain identifiers and bounded

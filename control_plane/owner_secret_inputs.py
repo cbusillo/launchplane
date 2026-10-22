@@ -103,6 +103,7 @@ def store_owner_secret_submission(
         created_by=actor,
         key_id=key_id,
         ciphertext=ciphertext,
+        value_origin="supplied",
     )
     record = SecretRecord(
         secret_id=secret_id,
