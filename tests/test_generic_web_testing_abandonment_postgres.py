@@ -1,4 +1,5 @@
 from tests import test_generic_web_testing_abandonment as abandonment
+from tests import test_testing_abandonment_authority as native_authority
 from tests.test_postgres_integration import _head_postgres_database
 from tests.support.auth import local_operator_policy
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -8,6 +9,12 @@ from unittest.mock import patch
 from typing import Any
 from control_plane import generic_web_testing_abandonment as qualification
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+
+
+class NativeTestingAbandonmentPostgresTests(native_authority.TestingAbandonmentAuthorityTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
 
 
 class TestingAbandonmentPostgresTests(abandonment.GenericWebTestingAbandonmentTests):

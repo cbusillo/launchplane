@@ -154,6 +154,7 @@ class _GenericWebDeployRecoveryInspection:
     adapter: GenericWebDeployProviderMutationAdapter | None = None
     provider_inspection: Any | None = None
     standing_testing_permission: bool = False
+    event_abandonment_only: bool = False
     abandonment_evidence: dict[str, Any] | None = None
 
     @property
@@ -599,6 +600,9 @@ async def _inspect_generic_web_deploy_recovery(
 ) -> _GenericWebDeployRecoveryInspection:
     original_payload: dict[str, object] | None = None
     expected_reservation: LaunchplaneIdempotencyRecord | None = None
+    event_reference_apply = isinstance(
+        recovery_request, GenericWebDeployRecoveryReferenceApplyRequest
+    )
     if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
         is_apply = isinstance(recovery_request, GenericWebDeployRecoveryReferenceApplyRequest)
         resolved, idempotency_key, expected_reservation = _resolve_reference_request(
@@ -608,6 +612,8 @@ async def _inspect_generic_web_deploy_recovery(
             dependencies=dependencies,
             trace_id=trace_id,
             apply=is_apply,
+            inspect_director_testing_abandonment=event_reference_apply
+            and allow_own_testing_original,
         )
         recovery_request = (
             GenericWebDeployRecoveryApplyRequest.model_validate(resolved)
@@ -891,13 +897,15 @@ async def _inspect_generic_web_deploy_recovery(
             else:
                 legacy_provider_effect_started_at = reservation.provider_effect_started_at
 
-    own_testing_original = (
+    testing_original_matches = (
         director_testing
-        and reservation.scope == idempotency_scope(identity)
         and operation_product == profile.product
         and operation_context == lane.context
         and operation_instance == lane.instance
         and not legacy_snapshot_without_product
+    )
+    own_testing_original = testing_original_matches and reservation.scope == idempotency_scope(
+        identity
     )
     stored_authorized = _recovery_authorization_allows(
         dependencies=dependencies,
@@ -907,7 +915,18 @@ async def _inspect_generic_web_deploy_recovery(
         context=operation_context,
         instance=operation_instance,
     )
-    if not own_testing_original and not (requested_authorized and stored_authorized):
+    event_abandonment_only = False
+    if (
+        testing_original_matches
+        and event_reference_apply
+        and not (requested_authorized and stored_authorized)
+    ):
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        event_abandonment_only = reservation.scope == reconcile_reservation_scope(profile.product)
+    if not (
+        own_testing_original or event_abandonment_only or requested_authorized and stored_authorized
+    ):
         raise dependencies.http_error(
             status_code=403,
             trace_id=trace_id,
@@ -1102,6 +1121,7 @@ async def _inspect_generic_web_deploy_recovery(
         provider_inspection=provider_inspection,
         standing_testing_permission=own_testing_original
         and not (requested_authorized and stored_authorized),
+        event_abandonment_only=event_abandonment_only,
         abandonment_evidence=abandonment_evidence,
     )
 
@@ -1216,6 +1236,20 @@ def build_generic_web_deploy_recovery_apply_handler(
         )
         assert isinstance(inspection.request, GenericWebDeployRecoveryApplyRequest)
         recovery_request = inspection.request
+        if inspection.event_abandonment_only:
+            metadata = _stored_recovery_metadata(inspection.reservation)
+            if not (
+                inspection.proposed_action == "abandon_testing_original"
+                or inspection.reservation.state == "completed"
+                and metadata is not None
+                and metadata[1] == "abandon_testing_original"
+            ):
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Director-agent event recovery is limited to qualified testing abandonment.",
+                )
         if not isinstance(record_store, PostgresRecordStore):
             raise dependencies.http_error(
                 status_code=503,
@@ -1444,6 +1478,7 @@ def _resolve_reference_request(
     dependencies: GenericWebDeployRecoveryDependencies,
     trace_id: str,
     apply: bool,
+    inspect_director_testing_abandonment: bool = False,
 ) -> tuple[dict[str, Any], str, LaunchplaneIdempotencyRecord]:
     coordinates = authorized_event_deploy_coordinates(
         product=recovery_request.product,
@@ -1453,6 +1488,7 @@ def _resolve_reference_request(
         trace_id=trace_id,
         apply=apply,
         recovery_reference=recovery_request.recovery_reference,
+        inspect_director_testing_abandonment=inspect_director_testing_abandonment,
     )
     if coordinates.reference != recovery_request.recovery_reference:
         raise dependencies.http_error(
@@ -1481,6 +1517,7 @@ def authorized_event_deploy_coordinates(
     trace_id: str,
     apply: bool,
     recovery_reference: str = "",
+    inspect_director_testing_abandonment: bool = False,
 ) -> EventDeployRecoveryCoordinates:
     admin = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
         isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
@@ -1503,7 +1540,12 @@ def authorized_event_deploy_coordinates(
         _, lane = resolve_generic_web_deploy_lane(
             record_store=record_store, product=product, instance="testing"
         )
-        if not _recovery_authorization_allows(
+        native_inspection = (
+            apply
+            and inspect_director_testing_abandonment
+            and director_agent_can_deploy_testing(identity, lane)
+        )
+        if not native_inspection and not _recovery_authorization_allows(
             dependencies=dependencies,
             identity=identity,
             actions=("generic_web_deploy.execute",) if apply else ("product_environment.read",),
