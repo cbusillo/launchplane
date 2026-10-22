@@ -36,6 +36,7 @@ from control_plane.merge_train_branch_refresh import require_merge_train_client_
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
+    MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubPolicyUnavailableError,
     MergeTrainGitHubTransport,
@@ -543,7 +544,6 @@ class TenantAdmissionControllerGitHubClient:
         *,
         request: TenantAdmissionControllerRunOnceEnvelope,
     ) -> str:
-        self.require_current_client_review(candidate=request.candidate)
         return self.merge_client.merge_pull_request(
             repository=request.candidate.repository,
             pull_request_number=request.candidate.pull_request_number,
@@ -893,10 +893,21 @@ def _execute_tenant_admission_merge(
         step_payload=checkpoint.model_dump(mode="json"),
     )
     try:
+        client.require_current_client_review(candidate=request.candidate)
+    except MergeTrainGitHubStaleHeadError as error:
+        lease.release()
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
+    except Exception:
+        lease.release()
+        raise
+    try:
         merge_commit_sha = client.merge_pull_request(request=request)
     except MergeTrainGitHubStaleHeadError as error:
         lease.release()
         raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
+    except MergeTrainGitHubMergeRejectedError:
+        lease.release()
+        raise
     checkpoint = checkpoint.model_copy(update={"merge_commit_sha": merge_commit_sha})
     lease.checkpoint(
         active_phase="confirm_merge",

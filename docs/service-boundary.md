@@ -3852,10 +3852,11 @@ For `mutate=true`, Launchplane uses the existing repository/base controller
 lease only as a shared mutation and crash-reconciliation fence; it does not
 enqueue the PR or borrow merge-train scheduler, label, batch, or stack policy.
 After the first evaluation it re-fetches PR/base facts, recomputes admission,
-and re-reads technical checks and Client review before checkpointing. The merge
-call re-reads the Client gate once more before issuing the GitHub merge request
-with the exact expected head SHA. A newly saved veto refuses that merge and
-releases the lease without a provider mutation. Provider uncertainty
+and re-reads technical checks and Client review before checkpointing. The
+controller re-reads the Client gate once more before issuing the GitHub merge
+request with the exact expected head SHA. A newly saved veto or a failed final
+read releases the lease without a provider mutation. A definite merge refusal
+also releases the fence; only an uncertain merge outcome retains it. Provider uncertainty
 leaves the exact request, admission decision, technical-check digest, and merge
 phase in durable controller state. A retry adopts success only when GitHub shows
 that exact head merged into the requested base and the target branch contains

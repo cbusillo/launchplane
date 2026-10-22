@@ -6,13 +6,24 @@ from typing import cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
+    MergeTrainControllerStateRecord,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.github_app_configuration import ADVISORY_GITHUB_APP_ID_ENV_KEY
-from control_plane.merge_train_controller_run_once import MergeTrainControllerLeaseContext
-from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_controller_run_once import (
+    MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+    MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS,
+    MergeTrainControllerLeaseContext,
+)
+from control_plane.merge_train_github import (
+    MergeTrainGitHubError,
+    MergeTrainGitHubMergeRejectedError,
+)
+from control_plane.product_review_status import OWNER_REVIEW_STATUS_CONTEXT
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
     TenantAdmissionControllerError,
@@ -34,12 +45,15 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
         payload = product_profile_payload(candidate.product)
         payload.update(
             repository=candidate.repository,
-            owner={"github_login": "client", "github_id": "901"},
+            owner={
+                "github_login": "client",
+                "github_id": "901",
+                "review_label": "client-preview-for-test",
+            },
             release_on_acceptance="held",
         )
-        self.store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(payload)
-        )
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        self.store.write_product_profile_record(self.profile)
         self.store.write_tenant_repository_classification_record(_classification())
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
@@ -118,7 +132,7 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                 transport = _ClientReviewTransport(
                     body="## Client test notes\nNothing for the Client to test: CI only.",
                     review_state="missing",
-                    review_label=review_label,
+                    review_label=self.profile.owner.review_label if review_label else "",
                 )
                 self.assertEqual(self._run(transport).outcome, expected)
                 self.assertEqual(transport.merge_called, expected == "merged")
@@ -179,12 +193,75 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
                 )
                 with self.assertRaises(MergeTrainGitHubError):
                     self._run(_ClientReviewTransport(uncertain_merge=True))
+                state = self.store.list_merge_train_controller_state_records(
+                    repository=_candidate().repository, base_branch="main"
+                )[0]
+                self.assertEqual(state.status, "reconcile_required")
+                with self.assertRaises(MergeTrainControllerAdoptionRejectedError):
+                    self._acquire_train_lease()
                 self.store = FilesystemRecordStore(state_dir=self.store.state_dir)
                 self.store.write_product_review_decision_record(_decision(record_id="latest"))
                 resumed = _ClientReviewTransport(initially_merged=merged)
                 result = self._run(resumed)
                 self.assertEqual(result.outcome, expected)
                 self.assertFalse(resumed.merge_called)
+
+    def test_failed_final_review_read_does_not_retain_an_uncertain_merge_fence(self) -> None:
+        for endpoint in ("pulls", "check-runs"):
+            for failure in (
+                MergeTrainGitHubError("provider unavailable", status_code=503),
+                TimeoutError("read timed out"),
+            ):
+                with self.subTest(endpoint=endpoint, failure=type(failure).__name__):
+                    transport = _ClientReviewTransport()
+                    original_request = transport.request
+
+                    def request(
+                        *, method: str, path: str, body: dict[str, object] | None = None
+                    ) -> object:
+                        state = self.store.list_merge_train_controller_state_records(
+                            repository=_candidate().repository, base_branch="main"
+                        )[0]
+                        if (
+                            state.active_phase == "merge_pull_request"
+                            and method == "GET"
+                            and f"/{endpoint}" in path
+                        ):
+                            raise failure
+                        return original_request(method=method, path=path, body=body)
+
+                    with patch.object(transport, "request", side_effect=request):
+                        with self.assertRaises(type(failure)):
+                            self._run(transport)
+                    self.assertFalse(transport.merge_called)
+                    state = self.store.list_merge_train_controller_state_records(
+                        repository=_candidate().repository, base_branch="main"
+                    )[0]
+                    lease = self._acquire_train_lease()
+                    lease.release()
+                    self.assertEqual(state.status, "idle")
+
+    def test_definite_merge_refusal_releases_the_shared_controller_fence(self) -> None:
+        transport = _ClientReviewTransport()
+        original_request = transport.request
+
+        def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
+            if method == "PUT" and path.endswith("/merge"):
+                transport.merge_called = True
+                raise MergeTrainGitHubError("merge refused", status_code=405)
+            return original_request(method=method, path=path, body=body)
+
+        with patch.object(transport, "request", side_effect=request):
+            with self.assertRaises(MergeTrainGitHubMergeRejectedError):
+                self._run(transport)
+        self.assertTrue(transport.merge_called)
+        self.assertFalse(transport.merged)
+        state = self.store.list_merge_train_controller_state_records(
+            repository=_candidate().repository, base_branch="main"
+        )[0]
+        lease = self._acquire_train_lease()
+        lease.release()
+        self.assertEqual(state.status, "idle")
 
     def test_missing_saved_decision_reader_fails_closed(self) -> None:
         with patch.object(self.store, "list_product_review_decision_records", None):
@@ -225,6 +302,20 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
             transport_factory=lambda _token: transport,
         )
 
+    def _acquire_train_lease(self) -> MergeTrainControllerLeaseContext:
+        state = self.store.acquire_merge_train_controller_state_record(
+            repository=_candidate().repository,
+            base_branch="main",
+            policy_key="main-train-policy",
+            policy_sha256="a" * 64,
+            lease_owner="main-train-worker",
+            lease_seconds=300,
+            initial_active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            initial_active_phase="plan",
+            adoptable_active_actions=MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS,
+        )
+        return MergeTrainControllerLeaseContext(record=state, record_store=self.store)
+
 
 class _ClientReviewTransport(_TenantControllerTransport):
     def __init__(
@@ -237,7 +328,7 @@ class _ClientReviewTransport(_TenantControllerTransport):
         technical_state: str = "success",
         uncertain_merge: bool = False,
         initially_merged: bool = False,
-        review_label: bool = False,
+        review_label: str = "",
     ) -> None:
         super().__init__(
             technical_state=technical_state,
@@ -254,13 +345,13 @@ class _ClientReviewTransport(_TenantControllerTransport):
         result = super().request(method=method, path=path, body=body)
         if isinstance(result, dict) and method == "GET" and "/pulls/" in path:
             result.update(
-                body=self.body, labels=[{"name": "owner-review"}] if self.review_label else []
+                body=self.body, labels=[{"name": self.review_label}] if self.review_label else []
             )
         if isinstance(result, dict) and "check_runs" in result and self.review_state != "missing":
             checks = cast(list[dict[str, object]], result["check_runs"])
             checks.append(
                 {
-                    "name": "launchplane/owner-review",
+                    "name": OWNER_REVIEW_STATUS_CONTEXT,
                     "head_sha": self.review_head,
                     "app": {"id": self.review_app},
                     "status": "in_progress" if self.review_state == "pending" else "completed",
