@@ -2740,6 +2740,10 @@ rotated. It creates no credential that reaches a live system and grants nobody
 access. No workflow or alternate identity substitutes for a denied service call.
 The source and target copies use the same SQL boundary independently, with a
 sanitized source-version snapshot preserved before the target registry runs.
+Filestore working copies use `cp --reflink=auto` with full-copy fallback where
+reflinks are unsupported; PostgreSQL `CREATE DATABASE ... TEMPLATE` remains a
+full copy, recovery archives and their restoration are unchanged, and capacity
+budgets still cover full copies.
 
 The necessary new boundary is one additive rehearsal record, not another lane or
 release controller. Its compose is reserved under the new context in the existing
