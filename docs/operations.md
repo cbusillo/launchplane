@@ -2233,6 +2233,12 @@ absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
   replacement.
 - The current repo workflow for that posture is
   `.github/workflows/deploy-launchplane.yml`.
+- Its GHCR image and buildcache uploads authenticate with the workflow's own
+  `GITHUB_TOKEN` and existing `packages: write` permission. The package must give
+  this repository Write access under Manage Actions access. The publisher no
+  longer reads `GHCR_USERNAME` or `GHCR_TOKEN`; Chris removes obsolete stored
+  copies and revokes the PAT after checking other consumers. Provider-side
+  registry pulls use their existing separate credential.
 - Launchplane image builds use Docker Hub public mirror-qualified base images
   and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
   fail closed on Docker Hub anonymous pull limits before Launchplane code is

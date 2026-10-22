@@ -75,6 +75,46 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             )
             return cast(dict[str, object], json.loads(Path(values["payload_file"]).read_text()))
 
+    def test_registry_login_uses_workflow_token_and_propagates_failure(self) -> None:
+        actor = "workflow-actor"
+        workflow_token = "workflow-test-token"
+        for token, docker_status in ((workflow_token, 0), ("", 0), (workflow_token, 1)):
+            with self.subTest(token_present=bool(token), docker_status=docker_status):
+                with TemporaryDirectory() as directory_name:
+                    directory = Path(directory_name)
+                    docker = directory / "docker"
+                    docker.write_text(
+                        "#!/usr/bin/env bash\n"
+                        'printf "%s\\n" "$@" > "$RUNNER_TEMP/docker-args"\n'
+                        'cat > "$RUNNER_TEMP/docker-password"\n'
+                        'exit "$DOCKER_STATUS"\n'
+                    )
+                    docker.chmod(0o700)
+                    result = self._run_step(
+                        "deploy",
+                        "Log in to GHCR",
+                        {
+                            "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                            "GITHUB_ACTOR": actor,
+                            "GHCR_USERNAME": "obsolete-user",
+                            "GHCR_TOKEN": "obsolete-token",
+                            "DOCKER_STATUS": str(docker_status),
+                        },
+                        directory,
+                        expression_values={"${{ secrets.GITHUB_TOKEN }}": token},
+                    )
+                    if not token:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse((directory / "docker-args").exists())
+                        continue
+                    self.assertEqual(result.returncode, docker_status, result.stderr)
+                    self.assertEqual(
+                        (directory / "docker-args").read_text().splitlines(),
+                        ["login", "ghcr.io", "--username", actor, "--password-stdin"],
+                    )
+                    self.assertEqual((directory / "docker-password").read_text(), token)
+                    self.assertNotIn(token, result.stdout + result.stderr)
+
     def test_rollback_reuses_prepared_budget_without_resolving_dependencies(self) -> None:
         with TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
