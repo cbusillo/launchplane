@@ -6,11 +6,11 @@ VOLUME_BACKING_INSPECTION_LIBRARY = (
     readback_predicate_library()
     + r"""
 class CopyReadbackRefused(RuntimeError):
-    def __init__(self, predicate):
+    def __init__(self, predicate: str) -> None:
         self.predicate = predicate
         super().__init__(predicate)
 
-def copy_readback_failure_frame(error, predicate=ReadbackPredicate.NATIVE_READ):
+def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, str]:
     return {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
         'kind': 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
 

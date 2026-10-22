@@ -3948,8 +3948,11 @@ else:
         self.host["one_inspection"] = lambda name: __import__("json").loads(
             network("inspect", name)
         )[0]
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.PRIVATE_STATE)
 
     def test_host_bind_and_published_ports_refuse_before_data_work(self) -> None:
         web = self.fixture.containers["web"]

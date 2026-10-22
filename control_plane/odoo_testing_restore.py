@@ -901,9 +901,10 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
 
 
 def restore_main():
-    global inspection_predicate
+    global inspection_predicate, inspection_only
     inspection_predicate = ReadbackPredicate.INPUT
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
+    inspection_only = bool(spec.get('inspection_only'))
     gen = spec["generation"]
     namespace = gen["namespace"]
     project = spec["compose_project"]
@@ -950,6 +951,7 @@ def restore_main():
                 raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
             if containers['web'][1]['Image'] != containers['script-runner'][1]['Image']:
                 raise CopyReadbackRefused(ReadbackPredicate.IMAGE)
+            inspection_predicate = ReadbackPredicate.IMAGE_DIGEST
             image=json.loads(docker('image','inspect',containers['web'][1]['Image']))[0]
             if spec['image_reference'] not in image.get('RepoDigests',[]):
                 raise CopyReadbackRefused(ReadbackPredicate.IMAGE_DIGEST)
@@ -1033,6 +1035,7 @@ def restore_main():
         capture=spec.get('native_capture')
         artifacts={}
         if capture is not None and present=='0':
+            inspection_predicate = ReadbackPredicate.FILES_READ
             files=json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
             for item in files['chunks']:
                 print(prefix+json.dumps({'type':'chunk',**item}),flush=True)
@@ -1158,7 +1161,9 @@ def restore_main():
 
 
 def main():
+    global inspection_only
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
+    inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
     if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
         raise RuntimeError("Invalid testing host lock identity")
@@ -1179,6 +1184,7 @@ def main():
 __LP_STORAGE_MAINTENANCE_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
+inspection_only = False
 try:
     main()
 except TestingProviderDenied:
@@ -1190,7 +1196,8 @@ except TestingProviderDenied:
     sys.exit(1)
 except Exception as error:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps(copy_readback_failure_frame(error, inspection_predicate)),flush=True)
+        frame = copy_readback_failure_frame(error, inspection_predicate) if inspection_only or isinstance(error, CopyReadbackRefused) else {'type':'failed'}
+        print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
     print("odoo_restore_completed=false")
     print("testing_copy_sanitized=false")

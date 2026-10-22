@@ -101,19 +101,77 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
             ("workflow_active", ReadbackPredicate.EXECUTION_LOCK, "refused"),
             ("runner_exec_active", ReadbackPredicate.RUNNER_IDLE, "refused"),
             ("inventory_unverified", ReadbackPredicate.RESOURCES, "unavailable"),
+            ("inventory_changed", ReadbackPredicate.RESOURCES, "unavailable"),
+            ("future_read_unavailable", ReadbackPredicate.RESOURCES, "unavailable"),
         ):
             with self.subTest(reason=reason):
                 raw = {
                     "connection_isolation_resources_ok": "false",
                     "integration_readback_refused": "testing_resources/" + reason,
-                    "readback_failed_predicate": ReadbackPredicate.RESOURCES,
-                    "readback_failure_kind": "unavailable",
+                    "readback_failed_predicate": predicate,
+                    "readback_failure_kind": kind,
                 }
                 with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised:
                     self.run_isolation(raw)
                 evidence = raised.exception.evidence
                 self.assertEqual(evidence["readback_failed_predicate"], predicate)
                 self.assertEqual(evidence["readback_failure_kind"], kind)
+
+    def test_legacy_inventory_reason_cannot_invent_an_observed_negative(self) -> None:
+        from control_plane.copy_readback_diagnostics import readback_failure_evidence
+
+        for reason in ("inventory_changed", "future_read_unavailable"):
+            evidence = readback_failure_evidence(
+                {
+                    "connection_isolation_resources_ok": "false",
+                    "integration_readback_refused": "testing_resources/" + reason,
+                }
+            )
+            self.assertEqual(evidence["readback_failure_kind"], "unavailable")
+
+    def test_qualifier_refusal_survives_outer_shell_trap(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            docker = root / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                "  *com.docker.compose.service=script-runner*) echo runner ;;\n"
+                "  *com.docker.compose.service=web*) echo web ;;\n"
+                "  *ExecIDs*) echo null ;;\n"
+                "  *State.Running*) echo true ;;\n"
+                "  'ps -aq') echo runner ;;\n"
+                "  'volume ls -q'|'network ls -q') exit 0 ;;\n"
+                f"  exec*) printf 'readback_failed_predicate={ReadbackPredicate.REVIEW_BINDING}\\nreadback_failure_kind=refused\\n' >&2; exit 1 ;;\n"
+                "  inspect*) echo '{}' ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n"
+            )
+            docker.chmod(0o700)
+            flock = root / "flock"
+            flock.write_text("#!/usr/bin/env bash\nexit 0\n")
+            flock.chmod(0o700)
+            with patch.object(post_deploy, "ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY", root):
+                script = isolation_script(
+                    compose_app_name="example",
+                    database_name="copy",
+                    instance="testing",
+                    mode="dry-run",
+                    readback_spec="fixture",
+                )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]},
+                check=False,
+            )
+            markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                {"logs": result.stdout + result.stderr}
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(markers["readback_failed_predicate"], ReadbackPredicate.REVIEW_BINDING)
+            self.assertEqual(markers["readback_failure_kind"], "refused")
 
     def test_stopped_runner_refuses_before_exec_with_safe_evidence(self) -> None:
         with TemporaryDirectory() as directory:
@@ -203,10 +261,17 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
             helper = root / "launchplane-write-action.py"
             helper.touch()
             evidence = root / "review.json"
-            for status in ("fail", "pass", "http-error", "transport-error"):
+            for status in (
+                "fail",
+                "pass",
+                "http-error",
+                "http-workflow",
+                "http-review",
+                "transport-error",
+            ):
 
                 def response(**_: object) -> dict[str, object]:
-                    if status == "http-error":
+                    if status.startswith("http-"):
                         raise urllib.error.HTTPError(
                             "https://service.invalid", 504, "private-value", Message(), None
                         )
@@ -252,7 +317,13 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                             "request_launchplane": response,
                             "summarize_http_error": lambda **_: {
                                 "status": "unavailable",
-                                "summary": {"http_status": 504},
+                                "summary": {
+                                    "http_status": 409 if status != "http-error" else 504,
+                                    "error_code": {
+                                        "http-workflow": "connection_isolation_workflow_active",
+                                        "http-review": "connection_isolation_plan_changed",
+                                    }.get(status, "provider_unavailable"),
+                                },
                             },
                             "LaunchplaneSafetyError": ValueError,
                             "public_trace_id": lambda value: value,
@@ -263,5 +334,13 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                     self.assertEqual(main(), 1)
                     result = json.loads(output.getvalue())
                     self.assertTrue(result.get("evidence"))
+                    if status in {"http-workflow", "http-review"}:
+                        self.assertEqual(result["evidence"]["readback_failure_kind"], "refused")
+                        self.assertEqual(
+                            result["evidence"]["readback_failed_predicate"],
+                            ReadbackPredicate.EXECUTION_LOCK
+                            if status == "http-workflow"
+                            else ReadbackPredicate.REVIEW_BINDING,
+                        )
                     self.assertNotIn("private-value", output.getvalue())
                     self.assertFalse(evidence.exists())

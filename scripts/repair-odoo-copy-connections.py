@@ -158,10 +158,17 @@ def main() -> int:
             )
         except transport["LaunchplaneSafetyError"]:
             error_payload = {"status": "unverified", "mode": args.mode}
+        summary = error_payload.get("summary", {})
+        code = summary.get("error_code") if isinstance(summary, dict) else None
+        refused_predicate = {
+            "connection_isolation_workflow_active": ReadbackPredicate.EXECUTION_LOCK,
+            "connection_isolation_plan_changed": ReadbackPredicate.REVIEW_BINDING,
+        }.get(code)
         error_payload["evidence"] = readback_failure_evidence(
             {
-                "readback_failed_predicate": ReadbackPredicate.SERVICE_RESPONSE,
-                "readback_failure_kind": "unavailable",
+                "readback_failed_predicate": refused_predicate
+                or ReadbackPredicate.SERVICE_RESPONSE,
+                "readback_failure_kind": "refused" if refused_predicate else "unavailable",
             }
         )
         print(json.dumps(error_payload))

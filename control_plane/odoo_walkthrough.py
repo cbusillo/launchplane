@@ -96,8 +96,14 @@ class WalkthroughPrerequisite(StrEnum):
 class WalkthroughPrerequisiteError(ValueError):
     """Only a code-owned checkpoint may leave the private planning boundary."""
 
-    def __init__(self, code: WalkthroughPrerequisite | ReadbackPredicate) -> None:
+    def __init__(
+        self,
+        code: WalkthroughPrerequisite | ReadbackPredicate,
+        *,
+        native_failure: NativeProgramFailed | None = None,
+    ) -> None:
         self.code = code
+        self.diagnostic_code = native_failure.code if native_failure is not None else code.value
         super().__init__("The testing task prerequisite did not pass: " + code.value + ".")
 
 
@@ -130,7 +136,7 @@ def _prerequisite(code: WalkthroughPrerequisite) -> Iterator[None]:
     except WalkthroughPrerequisiteError:
         raise
     except NativeProgramFailed as error:
-        raise WalkthroughPrerequisiteError(error.predicate) from None
+        raise WalkthroughPrerequisiteError(error.predicate, native_failure=error) from None
     except Exception:
         # Provider, validation and secret-store failures can carry credentials
         # or private topology. Never serialize their type, text or traceback.

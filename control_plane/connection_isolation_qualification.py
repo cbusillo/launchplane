@@ -8,7 +8,7 @@ from control_plane.disposable_lanes import (
 )
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.lane_usage import lane_usage_protected
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_predicate_library
 
 
 def require_connection_isolation_lane(
@@ -70,6 +70,10 @@ import json
 from pathlib import PurePosixPath
 
 
+class ResourceQualificationRefused(ValueError):
+    pass
+
+
 def qualify_resources(snapshot, project, database, context, runtime_identity):
     containers = snapshot["containers"]
     owned = {}
@@ -79,12 +83,12 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
         service = item["service"]
         if service in {"web", "database", "script-runner"}:
             if service in owned:
-                raise ValueError("testing_resources/ambiguous_service")
+                raise ResourceQualificationRefused("testing_resources/ambiguous_service")
             owned[service] = item
         elif item["running"]:
-            raise ValueError("testing_resources/unknown_writer")
+            raise ResourceQualificationRefused("testing_resources/unknown_writer")
     if set(owned) != {"web", "database", "script-runner"}:
-        raise ValueError("testing_resources/missing_service")
+        raise ResourceQualificationRefused("testing_resources/missing_service")
     for service in ("web", "script-runner"):
         environment = owned[service]["environment"]
         if (environment.get("PLATFORM_INSTANCE") != "testing"
@@ -92,29 +96,29 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
             or environment.get("ODOO_DB_NAME") != database
             or environment.get("ODOO_DB_HOST") != "database"
             or environment.get("ODOO_DB_PORT", "5432") != "5432"):
-            raise ValueError("testing_resources/database_identity")
+            raise ResourceQualificationRefused("testing_resources/database_identity")
         if (not runtime_identity or json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null"))
             != json.loads(runtime_identity)):
-            raise ValueError("testing_resources/runtime_identity")
+            raise ResourceQualificationRefused("testing_resources/runtime_identity")
     if owned["web"]["image"] != owned["script-runner"]["image"]:
-        raise ValueError("testing_resources/image_identity")
+        raise ResourceQualificationRefused("testing_resources/image_identity")
     db = owned["database"]
     runner = owned["script-runner"]
     if not db["running"] or not runner["running"] or db["ports"]:
-        raise ValueError("testing_resources/database_endpoint")
+        raise ResourceQualificationRefused("testing_resources/database_endpoint")
     common = set(db["networks"]) & set(runner["networks"])
     networks = {item["id"]: item for item in snapshot["networks"]}
     if len(common) != 1 or set(db["networks"]) != common:
-        raise ValueError("testing_resources/database_network")
+        raise ResourceQualificationRefused("testing_resources/database_network")
     network_id = next(iter(common))
     network = networks[network_id]
     owned_ids = {item["id"] for item in owned.values()}
     if (network["project"] != project or not set(network["members"]) <= owned_ids
         or set(network["members"]) - {owned["web"]["id"]} != {db["id"], runner["id"]}):
-        raise ValueError("testing_resources/shared_network")
+        raise ResourceQualificationRefused("testing_resources/shared_network")
     address = str(ipaddress.IPv4Address(db["networks"][network_id]))
     if not address or address == "0.0.0.0":
-        raise ValueError("testing_resources/database_endpoint")
+        raise ResourceQualificationRefused("testing_resources/database_endpoint")
     names = {mount["Name"] for item in owned.values() for mount in item["mounts"]
              if mount["RW"] and mount["Type"] == "volume"}
     volumes = {item["name"]: item for item in snapshot["volumes"] if item["name"] in names}
@@ -124,18 +128,18 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
             if not mount["RW"]:
                 continue
             if mount["Type"] != "volume":
-                raise ValueError("testing_resources/unsupported_mount")
+                raise ResourceQualificationRefused("testing_resources/unsupported_mount")
             volume = volumes[mount["Name"]]
             if (volume["driver"] != "local" or volume["has_options"] is not False
                 or volume["mountpoint"] != mount["Source"]
                 or not PurePosixPath(mount["Source"]).is_absolute()):
-                raise ValueError("testing_resources/unsupported_volume")
+                raise ResourceQualificationRefused("testing_resources/unsupported_volume")
             writable.append(mount)
     if not any(
         mount["RW"] and mount["Destination"] == DATABASE_DATA_DIRECTORY
         for mount in db["mounts"]
     ):
-        raise ValueError("testing_resources/database_storage")
+        raise ResourceQualificationRefused("testing_resources/database_storage")
     for other in containers:
         if other["id"] in owned_ids:
             continue
@@ -146,7 +150,7 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
             for own in writable:
                 own_path = PurePosixPath(own["Source"])
                 if path == own_path or path in own_path.parents or own_path in path.parents:
-                    raise ValueError("testing_resources/shared_storage")
+                    raise ResourceQualificationRefused("testing_resources/shared_storage")
     # Health alone and unrelated containers do not alter the reviewed resources;
     # changed network membership still invalidates their physical binding.
     binding = {
@@ -167,7 +171,8 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
 )
 
 RESOURCE_QUALIFICATION_PROGRAM = (
-    RESOURCE_QUALIFICATION_LIBRARY
+    readback_predicate_library()
+    + RESOURCE_QUALIFICATION_LIBRARY
     + r"""
 import os
 import sys
@@ -202,12 +207,16 @@ try:
         item["environment"] = environments.get(item["id"], {})
     digest, address = qualify_resources(snapshot, project, database, context, runtime_identity)
     if reviewed and digest != reviewed:
-        raise ValueError("testing_resources/review_binding")
+        raise ResourceQualificationRefused("testing_resources/review_binding")
     print(digest + " " + address)
 except (KeyError, TypeError, ValueError) as error:
     name = str(error)
     if not name.startswith("testing_resources/") or any(character not in "abcdefghijklmnopqrstuvwxyz_/" for character in name):
         name = "testing_resources/inventory_unverified"
+    predicate = ReadbackPredicate.REVIEW_BINDING if name == "testing_resources/review_binding" else ReadbackPredicate.RESOURCES
+    kind = "refused" if isinstance(error, ResourceQualificationRefused) else "unavailable"
+    print("readback_failed_predicate=" + predicate, file=sys.stderr)
+    print("readback_failure_kind=" + kind, file=sys.stderr)
     print("connection_isolation_resources_ok=false", file=sys.stderr)
     print("integration_readback_refused=" + name, file=sys.stderr)
     raise SystemExit(1)
@@ -221,6 +230,7 @@ def resource_inventory_script(*, program: str) -> str:
 
     return r"""
 inventory_refused() {
+    readback_failure_kind=unavailable
     printf 'connection_isolation_resources_ok=false\nintegration_readback_refused=testing_resources/%s\n' "$1" >&2
     exit 1
 }
@@ -242,9 +252,9 @@ snapshot=$(set -e
 """ + (
         'qualification=$(printf \'%s\n\' "$snapshot" | docker exec -i "$runner" python3 -I -c '
         + shlex.quote(program)
-        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources") || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate='
+        + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources" 2>&1) || { printf "connection_isolation_resources_ok=false\\nreadback_failed_predicate='
         + ReadbackPredicate.RESOURCES
-        + '\\nreadback_failure_kind=unavailable\\n" >&2; exit 1; }\n'
+        + '\\nreadback_failure_kind=unavailable\\n" >&2; printf \'%s\\n\' "$qualification" >&2; readback_failure_reported=true; exit 1; }\n'
         + 'read -r resource_digest database_address <<< "$qualification"\n'
         + '[[ "$resource_digest" =~ ^[a-f0-9]{64}$ ]] || inventory_refused qualification_unverified\n'
         + 'printf "connection_isolation_resources_ok=true\\nconnection_isolation_resource_sha256=%s\\n" "$resource_digest"\n'

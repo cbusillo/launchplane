@@ -73,9 +73,10 @@ reviewed_resources={shlex.quote(reviewed_resource_sha256)}
 operation_digest={shlex.quote(operation_digest)}
 readback_predicate={ReadbackPredicate.RUNNER_SELECTED}
 readback_failure_kind=unavailable
+readback_failure_reported=false
 readback_exit() {{
     status=$?
-    if [ "$status" -ne 0 ]; then
+    if [ "$status" -ne 0 ] && [ "$readback_failure_reported" != true ]; then
         printf 'readback_failed_predicate=%s\\nreadback_failure_kind=%s\\n' "$readback_predicate" "$readback_failure_kind" >&2
     fi
 }}

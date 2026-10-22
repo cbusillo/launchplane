@@ -504,6 +504,10 @@ def execute_odoo_post_deploy(
                         before_mutation=before_provider_effect,
                     )
                 except NativeProgramFailed as error:
+                    if not error.has_diagnostic:
+                        raise click.ClickException(
+                            "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
+                        ) from None
                     raise click.ClickException(
                         "Native testing copy predicate "
                         + error.code

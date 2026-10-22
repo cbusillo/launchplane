@@ -508,6 +508,23 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(frame["predicate"], ReadbackPredicate.CLEANUP_DATABASE)
         self.assertEqual(frame["kind"], "refused")
 
+    def test_native_file_inspection_failure_does_not_report_database_read(self) -> None:
+        self.spec.update(inspection_only=True, native_capture={})
+        original = self.command
+
+        def fail_files(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if kwargs.get("input") == self.spec["native_files_program"].encode():
+                raise RuntimeError("private-native-files")
+            return original(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=fail_files):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frame = json.loads(output.strip().removeprefix("fixture:"))
+        self.assertEqual(frame["predicate"], ReadbackPredicate.FILES_READ)
+        self.assertEqual(frame["kind"], "unavailable")
+        self.assertNotIn("private-native-files", output)
+
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,
     ) -> None:
@@ -543,7 +560,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         original = self.command
         witness = generation_binding(self.gen)
-        actual_image = self.spec["image_reference"]
+        actual_image: str | None = self.spec["image_reference"]
         sql = sqlite3.connect(":memory:")
         self.addCleanup(sql.close)
         sql.execute("CREATE TABLE ir_config_parameter (key TEXT PRIMARY KEY, value TEXT)")
@@ -552,6 +569,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             data = kwargs.get("input") or b""
             if command[:3] == ["docker", "image", "inspect"]:
                 self.calls.append(command)
+                if actual_image is None:
+                    raise RuntimeError("private image read")
                 return subprocess.CompletedProcess(
                     command,
                     0,
@@ -587,13 +606,23 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 if line.startswith("fixture:")
             ]
             self.assertEqual(frames, [TESTING_COPY_VERIFICATION_FRAME])
-            for fault in ("witness", "image", "gate"):
+            for fault in ("witness", "image", "image-read", "gate"):
                 with self.subTest(fault=fault):
                     witness = "wrong" if fault == "witness" else generation_binding(self.gen)
-                    actual_image = "wrong" if fault == "image" else self.spec["image_reference"]
+                    actual_image = (
+                        None
+                        if fault == "image-read"
+                        else "wrong"
+                        if fault == "image"
+                        else self.spec["image_reference"]
+                    )
                     gate.write_text("wrong" if fault == "gate" else self.gate_hash)
-                    status, _ = self.run_program()
+                    status, output = self.run_program()
                     self.assertNotEqual(status, 0)
+                    if fault == "image-read":
+                        frame = json.loads(output.strip().removeprefix("fixture:"))
+                        self.assertEqual(frame["predicate"], ReadbackPredicate.IMAGE_DIGEST)
+                        self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(
             any(
                 call[0] in {"ssh", "rsync"}

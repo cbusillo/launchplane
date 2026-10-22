@@ -46,6 +46,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
 
     def __init__(self, message: str, *, predicate: str = "", kind: str = "unavailable") -> None:
         super().__init__(message)
+        self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
         self.evidence = readback_failure_evidence(
             {
                 "readback_failed_predicate": predicate

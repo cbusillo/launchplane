@@ -107,6 +107,10 @@ class NativeSourceTransportTests(unittest.TestCase):
                         receive=lambda frame: None,
                     )
                 error = raised.exception
+                self.assertEqual(
+                    error.has_diagnostic,
+                    predicate in ReadbackPredicate and kind in {"refused", "unavailable"},
+                )
                 self.assertIn(error.predicate, ReadbackPredicate)
                 self.assertEqual(error.unavailable, kind != "refused")
                 self.assertNotIn("private-", json.dumps(error.evidence))
@@ -114,7 +118,7 @@ class NativeSourceTransportTests(unittest.TestCase):
     def test_failed_frame_is_distinct_from_missing_transport_evidence(self) -> None:
         connection = Connection()
         connection.frame = {"type": "failed"}
-        with self.assertRaises(transport.NativeProgramFailed):
+        with self.assertRaises(transport.NativeProgramFailed) as raised:
             transport._read_program(
                 connection,
                 program="fixture read-only probe",
@@ -122,6 +126,7 @@ class NativeSourceTransportTests(unittest.TestCase):
                 timeout_seconds=5,
                 receive=lambda frame: None,
             )
+        self.assertFalse(raised.exception.has_diagnostic)
 
     def test_dispatch_guard_can_refuse_after_handshake_without_sending_the_program(self) -> None:
         connection = Connection()

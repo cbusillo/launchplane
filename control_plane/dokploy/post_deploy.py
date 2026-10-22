@@ -57,6 +57,7 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.copy_readback_diagnostics import (
     READBACK_FAILURE_MARKERS,
+    ReadbackPredicate,
     readback_failure_evidence,
     readback_marker_is_safe,
 )
@@ -81,6 +82,8 @@ def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
     lock_path = ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY / f"launchplane-odoo-{digest}.lock"
     return f"""exec 9>{shlex.quote(str(lock_path))}
 if ! flock -n 9; then
+    readback_predicate={ReadbackPredicate.EXECUTION_LOCK}
+    readback_failure_kind=refused
     printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
     exit 1
 fi
@@ -94,6 +97,8 @@ def odoo_testing_idle_runner_script(container_variable: str) -> str:
     runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
     case "$runner_execs" in null|'[]') break ;; esac
     if [ "$runner_probe" = 3 ]; then
+        readback_predicate={ReadbackPredicate.RUNNER_IDLE}
+        readback_failure_kind=refused
         printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2
         exit 1
     fi

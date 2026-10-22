@@ -172,7 +172,7 @@ def register_testing_verification_routes(
                 error.code,
                 "Testing copy predicate "
                 + error.code
-                + ". Preserve the original generation, deployment, plan and key.",
+                + ". Preserve the original generation, deployment, plan and key. Never restore again to repair public verification.",
             )
         except (
             ValueError,

@@ -238,3 +238,14 @@ class ResourceQualificationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             self.assertNotIn("synthetic-secret", result.stdout + result.stderr)
+            if expected:
+                from control_plane.copy_readback_diagnostics import ReadbackPredicate
+                from control_plane.dokploy.post_deploy import (
+                    extract_odoo_post_deploy_readback_markers,
+                )
+
+                evidence = extract_odoo_post_deploy_readback_markers({"logs": result.stderr})
+                self.assertEqual(
+                    evidence["readback_failed_predicate"], ReadbackPredicate.REVIEW_BINDING
+                )
+                self.assertEqual(evidence["readback_failure_kind"], "refused")

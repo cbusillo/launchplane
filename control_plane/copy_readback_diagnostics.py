@@ -45,6 +45,7 @@ class ReadbackPredicate(StrEnum):
     INPUT = "copy_inspection_input_valid"
     RUNNER_CAPABILITIES = "runner_capabilities_available"
     DATABASE_READ = "copy_database_readable"
+    FILES_READ = "copy_native_files_readable"
     COPY_WITNESS = "copy_generation_witness_matches"
     RUNTIME = "copy_runtime_running"
     IMAGE_DIGEST = "copy_image_digest_matches"
@@ -95,25 +96,6 @@ def readback_failure_evidence(evidence: Mapping[str, str]) -> dict[str, str]:
         and evidence.get("integration_readback_ok") == "false"
     ):
         kind = "refused"
-    resource_refusals = evidence.get("integration_readback_refused", "").split(",")
-    if len(resource_refusals) == 1 and resource_refusals[0].startswith("testing_resources/"):
-        reason = resource_refusals[0].removeprefix("testing_resources/")
-        predicate = {
-            "workflow_active": ReadbackPredicate.EXECUTION_LOCK,
-            "runner_exec_active": ReadbackPredicate.RUNNER_IDLE,
-            "review_binding": ReadbackPredicate.REVIEW_BINDING,
-        }.get(reason, ReadbackPredicate.RESOURCES)
-        kind = (
-            "unavailable"
-            if reason
-            in {
-                "inventory_unverified",
-                "inventory_shape",
-                "inventory_limit",
-                "qualification_unverified",
-            }
-            else "refused"
-        )
     return {
         **evidence,
         "readback_failed_predicate": predicate,

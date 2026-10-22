@@ -172,7 +172,7 @@ def register_walkthrough_route(
                         record_store, dependencies.control_plane_root, payload, actor
                     )
                 except WalkthroughPrerequisiteError as error:
-                    refuse(error.code.value, "The testing task prerequisite did not pass.")
+                    refuse(error.diagnostic_code, "The testing task prerequisite did not pass.")
                     raise AssertionError
                 except Exception:
                     refuse(
