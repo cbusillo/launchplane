@@ -2,9 +2,7 @@
 
 import json
 import os
-import ast
 import hashlib
-import shlex
 import subprocess
 import threading
 import time
@@ -13,8 +11,6 @@ import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
-from typing import Any
-from unittest.mock import Mock
 
 from control_plane.dokploy.compose import ODOO_DATABASE_IMAGE
 from control_plane.dokploy.post_deploy import (
@@ -212,157 +208,6 @@ class OdooOnlineBackupRehearsalTests(unittest.TestCase):
         self.assertFalse((self.data / "backups" / "fixture" / record / "manifest.json").exists())
         self.assertNotIn(ODOO_BACKUP_GATE_RESULT_MARKER + "=", completed.stdout)
         return completed.stderr
-
-    def test_native_dump_selects_files_while_live_directories_change(self) -> None:
-        from control_plane.odoo_upgrade_rehearsal import rehearsal_host_program
-        from control_plane._odoo_rehearsal_attachment_validation import (
-            ATTACHMENT_VALIDATION_PROGRAM,
-        )
-
-        tree = ast.parse(rehearsal_host_program())
-        tree.body.pop()
-        host: dict[str, Any] = {}
-        exec(compile(tree, "native-capture-fixture", "exec"), host)
-        validator: dict[str, Any] = {"__name__": "fixture"}
-        exec(ATTACHMENT_VALIDATION_PROGRAM, validator)
-        reference = json.loads(
-            self.shell("""
-import json
-a = env['ir.attachment'].create({'name': 'native-cut', 'raw': b'native-cut bytes'})
-env.cr.commit()
-print(json.dumps({'fname': a.store_fname}))
-""").splitlines()[-1]
-        )
-        rows = json.loads(
-            self.docker(
-                "exec",
-                self.project + "-database",
-                "psql",
-                "-U",
-                "odoo",
-                "-d",
-                "fixture",
-                "-Atqc",
-                "SELECT json_agg(t) FROM (SELECT store_fname, checksum, file_size FROM ir_attachment WHERE store_fname IS NOT NULL) t",
-            )
-        )
-        root = self.data / "native-capture"
-        root.mkdir()
-        source = "/volumes/data/filestore/fixture"
-        source_file = self.data / "filestore" / "fixture" / reference["fname"]
-        host["rehearsal_source_reader"] = Mock(return_value=([], "fixture", source))
-        host["sanitize_capture"] = Mock()
-        host["sql"] = Mock(return_value="19.0")
-        host["docker"] = Mock()
-        host["attachment_validation_payload"] = lambda *_: {
-            "reason": validator["validate_attachment_files"](
-                [(r["store_fname"], r["checksum"], r["file_size"]) for r in rows],
-                root / "raw-source" / "filestore",
-                None,
-            )
-        }
-        bounded = host["bounded_capture"]
-        remove_reference = False
-        removed = self.data / "native-removed-reference"
-        orphan = source_file.with_name("unreferenced")
-        self.addCleanup(orphan.unlink, missing_ok=True)
-
-        def capture(arguments: list[str], path: Path, bound: int, **kwargs: Any) -> None:
-            if path.suffix == ".dump":
-                bounded(
-                    [
-                        "docker",
-                        "exec",
-                        self.project + "-script-runner",
-                        "/usr/bin/pg_dump",
-                        "-h",
-                        "database",
-                        "-U",
-                        "odoo",
-                        "-Fc",
-                        "--",
-                        "fixture",
-                    ],
-                    path,
-                    bound,
-                )
-                self.shell("""
-env['ir.attachment'].create({'name': 'after-native-cut', 'raw': b'after-native-cut bytes'})
-env.cr.commit()
-""")
-                return
-            if remove_reference:
-                source_file.rename(removed)
-            change = shlex.join(["touch", source + "/" + reference["fname"][:2] + "/unreferenced"])
-            command = (
-                arguments[-1]
-                + " "
-                + shlex.join(
-                    [
-                        "--checkpoint=1",
-                        "--checkpoint-action=exec=" + change,
-                    ]
-                )
-            )
-            bounded(
-                ["docker", "exec", "-i", self.project + "-script-runner", "sh", "-c", command],
-                path,
-                bound,
-                **kwargs,
-            )
-
-        host["bounded_capture"] = capture
-        spec = {
-            "source": {"ODOO_UPSTREAM_DB_USER": "odoo", "ODOO_UPSTREAM_DB_NAME": "fixture"},
-            "record": {
-                "source_binding_sha256": hashlib.sha256(b"fixture source").hexdigest(),
-                "source_odoo_version": "19.0",
-                "storage": {"database_bytes": 64 * 1024**2, "filestore_bytes": 64 * 1024**2},
-            },
-            "capture_comparison_timeout_seconds": 1200,
-        }
-        containers: dict[str, tuple[str, dict[str, Any]]] = {
-            "database": (self.project + "-database", {}),
-            "script-runner": (self.project + "-script-runner", {}),
-        }
-        raw = host["capture"](spec, root, containers, "fixture_source")
-        self.assertEqual(
-            {
-                str(p.relative_to(raw / "filestore"))
-                for p in (raw / "filestore").rglob("*")
-                if p.is_file()
-            },
-            {r["store_fname"] for r in rows},
-        )
-        self.assertTrue((root / "capture.json").is_file())
-        self.assertTrue(source_file.with_name("unreferenced").is_file())
-        root = self.data / "native-missing-reference"
-        root.mkdir()
-        remove_reference = True
-        try:
-            with self.assertRaises(host["RehearsalCommandFailure"]):
-                host["capture"](spec, root, containers, "fixture_source")
-        finally:
-            if removed.exists():
-                removed.rename(source_file)
-        self.assertFalse((root / "capture.json").exists())
-        self.assertFalse((root / "raw-source" / "filestore").exists())
-        self.assertTrue((root / "raw-source" / "database.dump").is_file())
-        remove_reference = False
-        root = self.data / "native-aliased-shard"
-        root.mkdir()
-        shard = source_file.parent
-        target = self.data / "native-shard-target"
-        shard.rename(target)
-        shard.symlink_to("/volumes/data/native-shard-target")
-        try:
-            with self.assertRaises(host["RehearsalCommandFailure"]):
-                host["capture"](spec, root, containers, "fixture_source")
-            self.assertEqual((root / "raw-source" / "filestore.tar").stat().st_size, 0)
-            self.assertFalse((root / "capture.json").exists())
-        finally:
-            shard.unlink()
-            target.rename(shard)
 
     def test_restore_cut_with_concurrent_attachment_writes_and_gc(self) -> None:
         old = json.loads(

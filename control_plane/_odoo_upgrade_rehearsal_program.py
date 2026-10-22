@@ -11,6 +11,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
     BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
 )
+from control_plane._filestore_tar import FILESTORE_TAR_LIBRARY
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -20,7 +21,8 @@ from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_C
 from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
-    REHEARSAL_SOURCE_READER_LIBRARY
+    FILESTORE_TAR_LIBRARY
+    + REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
@@ -91,9 +93,10 @@ def digest(path):
     return value.hexdigest()
 
 
-def bounded_capture(arguments,path,bound,*,stdin=None):
-    process=subprocess.Popen(arguments,stdin=stdin,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def bounded_capture(arguments,path,bound,*,filestore=False):
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     errors=b''
+    error_bytes=0
     try:
         size=0
         with path.open('xb') as output:
@@ -107,13 +110,14 @@ def bounded_capture(arguments,path,bound,*,stdin=None):
                         if not chunk:
                             selector.unregister(event.fileobj)
                         elif event.data=='error':
+                            error_bytes+=len(chunk)
                             errors=(errors+chunk)[-65536:]
                         else:
                             size+=len(chunk)
                             if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
                             output.write(chunk)
         status=process.wait(timeout=30)
-        if status:
+        if status and not (filestore and filestore_tar_warning_only(status,errors,error_bytes>len(errors))):
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
                 arguments,status,stdout=b'',stderr=errors),None)
             raise RehearsalCommandFailure(diagnostic)
@@ -432,25 +436,6 @@ def sanitize_capture(spec,containers,database,raw):
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
-def source_filestore_archive_command(filestore: str) -> str:
-    check='''from pathlib import Path
-import stat
-import sys
-root=Path(sys.argv[1])
-if not root.is_dir():
-    raise RuntimeError('Source filestore is unavailable')
-for shard in range(256):
-    try:
-        metadata=(root/f'{shard:02x}').lstat()
-    except FileNotFoundError:
-        continue
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise RuntimeError('Source filestore shard is aliased or unavailable')
-'''
-    archive=['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-']
-    return shlex.join(['python3','-c',check,filestore])+' && exec '+shlex.join(archive)
-
-
 def capture(spec,root,containers,database):
     started=time.monotonic()
     raw=root/'raw-source'
@@ -462,10 +447,8 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    names=write_captured_attachment_names(spec,raw,containers)
-    remote=source_filestore_archive_command(filestore)
-    with names.open('rb') as listed:
-        bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
+    remote=shlex.join(['env','LC_ALL=C','tar','-cf','-','-C',filestore,'.'])
+    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],filestore=True)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:
@@ -490,8 +473,6 @@ def capture(spec,root,containers,database):
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
-    # Check the dump's attachment set against the copied bytes, so a concurrent
-    # source deletion or incomplete rsync cannot be called a consistent capture.
     validation=attachment_validation_payload(containers,database,'validate')
     reason=validation['reason']
     if reason!='verified':

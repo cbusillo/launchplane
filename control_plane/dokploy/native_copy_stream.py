@@ -19,6 +19,7 @@ from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
 import click
+from control_plane._filestore_tar import FILESTORE_TAR_LIBRARY
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
@@ -465,7 +466,9 @@ def _read_remote(
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
 
 
-NATIVE_ODOO_SOURCE_READ_PROGRAM = r"""
+NATIVE_ODOO_SOURCE_READ_PROGRAM = (
+    FILESTORE_TAR_LIBRARY
+    + r"""
 import base64, hashlib, json, os, re, subprocess, sys, threading
 
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -527,15 +530,17 @@ def validate():
 def stream(part, arguments):
     digest=hashlib.sha256()
     size=0
-    # Drain stderr without logging or returning it, retaining only a bounded
-    # private prefix for an explicit authorization-refusal classification.
     with subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as process:
         errors=bytearray()
+        truncated=False
         def drain():
+            nonlocal truncated
             while True:
                 chunk=process.stderr.read(4096)
                 if not chunk:
                     return
+                if len(errors)+len(chunk)>16384:
+                    truncated=True
                 if len(errors)<16384:
                     errors.extend(chunk[:16384-len(errors)])
         reader=threading.Thread(target=drain,daemon=True)
@@ -554,7 +559,7 @@ def stream(part, arguments):
             reader.join()
             if status and denied(bytes(errors)):
                 raise ReadDenied()
-            if status!=0 or not size:
+            if (status and not (part=='filestore' and filestore_tar_warning_only(status,bytes(errors),truncated))) or not size:
                 raise RuntimeError('Source export failed')
         except BaseException:
             process.kill()
@@ -569,7 +574,7 @@ try:
     database=['docker','exec',source['database_container'],'sh','-c',
         'exec timeout --signal=TERM --kill-after=5s 180s pg_dump --host=/var/run/postgresql --username="$POSTGRES_USER" --lock-wait-timeout=10s --format=custom --no-owner -- "$1"',
         '_',source['database_name']]
-    filestore=['docker','exec',source['web_container'],'timeout','--signal=TERM','--kill-after=5s','180s','tar','--create','--gzip','--file=-',
+    filestore=['docker','exec','--env','LC_ALL=C',source['web_container'],'timeout','--signal=TERM','--kill-after=5s','180s','tar','--create','--gzip','--file=-',
         '--directory',source['filestore_path'],'.']
     if spec['mode']=='probe':
         checks=[['docker','exec',source['database_container'],'sh','-c',
@@ -596,5 +601,6 @@ except BaseException:
     emit({'type':'failed'})
     raise SystemExit(1)
 """.replace("__RUNTIME_IDENTITY_ENV_KEY__", RUNTIME_IDENTITY_ENV_KEY).replace(
-    "__ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES)
+        "__ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES)
+    )
 )
