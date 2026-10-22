@@ -68,6 +68,37 @@ authoritative application custody/isolation collector prerequisite
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
 
+For an existing application testing recipient, opt into read-only resource
+metadata with `include_application_resources=true` on `collect`, or run the
+repository client with `collect --application-resources`. The client uses the
+installed `operator` helper's transport. Ordinary requests retain their existing
+wire and response shape. The option is unavailable for previews or `inspect`.
+
+The service resolves the recorded application and registered server, then runs
+a fixed read program through the existing private transport. On a verified
+single-local-node Swarm it reports service/task counts, all attributable extant
+containers including stopped containers, configured and referenced named-volume
+counts, and content presence for verified local volume backing. Missing volumes,
+remote drivers, driver options and redirected backing are unavailable, never
+empty. Unsupported mounts are reported by a presence flag without reading their
+contents. Image volume declarations cover only the current immutable local
+service image, not every historical image; unavailable image metadata has a null
+declaration count.
+Unknown or changed inventory supplies no counts.
+
+The response includes no filesystem paths, filenames, file contents, environment
+values or raw provider errors. The reader neither changes resources nor creates
+a schedule. Its counts and `service_quiescent` value describe a sample of the
+selected service, its tasks and its attributable containers. Other volume
+consumers are not excluded. Filesystem data can change independently; service
+quiescence is not an execution fence. The `application_resources` read runs
+before usage collection; `observed_at` and `expires_at` do not timestamp or give
+a validity period to that earlier metadata sample. These observations publish
+no positive custody or production-isolation facts and do not qualify deployment.
+The broader [#4372](https://github.com/cbusillo/launchplane/issues/4372)
+prerequisite remains open until supported sources establish those facts for the
+actual application state.
+
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
@@ -3069,7 +3100,15 @@ keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
-`ODOO_DB_NAME` set to the final upgraded copy. Its stdin is one JSON object:
+`ODOO_DB_NAME` set to the final upgraded copy. The shared Compose environment
+defaults `ODOO_FILESTORE_PATH` to `/volumes/data/filestore` for both web and the
+script-runner, preserving explicitly configured filestore paths on other lanes.
+Copy/upgrade, before-web readback, attachment checks and product validation inherit
+the same rehearsal filestore setting. Copy/upgrade keeps its per-exec flag for
+containers prepared before this environment change. Existing switched containers
+do not gain a new environment from a source deploy; an already held validation
+still requires its separately reviewed original-operation disposition.
+Its stdin is one JSON object:
 `product`, `rehearsal_id`, `artifact_id`, `source_commit`, `database`, and
 `attempt_sha256`. Launchplane establishes these from the stored rehearsal,
 verified candidate and original operation key. The product independently checks
@@ -3086,9 +3125,15 @@ connected database and holds the native workflow lock; it can access other
 rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 
 The product writes exactly one line
-`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
-discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
+`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other stdout,
+including nonzero-exit stdout, is discarded. Stderr is drained concurrently;
+on failure its bounded tail passes through the existing credential and SQL-row
+redactor into the attempt-bound private child diagnostic, alongside any host
+timeout or output-limit reason. Truncated tails discard their first partial line
+before redaction. No stderr is added to
+a successful receipt. Product code must keep copied business values out of its
+error messages; redaction is not a general Client-data classifier.
+Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
 unknown original-key custody; stopping the host observer does not prove the
 in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`
