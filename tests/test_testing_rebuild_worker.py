@@ -2689,11 +2689,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         history = self.fixture.fixture.restore_deployments
         history[0].update(
             status="error",
-            logs=[
-                f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
-                "readback_failure_kind=refused",
-                "private attachment detail",
-            ],
+            logs=[],
         )
         original_prepare = service.NativeTestingRebuildExecution.prepare
         plans: list[Any] = []
@@ -2705,6 +2701,18 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         with (
             patch.object(service.NativeTestingRebuildExecution, "prepare", prepare),
+            patch.object(
+                api,
+                "fetch_dokploy_deployment_logs",
+                side_effect=[
+                    post_deploy.OdooPostDeployReadbackFailure("private unavailable", evidence={}),
+                    [
+                        f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+                        "readback_failure_kind=refused",
+                        "private attachment detail",
+                    ],
+                ],
+            ),
             patch.object(api, "dokploy_request", side_effect=self.fixture.fixture.configure),
             patch.object(
                 api, "list_deployments_for_target", return_value=self.fixture.fixture.deployments
@@ -2719,6 +2727,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         assert retained is not None and retained.application is not None
         self.assertEqual(retained.application.phase, "abandoned")
         self.assertIn(diagnostic, retained.application.abandonment_evidence)
+        self.assertEqual(
+            checkpoint.preparation_failure_evidence, retained.application.abandonment_evidence
+        )
         self.assertNotIn("private", checkpoint.preparation_failure_evidence)
         self.assertEqual(self.execute(), result)
         self.assertEqual(self.fixture.fixture.effects, effects)

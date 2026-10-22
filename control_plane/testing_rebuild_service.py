@@ -1150,8 +1150,10 @@ class NativeTestingRebuildExecution:
                         lease=self.lease,
                         guard=self.guard,
                     )
+                    assert self.allocation.application is not None
                     raise TestingRebuildPreparationFailure(
-                        copy_id=plan.new.copy_id, evidence_id=evidence
+                        copy_id=plan.new.copy_id,
+                        evidence_id=self.allocation.application.abandonment_evidence,
                     ) from None
             if (
                 current is not None
@@ -1169,8 +1171,10 @@ class NativeTestingRebuildExecution:
                         lease=self.lease,
                         guard=self.guard,
                     )
+                    assert self.allocation.application is not None
                     raise TestingRebuildPreparationFailure(
-                        copy_id=plan.new.copy_id, evidence_id=evidence
+                        copy_id=plan.new.copy_id,
+                        evidence_id=self.allocation.application.abandonment_evidence,
                     ) from None
             raise
         app = self.allocation.application
