@@ -17,6 +17,8 @@ from control_plane.odoo_runtime_reads import (
     OdooRuntimeSelection,
 )
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
 from control_plane.odoo_walkthrough import (
     plan_walkthrough,
@@ -247,6 +249,29 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.store.read_disposable_resource_preparation.assert_not_called()
         self.store.read_fresh_odoo_testing_generation.assert_not_called()
 
+    def test_physical_copy_diagnostic_survives_path_check_without_private_exception_text(
+        self,
+    ) -> None:
+        for kind, state in (("refused", "blocked"), ("unavailable", "unknown")):
+            with self.subTest(kind=kind):
+                self.usage.side_effect = NativeProgramFailed(
+                    "private-provider-value",
+                    predicate=ReadbackPredicate.RUNNER_RUNNING,
+                    kind=kind,
+                )
+                steps = self.provision_path_check()
+                physical = next(
+                    step for step in steps if step.step_id == WalkthroughPrerequisite.PHYSICAL_COPY
+                )
+                self.assertEqual(physical.code, ReadbackPredicate.RUNNER_RUNNING)
+                self.assertEqual(physical.state, state)
+                self.assertTrue(physical.description)
+                self.assertNotIn(
+                    "private-provider-value", json.dumps([step.model_dump() for step in steps])
+                )
+        self.store.read_disposable_resource_preparation.assert_not_called()
+        self.store.read_fresh_odoo_testing_generation.assert_not_called()
+
     def test_path_check_projects_observed_native_refusal_apart_from_unavailable_read(
         self,
     ) -> None:
@@ -405,7 +430,7 @@ class WalkthroughPlanTests(unittest.TestCase):
 
     def isolation_or_usage(
         self, request: OdooWalkthroughRequest | None = None
-    ) -> tuple[WalkthroughPrerequisite, str]:
+    ) -> tuple[WalkthroughPrerequisite | ReadbackPredicate, str]:
         return next(
             (code, state)
             for checkpoint, code, state in read_walkthrough_prerequisites(

@@ -3170,6 +3170,15 @@ boolean verdicts and setting names only. Each apply key has its own schedule,
 separate from observations and ordinary data workflows, so later deployments
 cannot replace the original script or rotate its job out of shared history.
 Retain uncertain operation schedules and their logs as recovery evidence.
+Failed results always retain `readback_failed_predicate` and
+`readback_failure_kind` (`refused` or `unavailable`), plus safe setting findings,
+log availability and schedule references when observed. A stopped selected
+runner reports `runner_running` before SQL; a failed or empty probe cannot
+produce a review receipt. A provider job marked done without the required
+markers reports `schedule_evidence_complete`, not a successful readback.
+Inspect the selected runner and its retained lifecycle/log evidence before
+choosing a separately authorized runtime recovery. Preserve the original copy;
+do not use a SQL repair, restore or new generation to replace missing evidence.
 Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
