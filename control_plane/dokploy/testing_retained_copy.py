@@ -160,7 +160,9 @@ try:
     if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
         raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
     if spec['mode']=='readiness':
-        if result['web_stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
+        if result['web_stopped']:
+            raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
+        if not spec.get('identity') or not spec.get('health_path','').startswith('/'):
             raise ValueError('Retained private health requires the original running process')
         web=next(item for item in inventory() if item['Id']==result['web_id'])
         environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)

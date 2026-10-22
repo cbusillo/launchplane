@@ -10,6 +10,9 @@ import configparser, hmac, json, os, sys
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 from urllib.parse import urlsplit
 spec = json.load(sys.stdin)
+def refuse_readiness() -> None:
+    print('candidate_private_readiness_ok=false', flush=True)
+    raise RuntimeError('Candidate private readiness refused')
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -32,7 +35,7 @@ if not isinstance(actual, dict):
     raise RuntimeError('Candidate HTTP identity is missing')
 actual.pop('deployed_at', None)
 if actual != spec['runtime_identity']:
-    raise RuntimeError('Candidate HTTP identity differs')
+    refuse_readiness()
 config = configparser.ConfigParser(interpolation=None)
 if config.read(spec['web_config']) != [spec['web_config']]:
     raise RuntimeError('Candidate running config is unavailable')
@@ -41,7 +44,7 @@ if (options.get('db_host') != 'database'
         or options.get('db_name') != os.environ['ODOO_DB_NAME']
         or options.get('db_user') != os.environ['ODOO_DB_USER']
         or not hmac.compare_digest(options.get('db_password', ''), os.environ['ODOO_DB_PASSWORD'])):
-    raise RuntimeError('Candidate local database credential differs')
+    refuse_readiness()
 # Never authenticate a web session here: a readiness login would manufacture
 # the sessions and login history that protect a lane from its next rebuild.
 import psycopg2
@@ -66,7 +69,7 @@ try:
         rows = cursor.fetchall()
         if (len(rows) != 1 or not rows[0][0]
                 or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
-            raise RuntimeError('Candidate local admin credential differs')
+            refuse_readiness()
 finally:
     try:
         connection.rollback()
@@ -75,7 +78,7 @@ finally:
 # Supported startup renders the master value directly. This checks rendering
 # consistency; it is not an interactive authentication or an admission digest.
 if not hmac.compare_digest(os.environ['ODOO_MASTER_PASSWORD'], options['admin_passwd']):
-    raise RuntimeError('Candidate local master credential differs')
+    refuse_readiness()
 print('candidate_credentials_verified=true')
 """
 
@@ -92,6 +95,8 @@ def docker(*arguments, stdin=None):
     if result.returncode:
         if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('Candidate runtime refused the operation')
+        if inspection_predicate == ReadbackPredicate.CANDIDATE_READINESS and result.stdout.splitlines() == [b'candidate_private_readiness_ok=false']:
+            raise CopyReadbackRefused(ReadbackPredicate.CANDIDATE_READINESS)
         raise RuntimeError('Candidate runtime readback failed')
     return result.stdout
 
@@ -113,9 +118,10 @@ def probe(spec):
         raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
     runner = containers['script-runner'][0]
     web, observed = containers['web']
+    inspection_predicate = ReadbackPredicate.PRIVATE_ENDPOINT
     labels = observed['Config'].get('Labels') or {}
     if labels.get('traefik.enable') != 'false' or any(key.startswith('traefik.http.routers.') for key in labels):
-        raise CopyReadbackRefused(ReadbackPredicate.PORTS)
+        raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     namespace = spec['generation']['namespace']
     aliases = observed['NetworkSettings']['Networks']['dokploy-network'].get('Aliases')
     if not isinstance(aliases, list):
@@ -149,7 +155,7 @@ def probe(spec):
         if environment.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','') != spec['expected_overrides_payload']:
             raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
     inspection_predicate = ReadbackPredicate.WEB_GATE
-    gate = docker('exec', runner, 'python3','-c', "import hashlib,os,sys;from pathlib import Path;expected=hashlib.sha256((sys.argv[1]+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest();print(Path(sys.argv[2]).read_text()==expected)",spec['database_name'],spec['web_gate_path']).decode().strip()
+    gate = docker('exec', runner, 'python3','-c',COPY_WEB_GATE_READ_PROGRAM,spec['database_name'],spec['web_gate_path']).decode().strip()
     if gate not in {'True','False'}:
         raise RuntimeError('Candidate web gate is unreadable')
     if gate == 'False':
@@ -160,10 +166,12 @@ def probe(spec):
         if actual != spec['copy_binding_sha256']:
             raise CopyReadbackRefused(ReadbackPredicate.COPY_WITNESS)
     inspection_predicate = ReadbackPredicate.INTEGRATIONS
-    readback = docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],stdin=base64.b64decode(spec['readback_program'])).decode()
+    readback = docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],'dry-run',stdin=base64.b64decode(spec['readback_program'])).decode()
+    if 'integration_readback_ok=false' in readback.splitlines():
+        raise CopyReadbackRefused(ReadbackPredicate.INTEGRATIONS)
     if 'integration_readback_ok=true' not in readback.splitlines():
         raise RuntimeError('Candidate connections remain configured')
-    inspection_predicate = ReadbackPredicate.CREDENTIALS
+    inspection_predicate = ReadbackPredicate.CANDIDATE_READINESS
     credentials = docker('exec','-i',web,'python3','-c',base64.b64decode(spec['credential_program']).decode(),stdin=json.dumps(spec).encode()).decode().splitlines()
     if credentials != ['candidate_credentials_verified=true']:
         raise RuntimeError('Candidate local credentials are unverified')

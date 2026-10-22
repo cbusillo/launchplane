@@ -343,6 +343,7 @@ class TaskRouteTests(unittest.TestCase):
                     self.assertNotIn("private-", json.dumps(response))
         self.account.assert_not_called()
         self.browser.assert_not_called()
+        self.assertEqual(self.store.list_secret_records(), ())
 
     def test_native_prerequisite_keeps_observation_kind_without_dispatch(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed

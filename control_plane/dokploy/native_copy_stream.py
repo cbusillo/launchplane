@@ -64,6 +64,12 @@ class NativeSourceExceedsBound(NativeSourceUnavailable):
     """A determinate capture limit; recovery must not repeat this source read."""
 
 
+def native_failure_diagnostic(error: BaseException) -> str:
+    return (
+        " " + error.code if isinstance(error, NativeProgramFailed) and error.has_diagnostic else ""
+    )
+
+
 class NativeUploadRejected(NativeSourceUnavailable):
     """A fixed receiver writer refusal after closing its file, never a timeout."""
 

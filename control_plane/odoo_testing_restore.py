@@ -947,7 +947,10 @@ def restore_main():
                 raise CopyReadbackRefused(ReadbackPredicate.COPY_WITNESS)
         prefix=sys.argv[2]
         if spec.get('verification_only'):
-            if present != '1' or any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
+            if present != '1':
+                raise CopyReadbackRefused(ReadbackPredicate.DATABASE_PRESENT)
+            inspection_predicate = ReadbackPredicate.RUNTIME
+            if any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
                 raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
             if containers['web'][1]['Image'] != containers['script-runner'][1]['Image']:
                 raise CopyReadbackRefused(ReadbackPredicate.IMAGE)
@@ -965,9 +968,7 @@ def restore_main():
                 if identity != spec['runtime_identity']:
                     raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
             inspection_predicate = ReadbackPredicate.WEB_GATE
-            gate = docker('exec',runner,'python3','-c',
-                "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();print(Path(sys.argv[2]).read_text()==expected)",
-                database,spec['web_gate_path']).decode().strip()
+            gate = docker('exec',runner,'python3','-c',COPY_WEB_GATE_READ_PROGRAM,database,spec['web_gate_path']).decode().strip()
             if gate not in {'True','False'}:
                 raise RuntimeError('Testing web gate is unreadable')
             if gate == 'False':

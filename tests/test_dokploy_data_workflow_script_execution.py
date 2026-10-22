@@ -96,11 +96,6 @@ def main(argv):
                 active = True
             print('["orphaned-exec"]' if active else "null")
             return 0
-        if ".State.Running" in template:
-            path = state_path(container_id)
-            status = path.read_text().strip() if path.exists() else "running"
-            print("true" if status == "running" else "false")
-            return 0
         if '"kind"' in template:
             kind = "environment" if '"environment"' in template else "container"
             rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
@@ -112,6 +107,11 @@ def main(argv):
                 if row["kind"] == kind and row["id"] in argv[3:]:
                     print(json.dumps(row))
             return 42 if os.environ.get("FAKE_METADATA_READ_FAILURE") == "1" else 0
+        if ".State.Running" in template:
+            path = state_path(container_id)
+            status = path.read_text().strip() if path.exists() else "running"
+            print("true" if status == "running" else "false")
+            return 0
         if ".State.Status" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"

@@ -14,7 +14,10 @@ from control_plane.dokploy.connection_isolation import isolation_script, run_con
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
-from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.odoo_connection_isolation import (
+    OdooConnectionIsolationMode,
+    ConnectionIsolationPreconditionFailed,
+)
 
 
 class CopyReadbackDiagnosticsTests(unittest.TestCase):
@@ -344,8 +347,12 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                                 "summary": {
                                     "http_status": 409 if status != "http-error" else 504,
                                     "error_code": {
-                                        "http-workflow": "connection_isolation_workflow_active",
-                                        "http-review": "connection_isolation_plan_changed",
+                                        "http-workflow": ConnectionIsolationPreconditionFailed(
+                                            "workflow_active"
+                                        ).code,
+                                        "http-review": ConnectionIsolationPreconditionFailed(
+                                            "plan_changed"
+                                        ).code,
                                     }.get(status, "provider_unavailable"),
                                 },
                             },

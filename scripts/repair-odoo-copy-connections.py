@@ -9,6 +9,7 @@ import runpy
 import sys
 import urllib.error
 
+from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
 from control_plane.odoo_post_deploy_http import ODOO_POST_DEPLOY_ROUTE, OdooPostDeployEnvelope
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest
 from control_plane.copy_readback_diagnostics import (
@@ -161,8 +162,12 @@ def main() -> int:
         summary = error_payload.get("summary", {})
         code = summary.get("error_code") if isinstance(summary, dict) else None
         refused_predicate = {
-            "connection_isolation_workflow_active": ReadbackPredicate.EXECUTION_LOCK,
-            "connection_isolation_plan_changed": ReadbackPredicate.REVIEW_BINDING,
+            ConnectionIsolationPreconditionFailed(
+                "workflow_active"
+            ).code: ReadbackPredicate.EXECUTION_LOCK,
+            ConnectionIsolationPreconditionFailed(
+                "plan_changed"
+            ).code: ReadbackPredicate.REVIEW_BINDING,
         }.get(code)
         error_payload["evidence"] = readback_failure_evidence(
             {

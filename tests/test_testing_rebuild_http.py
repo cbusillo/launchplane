@@ -188,7 +188,11 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
     async def test_provider_denial_and_unavailable_preflight_cannot_queue(self) -> None:
         import click
         from control_plane.dokploy import api
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import (
+            NativeSourceUnavailable,
+            NativeProgramFailed,
+        )
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         for failure, status in (
@@ -214,6 +218,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             (ValueError("private-retained-identity-message"), 409),
             (FileNotFoundError("private-retained-record"), 409),
             (NativeSourceUnavailable("private-transient-observation"), 409),
+            (
+                NativeProgramFailed(
+                    "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+                ),
+                409,
+            ),
         ):
             for method in ("GET", "POST"):
                 with (
@@ -237,6 +247,8 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         if isinstance(failure, NativeSourceUnavailable)
                         else "testing_rebuild_inputs_unverified",
                     )
+                    if isinstance(failure, NativeProgramFailed):
+                        self.assertIn(failure.code, response.text)
                     self.assertNotIn("private-", response.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])

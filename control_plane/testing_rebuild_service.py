@@ -56,6 +56,7 @@ from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.native_copy_stream import (
     require_registered_remote_server,
     NativeSourceUnavailable,
+    native_failure_diagnostic,
     NativeSourceAuthorizationDenied,
 )
 from control_plane.dokploy.testing_retained_copy import retained_copy_operation
@@ -1803,7 +1804,7 @@ def execute_native_testing_rebuild(
         TestingRebuildObservationUnavailable,
     ) as error:
         raise NativeTestingRebuildPending(
-            "The original candidate needs another observation."
+            "The original candidate needs another observation." + native_failure_diagnostic(error)
         ) from error
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:

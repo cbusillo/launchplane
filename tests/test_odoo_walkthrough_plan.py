@@ -246,6 +246,8 @@ class WalkthroughPlanTests(unittest.TestCase):
     def test_completed_provision_generation_does_not_require_copy_preparation(self) -> None:
         steps = self.provision_path_check()
         self.assertTrue(all(step.state == "clear" for step in steps))
+        self.store.read_disposable_resource_preparation.assert_not_called()
+        self.store.read_fresh_odoo_testing_generation.assert_not_called()
 
     def test_physical_copy_diagnostic_survives_path_check_without_private_exception_text(
         self,

@@ -28,6 +28,8 @@ class ReadbackPredicate(StrEnum):
     NAMESPACE = "copy_namespace_valid"
     SERVICES = "copy_services_exact"
     CUSTODY = "copy_custody_matches"
+    CANDIDATE_READINESS = "candidate_private_readiness_complete"
+    DATABASE_PRESENT = "copy_database_present"
     PRIVATE_ENDPOINT = "copy_private_endpoint_exclusive"
     CAPABILITIES = "copy_host_capabilities_absent"
     PORTS = "copy_host_ports_absent"

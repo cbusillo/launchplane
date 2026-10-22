@@ -4,6 +4,20 @@ import inspect
 
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
 
+COPY_WEB_GATE_READ_PROGRAM = r"""
+import hashlib,os,sys
+from pathlib import Path
+payload=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')
+expected=hashlib.sha256((sys.argv[1]+'\n'+payload).encode()).hexdigest()
+try:
+    actual=Path(sys.argv[2]).read_text()
+except FileNotFoundError:
+    print(False)
+else:
+    print(actual==expected)
+"""
+
+
 VOLUME_BACKING_INSPECTION_LIBRARY = (
     readback_predicate_library()
     + inspect.getsource(CopyReadbackRefused)
@@ -45,6 +59,9 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
+    + "\nCOPY_WEB_GATE_READ_PROGRAM="
+    + repr(COPY_WEB_GATE_READ_PROGRAM)
+    + "\n"
     + r"""
 def inspect_copy_runtime(spec, *, expected_instance):
     gen = spec["generation"]

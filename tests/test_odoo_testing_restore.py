@@ -609,7 +609,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 if line.startswith("fixture:")
             ]
             self.assertEqual(frames, [TESTING_COPY_VERIFICATION_FRAME])
-            for fault in ("witness", "image", "image-read", "gate"):
+            for fault in ("witness", "image", "image-read", "gate", "missing-gate"):
                 with self.subTest(fault=fault):
                     witness = "wrong" if fault == "witness" else generation_binding(self.gen)
                     actual_image = (
@@ -620,9 +620,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                         else self.spec["image_reference"]
                     )
                     gate.write_text("wrong" if fault == "gate" else self.gate_hash)
+                    if fault == "missing-gate":
+                        gate.unlink()
                     status, output = self.run_program()
                     self.assertNotEqual(status, 0)
-                    if fault == "gate":
+                    if fault in {"gate", "missing-gate"}:
                         frame = json.loads(output.strip().removeprefix("fixture:"))
                         self.assertEqual(frame["predicate"], ReadbackPredicate.WEB_GATE)
                         self.assertEqual(frame["kind"], "refused")

@@ -198,6 +198,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
         frame, _ = self.run_host(extra={"physical_binding": "changed"})
         self.assertEqual(frame["predicate"], ReadbackPredicate.BACKING_STORAGE)
         self.assertEqual(frame["kind"], "refused")
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(
+            mode="readiness", extra={"physical_binding": read["physical_binding"]}
+        )
+        self.assertEqual(frame["predicate"], ReadbackPredicate.RUNTIME)
+        self.assertEqual(frame["kind"], "refused")
 
     def test_host_read_refuses_a_bind_alias_of_the_testing_data(self) -> None:
         self.containers.append(

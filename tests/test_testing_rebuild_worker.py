@@ -617,19 +617,25 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.assertEqual(self.current(), self.fixture.before)
 
     def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
         self.operation = self.operation.model_copy(
             update={"operation_id": "fresh-transient-capture"}
         )
         self.capture.side_effect = self.capture_function
+        cause = NativeProgramFailed(
+            "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+        )
         with patch.object(
             DokployTestingRouteTransport,
             "read",
-            side_effect=NativeSourceUnavailable("fixture unavailable"),
+            side_effect=cause,
         ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
+            with self.assertRaises(service.NativeTestingRebuildPending) as caught:
                 self.execute()
+            self.assertIn(cause.code, str(caught.exception))
+            self.assertNotIn("private-value", str(caught.exception))
         self.capture.assert_called_once()
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
