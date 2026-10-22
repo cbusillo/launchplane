@@ -930,7 +930,7 @@ Legacy originals without a saved event request remain held. A changed safety
 observation or binding makes the reviewed digest stale; repeat dry-run and review
 before applying. Explicit original-request service calls retain their existing
 deploy authorization; the installed helper uses the safer opaque reference flow.
-The service-marked Director local operator can perform this bounded event-testing
+The service-marked Director `local_operator` can perform this bounded event-testing
 abandonment and its exact completed replay without the mixed deploy grant.
 Other recovery actions and identities retain their existing authority requirements.
 
