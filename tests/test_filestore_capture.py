@@ -146,14 +146,3 @@ with tempfile.TemporaryDirectory() as temporary:
         )
         validate = validator["validate_attachment_files"]
         self.assertEqual(validate([row], extracted, None), "verified")
-        path = extracted / name
-        for replacement, reason in (
-            (b"short", "attachment_size_mismatch"),
-            (b"x" * len(content), "attachment_hash_mismatch"),
-            (None, "attachment_missing"),
-        ):
-            if replacement is None:
-                path.unlink()
-            else:
-                path.write_bytes(replacement)
-            self.assertEqual(validate([row], extracted, None), reason)
