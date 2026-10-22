@@ -51,6 +51,7 @@ from control_plane.contracts.product_incident_read_model import (
     preview_fence_incident_scope,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 from control_plane.artifact_retention import (
     ArtifactRetentionPlan,
     ArtifactRetentionProductMissingError,
@@ -257,6 +258,7 @@ class ProductProfileListResponse(BaseModel):
     trace_id: str
     driver_id: str
     profiles: tuple[LaunchplaneProductProfileRecord, ...]
+    coverage: ReadCoverage
 
 
 class ProductProfileResponse(BaseModel):
@@ -1570,6 +1572,13 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             driver_id=str(product_profile_payload["driver_id"]),
             profiles=profiles,
+            coverage=read_coverage(
+                profile_store,
+                collections=("product_profiles",),
+                population="active_product_profiles_for_requested_driver",
+                authorization_complete=service_reader,
+                exclusions=("inactive_products",),
+            ),
         )
 
     error_responses: dict[int | str, dict[str, object]] = {

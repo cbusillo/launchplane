@@ -25,6 +25,16 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
+from control_plane.contracts.product_profile_record import (
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
+from control_plane.product_binding_resolution import (
+    ProductBindingResolution,
+    product_binding_resolution,
+)
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -108,6 +118,8 @@ class ProductSecretBindingsResponse(BaseModel):
     trace_id: str
     product: str
     bindings: list[product_secret_copy.ProductSecretBindingMetadata]
+    coverage: ReadCoverage
+    lane_binding_resolution: ProductBindingResolution | None = None
 
 
 class SecretStatusAuditEvent(BaseModel):
@@ -775,6 +787,11 @@ def register_managed_secret_read_routes(
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_resolution: bool = False,
+        integration: Annotated[str, Query(min_length=1, max_length=256, pattern=r"^\S+$")] = (
+            control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+        ),
+        scopes: Annotated[list[SecretScope] | None, Query()] = None,
     ) -> ProductSecretBindingsResponse:
         trace_id = dependencies.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
@@ -826,6 +843,45 @@ def register_managed_secret_read_routes(
                     target=target,
                 ):
                     visible_bindings.append(binding)
+            resolution = None
+            if include_resolution:
+                store = cast(product_secret_copy.ProductSecretCopyStore, record_store)
+                owners = product_context_owner_map(store.list_product_profile_records())
+
+                def source_read_allowed(record: SecretRecord) -> bool:
+                    target = AuthorizationTarget(
+                        scope="instance" if record.instance else "context",
+                        instances=(record.instance,) if record.instance else (),
+                    )
+                    return dependencies.authorization_allows(
+                        identity=identity,
+                        action="secret.list",
+                        product=LAUNCHPLANE_SERVICE_CONTEXT,
+                        context=record.context,
+                        target=target,
+                    ) or (
+                        record.scope != "global"
+                        and record.integration
+                        == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+                        and is_exclusive_product_context(
+                            context=record.context, product=product, owners=owners
+                        )
+                        and dependencies.authorization_allows(
+                            identity=identity,
+                            action="product_environment.read",
+                            product=product,
+                            context=record.context,
+                            target=target,
+                        )
+                    )
+
+                resolution = product_binding_resolution(
+                    store,
+                    product=product,
+                    integration=integration,
+                    scopes=frozenset(scopes or ("global", "context", "context_instance")),
+                    source_read_allowed=source_read_allowed,
+                )
         except product_secret_copy.ProductSecretCopyError as error:
             raise dependencies.http_error(
                 status_code=404,
@@ -847,6 +903,19 @@ def register_managed_secret_read_routes(
                 product_secret_copy.ProductSecretBindingMetadata.model_validate(binding)
                 for binding in visible_bindings
             ],
+            coverage=read_coverage(
+                record_store,
+                collections=("product_profiles", "secret_records", "secret_bindings"),
+                population="configured_runtime_copy_metadata_in_exclusive_declared_product_contexts",
+                authorization_complete=len(visible_bindings) == len(bindings),
+                exclusions=(
+                    "global_secrets",
+                    "historical_and_undeclared_lanes",
+                    "ambiguous_contexts",
+                    "other_integrations",
+                ),
+            ),
+            lane_binding_resolution=resolution,
         )
 
     app.add_api_route(

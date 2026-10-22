@@ -15739,6 +15739,37 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LaneBindingSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/ProductSecretBindingMetadata"
+            },
+            "title": "Bindings",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ReadCoverage"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "bindings",
+          "coverage"
+        ],
+        "title": "LaneBindingSelection",
+        "type": "object"
+      },
       "LaneHealthHistory": {
         "additionalProperties": false,
         "properties": {
@@ -32753,6 +32784,45 @@
         "title": "ProductActivityResponse",
         "type": "object"
       },
+      "ProductBindingResolution": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/ReadCoverage"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/LaneBindingSelection"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "selection_scopes": {
+            "items": {
+              "enum": [
+                "global",
+                "context",
+                "context_instance"
+              ],
+              "type": "string"
+            },
+            "title": "Selection Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "integration",
+          "selection_scopes",
+          "lanes",
+          "coverage"
+        ],
+        "title": "ProductBindingResolution",
+        "type": "object"
+      },
       "ProductConfigApplyResponse": {
         "additionalProperties": false,
         "properties": {
@@ -37714,6 +37784,9 @@
       "ProductProfileListResponse": {
         "additionalProperties": false,
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/ReadCoverage"
+          },
           "driver_id": {
             "title": "Driver Id",
             "type": "string"
@@ -37739,7 +37812,8 @@
         "required": [
           "trace_id",
           "driver_id",
-          "profiles"
+          "profiles",
+          "coverage"
         ],
         "title": "ProductProfileListResponse",
         "type": "object"
@@ -40063,6 +40137,19 @@
             "title": "Bindings",
             "type": "array"
           },
+          "coverage": {
+            "$ref": "#/components/schemas/ReadCoverage"
+          },
+          "lane_binding_resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductBindingResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "product": {
             "title": "Product",
             "type": "string"
@@ -40081,7 +40168,8 @@
         "required": [
           "trace_id",
           "product",
-          "bindings"
+          "bindings",
+          "coverage"
         ],
         "title": "ProductSecretBindingsResponse",
         "type": "object"
@@ -43348,6 +43436,61 @@
           "notice"
         ],
         "title": "PublicSitePlan",
+        "type": "object"
+      },
+      "ReadCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "scoped",
+              "unknown"
+            ],
+            "title": "Authorization",
+            "type": "string"
+          },
+          "exclusions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclusions",
+            "type": "array"
+          },
+          "population": {
+            "title": "Population",
+            "type": "string"
+          },
+          "source": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "limited",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "scoped",
+              "limited",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "population"
+        ],
+        "title": "ReadCoverage",
         "type": "object"
       },
       "RecentOperationsResponse": {
@@ -96043,6 +96186,53 @@
             "schema": {
               "title": "Product",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_resolution",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Resolution",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "integration",
+            "required": false,
+            "schema": {
+              "default": "runtime_environment",
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Integration",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scopes",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "global",
+                      "context",
+                      "context_instance"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scopes"
             }
           },
           {

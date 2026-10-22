@@ -3996,6 +3996,13 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def collection_read_coverage(self, collection: str) -> str:
+        return (
+            "complete"
+            if collection in {"product_profiles", "secret_records", "secret_bindings"}
+            else "unsupported"
+        )
+
     def write_secret_version(self, version: SecretVersion) -> Path:
         return self._write_model("launchplane_secret_versions", version.version_id, version)
 

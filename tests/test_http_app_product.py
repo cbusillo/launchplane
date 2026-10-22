@@ -2352,7 +2352,9 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(set(payload), {"status", "trace_id", "driver_id", "profiles"})
+        self.assertEqual(set(payload), {"status", "trace_id", "driver_id", "profiles", "coverage"})
+        self.assertEqual(payload["coverage"]["status"], "complete")
+        self.assertEqual(payload["coverage"]["source"], "complete")
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
         self.assertEqual(payload["driver_id"], "generic-web")

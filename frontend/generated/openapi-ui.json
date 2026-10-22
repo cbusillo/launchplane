@@ -33369,6 +33369,9 @@
       "ProductProfileListResponse": {
         "additionalProperties": false,
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/ReadCoverage"
+          },
           "driver_id": {
             "title": "Driver Id",
             "type": "string"
@@ -33392,6 +33395,7 @@
           }
         },
         "required": [
+          "coverage",
           "driver_id",
           "profiles",
           "status",
@@ -38091,6 +38095,65 @@
           "writers"
         ],
         "title": "PublicSitePlan",
+        "type": "object"
+      },
+      "ReadCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "scoped",
+              "unknown"
+            ],
+            "title": "Authorization",
+            "type": "string"
+          },
+          "exclusions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclusions",
+            "type": "array"
+          },
+          "population": {
+            "title": "Population",
+            "type": "string"
+          },
+          "source": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "limited",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "unknown",
+            "enum": [
+              "complete",
+              "scoped",
+              "limited",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization",
+          "exclusions",
+          "population",
+          "source",
+          "status"
+        ],
+        "title": "ReadCoverage",
         "type": "object"
       },
       "RecordFailure": {

@@ -865,6 +865,51 @@ read it through the same standing environment read across products
 and removed-lane bindings and contexts shared ambiguously between products are
 excluded.
 
+### Read coverage and binding selection
+
+The existing product catalog (`GET /v1/product-profiles`) and binding response
+include `coverage`: `population`, `source`, `authorization`, `status` and explicit
+`exclusions`. Catalog coverage is for active products within the requested
+`driver_id`, not inactive products or other drivers. A product-scoped catalog
+reports `scoped` even when its returned subset is empty. It never reveals hidden
+product identities or counts.
+
+Binding `coverage` describes the copy metadata population above. `complete`
+means unbounded source enumeration and authorized records within that stated
+population, not every effective secret or every historical lane. The storage
+adapter's `collection_read_coverage` attests unbounded profile, secret-record and
+binding enumeration; a limited, unsupported or unknown collection keeps that
+limitation in the response. Adapters without the capability report `unknown`.
+These are current read observations, not an atomic snapshot or runtime proof.
+
+For names-only selection evidence on the same binding endpoint, request
+`include_resolution=true`. `integration` defaults to `runtime_environment` and
+can explicitly select another existing integration without discovering hidden
+integration names. Repeated `scopes` parameters select `global`, `context` and/or
+`context_instance`; omitting them selects all three. For example,
+`?include_resolution=true&integration=launchplane_worker&scopes=context_instance`
+asks the shared selector the same scope question as the exact-lane worker
+resolver. `lane_binding_resolution` states these inputs and reports each declared
+lane's selected binding metadata and coverage. It reads no versions or values.
+
+Selection uses the existing secret resolver's precedence before authorization.
+An unreadable winner is withheld and makes coverage `scoped`; a readable shadow
+never replaces it. Global sources require existing `secret.list` at their actual
+source scope. Product-environment metadata access can cover only runtime sources
+in an exclusive product context, never a global or ambiguous source or another
+integration. Existing copy eligibility and grants are unchanged.
+
+All-scope selection is not a delivery claim: site delivery may exclude global
+or context sources, and worker delivery selects exact-instance sources. Declare
+the appropriate scopes when qualifying one of those paths. Historical and
+undeclared lanes and other integrations remain outside the stated population;
+runtime delivery, value validity and health need their own evidence.
+
+Consumers must preserve server coverage and requested selection evidence. Missing
+coverage from an older server or projection is `unknown`; zero client omissions
+does not prove server completeness. A bounded client projection must retain its
+own bound separately and cannot turn partial rows into a complete inventory.
+
 A product-config secret entry can use `copy_from` instead of `value`:
 
 ```json
