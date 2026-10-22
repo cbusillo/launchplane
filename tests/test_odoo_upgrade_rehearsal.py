@@ -792,7 +792,7 @@ class RehearsalScenario(unittest.TestCase):
     def adapter(self, action: str) -> OdooRehearsalAdapter:
         record = self.store.read_odoo_upgrade_rehearsal(self.identifier)
         assert record is not None
-        return OdooRehearsalAdapter(
+        adapter = OdooRehearsalAdapter(
             self.root,
             self.store,
             self.product,
@@ -806,6 +806,12 @@ class RehearsalScenario(unittest.TestCase):
             self.principal,
             "fixture-trace",
         )
+
+        if action == "rebuild-final":
+            adapter.request = adapter.request.model_copy(
+                update={"reviewed_plan_sha256": adapter.reviewed_binding(record)}
+            )
+        return adapter
 
     def test_new_record_and_source_inputs_leave_canonical_lane_authority_unchanged(self) -> None:
         before = self.authority()

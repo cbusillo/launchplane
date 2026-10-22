@@ -25331,7 +25331,9 @@
               "validate-business",
               "verify",
               "retire",
-              "retire-incomplete"
+              "retire-incomplete",
+              "abandon-validation",
+              "rebuild-final"
             ],
             "title": "Action",
             "type": "string"
