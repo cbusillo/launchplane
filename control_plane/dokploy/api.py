@@ -62,6 +62,10 @@ _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
     rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_COOKIE_LOG_VALUE_PATTERN = re.compile(
+    r"""(?i)((?<![\w-])["']?(?:set-)?cookie["']?\s*[=:]\s*)"""
+    r"""(?:(?P<quote>["'])(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)|[^\r\n]+)"""
+)
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
 )
@@ -527,8 +531,14 @@ def normalize_dokploy_compose_service_name(raw_service_name: str) -> str:
     return service_name
 
 
+def _redact_cookie_value(match: re.Match[str]) -> str:
+    quote = match["quote"] or ""
+    return f"{match[1]}{quote}[redacted]{quote}"
+
+
 def redact_dokploy_log_line(raw_line: str) -> str:
-    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', raw_line)
+    redacted_line = _COOKIE_LOG_VALUE_PATTERN.sub(_redact_cookie_value, raw_line)
+    redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', redacted_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
     redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
     redacted_line = _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)

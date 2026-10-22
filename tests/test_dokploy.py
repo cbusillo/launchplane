@@ -157,7 +157,8 @@ class DokployConfigTests(unittest.TestCase):
             fp=BytesIO(
                 b'{"message":"Remote command failed with exit code 1",'
                 b'"DATABASE_URL":"postgresql://user:password@database/example",'
-                b'"SERVICE_TOKEN":"secret-token"}'
+                b'"SERVICE_TOKEN":"secret-token",'
+                b'"headers":{"Set-Cookie":"session_id=cookie-secret; HttpOnly"}}'
             ),
         )
         self.addCleanup(error.close)
@@ -175,6 +176,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertTrue(raised.exception.remote_command_failed)
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("secret-token", raised.exception.format_message())
+        self.assertNotIn("cookie-secret", raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
 
     def test_dokploy_request_closes_http_error_when_its_body_times_out(self) -> None:
@@ -661,6 +663,47 @@ class DokployConfigTests(unittest.TestCase):
             redacted_line,
             '{"API_KEY":"[redacted]","nested":{"SERVICE_TOKEN":"[redacted]"},"note":"safe"}',
         )
+
+    def test_redact_dokploy_log_line_redacts_cookie_headers(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "GET /web 200 Cookie: session_id=abc123; frontend_lang=en_US"
+            ),
+            "GET /web 200 Cookie: [redacted]",
+        )
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "set-cookie: session_id=abc123; Path=/; HttpOnly"
+            ),
+            "set-cookie: [redacted]",
+        )
+
+    def test_redact_dokploy_log_line_redacts_structured_cookie_fields(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
+            ),
+            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]',
+        )
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "{'Set-Cookie': 'sid=abc123; Secure', 'path': '/web'}"
+            ),
+            "{'Set-Cookie': '[redacted]', 'path': '/web'}",
+        )
+
+    def test_redact_dokploy_log_line_redacts_truncated_cookie_values(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                '{"status":502,"Cookie":"sid=abc123; x=ab'
+            ),
+            '{"status":502,"Cookie":[redacted]',
+        )
+
+    def test_redact_dokploy_log_line_keeps_cookie_settings_diagnostics(self) -> None:
+        line = "SESSION_COOKIE_SECURE=true prefer-secure-cookie=false cookie consent banner shown"
+
+        self.assertEqual(control_plane_dokploy.redact_dokploy_log_line(line), line)
 
     def test_normalize_dokploy_log_payload_reads_message_objects_in_dict_lists(self) -> None:
         lines = control_plane_dokploy.normalize_dokploy_log_payload(
