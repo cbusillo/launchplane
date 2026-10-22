@@ -5827,6 +5827,56 @@ def _recover_failed_merge_train_candidate(
         ],
         "failed_tests": list(failures.failed_tests),
     }
+    retry_result: dict[str, object] = {
+        "repository": repository,
+        "base_branch": base_branch,
+        "mode": "dry-run",
+        "controller_action": "candidate_failed",
+        "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+        "candidate": failed.model_dump(mode="json"),
+        "details": details,
+    }
+    if any(check.conclusion == "action_required" for check in failures.checks):
+        return {**retry_result, "reason_code": "candidate_checks_admin_hold"}
+    if not failed.check_rerun_attempts and failures.retry_runs:
+        retried = failed.model_copy(update={"check_rerun_attempts": dict(failures.retry_runs)})
+        retry_result.update(
+            controller_action="observe_candidate",
+            mode="observe_candidate" if mutate else "dry-run",
+            reason_code="candidate_checks_retry_requested",
+            candidate=retried.model_dump(mode="json"),
+        )
+        if mutate:
+            record_id = _persist_replacement_candidate(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                candidate=retried,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                lease=lease,
+            )
+            retry_result["merge_train_batch_candidate_record_id"] = record_id
+            lease.checkpoint(
+                active_action="reflow_candidate",
+                active_phase="retry_candidate_checks",
+                active_record_id=record_id,
+                active_pull_request_number=None,
+                step_payload={"candidate_record_id": record_id},
+            )
+            github_client.retry_candidate_checks(candidate=retried)
+        return retry_result
+    if failures.checks_disagree:
+        return {**retry_result, "reason_code": "candidate_checks_disagree"}
+    if failed.check_rerun_attempts and not github_client.candidate_check_retry_finished(
+        candidate=failed
+    ):
+        return {
+            **retry_result,
+            "controller_action": "observe_candidate",
+            "reason_code": "candidate_checks_retry_pending",
+        }
     if failures.infrastructure_only:
         if _infrastructure_retry_used(
             candidate_store=candidate_store,

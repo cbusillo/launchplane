@@ -23,6 +23,7 @@ class MergeTrainStallObservation(BaseModel):
     progress_key: str = ""
     progress_since: str = ""
     ready_since: dict[str, str] = Field(default_factory=dict)
+    blocked_since: dict[str, str] = Field(default_factory=dict)
     reasons: tuple[str, ...] = ()
     suspected_signals: tuple[str, ...] = ()
     queue_suspended: bool = False

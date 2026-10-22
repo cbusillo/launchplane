@@ -1186,12 +1186,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             ),
             safe="",
         )
-        check_runs = _list_check_runs(
+        check_payload = _list_check_runs(
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_sha,
             required_checks=tuple((check.name, check.app_id) for check in requirements),
-        )["check_runs"]
+            include_history=True,
+        )
+        check_runs = check_payload["check_runs"]
+        history = cast(list[object], check_payload.get("check_runs_history", check_runs))
         statuses = _list_commit_statuses(
             transport=self.transport,
             repository_path=repository_path,
@@ -1267,10 +1270,118 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         return replace(
             failures,
+            checks_pending=failures.checks_pending
+            or bool(check_payload.get("actions_observation_error")),
             attribution_requirements=tuple(
                 requirement for requirement, state in verdict.blocking if state == "fail"
             ),
+            retry_runs=self._candidate_check_retry_runs(
+                candidate=candidate,
+                checks=[check for check in normalized_runs if is_required(check, "check_run")],
+            ),
+            checks_disagree=any(
+                _check_run_status(failed) == "fail"
+                and is_required(failed, "check_run")
+                and _actions_check_identity(
+                    failed, repository_path=repository_path, head_sha=encoded_sha
+                )
+                is not None
+                and any(
+                    str(passed.get("name") or "").casefold()
+                    == str(failed.get("name") or "").casefold()
+                    and _check_payload_app_id(passed) == _check_payload_app_id(failed)
+                    and passed.get("status") == "completed"
+                    and passed.get("conclusion") == "success"
+                    and _actions_check_identity(
+                        passed, repository_path=repository_path, head_sha=encoded_sha
+                    )
+                    is not None
+                    for item in history
+                    for passed in (_json_object(item, "GitHub check run history"),)
+                )
+                for failed in normalized_runs
+            ),
         )
+
+    def _candidate_check_retry_runs(
+        self, *, candidate: MergeTrainBatchCandidate, checks: list[dict[str, object]]
+    ) -> tuple[tuple[int, int], ...]:
+        repository_path = _repository_path(candidate.repository)
+        runs: dict[int, int] = {}
+        for check in checks:
+            if check.get("conclusion") not in {"failure", "timed_out"}:
+                continue
+            identity = _actions_check_identity(
+                check, repository_path=repository_path, head_sha=candidate.candidate_sha
+            )
+            if identity is None:
+                return ()
+            run_id, suite_id = identity
+            if run_id in runs:
+                continue
+            run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+            if (
+                run.get("check_suite_id") != suite_id
+                or run.get("status") != "completed"
+                or run.get("conclusion") not in {"failure", "timed_out"}
+            ):
+                return ()
+            runs[run_id] = cast(int, run["run_attempt"])
+        return tuple(sorted(runs.items()))
+
+    def _candidate_check_retry_run(
+        self, *, candidate: MergeTrainBatchCandidate, run_id: int
+    ) -> dict[str, object]:
+        run = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{_repository_path(candidate.repository)}/actions/runs/{run_id}",
+            ),
+            "GitHub candidate check execution",
+        )
+        attempt = run.get("run_attempt")
+        if (
+            run.get("id") != run_id
+            or run.get("head_sha") != candidate.candidate_sha
+            or run.get("head_branch") != candidate.candidate_ref.removeprefix("refs/heads/")
+            or run.get("event") not in {"push", "pull_request"}
+            or _repository_full_name(run.get("repository"), "GitHub execution repository")
+            != candidate.repository.casefold()
+            or _repository_full_name(run.get("head_repository"), "GitHub execution head repository")
+            != candidate.repository.casefold()
+            or not isinstance(attempt, int)
+            or isinstance(attempt, bool)
+            or attempt < 1
+        ):
+            raise MergeTrainGitHubError(
+                "Candidate check retry execution provenance is unavailable."
+            )
+        return run
+
+    def retry_candidate_checks(self, *, candidate: MergeTrainBatchCandidate) -> None:
+        runs = [
+            (run_id, attempt, self._candidate_check_retry_run(candidate=candidate, run_id=run_id))
+            for run_id, attempt in candidate.check_rerun_attempts.items()
+        ]
+        if not runs or any(
+            run.get("run_attempt") != attempt
+            or run.get("status") != "completed"
+            or run.get("conclusion") not in {"failure", "timed_out"}
+            for _, attempt, run in runs
+        ):
+            raise MergeTrainGitHubError("Candidate check execution changed before retry.")
+        for run_id, _, _ in runs:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{_repository_path(candidate.repository)}/actions/runs/{run_id}/rerun-failed-jobs",
+            )
+
+    def candidate_check_retry_finished(self, *, candidate: MergeTrainBatchCandidate) -> bool:
+        for run_id, attempt in candidate.check_rerun_attempts.items():
+            run = self._candidate_check_retry_run(candidate=candidate, run_id=run_id)
+            if cast(int, run["run_attempt"]) <= attempt or run.get("status") != "completed":
+                return False
+        return bool(candidate.check_rerun_attempts)
 
     def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
@@ -5844,12 +5955,16 @@ def _list_check_runs(
     repository_path: str,
     encoded_head_sha: str,
     required_checks: tuple[tuple[str, int | None], ...] | None = None,
+    include_history: bool = False,
 ) -> dict[str, object]:
     check_runs: list[object] = []
     page = 1
     total_count: int | None = None
     while True:
-        query = urlencode({"per_page": "100", "page": str(page)})
+        parameters = {"per_page": "100", "page": str(page)}
+        if include_history:
+            parameters["filter"] = "all"
+        query = urlencode(parameters)
         payload = _json_object(
             transport.request(
                 method="GET",
@@ -5891,6 +6006,7 @@ def _list_check_runs(
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
         "check_runs": latest,
+        **({"check_runs_history": check_runs} if include_history else {}),
         "actions_observation_error": observation_error,
     }
 

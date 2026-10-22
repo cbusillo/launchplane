@@ -126,6 +126,13 @@ Recorded Client release holds pause queue/controller timers; lease and recovered
 failure signals still run. Long-running CI can cross the thirty-minute threshold:
 the incident reports delay for the Supervisor to assess, not proof of dead CI.
 
+The same monitor tracks open heads with a persisted controller candidate-failure
+block. After thirty minutes it lists each PR and head in the existing incident,
+even with no eligible queue or active candidate. Unrelated train progress does
+not reset that head's clock. Removing the block or closing the PR clears the
+observation; a changed head starts its own clock. Release holds pause this timer
+too. This observation changes no block or recovery authority.
+
 The existing delivery App creates or updates one bot-owned `Merge train stalled`
 issue in each affected repository. It stays open while any monitored base has a
 stall, closes when complete fresh evidence shows none, and reopens for a later

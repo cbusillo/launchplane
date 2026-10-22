@@ -58,17 +58,21 @@ def observe_stall(
     progress_key: str,
     ready: tuple[str, ...],
     busy: bool,
+    blocked: tuple[str, ...] = (),
     orphaned_lease: bool = False,
     recovered_failure: bool = False,
 ) -> MergeTrainStallObservation:
     changed = progress_key != previous.progress_key
     since = now if changed or not previous.progress_since else previous.progress_since
     ready_since = {key: previous.ready_since.get(key, now) for key in ready}
+    blocked_since = {key: previous.blocked_since.get(key, now) for key in blocked}
     reasons: list[str] = []
     if busy and _age(now, since) >= STALL_SECONDS:
         reasons.append("controller_unchanged")
     if any(_age(now, started) >= STALL_SECONDS for started in ready_since.values()):
         reasons.append("ready_change_not_moving")
+    if any(_age(now, started) >= STALL_SECONDS for started in blocked_since.values()):
+        reasons.append("candidate_failure_block_persisted")
     signals: list[str] = []
     if orphaned_lease:
         signals.append("lease_without_live_heartbeat")
@@ -82,6 +86,7 @@ def observe_stall(
         progress_key=progress_key,
         progress_since=since,
         ready_since=ready_since,
+        blocked_since=blocked_since,
         reasons=tuple(reasons),
         suspected_signals=tuple(signals),
     )
@@ -205,6 +210,10 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
                 f"  - Ready change `{key}` since {since}."
                 for key, since in sorted(observation.ready_since.items())
             )
+            lines.extend(
+                f"  - Candidate-failure blocked change `{key}` since {since}."
+                for key, since in sorted(observation.blocked_since.items())
+            )
     if not any(item.reasons for item in record.observations.values()):
         lines.append("Resolved: no actionable stall condition remains.")
     lines.extend(
@@ -315,6 +324,37 @@ def run_stall_monitor_pass(
                         else set()
                     )
                     ready = tuple(f"{e.number}:{e.head_sha}" for e in queue.queue if e.eligible)
+                    blocked_heads = {
+                        (pr.number, pr.head_sha)
+                        for pr in snapshot.pull_requests
+                        if target.blocked_label.casefold()
+                        in {label.casefold() for label in pr.labels}
+                    }
+                    blocked = tuple(
+                        sorted(
+                            {
+                                f"{entry.pull_request_number}:{entry.head_sha}"
+                                for candidate in (
+                                    getattr(store, "list_merge_train_batch_candidate_records")(
+                                        repository=repository,
+                                        base_branch=target.base_branch,
+                                        status="superseded",
+                                    )
+                                    if blocked_heads
+                                    else ()
+                                )
+                                if candidate.block_intent is not None
+                                and candidate.source.startswith("service:controller:")
+                                and candidate.candidate.policy_key == target.policy_key
+                                and (
+                                    candidate.block_intent.label_write_succeeded
+                                    or candidate.block_intent.applied_label_event_id is not None
+                                )
+                                for entry in candidate.candidate.entries
+                                if (entry.pull_request_number, entry.head_sha) in blocked_heads
+                            }
+                        )
+                    )
                     previous = previous.model_copy(
                         update={
                             "ready_since": {
@@ -340,6 +380,7 @@ def run_stall_monitor_pass(
                         now=observed_at,
                         progress_key=progress_key,
                         ready=() if release_held else ready,
+                        blocked=() if release_held else blocked,
                         busy=not release_held
                         and bool(ready or current or (state and state.lease_owner)),
                         orphaned_lease=bool(

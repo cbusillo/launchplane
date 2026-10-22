@@ -1953,7 +1953,22 @@ Controller actions have these retry/stop semantics:
   checks pass, fail, or remain pending.
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
-  evidence. If the eligible queue/base changes, the next controller action may
+  evidence. Before isolation, the controller requests one rerun of failed jobs
+  in each proven required-check execution on the same candidate SHA. Its
+  `check_rerun_attempts` record reserves the original execution IDs and attempts
+  before dispatch, so restart or an uncertain response cannot resend a retry.
+  Dry-run reports `candidate_checks_retry_requested` without consuming it.
+  Until a newer completed attempt is observed, `candidate_checks_retry_pending`
+  preserves the hold. A repeat failure then follows normal isolation. A success
+  and failure for the same required check and App on this SHA instead report
+  `candidate_checks_disagree`: the conflict is transient and cannot blame a
+  member or authorize landing. All required checks must still pass for recovery.
+  Unknown execution provenance and admin holds never authorize a rerun. The
+  existing credential must already support it; no permission is added here.
+  The existing stall monitor surfaces a recorded candidate-failure block that
+  remains on an open head for thirty minutes, even when the eligible queue is
+  empty or other candidates progress.
+  If the eligible queue/base changes, the next controller action may
   become `plan_candidate` for a superseding candidate. A failed candidate with
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build
