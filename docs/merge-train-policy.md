@@ -1252,10 +1252,15 @@ unrelated optional workflows cannot change its classification:
   when another queued change still fails. Each probe uses current eligibility,
   Ready and Client evidence, release/manual holds, stack discovery or the exact
   recorded collapse proof, and the ordinary candidate and protected landing
-  gates. Conflict holds survive only while their recorded preceding-head lineage
-  still matches; changed lineage is probed again. Dependency holds retain their
-  existing base/head binding. Only temporary `failure_isolation` deferrals are reconsidered between failed probes. The
+  gates. Ordinary conflict holds survive only while their recorded preceding-head
+  lineage still matches; changed lineage is probed again. Singleton exploration
+  releases pairwise conflict holds because the conflicting peers are absent from
+  that trial, while retaining base-conflict and dependency holds. Temporary
+  `failure_isolation` deferrals are reconsidered between failed probes. The
   currently tested probe keeps the other roots deferred while it runs.
+  Policy-eligible engineering heads awaiting checks are deferred too, so they
+  cannot join or block a passing singleton's retry. Each trial still requires
+  its own current readiness. Ineligible and manually held heads stay excluded.
   History on the exact base commit, source head and compatible policy avoids
   repeating failed singleton inputs, including after a service restart. A
   failed first singleton does not prevent the next eligible one from running.
@@ -1270,7 +1275,13 @@ unrelated optional workflows cannot change its classification:
   retired stack work inside exploration. When no
   further singleton probe is currently plannable, `base_failure_exploration_exhausted`
   reports a non-blaming wait without claiming that every root failed or launching
-  more unchanged probes. Deferred roots receive a waiting message while the base
+  more unchanged probes. Existing unsupported-stack and disposition-preparation
+  causes remain in the result and exhausted message, so an admin sees the
+  prerequisite to resolve or recheck. A dry run still names missing label
+  preparation without creating the label. Historical reads that do not recover
+  a candidate do not replace the failed source in the stored diagnostics; an
+  actual passing-rerun replacement retains its historical source.
+  Deferred roots receive a waiting message while the base
   is unproved; repeated exhausted polls retain the existing probe scope rather
   than resending that message to every deferred root. A surviving conflict hold
   still reports blocked and asks its author to resolve the conflict. A new

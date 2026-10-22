@@ -5998,15 +5998,19 @@ def _explore_nonpassing_base_candidates(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
-    holds = _surviving_held_out_entries(
-        policy=policy,
-        snapshot=snapshot,
-        held_out=held_out,
-        batch_landing=True,
+    holds = tuple(
+        hold
+        for hold in _surviving_held_out_entries(
+            policy=policy,
+            snapshot=snapshot,
+            held_out=held_out,
+            batch_landing=True,
+        )
+        if hold.reason != "entry_conflict" or not hold.conflicts_with
     )
     available_snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=holds)
     available = build_merge_train_dry_run_result(
-        policy=policy, snapshot=available_snapshot, batch_landing=True, new_candidate=True
+        policy=policy, snapshot=available_snapshot, batch_landing=True
     )
     if len(failed.entries) == 1 and sum(entry.eligible for entry in available.queue) == 1:
         return None
@@ -6027,6 +6031,7 @@ def _explore_nonpassing_base_candidates(
             current_sha256=policy_sha256,
         )
     )
+    deferred_roots: list[dict[str, object]] = []
     for entry in available.queue:
         if not entry.eligible:
             continue
@@ -6068,6 +6073,7 @@ def _explore_nonpassing_base_candidates(
             None,
         )
         if latest_outcome is not None and latest_outcome.candidate.required_checks_status == "fail":
+            observations = lease.observations.copy()
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
                 candidate_store=candidate_store,
@@ -6110,6 +6116,8 @@ def _explore_nonpassing_base_candidates(
                         ),
                     )
                 return recovered
+            lease.observations.clear()
+            lease.observations.update(observations)
             continue
         proof = next(
             (
@@ -6126,6 +6134,14 @@ def _explore_nonpassing_base_candidates(
                 policy=policy, snapshot=available_snapshot, root_pull_request_number=entry.number
             )
             if discovery.status == "unsupported":
+                deferred_roots.append(
+                    {
+                        "pull_request_number": entry.number,
+                        "code": "merge_train_stack_unsupported",
+                        "message": "; ".join(discovery.unsupported_reasons),
+                    }
+                )
+                details = {**details, "deferred_roots": deferred_roots}
                 continue
             if discovery.status == "ready_for_collapse":
                 progress = _plan_discovered_stack_collapse(
@@ -6147,7 +6163,16 @@ def _explore_nonpassing_base_candidates(
                     lease=lease,
                 )
                 if progress["controller_action"] == "block":
+                    deferred_roots.append(
+                        {
+                            "pull_request_number": entry.number,
+                            **cast(dict[str, object], progress["blocking_reason"]),
+                        }
+                    )
+                    details = {**details, "deferred_roots": deferred_roots}
                     continue
+                progress["reason_code"] = "base_failure_exploration"
+                progress["details"] = details
                 if mutate:
                     lease.checkpoint(
                         active_action="reflow_candidate",
@@ -6215,6 +6240,10 @@ def _explore_nonpassing_base_candidates(
                 f" {details['base_checks_diagnostic']}"
                 if details.get("base_checks_diagnostic")
                 else ""
+            )
+            + "".join(
+                f" Pull request #{root['pull_request_number']}: {root['message']}"
+                for root in deferred_roots
             ),
         },
         "details": details,

@@ -5,6 +5,7 @@ leases, candidate history and landing checkpoints use the production code.
 """
 
 import unittest
+from anyio import EndOfStream
 from control_plane.merge_train_github import MergeTrainBaseCheckObservation
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -241,7 +242,12 @@ class RecoveryReplayTests(unittest.IsolatedAsyncioTestCase):
                     if interruption is None:
                         raise
                     if remaining is not None:
-                        _, remaining = remaining.split(lambda item: isinstance(item, RuntimeError))
+                        _, remaining = remaining.split(
+                            lambda item: (
+                                isinstance(item, RuntimeError)
+                                and isinstance(item.__context__, EndOfStream)
+                            )
+                        )
                     if remaining is not None:
                         raise remaining
                     interrupted = True

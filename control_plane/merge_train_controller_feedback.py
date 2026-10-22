@@ -352,6 +352,10 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
+        if result.get("reason_code") == "base_failure_exploration_exhausted" and _as_list(
+            _as_dict(result.get("details")).get("deferred_roots")
+        ):
+            return _blocking_detail(result)
         if result.get("reason_code") in {
             "base_checks_not_green",
             "base_failure_exploration_exhausted",
