@@ -7514,7 +7514,6 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         if self.database_url.startswith("sqlite"):
             return
-        # A row lock cannot serialize first writers when the audit key is absent.
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:runner-lifecycle-audit:{audit_record_key}"},

@@ -277,7 +277,6 @@ class RunnerAuditHttpIdentityTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(
                                 store.list_runner_lane_registration_audit_records(), (original,)
                             )
-                            # A refused upload must not poison this HTTP key with an accepted receipt.
                             terminal = lifecycle_audit(status="completed")
                             recovered = await _post_runner_lane_registration_audit_evidence(
                                 app,

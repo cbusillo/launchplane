@@ -235,7 +235,7 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
 
 
 class RunnerLaneRegistrationAuditIdentityConflict(ValueError):
-    """An audit key is already bound to a different original lifecycle request."""
+    pass
 
 
 def validate_runner_lane_registration_audit_identity(
