@@ -17,7 +17,7 @@ def _cookie_representations() -> tuple[str, ...]:
     cookie = Cookie(
         0,
         "sid",
-        "made-up-jar",
+        'made-up-jar]>"\\tail',
         None,
         False,
         "example.invalid",
@@ -38,16 +38,27 @@ def _cookie_representations() -> tuple[str, ...]:
     request_jar.set_cookie(cookie)
     simple = SimpleCookie()
     simple["sid"] = "made-up-simple"
+    simple["apostrophe"] = "'made-up-'tail"
+    simple["punctuation"] = 'made-up->]"tail'
     headers = Message()
     headers["Set-Cookie"] = "sid=made-up-pair"
     return (
         repr(headers.items()),
+        """['Cookie', `sid="made-up-one's"`, 'X-Request-Id', 'req-123']""",
         repr([(b"Set-Cookie", b"sid=made-up-bytes"), (b"X-Request-Id", b"req-123")]),
         json.dumps({"rawHeaders": ["Set-Cookie", "sid=made-up-raw", "X-Request-Id", "req-123"]}),
         "rawHeaders: [\n  'Set-Cookie',\n  'sid=made-up-raw',\n  'X-Request-Id', 'req-123'\n]",
         *(
             representation(value)
-            for value in (cookie, jar, request_jar, simple, simple["sid"])
+            for value in (
+                cookie,
+                jar,
+                request_jar,
+                simple,
+                simple["sid"],
+                simple["apostrophe"],
+                simple["punctuation"],
+            )
             for representation in (str, repr)
         ),
         *(
@@ -66,6 +77,38 @@ def _cookie_representations() -> tuple[str, ...]:
 
 
 class DokployCookieLogTests(unittest.TestCase):
+    def test_undecodable_quoted_representations_redact_cookies(self) -> None:
+        for representation in _cookie_representations():
+            for invalid_json in (r"\x1b", "\t"):
+                with self.subTest(representation=representation, invalid_json=invalid_json):
+                    body = json.dumps(f"{representation} {invalid_json}")
+                    if invalid_json == "\t":
+                        body = body.replace(r"\t", "\t")
+                    else:
+                        body = body.replace(r"\\x1b", r"\x1b")
+                    with self.assertRaises(json.JSONDecodeError):
+                        json.loads(body)
+                    output = api.redact_dokploy_log_line(f"status=502\n{body}\nretry scheduled")
+                    self.assertNotIn("made-up-", output)
+                    self.assertIn("status=502", output)
+                    self.assertIn("retry scheduled", output)
+
+    def test_tagged_cookie_containers_redact_their_bodies(self) -> None:
+        for representation in (
+            "cookies: [Object: null prototype] { sid: 'made-up-node' }, status: 502",
+            "cookies: [Object: null prototype] {\n  sid: 'made-up-node'\n}, status: 502",
+        ):
+            with self.subTest(representation=representation):
+                output = api.redact_dokploy_log_line(representation)
+                self.assertNotIn("made-up-", output)
+                self.assertIn("status: 502", output)
+
+    def test_quotes_inside_redacted_values_cannot_hide_later_cookie_keys(self) -> None:
+        text = "{ cookie: 'sid=made-up-one\"tail', 'set-cookie': \"x=made-up-two's\", status: 502 }"
+        output = api.redact_dokploy_log_line(text)
+        self.assertNotIn("made-up-", output)
+        self.assertIn("status: 502", output)
+
     def test_representations_redact_whole_bodies_and_batches(self) -> None:
         for representation in _cookie_representations():
             body = f"status=502\n{representation}\nretry scheduled"
@@ -90,6 +133,7 @@ class DokployCookieLogTests(unittest.TestCase):
     def test_representation_redaction_preserves_neighboring_structured_diagnostics(self) -> None:
         for representation in (
             "[('Set-Cookie', 'sid=made-up-pair'), ('X-Request-Id', 'req-123')]",
+            """['Cookie', `sid="made-up-one's"`, 'X-Request-Id', 'req-123']""",
             '["Cookie", "sid=made-up-raw", "X-Request-Id", "req-123"]',
             "<Cookie sid=made-up-jar for example.invalid/>",
             "Cookie(version=0, name='sid', value='made-up-jar')",

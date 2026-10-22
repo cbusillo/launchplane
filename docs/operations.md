@@ -2838,6 +2838,9 @@ Conventional onboarding creates new products only.
   An empty cookie key followed by a cookie-shaped assignment or container is
   ambiguous; that following value is suppressed even if it was a diagnostic.
   A plain cookie header inside a JSON string can suppress its same-line suffix.
+  A space-separated field after a quoted logfmt cookie value is indistinguishable
+  from more cookie data and is suppressed. Deeper-indented stack frames following
+  an unquoted cookie header are treated as folded header continuations.
 - `GET /v1/previews/{preview_id}/outgoing-email` and `GET
   /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
   status with exact `subject` and `recipient` filters plus a timezone-qualified
