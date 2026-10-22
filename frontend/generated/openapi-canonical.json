@@ -50229,6 +50229,93 @@
         "title": "SharedSourceReview",
         "type": "object"
       },
+      "ShopifyIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ShopifyIdentityResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ShopifyIdentityResponse",
+        "type": "object"
+      },
+      "ShopifyIdentityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": false,
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "probe": {
+            "default": "unavailable",
+            "enum": [
+              "verified",
+              "token_rejected",
+              "unavailable"
+            ],
+            "title": "Probe",
+            "type": "string"
+          },
+          "production_domain_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Production Domain Sha256",
+            "type": "string"
+          },
+          "production_shop_id_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Production Shop Id Sha256",
+            "type": "string"
+          },
+          "separation": {
+            "default": "unknown",
+            "enum": [
+              "separate",
+              "same",
+              "unknown"
+            ],
+            "title": "Separation",
+            "type": "string"
+          },
+          "testing_domain_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Domain Sha256",
+            "type": "string"
+          },
+          "testing_shop_id_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Shop Id Sha256",
+            "type": "string"
+          },
+          "values_redacted": {
+            "const": true,
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "title": "ShopifyIdentityResult",
+        "type": "object"
+      },
       "SoloAdministrationConfirmationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -93561,6 +93648,134 @@
           }
         },
         "summary": "Read one public ingress incident with linked evidence"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/shopify-identity": {
+      "get": {
+        "operationId": "read_odoo_shopify_identity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShopifyIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Compare held testing Shopify identity with current production store authority read-only"
       }
     },
     "/v1/products/{product}/environments/{environment}/website-bootstrap": {
