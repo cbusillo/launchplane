@@ -942,7 +942,7 @@ requirement; one source's pass cannot erase another matching failure or pending
 signal. A required check with no matching evidence remains pending. Optional
 checks do not fail the required verdict. Passing owner/configuration facets
 cannot replace an unavailable required verdict. Missing names are retained in
-head/candidate records and waiting feedback. Stacked children use the train
+head/candidate observations and waiting feedback. Stacked children use the train
 base's technical requirements while preserving their actual parent branch and
 comparison/review bindings.
 
@@ -953,12 +953,15 @@ independent technical verdict unknown. Candidate validation, check reuse and lan
 usable protected-branch technical requirements; retaining the queue view cannot
 qualify delivery.
 
-The optional `required_checks_observation_error` on persisted batch candidates is
-an additive payload-schema field, omitted when empty so existing records and their
-digests retain their prior shape. Nonempty diagnostics require compatible readers
-on every replica and a reader-capable rollback image while those records exist;
-older strict candidate models reject the added field. This adds no database
-table or Alembic migration. A private installation without Actions read still
+The optional `required_checks_observation_error` belongs to observation/result
+projections. The canonical batch-candidate record builder omits it from its own
+copy before hashing and persistence, preserving the old stored payload and digest
+shape. The original observation retains the diagnostic for waiting feedback.
+Native scheduler feedback records save it in their existing comment body; keyed
+service responses retain it in their existing idempotency envelope and replay it
+after restart. A direct response without an idempotency key has no such durable
+response guarantee. This introduces no stored candidate field, table, migration
+or reader-first rollback prerequisite. A private installation without Actions read still
 cannot prove a failing job superseded and retains that blocker with a diagnostic.
 An App-pinned commit status needs explicit App attribution; a creator identity
 does not establish it. These retained evidence limits do not authorize grants or

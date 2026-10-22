@@ -1802,7 +1802,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             (reloaded,) = store.list_merge_train_batch_candidate_records(
                 repository=observed.repository
             )
-            self.assertIn(missing, reloaded.candidate.required_checks_observation_error)
+            baseline = build_merge_train_batch_candidate_record(
+                candidate=observed.model_copy(update={"required_checks_observation_error": ""}),
+                source=record.source,
+                updated_at=record.updated_at,
+            )
+            self.assertEqual(reloaded.model_dump(mode="json"), baseline.model_dump(mode="json"))
+            self.assertNotIn(
+                "required_checks_observation_error", reloaded.candidate.model_dump(mode="json")
+            )
+            self.assertIn(
+                missing, observed.model_dump(mode="json")["required_checks_observation_error"]
+            )
 
     def test_observe_batch_candidate_checks_accepts_unpinned_commit_status(self) -> None:
         candidate = _batch_candidate().model_copy(

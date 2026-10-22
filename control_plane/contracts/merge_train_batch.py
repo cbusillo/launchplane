@@ -681,7 +681,7 @@ def build_merge_train_batch_candidate_record(
         ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
-        candidate=candidate,
+        candidate=candidate.model_copy(update={"required_checks_observation_error": ""}),
     )
     return MergeTrainBatchCandidateRecord.model_validate(
         {
