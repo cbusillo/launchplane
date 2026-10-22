@@ -439,13 +439,13 @@ def register_odoo_runtime_read_routes(
                 control_plane_root=dependencies.control_plane_root,
                 database_url=dependencies.database_url,
             )
-            _logger.info(
-                "Shopify identity read: trace=%s stage=%s reason=%s separation=%s",
-                trace_id,
-                result.stage,
-                result.reason,
-                result.separation,
-            )
+            if result.stage != "complete":
+                _logger.warning(
+                    "Shopify identity unavailable: trace=%s stage=%s reason=%s",
+                    trace_id,
+                    result.stage,
+                    result.reason,
+                )
             return ShopifyIdentityResponse(
                 trace_id=trace_id,
                 result=result,

@@ -335,7 +335,10 @@ def runtime_identity(
     if (
         set(result) != keys
         or any(not isinstance(value, str) for value in result.values())
-        or (result["status"] != "verified" and result["reason"] not in get_args(IdentityReason)[1:])
+        or (
+            result["status"] != "verified"
+            and result["reason"] not in set(get_args(IdentityReason)) - {""}
+        )
     ):
         raise ValueError("Identity unavailable")
     return result
@@ -391,11 +394,14 @@ def compare_identity(
         token = _decrypt_secret_value(selected.version.ciphertext, selected.version.key_id)
         stage, reason = "testing_probe", "probe_unavailable"
         observed = runtime_identity(connection, selected, environment, token)
-        stage, reason = "evidence", "authority_changed"
+        stage, reason = "evidence", "runtime_changed"
         reads.assert_selection_current(store, selection)
+        reason = "authority_changed"
+        if authority(store, product).snapshot != selected.snapshot:
+            return ShopifyIdentityResult(stage=stage, reason=reason)
+        reason = "runtime_changed"
         if (
-            authority(store, product).snapshot != selected.snapshot
-            or reads.inspect_runtime_container(
+            reads.inspect_runtime_container(
                 connection.host,
                 connection.token,
                 connection.server_id,
@@ -412,6 +418,7 @@ def compare_identity(
                 stage="testing_probe",
                 reason=cast(IdentityReason, observed.get("reason", "probe_unavailable")),
             )
+        reason = "runtime_changed"
         reads.assert_selection_current(store, production_selection)
         stage, reason = "production_probe", "probe_unavailable"
         production = runtime_identity(production_connection, None, production_environment, "")
@@ -430,6 +437,7 @@ def compare_identity(
         stage, reason = "evidence", "authority_changed"
         if authority(store, product).snapshot != selected.snapshot:
             return ShopifyIdentityResult(stage=stage, reason=reason)
+        reason = "runtime_changed"
         reads.assert_selection_current(store, production_selection)
         reads.assert_selection_current(store, selection)
         result = ShopifyIdentityResult(

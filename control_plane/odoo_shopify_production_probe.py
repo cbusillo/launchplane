@@ -18,12 +18,17 @@ class IdentityUnavailable(ValueError):
 def read_identity(spec: dict[str, object]) -> dict[str, str]:
     config = configparser.ConfigParser(interpolation=None)
     path = str(spec["config_path"])
-    if config.read(path) != [path]:
-        raise IdentityUnavailable("configuration_unavailable")
-    options = config["options"]
-    database = os.environ["ODOO_DB_NAME"]
-    if options.get("db_name") != database or options.get("db_host") != "database":
+    try:
+        if config.read(path) != [path]:
+            raise IdentityUnavailable("configuration_unavailable")
+        options = config["options"]
+    except (OSError, configparser.Error, KeyError):
+        raise IdentityUnavailable("configuration_unavailable") from None
+    database = os.environ.get("ODOO_DB_NAME")
+    if not database or options.get("db_name") != database or options.get("db_host") != "database":
         raise IdentityUnavailable("database_identity_unavailable")
+    if not options.get("db_user") or not options.get("db_password"):
+        raise IdentityUnavailable("configuration_unavailable")
     try:
         driver = importlib.import_module("psycopg2")
     except ImportError:
@@ -100,11 +105,18 @@ def read_identity(spec: dict[str, object]) -> dict[str, str]:
 
 def main() -> None:
     try:
-        result = read_identity(json.loads(sys.stdin.read(4097)))
+        spec = json.loads(sys.stdin.read(4097))
+        if not isinstance(spec, dict) or not isinstance(spec.get("config_path"), str):
+            raise ValueError()
+    except (ValueError, TypeError):
+        print(json.dumps({"status": "unavailable", "reason": "request_invalid"}))
+        return
+    try:
+        result = read_identity(spec)
     except IdentityUnavailable as error:
         result = {"status": "unavailable", "reason": error.reason}
     except Exception:
-        result = {"status": "unavailable", "reason": "configuration_unavailable"}
+        result = {"status": "unavailable", "reason": "probe_failed"}
     print(json.dumps(result))
 
 

@@ -350,7 +350,9 @@ class ShopifyComparisonTests(unittest.TestCase):
             return self.observation
 
         self.calls[-1].side_effect = observe
-        self.assertEqual(self.run_comparison().separation, "unknown")
+        result = self.run_comparison()
+        self.assertEqual(result.separation, "unknown")
+        self.assertEqual(result.reason, "authority_changed")
 
     def test_unsafe_recipient_or_credential_authority_never_decrypts_or_probes(self) -> None:
         original_bindings = dict(self.bindings)
@@ -571,7 +573,9 @@ class ShopifyComparisonTests(unittest.TestCase):
             ]
             self.assertEqual(len(testing_requests), 1)
             drift = True
-            self.assertEqual(self.run_comparison().separation, "unknown")
+            result = self.run_comparison()
+            self.assertEqual(result.separation, "unknown")
+            self.assertEqual(result.reason, "runtime_changed")
         self.assertTrue(
             all(command[:2] in (["docker", "inspect"], ["docker", "exec"]) for command in commands)
         )
@@ -614,8 +618,11 @@ class ShopifyHttpTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             comparison, "compare_identity", return_value=comparison.ShopifyIdentityResult()
         ) as execute:
-            response = await request(app, "GET", path)
+            with self.assertLogs("control_plane.http_routes.odoo_runtime", level="WARNING") as logs:
+                response = await request(app, "GET", path)
             self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn("fixture-trace", logs.output[0])
+            self.assertIn(response.json()["result"]["reason"], logs.output[0])
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(
                 {call.kwargs["target"].instances for call in allowed.call_args_list},
@@ -692,6 +699,11 @@ class ShopifyCallerTests(unittest.TestCase):
                 self.assertEqual(script["main"](), 1)
             self.assertNotIn("fixture-private", errors.getvalue())
             self.assertTrue(transport["request_launchplane_read"].side_effect.fp.closed)
+            transport["request_launchplane_read"].side_effect = TimeoutError("fixture-private")
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(script["main"](), 1)
+            self.assertEqual(json.loads(errors.getvalue())["reason"], "client_timeout")
+            self.assertNotIn("fixture-private", errors.getvalue())
             transport["request_launchplane_read"].side_effect = KeyError("fixture-private")
             with contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(script["main"](), 1)
@@ -711,6 +723,9 @@ class ProductionIdentityTests(unittest.TestCase):
         for failure, reason in (
             ("configuration", "configuration_unavailable"),
             ("identity", "database_identity_unavailable"),
+            ("missing_environment", "database_identity_unavailable"),
+            ("missing_user", "configuration_unavailable"),
+            ("malformed_request", "request_invalid"),
             ("driver", "database_driver_unavailable"),
             ("connection", "database_unavailable"),
             ("settings", "settings_unavailable"),
@@ -731,7 +746,11 @@ class ProductionIdentityTests(unittest.TestCase):
                 if failure == "connection":
                     database.connect.side_effect = RuntimeError("fixture-private-token")
                 with (
-                    patch.object(sys, "stdin", io.StringIO(json.dumps(spec))),
+                    patch.object(
+                        sys,
+                        "stdin",
+                        io.StringIO(json.dumps({} if failure == "malformed_request" else spec)),
+                    ),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                     patch.object(
                         configparser.ConfigParser,
@@ -744,11 +763,15 @@ class ProductionIdentityTests(unittest.TestCase):
                         return_value={
                             "db_name": "different-db" if failure == "identity" else "fixture-db",
                             "db_host": "database",
-                            "db_user": "fixture-user",
+                            "db_user": "" if failure == "missing_user" else "fixture-user",
                             "db_password": "fixture-private-token",
                         },
                     ),
-                    patch.dict(os.environ, {"ODOO_DB_NAME": "fixture-db"}),
+                    patch.dict(
+                        os.environ,
+                        {} if failure == "missing_environment" else {"ODOO_DB_NAME": "fixture-db"},
+                        clear=True,
+                    ),
                     patch.object(
                         importlib,
                         "import_module",
