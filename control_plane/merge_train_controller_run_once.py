@@ -4693,6 +4693,7 @@ def _advance_from_live_snapshot(
         snapshot=snapshot,
         held_out=held_out,
         batch_landing=lease.record.ordinary_job_binding is None,
+        new_candidate=True,
     )
     recovery_snapshot = snapshot
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
@@ -7118,6 +7119,7 @@ def _surviving_held_out_entries(
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
     batch_landing: bool = False,
     isolating_entries: tuple[MergeTrainBatchEntry, ...] = (),
+    new_candidate: bool = False,
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
     if not held_out:
         return ()
@@ -7128,7 +7130,10 @@ def _surviving_held_out_entries(
     contextual_heads = {
         (entry.number, entry.head_sha)
         for entry in build_merge_train_dry_run_result(
-            policy=policy, snapshot=snapshot, batch_landing=batch_landing
+            policy=policy,
+            snapshot=snapshot,
+            batch_landing=batch_landing,
+            new_candidate=new_candidate,
         ).queue
         if entry.eligible
     }

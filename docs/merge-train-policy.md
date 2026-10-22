@@ -1394,11 +1394,10 @@ merge onto the base). The controller result reports the probe as
 requests it conflicts with. Each hold also records `probe_base_sha` and the
 ordered `conflicts_with_head_shas`. A base-only conflict lasts while its base,
 held head and policy eligibility are unchanged. A pairwise conflict also needs
-the same accepted preceding PR/head sequence from the contextual queue; excluded
-heads never become probe predecessors. A changed base or preceding membership/head
-permits a fresh observation without requiring a speculative PR refresh. Legacy
-holds without probe lineage are
-re-observed once; their missing history is not reconstructed. On the first
+the same accepted preceding PR/head sequence from the current planning mode's
+contextual queue. A changed base or preceding membership/head permits a fresh
+observation without requiring a speculative PR refresh. Legacy holds without
+probe lineage are re-observed once; their missing history is not reconstructed. On the first
 mutating pass, this may supersede and rebuild an in-flight candidate and close
 its service batch PR, so its CI runs once more. Trailing queue
 additions do not invalidate a hold. An unchanged real conflict stays held and

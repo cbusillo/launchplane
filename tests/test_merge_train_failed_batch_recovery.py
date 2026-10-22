@@ -12,6 +12,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
 )
 from control_plane.contracts.merge_train_effect import (
+    CandidateHeadMergeEffect,
     CandidateHeadMergeOutcome,
     MergeTrainSemanticEffectExecutor,
 )
@@ -193,6 +194,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         base_status: str | MergeTrainGitHubError = "pass",
         label_prepared: bool | MergeTrainGitHubError = True,
         lease: Mock | MergeTrainControllerLeaseContext | None = None,
+        probe_executor: MergeTrainSemanticEffectExecutor | None = None,
     ) -> dict[str, Any]:
         record = build_merge_train_batch_candidate_record(
             candidate=candidate, source="test", updated_at="2026-10-03T12:00:00Z"
@@ -209,6 +211,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 cast(MergeTrainCheckStatus, base_status)
             )
         client.probe_batch_entry_conflicts.return_value = conflicts
+        if probe_executor is not None:
+            client.probe_batch_entry_conflicts.side_effect = GitHubMergeTrainClient(
+                transport=self.provider, effect_executor=probe_executor
+            ).probe_batch_entry_conflicts
         client.add_pull_request_label.return_value = None
         if isinstance(label_prepared, MergeTrainGitHubError):
             client.ensure_repository_label.side_effect = label_prepared
@@ -490,15 +496,27 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         self.assertNotIn(manual.number, events)
                         self.reflow_client.add_pull_request_label.assert_not_called()
 
-    def test_reflow_preserves_pairwise_conflict_context_behind_a_hidden_client(self) -> None:
-        for base_status, mutate, hidden, cap in (
-            ("pass", True, False, None),
-            ("pass", True, True, None),
-            ("fail", True, True, None),
-            ("pass", False, True, None),
-            ("pass", True, True, 2),
+    def test_reflow_keeps_pairwise_holds_bound_to_the_current_context(self) -> None:
+        class ResolvingExecutor(_PairConflictProbeExecutor):
+            def merge_candidate_head(
+                self, effect: CandidateHeadMergeEffect
+            ) -> CandidateHeadMergeOutcome:
+                if effect.pull_request_number == 4 and 2 in self.merged:
+                    self.merged.append(effect.pull_request_number)
+                    return CandidateHeadMergeOutcome(result_sha="conflict-resolved-by-2")
+                return super().merge_candidate_head(effect)
+
+        for base_status, mutate, hidden, cap, resolving in (
+            ("pass", True, False, None, False),
+            ("pass", True, True, None, False),
+            ("fail", True, True, None, False),
+            ("pass", False, True, None, False),
+            ("pass", True, True, 2, False),
+            ("pass", True, True, None, True),
         ):
-            with self.subTest(base=base_status, mutate=mutate, hidden=hidden, cap=cap):
+            with self.subTest(
+                base=base_status, mutate=mutate, hidden=hidden, cap=cap, resolving=resolving
+            ):
                 self._prepare()
                 template = self.snapshot.pull_requests[0]
                 self.snapshot = self.snapshot.model_copy(
@@ -510,7 +528,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                                     "head_sha": f"head-{number}",
                                     "head_ref": f"branch-{number}",
                                     "created_at": f"2026-05-08T0{number}:00:00Z",
-                                    "owner_review_required": number in (1, 2),
+                                    "owner_review_required": not resolving and number in (1, 2),
                                     "required_checks_status": "pending"
                                     if number == 2 and hidden
                                     else "pass",
@@ -520,11 +538,22 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         )
                     }
                 )
+                initial_snapshot = self.snapshot.model_copy(
+                    update={
+                        "pull_requests": tuple(
+                            pull
+                            for pull in self.snapshot.pull_requests
+                            if not resolving or pull.number != 2
+                        )
+                    }
+                )
                 planning = build_merge_train_dry_run_result(
-                    policy=self.policy, snapshot=self.snapshot, batch_landing=True
+                    policy=self.policy, snapshot=initial_snapshot, batch_landing=True
                 )
                 by_number = {entry.number: entry for entry in planning.queue}
-                executor = _PairConflictProbeExecutor(conflicting_pair=(3, 4))
+                executor = (ResolvingExecutor if resolving else _PairConflictProbeExecutor)(
+                    conflicting_pair=(3, 4)
+                )
                 probe_client = GitHubMergeTrainClient(
                     transport=self.provider,
                     effect_executor=cast(MergeTrainSemanticEffectExecutor, executor),
@@ -536,8 +565,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     queue=tuple(by_number[number] for number in planning.queue_order),
                     probe_ref="fixture-probe",
                 )
-                candidate_snapshot = self.snapshot.model_copy(
-                    update={"pull_requests": self.snapshot.pull_requests[:-1]}
+                candidate_snapshot = initial_snapshot.model_copy(
+                    update={"pull_requests": initial_snapshot.pull_requests[:-1]}
                 )
                 self.candidate = build_merge_train_batch_candidate(
                     dry_run_result=build_merge_train_dry_run_result(
@@ -575,10 +604,21 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         conflicts=holds,
                         base_status=base_status,
                         mutate=mutate,
+                        probe_executor=cast(MergeTrainSemanticEffectExecutor, executor)
+                        if resolving
+                        else None,
                     )
-                self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
                 self.reflow_client.add_pull_request_label.assert_not_called()
                 replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                if resolving:
+                    self.reflow_client.probe_batch_entry_conflicts.assert_called_once()
+                    self.assertEqual(
+                        [entry.pull_request_number for entry in replacement.entries],
+                        [pull.number for pull in self.snapshot.pull_requests],
+                    )
+                    self.assertEqual(replacement.held_out, ())
+                    continue
+                self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
                 self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1])
                 if base_status == "pass":
                     self.assertIn(holds[0], replacement.held_out)
@@ -591,6 +631,100 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                             if pull.number != replacement.entries[0].pull_request_number
                         },
                     )
+
+    def test_stale_candidate_replanning_keeps_readiness_deferred_conflict_context(self) -> None:
+        for checks, mergeable in (
+            ("pending", "mergeable"),
+            ("unknown", "mergeable"),
+            ("pass", "unknown"),
+        ):
+            for mutate in (False, True):
+                with (
+                    self.subTest(checks=checks, mergeable=mergeable, mutate=mutate),
+                    TemporaryDirectory() as directory,
+                ):
+                    self._prepare()
+                    template = self.snapshot.pull_requests[0]
+                    self.snapshot = self.snapshot.model_copy(
+                        update={
+                            "pull_requests": tuple(
+                                template.model_copy(
+                                    update={
+                                        "number": number,
+                                        "head_sha": f"head-{number}",
+                                        "head_ref": f"branch-{number}",
+                                        "created_at": f"2026-05-08T0{number}:00:00Z",
+                                        "required_checks_status": checks if number == 2 else "pass",
+                                        "mergeable": mergeable if number == 2 else "mergeable",
+                                    }
+                                )
+                                for number in range(1, 5)
+                            )
+                        }
+                    )
+                    executor = _PairConflictProbeExecutor(conflicting_pair=(1, 3))
+                    probe_client = GitHubMergeTrainClient(
+                        transport=self.provider,
+                        effect_executor=cast(MergeTrainSemanticEffectExecutor, executor),
+                    )
+                    client = Mock(wraps=self.client)
+                    client.read_merge_train_snapshot.side_effect = lambda **_: self.snapshot
+                    client.probe_batch_entry_conflicts.side_effect = (
+                        probe_client.probe_batch_entry_conflicts
+                    )
+                    client.candidate_block_label_events.return_value = []
+                    lease = Mock(
+                        owner="test",
+                        acquisition_token="test",
+                        record=Mock(ordinary_job_binding=None, step_payload={}),
+                    )
+                    store = FilesystemRecordStore(state_dir=Path(directory))
+                    initial = _advance_from_live_snapshot(
+                        request=MergeTrainControllerRunOnceEnvelope(
+                            repository=self.snapshot.repository, mutate=True
+                        ),
+                        policy=self.policy,
+                        policy_sha256="policy-digest",
+                        transport=self.provider,
+                        github_client=cast(GitHubMergeTrainClient, client),
+                        candidate_store=store,
+                        stack_collapse_store=store,
+                        trace_id="initial",
+                        recorded_at="2026-10-03T12:00:00Z",
+                        lease=lease,
+                        snapshot=self.snapshot,
+                    )
+                    planned = MergeTrainBatchCandidate.model_validate(initial["candidate"])
+                    record = store.list_merge_train_batch_candidate_records(status="active")[0]
+                    probe_calls = client.probe_batch_entry_conflicts.call_count
+                    self.snapshot = self.snapshot.model_copy(
+                        update={"pull_requests": self.snapshot.pull_requests[:-1]}
+                    )
+                    result, _ = _reflow_stale_candidate_record(
+                        request=MergeTrainControllerRunOnceEnvelope(
+                            repository=self.snapshot.repository, mutate=mutate
+                        ),
+                        policy=self.policy,
+                        policy_sha256="policy-digest",
+                        repository_policy=self.policy.policies[0],
+                        transport=self.provider,
+                        github_client=cast(GitHubMergeTrainClient, client),
+                        candidate_store=store,
+                        stack_collapse_store=store,
+                        candidate_record=record,
+                        trace_id="stale",
+                        recorded_at="2026-10-03T12:01:00Z",
+                        lease=lease,
+                    )
+                    assert result is not None
+                    replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                    self.assertEqual(client.probe_batch_entry_conflicts.call_count, probe_calls)
+                    self.assertEqual(replacement.held_out, planned.held_out)
+                    self.assertEqual(
+                        [entry.pull_request_number for entry in replacement.entries],
+                        [planned.entries[0].pull_request_number],
+                    )
+                    client.add_pull_request_label.assert_not_called()
 
     def test_base_exploration_preserves_a_base_conflict_behind_a_hidden_client(self) -> None:
         first, repair = self.snapshot.pull_requests
