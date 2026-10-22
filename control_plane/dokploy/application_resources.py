@@ -128,7 +128,8 @@ class ReadDenied(Exception):
     pass
 
 class InventoryChanged(Exception):
-    pass
+    def __init__(self, component):
+        self.component = component
 
 def docker(*arguments):
     remaining = deadline - time.monotonic()
@@ -305,21 +306,25 @@ def observation(spec):
                 image_volumes = len(declared or {})
         except (ValueError, KeyError, TypeError):
             pass
-    if (single_local_swarm_node(docker) != nodes
-        or row('service', 'inspect', '--format', SERVICE_FORMAT, application) != service
-        or identifiers('service', 'ps', '--no-trunc', '--quiet', service_id) != tasks
-        or identifiers('ps', '-aq', '--no-trunc') != containers
-        or identifiers('volume', 'ls', '--quiet') != volumes):
-        raise InventoryChanged()
+    if single_local_swarm_node(docker) != nodes:
+        raise InventoryChanged('swarm_nodes')
+    if row('service', 'inspect', '--format', SERVICE_FORMAT, application) != service:
+        raise InventoryChanged('service')
+    if identifiers('service', 'ps', '--no-trunc', '--quiet', service_id) != tasks:
+        raise InventoryChanged('task_membership')
+    if identifiers('ps', '-aq', '--no-trunc') != containers:
+        raise InventoryChanged('container_membership')
+    if identifiers('volume', 'ls', '--quiet') != volumes:
+        raise InventoryChanged('volume_membership')
     for identifier, initial in task_rows.items():
         if row('inspect', '--type', 'task', '--format', TASK_FORMAT, identifier) != initial:
-            raise InventoryChanged()
+            raise InventoryChanged('task_metadata')
     for identifier, initial in container_rows.items():
         if row('inspect', '--type', 'container', '--format', CONTAINER_FORMAT, identifier) != initial:
-            raise InventoryChanged()
+            raise InventoryChanged('container_metadata')
     for name, initial in volume_rows.items():
         if row('volume', 'inspect', '--format', VOLUME_FORMAT, name) != initial:
-            raise InventoryChanged()
+            raise InventoryChanged('volume_metadata')
     update = service['Update']
     if update is not None and not isinstance(update, dict):
         raise ValueError('Service update unavailable')
@@ -339,8 +344,8 @@ try:
 except ReadDenied:
     print(sys.argv[2] + json.dumps({'type':'denied'}), flush=True)
     sys.exit(0)
-except InventoryChanged:
-    result = {'reason_code':'resource_inventory_changed'}
+except InventoryChanged as error:
+    result = {'reason_code':'resource_inventory_changed','changed_component':error.component}
 except Exception:
     result = {'reason_code':'resource_inventory_unavailable'}
 print(sys.argv[2] + json.dumps({'type':'complete','result':result}, sort_keys=True), flush=True)

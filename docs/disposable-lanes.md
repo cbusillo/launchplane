@@ -85,6 +85,16 @@ contents. Image volume declarations cover only the current immutable local
 service image, not every historical image; unavailable image metadata has a null
 declaration count.
 Unknown or changed inventory supplies no counts.
+Changed inventory includes an optional `changed_component` category identifying
+the first detected difference: Swarm nodes, the owned service, task/container/volume
+membership, or task/container/referenced-volume metadata. Container membership
+and metadata cover the whole local host, including unrelated services. This
+diagnostic supplies no resource identifiers or changed values. It preserves all
+inventory comparisons and the unknown safety verdict; it does not prove that the
+owned application caused the change. Older observations can omit the category.
+Use a compatible repository client to validate this optional diagnostic; an older
+strict client can reject the new field. Preserve an unknown result and use
+supported inspect/readback before considering an explicit new collection.
 
 The response includes no filesystem paths, filenames, file contents, environment
 values or raw provider errors. The reader neither changes resources nor creates

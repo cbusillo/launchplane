@@ -167,16 +167,23 @@ class DisposableLaneClientTests(unittest.TestCase):
             ApplicationResourceObservation,
         )
 
-        observation = ApplicationResourceObservation(
-            reason_code="resource_inventory_unavailable"
-        ).model_dump(mode="json")
-        status, output, request = self.call_client(
-            application_resources=observation, include_application_resources=True
-        )
-        self.assertEqual(status, 0, output)
-        self.assertEqual(json.loads(output)["application_resources"], observation)
-        self.assertTrue(request.call_args.kwargs["body"]["include_application_resources"])
-        self.assertNotIn("include_application_resources", request.call_args_list[0].kwargs["body"])
+        for metadata in (
+            ApplicationResourceObservation(reason_code="resource_inventory_unavailable"),
+            ApplicationResourceObservation(
+                reason_code="resource_inventory_changed", changed_component="container_metadata"
+            ),
+        ):
+            with self.subTest(metadata=metadata):
+                observation = metadata.model_dump(mode="json")
+                status, output, request = self.call_client(
+                    application_resources=observation, include_application_resources=True
+                )
+                self.assertEqual(status, 0, output)
+                self.assertEqual(json.loads(output)["application_resources"], observation)
+                self.assertTrue(request.call_args.kwargs["body"]["include_application_resources"])
+                self.assertNotIn(
+                    "include_application_resources", request.call_args_list[0].kwargs["body"]
+                )
         status, output, request = self.call_client()
         self.assertEqual(status, 0, output)
         self.assertNotIn("application_resources", json.loads(output))
