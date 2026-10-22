@@ -11,7 +11,6 @@ from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
     BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
 )
-from control_plane._filestore_tar import FILESTORE_TAR_LIBRARY
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -21,8 +20,7 @@ from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_C
 from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
-    FILESTORE_TAR_LIBRARY
-    + REHEARSAL_SOURCE_READER_LIBRARY
+    REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
@@ -91,6 +89,11 @@ def digest(path):
         for chunk in iter(lambda:stream.read(1024*1024),b''):
             value.update(chunk)
     return value.hexdigest()
+
+
+def filestore_tar_warning_only(status: int, errors: bytes, truncated: bool) -> bool:
+    return (status == 1 and not truncated
+        and re.fullmatch(rb'(?:tar: [^\r\n]+: file changed as we read it\n)+', errors) is not None)
 
 
 def bounded_capture(arguments,path,bound,*,filestore=False):

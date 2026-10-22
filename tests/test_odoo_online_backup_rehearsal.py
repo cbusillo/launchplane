@@ -2,7 +2,6 @@
 
 import json
 import os
-import hashlib
 import subprocess
 import threading
 import time

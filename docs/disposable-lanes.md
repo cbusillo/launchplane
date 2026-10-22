@@ -1947,11 +1947,7 @@ preflight refuses local or missing recipients before testing writes. It refuses
 the provider's local key-generating terminal. Fixed
 commands read `pg_dump` output inside the recorded database container and stream
 the recorded web container's filestore; they create no production dump/archive,
-schedule, attachment pin, password or other persistent source file. Filestore tar
-runs with C-locale diagnostics and accepts status 1 only for complete, nonempty,
-warning-only `file changed as we read it` diagnostics; truncation or mixed errors
-refuse capture. Receiver extraction safety and full attachment size/SHA-1
-validation remain required. A read-only
+schedule, attachment pin, password or other persistent source file. A read-only
 probe and source identity checks precede the first testing provider write.
 The source web container's injected runtime identity must match the registered
 product, context and stable production instance. Before a live capture, read
