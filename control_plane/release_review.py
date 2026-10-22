@@ -18,6 +18,7 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsInt
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.generic_web_source_qualification import (
+    GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     qualified_generic_web_source_inventory,
 )
@@ -49,7 +50,7 @@ from control_plane.workflows.launchplane import (
 )
 
 
-class ReleaseReviewStore(Protocol):
+class ReleaseReviewStore(GenericWebSourceQualificationStore, Protocol):
     def list_preview_records(
         self,
         *,

@@ -109,8 +109,8 @@ from control_plane.generic_web_testing_settlement import settle_testing_pre_imag
 
 
 class OriginalExecutionTests(unittest.TestCase):
-    def test_real_post_image_transport_errors_keep_current_source_unqualified(self) -> None:
-        for failure in ("product_transport", "product_server", "canary_server"):
+    def test_real_unresolved_application_effects_keep_current_source_unqualified(self) -> None:
+        for failure in ("product_transport", "product_server", "canary_server", "quiesce_lost"):
             with (
                 self.subTest(failure=failure),
                 TemporaryDirectory() as directory,
@@ -122,7 +122,7 @@ class OriginalExecutionTests(unittest.TestCase):
                 fixture = _store_with_production()
                 profile = fixture.profile
                 lane = profile.lanes[0]
-                if failure == "canary_server":
+                if failure in {"canary_server", "quiesce_lost"}:
                     lane = lane.model_copy(
                         update={
                             "generic_web_extensions": _extensions().model_copy(
@@ -152,14 +152,14 @@ class OriginalExecutionTests(unittest.TestCase):
                     store.write_deployment_record(record)
                 for inventory in fixture.inventories.values():
                     store.write_environment_inventory(inventory)
-                release_version(store=store, profile=profile, instance="testing")
-                provider_type = (
-                    _LifecycleDeployProvider
-                    if failure == "canary_server"
-                    else _FakeGenericWebDeployProvider
+                baseline = store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
                 )
-                provider = provider_type(
-                    target_id="fixture-target",
+                baseline_record = store.read_deployment_record(baseline.deployment_record_id)
+                assert baseline_record.deployed_target is not None
+                provider = _LifecycleDeployProvider(
+                    target_id=baseline_record.deployed_target.target_id,
+                    target_name=baseline_record.deploy.target_name,
                     observation=GenericWebProviderDeploymentObservation(
                         outcome="present",
                         deployment_status="success",
@@ -209,6 +209,11 @@ class OriginalExecutionTests(unittest.TestCase):
                         display_name="fixture",
                         updated_at=provider.observation.started_at,
                     )
+                )
+                release_version(store=store, profile=profile, instance="testing")
+                resolve_generic_web_promotion_inputs(
+                    record_store=store,
+                    request=GenericWebProdPromotionRequest(product=profile.product),
                 )
                 calls: list[str] = []
 
@@ -260,13 +265,27 @@ class OriginalExecutionTests(unittest.TestCase):
                         )
                     )
                 else:
-                    schedules: dict[str, api.JsonObject] = {}
+                    schedules: dict[str, api.JsonObject] = (
+                        {
+                            item.name: schedule_payload(
+                                item, target.resolved_target.target_id, enabled=True
+                            )
+                            for item in lane.generic_web_extensions.schedules
+                        }
+                        if failure == "quiesce_lost"
+                        else {}
+                    )
 
                     def upsert(**kwargs: Any) -> api.JsonObject:
                         guard = kwargs.get("provider_mutation_guard")
                         with guard() if callable(guard) else nullcontext():
                             payload = dict(kwargs["schedule_payload"])
                             schedules[str(payload["name"])] = payload
+                            if failure == "quiesce_lost":
+                                calls.append(failure)
+                                raise click.ClickException(
+                                    "Schedule write response lost after dispatch."
+                                )
                             return {**payload, "scheduleId": payload["name"]}
 
                     patches.enter_context(
@@ -304,7 +323,24 @@ class OriginalExecutionTests(unittest.TestCase):
                 current = store.read_environment_inventory(
                     context_name=lane.context, instance_name="testing"
                 )
-                held = store.read_deployment_record(current.deployment_record_id)
+                assert outcome.record is not None
+                held = store.read_deployment_record(
+                    adapter._deployment_record_id(
+                        build_provider_operation_key(
+                            scope=outcome.record.scope,
+                            route_path=outcome.record.route_path,
+                            idempotency_key=outcome.record.idempotency_key,
+                            request_fingerprint=outcome.record.request_fingerprint,
+                            reconciliation_key=outcome.record.reconciliation_key,
+                        )
+                    )
+                )
+                if failure == "quiesce_lost":
+                    self.assertEqual(current, baseline)
+                    self.assertEqual(
+                        store.read_deployment_record(baseline_record.record_id), baseline_record
+                    )
+                    self.assertEqual(provider.runtime_identities, [])
                 self.assertTrue(
                     any(
                         not entry.terminal
@@ -1769,12 +1805,10 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     outcome = self.run_normal(self.normal_adapter(), key)
                 self.assertEqual(outcome.status, "reconcile_required")
                 saved = self.normal_record(outcome)
-                self.assertEqual(
+                with self.assertRaises(GenericWebSourceUnqualified):
                     qualified_generic_web_source_inventory(
                         store=self.store, profile=self.profile, lane=self.profile.lanes[0]
-                    ).deployment_record_id,
-                    saved.record_id,
-                )
+                    )
                 if newer:
                     apply_deployment_evidence(
                         record_store=self.store,

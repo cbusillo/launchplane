@@ -69,9 +69,20 @@ referenced deployment record as well as the inventory. That record must pass
 deployment, post-deploy and destination-health qualification and match the
 lane, artifact, source revision, runtime identity and provider target evidence.
 A copied passing inventory cannot qualify a missing, mismatched or failed
-deployment. The accepted-release worker and direct promotion path recheck this
+deployment. The physical recipient must also match the current provider-target
+binding. A running or reconciliation-required operation on that testing recipient
+refuses fresh admission, including an expired or receiptless original whose effects
+remain uncertain. A hold on a different retired recipient does not disqualify a
+qualified replacement. These facts are read together under the existing authority
+fence; supported original observation, terminal continuation and retesting remain
+available.
+
+The accepted-release worker and direct promotion path recheck this
 source evidence after backup waits and before admitting the first forward
-production effect, including a recipient cutover resumed before dispatch.
+production effect, including a recipient cutover resumed before dispatch. The final source check runs
+inside the native first-effect checkpoint, serialized with testing reservation
+insertion, reacquisition and current authority publication. No provider I/O runs
+under that short read/checkpoint boundary.
 Once that accepted production attempt starts, testing may advance to a newer
 qualified build without aborting it. Acceptance and backup checks continue;
 an already started gated rollback keeps its existing recovery authority.

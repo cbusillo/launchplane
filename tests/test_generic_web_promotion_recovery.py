@@ -202,6 +202,37 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.case.advance()
         self.recovery_step = "rollback"
 
+    def test_current_testing_hold_keeps_original_observation_adoption_and_replay_available(
+        self,
+    ) -> None:
+        self.interrupt_completion()
+        self.case.hold_testing_source()
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+        from control_plane.workflows.generic_web_promotion import (
+            resolve_generic_web_promotion_inputs,
+        )
+        from control_plane.client_release import client_release_promotion_request
+
+        with self.assertRaises(GenericWebPromotionSourceRefused):
+            resolve_generic_web_promotion_inputs(
+                record_store=self.store,
+                request=client_release_promotion_request(
+                    self.case.profile,
+                    self.decision,
+                    self.store.list_verireel_prod_backup_gate_operation_records()[
+                        0
+                    ].backup_record_id,
+                ),
+            )
+        effects = list(self.provider.deployed_artifacts)
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "adopt_promotion")
+        status, result = self.apply(plan)
+        self.assertEqual(status, 202, result)
+        self.assertEqual(self.reservation().state, "completed")
+        self.assertEqual(self.dry_run()["proposed_action"], "replay_completed")
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+
     def test_adopts_unknown_drill_once_and_continues_the_accepted_release(self) -> None:
         self.prepare_drill()
         self.interrupt_completion()

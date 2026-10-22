@@ -75,6 +75,26 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             }
         )
         self.store.write_product_profile_record(self.profile)
+        for key, binding in source.provider_targets.items():
+            source.provider_targets[key] = binding.model_copy(update={"target_id": "testing-app"})
+            self.store.write_provider_target_record(source.provider_targets[key])
+        testing = source.read_environment_inventory(
+            context_name=self.profile.lanes[0].context, instance_name="testing"
+        )
+        prior = source.read_deployment_record(testing.deployment_record_id)
+        assert prior.deployed_target is not None and prior.resolved_target is not None
+        source.write_deployment_record(
+            prior.model_copy(
+                update={
+                    "deployed_target": prior.deployed_target.model_copy(
+                        update={"target_id": "testing-app"}
+                    ),
+                    "resolved_target": prior.resolved_target.model_copy(
+                        update={"target_id": "testing-app"}
+                    ),
+                }
+            )
+        )
         for inventory in source.inventories.values():
             sha = BASE if inventory.instance == "prod" else HEAD
             deployment = source.deployments[inventory.deployment_record_id]
@@ -2190,6 +2210,164 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "stopped")
         self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def hold_testing_source(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.generic_web_source_qualification import generic_web_source_target_key
+
+        target = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        deployment = self.store.read_deployment_record(inventory.deployment_record_id)
+        reservation = self.store.reserve_mutation(
+            scope="testing-source",
+            route_path="/v1/drivers/generic-web/deploy",
+            idempotency_key="uncertain-original",
+            request_fingerprint="a" * 64,
+            lease_owner="testing-worker",
+            reconciliation_key="testing-source-original",
+            provider_target_key=generic_web_source_target_key(
+                target, deployment.deploy.target_type
+            ),
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                provider_id=target.provider_id,
+                target_type=deployment.deploy.target_type,
+                target_id=target.target_id,
+            ),
+        )
+        self.assertEqual(reservation.status, "acquired")
+
+    def test_default_input_promotion_rechecks_the_selected_build_at_final_checkpoint(self) -> None:
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+        from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+        from control_plane.provider_operations import run_durable_provider_operation
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        self.accept()
+        self.advance()
+        self.capture()
+        backup = self.store.list_verireel_prod_backup_gate_operation_records()[0].backup_record_id
+        original = self.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal inserted
+            if not inserted:
+                inventory = self.store.read_environment_inventory(
+                    context_name=self.context, instance_name="testing"
+                )
+                assert inventory.runtime_identity is not None
+                self.write_qualified_testing_inventory(
+                    inventory.model_copy(
+                        update={
+                            "runtime_identity": inventory.runtime_identity.model_copy(
+                                update={
+                                    "artifact_id": self.profile.image.repository
+                                    + "@sha256:"
+                                    + "d" * 64,
+                                    "source_git_ref": "d" * 40,
+                                }
+                            ),
+                        }
+                    )
+                )
+                inserted = True
+            return original(**kwargs)
+
+        adapter = GenericWebProdPromotionProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            promotion_request=GenericWebProdPromotionEnvelope(
+                product=self.profile.product,
+                promotion=GenericWebProdPromotionRequest(
+                    product=self.profile.product, backup_record_id=backup
+                ),
+            ),
+            profile=self.profile,
+            lane=next(lane for lane in self.profile.lanes if lane.instance == "prod"),
+            trace_id="default-input-race",
+            validate_before_effect=lambda _: None,
+            deploy_provider=self.provider,
+        )
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            with self.assertRaises(GenericWebPromotionSourceRefused):
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope="default-input-promotion",
+                    route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    idempotency_key="selected-build",
+                    request_fingerprint="f" * 64,
+                    lease_owner="default-worker",
+                    response_trace_id="default-input-race",
+                    adapter=adapter,
+                )
+        self.assertTrue(inserted)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_testing_hold_after_cached_admission_refuses_at_first_effect(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        original = self.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal inserted
+            if not inserted:
+                self.hold_testing_source()
+                inserted = True
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            self.assertEqual(self.advance(), ())
+        self.assertTrue(inserted)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=f"{accepted.record_id}:promote-1",
+            )
+        )
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
+
+    def test_testing_hold_after_first_effect_keeps_forward_and_inverse_usable(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.provider.fail_artifact = accepted.checklist.candidate.artifact_id
+        original = self.provider.execute_artifact_deploy
+
+        def execute(**kwargs: Any) -> None:
+            try:
+                original(**kwargs)
+            finally:
+                if len(self.provider.deployed_artifacts) == 1:
+                    self.hold_testing_source()
+
+        with patch.object(self.provider, "execute_artifact_deploy", side_effect=execute):
+            self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts,
+            [accepted.checklist.candidate.artifact_id, accepted.checklist.production.artifact_id],
+        )
+        self.assertEqual(self.store.list_promotion_records()[0].rollback.status, "pass")
 
     def test_source_loss_during_target_resolution_keeps_accepted_step_retryable(self) -> None:
         self.source_loss_before_effect(during_review=False)

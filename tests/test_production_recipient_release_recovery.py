@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 import click
 from control_plane import client_release as releases
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseReviewDecisionRecord,
@@ -190,6 +191,19 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             resolved_target=ResolvedTargetEvidence(
                 target_type="application", target_id="testing", target_name="testing"
             ),
+        )
+        assert testing.deployed_target is not None
+        f.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing_context,
+                instance="testing",
+                provider_id=testing.deployed_target.provider_id,
+                target_category=testing.deployed_target.target_category,
+                provider_target_type=testing.deployed_target.provider_target_type,
+                target_id=testing.deployed_target.target_id,
+                display_name=testing.deployed_target.display_name,
+                updated_at=profile.updated_at,
+            )
         )
         f.store.write_deployment_record(testing)
         f.store.write_environment_inventory(

@@ -1,15 +1,27 @@
 """Join a generic-web testing inventory to its current qualification evidence."""
 
+from dataclasses import dataclass
 from typing import Protocol
 
 import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+
+
+@dataclass(frozen=True)
+class GenericWebSourceSnapshot:
+    profile: LaunchplaneProductProfileRecord
+    inventory: EnvironmentInventory
+    deployment: DeploymentRecord
+    provider_target: ProviderTargetRecord
+    held_reservations: tuple[LaunchplaneIdempotencyRecord, ...]
 
 
 class GenericWebSourceQualificationStore(Protocol):
@@ -20,6 +32,22 @@ class GenericWebSourceQualificationStore(Protocol):
     ) -> EnvironmentInventory: ...
 
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot: ...
+
+
+def generic_web_source_target_key(target: ProviderTargetRecord, target_type: str) -> str:
+    from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
+
+    return generic_web_provider_target_key(
+        provider_id=target.provider_id,
+        context=target.context,
+        instance=target.instance,
+        target_type=target_type,
+        target_id=target.target_id,
+    )
 
 
 class GenericWebSourceUnqualified(ValueError):
@@ -42,7 +70,10 @@ def qualified_generic_web_source_inventory(
     from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 
     try:
-        current_profile = store.read_product_profile_record(profile.product)
+        snapshot = store.read_generic_web_source_snapshot(
+            product=profile.product, context_name=lane.context, instance_name=lane.instance
+        )
+        current_profile = snapshot.profile
         current_lane = next(
             (item for item in current_profile.lanes if item.instance.strip() == "testing"), None
         )
@@ -56,17 +87,16 @@ def qualified_generic_web_source_inventory(
             raise GenericWebSourceUnqualified(
                 "The product's testing source changed before release."
             )
-        inventory = store.read_environment_inventory(
-            context_name=lane.context, instance_name=lane.instance
-        )
-        record = store.read_deployment_record(inventory.deployment_record_id)
-    except FileNotFoundError as error:
+        inventory = snapshot.inventory
+        record = snapshot.deployment
+    except (FileNotFoundError, ValueError) as error:
         raise GenericWebSourceUnqualified(
             "Testing requires current source inventory and its referenced deployment record, "
             "bound to a current product lane."
         ) from error
     identity = inventory.runtime_identity
     target = record.deployed_target
+    current_target = snapshot.provider_target
     artifact = inventory.artifact_identity
     if (
         lane.instance != "testing"
@@ -115,5 +145,25 @@ def qualified_generic_web_source_inventory(
     ):
         raise GenericWebSourceUnqualified(
             "Testing's referenced deployment is not qualified for the current source inventory."
+        )
+    if (
+        current_target.context != lane.context
+        or current_target.instance != lane.instance
+        or any(
+            getattr(current_target, field) != getattr(target, field)
+            for field in ("provider_id", "target_category", "provider_target_type", "target_id")
+        )
+    ):
+        raise GenericWebSourceUnqualified(
+            "Testing's passing deployment does not match its current physical recipient."
+        )
+    if any(
+        held.state in {"running", "reconcile_required"}
+        and held.provider_target_key
+        == generic_web_source_target_key(current_target, record.deploy.target_type)
+        for held in snapshot.held_reservations
+    ):
+        raise GenericWebSourceUnqualified(
+            "Testing's current physical recipient has an unresolved provider operation."
         )
     return inventory
