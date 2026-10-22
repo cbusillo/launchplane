@@ -31,7 +31,7 @@ Testing's store and API version come from its stored addon settings. Its managed
 token is decrypted inside Launchplane and consumed by one fixed
 `query { shop { id myshopifyDomain } }` request. Testing needs no running Odoo
 container, runtime inventory or delivered provider environment for this read.
-The query runs in a local child process with a 15-second total deadline, including
+The query runs in a local child process with a fixed total deadline, including
 DNS resolution and response reads. Its token travels on stdin, never command
 arguments, environment, files, the provider host, Docker or result output.
 The probe uses HTTPS, refuses redirects and proxy
@@ -75,6 +75,7 @@ prerequisite failed.
 | `database_driver_unavailable` or `database_unavailable` | Check the selected runtime's Python database driver and read-only database connectivity. |
 | `settings_unavailable` or `settings_changed` | Check production's applied store settings; changed settings invalidate this read. |
 | `request_invalid`, `request_failed` or `response_invalid` | Check that side's existing store/API settings, connectivity and identity-only response. |
+| `testing_probe` or `production_probe` with `probe_unavailable` | The bounded probe could not complete or return valid evidence; inspect correlated service evidence without replaying it. |
 | `token_rejected` | That side's existing token was rejected; use the Director's credential-entry process. |
 | `probe_failed`, `runtime_changed`, `authority_changed` or `evidence` | Inspect correlated service/runtime evidence; do not replay the identity check or change the hold to diagnose it. |
 

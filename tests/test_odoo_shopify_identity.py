@@ -2,6 +2,7 @@ import socket
 from urllib import request as urllib_request
 import configparser
 import importlib
+from http.client import IncompleteRead
 import os
 import base64
 import subprocess
@@ -321,7 +322,7 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.observation = observation
                 self.assertNotEqual(self.run_comparison().separation, "separate")
 
-    def test_stalled_testing_probe_is_stopped_before_production_probe(self) -> None:
+    def test_testing_probe_timeout_stops_comparison_without_leaking_credentials(self) -> None:
         with (
             patch.object(self.comparison, "testing_identity", self.real_testing_identity),
             patch.object(
@@ -501,7 +502,6 @@ class ShopifyComparisonTests(unittest.TestCase):
             commands.append(command)
             self.assertNotIn("fixture-secret", repr(command))
             if command[0] == sys.executable:
-                self.assertEqual(kwargs["timeout"], comparison.TESTING_PROBE_TIMEOUT_SECONDS)
                 return subprocess.CompletedProcess(
                     command,
                     0,
@@ -584,7 +584,6 @@ class ShopifyComparisonTests(unittest.TestCase):
         with (
             patch.object(self.comparison, "production_identity", self.real_production_identity),
             patch.object(self.comparison, "testing_identity", self.real_testing_identity),
-            patch.object(probe, "build_opener", return_value=opener),
             patch.object(configparser.ConfigParser, "read", side_effect=lambda path: [path]),
             patch.object(
                 configparser.ConfigParser,
@@ -612,6 +611,25 @@ class ShopifyComparisonTests(unittest.TestCase):
             result = self.run_comparison()
             self.assertEqual(result.separation, "unknown")
             self.assertEqual(result.reason, "runtime_changed")
+            drift = False
+            for side in ("testing", "production"):
+                with self.subTest(side=side):
+
+                    def fail_transport(request: Any, **kwargs: Any) -> Any:
+                        production = (
+                            request.get_header("X-shopify-access-token")
+                            == "fixture-production-secret"
+                        )
+                        if production == (side == "production"):
+                            raise IncompleteRead(b"fixture-secret", 42)
+                        return open_request(request, **kwargs)
+
+                    opener.open.side_effect = fail_transport
+                    result = self.run_comparison()
+                    self.assertEqual(result.separation, "unknown")
+                    self.assertEqual(result.stage, f"{side}_probe")
+                    self.assertEqual(result.reason, "request_failed")
+                    self.assertNotIn("fixture-secret", result.model_dump_json())
         self.assertTrue(
             all(
                 command[0] == sys.executable

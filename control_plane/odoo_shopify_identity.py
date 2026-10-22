@@ -293,6 +293,7 @@ def production_identity(
     query_library = "\n".join(
         (
             "import hashlib,json,re",
+            "from http.client import HTTPException",
             "from urllib.error import HTTPError",
             "from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener",
             f"DOMAIN_PATTERN = {DOMAIN_PATTERN!r}",
