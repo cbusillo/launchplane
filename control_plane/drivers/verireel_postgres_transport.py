@@ -260,6 +260,7 @@ def apply_verireel_preview_destroy_result(
     execution_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_verireel_preview_destroy(
+        record_store=record_store,
         control_plane_root=control_plane_root,
         request=request.destroy,
         **({"profile": execution_profile} if execution_profile is not None else {}),

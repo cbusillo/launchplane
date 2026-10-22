@@ -23,6 +23,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.preview_resource_destroy import (
+    PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
 )
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -1399,6 +1400,7 @@ def execute_verireel_preview_destroy(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewDestroyRequest,
+    record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewDestroyResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1469,12 +1471,25 @@ def execute_verireel_preview_destroy(
     cleanup_errors: list[str] = []
     if application_id:
         destroy_result = destroy_dokploy_preview_resource(
+            record_store=record_store,
+            context=profile.preview.context if profile is not None else request.context,
+            instance=request.preview_slug,
             host=host,
             token=token,
             resource_type="application",
             resource_id=application_id,
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
+        if cleanup_errors and cleanup_errors[0].startswith(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"):
+            return VeriReelPreviewDestroyResult(
+                destroy_status="fail",
+                destroy_started_at=started_at,
+                destroy_finished_at=utc_now_timestamp(),
+                application_name=application_name,
+                application_id=application_id,
+                preview_url=preview_url,
+                error_message=cleanup_errors[0],
+            )
     try:
         _run_application_command_with_retries(
             host=host,

@@ -2,6 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import Mock
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.workflows.preview_resource_destroy import PreviewTargetOwnershipStore
 
 from control_plane.contracts.disposable_lane import (
     DisposableLaneSafety,
@@ -101,3 +105,15 @@ def record_safety(
         }
     )
     store.write_disposable_lane_safety(evidence)
+
+
+def preview_target_inventory(
+    *,
+    targets: tuple[DokployTargetIdRecord, ...] = (),
+    provider_targets: tuple[ProviderTargetRecord, ...] = (),
+) -> PreviewTargetOwnershipStore:
+    return Mock(
+        spec=PreviewTargetOwnershipStore,
+        list_dokploy_target_id_records=Mock(return_value=targets),
+        list_physical_provider_target_records=Mock(return_value=provider_targets),
+    )

@@ -8,6 +8,7 @@ from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
 import click
+from tests.support.disposable_lanes import preview_target_inventory
 from control_plane.odoo_preview_import_source import PREVIEW_FISHBOWL_SOURCE_ENV_KEY
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 
@@ -682,6 +683,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             self.assertEqual(moved.status, "blocked")
 
             result = execute_odoo_preview_dokploy_apply(
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
                 control_plane_root=Path("."),
                 request=OdooPreviewDokployApplyRequest(dry_run_plan=inputs.dry_run_plan),
             )
@@ -729,6 +732,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
         ):
             result = execute_odoo_preview_dokploy_apply(
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
                 control_plane_root=Path("."),
                 request=OdooPreviewDokployApplyRequest(dry_run_plan=dry_run),
             )
@@ -2622,6 +2627,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
         ):
             result = execute_odoo_preview_dokploy_apply(
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
                 control_plane_root=ANY,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
@@ -2682,6 +2689,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
         ):
             result = execute_odoo_preview_dokploy_apply(
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
                 control_plane_root=ANY,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
@@ -2741,6 +2750,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
         ):
             result = execute_odoo_preview_dokploy_apply(
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
                 control_plane_root=ANY,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,

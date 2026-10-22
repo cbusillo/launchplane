@@ -1888,6 +1888,9 @@ def _execute_generic_web_preview_destroy_unserialized(
             ),
         )
     destroy_result = destroy_dokploy_preview_resource(
+        record_store=record_store,
+        context=resolved_profile.preview.context,
+        instance=request.preview_slug,
         host=host,
         token=token,
         resource_type="application",

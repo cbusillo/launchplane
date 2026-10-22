@@ -193,7 +193,8 @@ Fresh ordinary Compose lanes and Odoo previews use the same admission check
 before their first provider create, including the project's and environment's
 creation. Ordinary lane creation admits its private default bridge; repository
 Compose source is not yet available, so this is not a guarantee for additional
-networks a later deployment might declare. Generic-web testing activation and independent production recipients
+networks a later deployment might declare. Generic-web testing activation and
+independent production recipients
 check before recording fresh placement custody or dispatching resource work.
 Their known Compose source reserves the default bridge and all declared private
 networks. Explicit partial-placement recovery and an existing preview continue
@@ -444,24 +445,18 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. For an exact owned preview it
-records the Director agent's observed usage, data custody and isolation facts
-as cleanup-only observations. They cannot qualify runtime sync, deploy or other
-ordinary preview mutations. Preview refresh and retirement still read protective
-reports under their existing rules. Recording wakes normal preview reconciliation.
-The existing client supports `record` with `--preview-id`, `--usage`, `--data`,
-`--production-resources` and the `--usage-evidence`, `--data-evidence`,
-`--isolation-evidence` references. Each observation remains bound
-with required evidence references, the current binding and the existing expiry.
-Use `--lifetime-seconds` for a slower queue, within the service's existing
-fifteen-minute cap; expiry still requires fresh facts before another effect.
-Unknown facts stay unknown. Existing protected reports cannot be overwritten by
-an unverified safe assertion. This supplies scheduled preview cleanup's facts
-through the existing service API, without direct record edits.
-Scheduled preview cleanup requires current unused/reproducible facts and a
-confirmed closed PR. It does not require `production_resources: isolated`:
-credentials the preview reads are outside its destroy set. Production lanes,
-inexact preview identities and targets shared with another lane still refuse.
+authenticated actor and current time itself. Preview `record` assertions are refused.
+For testing, caller-supplied usage, custody and isolation values are stored as
+unknown. Observations retain their actor as provenance;
+historical observer names confer no permission. Preview refresh and retirement
+keep their existing protective-report rules.
+
+Scheduled preview cleanup tears down a preview when its PR is confirmed closed
+or merged, without usage, custody, data-origin or isolation observations. An
+open PR keeps its preview. Unknown PR state remains held until the source can be
+read. Cleanup needs no assertion, waiver or preview fact collector.
+Production lanes, inexact preview identities and targets shared with another
+lane still refuse.
 The destroy path remains limited to the preview's own target and storage;
 production-shared targets, volumes or databases are not disposable. Runtime
 sync, rebuild and refresh retain their existing isolation rules. Credential

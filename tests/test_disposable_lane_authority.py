@@ -1025,75 +1025,14 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             data_evidence="agent:reproducible-test-copy",
             isolation_evidence="agent:inspected-independent-resources",
         )
-        self.assertEqual(recorded.status_code, 202, recorded.text)
+        self.assertEqual(recorded.status_code, 409, recorded.text)
         evidence = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-1")
         assert evidence is not None
         self.assertEqual(
             (evidence.usage, evidence.data, evidence.production_resources),
-            ("unused", "reproducible", "isolated"),
+            ("unknown", "unknown", "unknown"),
         )
         self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
-
-        self.assertTrue(recorded.json()["result"]["reconcile_requested"])
-        self.assertTrue(self.store.list_product_reconcile_requests(product=profile.product))
-        from control_plane.disposable_lanes import (
-            require_disposable_lane,
-            DisposableLaneSafetyUnknown,
-        )
-
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            require_disposable_lane(
-                self.store, product=profile.product, context=preview.context, instance="pr-1"
-            )
-        require_disposable_lane(
-            self.store,
-            product=profile.product,
-            context=preview.context,
-            instance="pr-1",
-            preview_cleanup=True,
-        )
-        safe_facts = dict(
-            usage="unused",
-            data="reproducible",
-            production_resources="isolated",
-            usage_evidence="observed usage",
-            data_evidence="observed data",
-            isolation_evidence="observed resources",
-        )
-        scope = dict(context=preview.context, instance="pr-1", preview_id=preview.preview_id)
-        for field, value in (
-            ("usage", "in_use"),
-            ("data", "only_copy"),
-            ("production_resources", "shared"),
-        ):
-            with self.subTest(field=field):
-                clearing = await self.observe(**scope)
-                cleared = await self.observe(
-                    mode="clear",
-                    expected_observation_sha256=clearing.json()["result"]["observation_sha256"],
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **scope,
-                )
-                self.assertEqual(cleared.status_code, 202, cleared.text)
-                protected = await self.observe(
-                    **scope,
-                    mode="record",
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **{**safe_facts, field: value},
-                )
-                self.assertEqual(protected.status_code, 202, protected.text)
-                refused = await self.observe(
-                    **scope,
-                    mode="record",
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **safe_facts,
-                )
-                self.assertEqual(refused.status_code, 409, refused.text)
-                evidence = self.store.read_disposable_lane_safety(
-                    profile.product, preview.context, "pr-1"
-                )
-                assert evidence is not None
-                self.assertEqual(getattr(evidence, field), value)
 
     async def test_clear_rechecks_owned_preview_identity_and_binding(self) -> None:
         from control_plane.contracts.preview_record import PreviewRecord

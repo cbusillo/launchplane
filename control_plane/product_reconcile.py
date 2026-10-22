@@ -10,6 +10,7 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
@@ -2023,6 +2024,11 @@ def reconcile_preview_target(
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )
         outcome = _preview_failure(plan, code)
+    if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+        plan.pop("last_failed_error_code", None)
+        plan.pop("last_failed_error_summary", None)
+        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
+        return ReconcileOutcome(plan)
     if (
         plan["action"] == "destroy"
         and outcome.error
@@ -2039,38 +2045,39 @@ def reconcile_preview_target(
 
 
 def _preview_cleanup_guard(
-    store: ProductReconcileStore, profile: LaunchplaneProductProfileRecord, number: int
+    store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
         DisposableLaneStore,
-        require_disposable_lane,
+        resolve_disposable_preview,
+        require_lane_target_ownership,
     )
+
+    from control_plane.workflows.preview_resource_destroy import PreviewTargetOwnershipStore
 
     if store.read_product_profile_record(profile.product) != profile:
         raise ProductReconcileError(
             "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
         )
     instance = profile.preview.slug_template.format(number=number)
-    evidence = cast(DisposableLaneStore, store).read_disposable_lane_safety(
-        profile.product, profile.preview.context, instance
-    )
-    for condition, value, required in (
-        ("usage", evidence.usage if evidence else "unknown", "unused"),
-        ("data", evidence.data if evidence else "unknown", "reproducible"),
-    ):
-        if value != required:
-            raise ProductReconcileError(
-                f"Preview cleanup held: {condition} is {value}.",
-                code=f"preview_cleanup_{condition}_{value}",
-            )
     try:
-        require_disposable_lane(
+        resolve_disposable_preview(
             cast(DisposableLaneStore, store),
-            product=profile.product,
+            profile,
+            profile.preview.context,
+            instance,
+        )
+        target_store = cast(PreviewTargetOwnershipStore, store)
+        require_lane_target_ownership(
+            (
+                *target_store.list_dokploy_target_id_records(),
+                *target_store.list_physical_provider_target_records(),
+            ),
             context=profile.preview.context,
             instance=instance,
-            preview_cleanup=True,
         )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
@@ -2372,6 +2379,10 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
+        if str(driver_result.get("error_message") or "").startswith(
+            f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
+        ):
+            plan["preview_result_error_code"] = PREVIEW_CLEANUP_SAFETY_UNKNOWN
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"
