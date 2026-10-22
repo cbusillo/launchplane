@@ -10,6 +10,7 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressNotif
 from control_plane.outbox_worker import OutboxWorkerStepResult, run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
+    INCIDENT_RESOLVED_SUPERSESSION_ACTION,
     HttpObservation,
     PublicIngressMonitorResult,
     PublicIngressNotificationDriverSet,
@@ -20,7 +21,9 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 
 class DirectNotificationOutboxTests(unittest.TestCase):
-    def test_recovery_survives_restart_and_transient_failure_without_new_event(self) -> None:
+    def test_open_incident_survives_restart_and_transient_failure_without_duplicate_send(
+        self,
+    ) -> None:
         for kind in ("email", "discord"):
             with self.subTest(kind=kind), TemporaryDirectory() as directory:
                 url = _sqlite_database_url(Path(directory) / "records.sqlite3")
@@ -49,12 +52,6 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                     ),
                 )
                 self._probe(store, 503, "2026-05-29T12:00:00Z")
-                self.assertEqual(
-                    self._work(store, drivers, "2026-05-29T12:00:01Z").status, "delivered"
-                )
-                recovery = self._probe(store, 200, "2026-05-29T12:01:00Z")
-                self.assertEqual(recovery.resolved_incident_count, 1)
-                # Simulate restart after the event/outbox commit and before any send.
                 store.close()
                 store = PostgresRecordStore(database_url=url)
                 queued = store.list_outbox_delivery_records(states=("pending",))
@@ -74,8 +71,8 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                 failed = store.read_outbox_delivery_record(delivery_id)
                 self.assertEqual(failed.error_code, "provider_error")
                 self.assertNotIn("private detail", str(failed.payload))
-                healthy = self._probe(store, 200, "2026-05-29T12:02:00Z")
-                self.assertEqual(healthy.incident_events, ())
+                unchanged = self._probe(store, 503, "2026-05-29T12:02:00Z")
+                self.assertEqual(unchanged.incident_events, ())
                 fail = False
                 self.assertEqual(
                     self._work(store, drivers, "2026-05-29T12:02:01Z").status, "delivered"
@@ -86,11 +83,11 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                     cast(dict[str, object], delivered.payload["attempt"])["incident_event_id"],
                     event_id,
                 )
-                self.assertEqual(len(sent), 2)
-                attempts = store.list_public_ingress_notification_attempt_records(event="resolved")
+                self.assertEqual(len(sent), 1)
+                attempts = store.list_public_ingress_notification_attempt_records(event="opened")
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(attempts[0].delivery_status, "delivered")
-                self.assertEqual(store.list_public_ingress_incident_records()[0].status, "resolved")
+                self.assertEqual(store.list_public_ingress_incident_records()[0].status, "open")
                 store.close()
 
     def test_interrupted_send_is_explicitly_uncertain_and_not_resent(self) -> None:
@@ -115,13 +112,20 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             )
             with self.assertRaises(KeyboardInterrupt):
                 self._work(store, drivers, "2026-05-29T12:00:01Z")
+            self._probe(store, 200, "2026-05-29T12:01:00Z")
             store.close()
             store = PostgresRecordStore(database_url=url)
             result = self._work(store, drivers, "2026-05-29T12:06:01Z")
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.error_code, "delivery_outcome_unknown")
             self.assertEqual(len(sends), 1)
-            self.assertEqual(self._work(store, drivers, "2026-05-29T12:07:01Z").status, "idle")
+            superseded = self._work(store, drivers, "2026-05-29T12:07:01Z")
+            self.assertEqual(
+                store.read_outbox_delivery_record(superseded.delivery_id).action,
+                INCIDENT_RESOLVED_SUPERSESSION_ACTION,
+            )
+            self.assertEqual(len(sends), 1)
+            self.assertEqual(self._work(store, drivers, "2026-05-29T12:08:01Z").status, "idle")
             store.close()
 
     def test_retry_budget_exhaustion_is_visible(self) -> None:
