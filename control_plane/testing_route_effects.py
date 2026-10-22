@@ -397,30 +397,6 @@ class TestingRouteEffects:
         # this CAS advances the attempt. Its initializer cannot publish a route.
         return ProviderObservation("absent", retry_safe=True)
 
-    def observe_for_abort(self, effect_phase: str, attempt_number: int) -> ProviderObservation:
-        if self.inverse:
-            raise ValueError("Abort settlement belongs only to the original forward effect.")
-        self.recovery_guard()
-        attempt = self.original_writer(attempt_number)
-        if attempt is None:
-            if effect_phase not in {"", ROUTE_PREPARING}:
-                return ProviderObservation("unknown")
-            outcome = "excluded"
-        elif self.writer_was_busy(attempt_number):
-            outcome = "excluded"
-        else:
-            outcome = self.settle(attempt)
-        if outcome not in {"applied", "excluded", "retired"}:
-            return ProviderObservation("unknown")
-        return ProviderObservation(
-            "present",
-            200,
-            {
-                "abort_writer_outcome": outcome,
-                **({"route_write_not_started": True} if outcome == "excluded" else {}),
-            },
-        )
-
     def apply(self, lease: ProviderOperationLease) -> ProviderMutationOutcome:
         controller = self.controller
         controller.guard()

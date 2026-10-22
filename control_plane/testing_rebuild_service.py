@@ -64,7 +64,10 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
     NativeSourceAuthorizationDenied,
 )
-from control_plane.dokploy.testing_retained_copy import retained_copy_operation
+from control_plane.dokploy.testing_retained_copy import (
+    retained_copy_operation,
+    retained_inventory_sha256,
+)
 from control_plane.dokploy_inventory import read_dokploy_target_placement, InventoryUnavailable
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -666,6 +669,7 @@ class NativeTestingRebuildExecution:
         self.route: TestingLaneRoute
         self.transport: DokployTestingRouteTransport
         self.publication: TestingPublicationPlan | None = None
+        self.removed_old_containers = False
 
     @property
     def base_url(self) -> str:
@@ -714,13 +718,6 @@ class NativeTestingRebuildExecution:
                 checkpoint = self.adapter.checkpoints.load(self.plan)
             except FileNotFoundError:
                 pass
-        if (
-            isinstance(self.intent.old, UnavailableTestingPredecessor)
-            and checkpoint is not None
-            and checkpoint.step in {"switching", "publishing", "retiring", "rolling_back"}
-        ):
-            record = self.resume_admission_rollback(checkpoint, str(error))
-            return rebuild_result(record, self.allocation)
         for copy_id in (self.intent.old.copy_id, self.adapter.namespace):
             route = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
@@ -857,50 +854,6 @@ class NativeTestingRebuildExecution:
         )
         return result
 
-    def resume_admission_rollback(
-        self, checkpoint: TestingRebuildRecord, reason: str
-    ) -> TestingRebuildRecord:
-        if not isinstance(checkpoint.plan.old, UnavailableTestingPredecessor):
-            raise ValueError("Unavailable-predecessor recovery cannot replace healthy retirement.")
-        self.guard(recovery=True)
-        if not checkpoint.error:
-            checkpoint = TestingRebuildRecord.model_validate(
-                {
-                    **checkpoint.model_dump(),
-                    "error": "testing_rebuild_admission_changed",
-                    "admission_refusal": reason,
-                    "updated_at": datetime.now(UTC),
-                }
-            )
-            self.adapter.checkpoints.save(checkpoint)
-        if checkpoint.error != "testing_rebuild_admission_changed":
-            raise NativeTestingRebuildPending("Continue the original recorded rollback cause.")
-        self.switch(
-            checkpoint.plan,
-            checkpoint.plan.old,
-            checkpoint.plan.new,
-            reconcile_only=True,
-            abort_forward=True,
-        )
-        if checkpoint.step != "rolling_back":
-            exclusion = (
-                self.unstarted_retirement(checkpoint.plan, cause=checkpoint.error)
-                if checkpoint.retirement_started
-                else None
-            )
-            if checkpoint.retirement_started and exclusion is None:
-                raise NativeTestingRebuildPending("The original retirement is not proven excluded.")
-            checkpoint = TestingRebuildRecord.model_validate(
-                {
-                    **checkpoint.model_dump(),
-                    "step": "rolling_back",
-                    "retirement_recovery": exclusion,
-                    "updated_at": datetime.now(UTC),
-                }
-            )
-            self.adapter.checkpoints.save(checkpoint)
-        return execute_testing_rebuild(checkpoint.plan, self.adapter.checkpoints, self)
-
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
         self.lease.assert_current()
@@ -935,11 +888,15 @@ class NativeTestingRebuildExecution:
         if not recovery and target.policies.staff_testing_hold is not None:
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
         if isinstance(self.intent.old, UnavailableTestingPredecessor):
-            if not recovery:
+            if not recovery and not self.cutover_started():
                 self.old_provider()
         else:
             self.old_provider()
-        if not recovery and self.intent.unavailable_route is not None:
+        if (
+            not recovery
+            and not self.cutover_started()
+            and self.intent.unavailable_route is not None
+        ):
             try:
                 placement = unavailable_provider_placement(
                     host=self.host,
@@ -1097,9 +1054,10 @@ class NativeTestingRebuildExecution:
                 server_id=self.intent.server_id,
                 payload=self.retained_payload("read"),
             )
-            if (
-                isinstance(self.intent.old, UnavailableTestingPredecessor)
-                and proof.get("observation_sha256") != self.intent.old.observation_sha256
+            if isinstance(self.intent.old, UnavailableTestingPredecessor) and (
+                (proof.get("availability") != "absent")
+                if self.removed_old_containers
+                else (proof.get("observation_sha256") != self.intent.old.observation_sha256)
             ):
                 raise NativeTestingRebuildAdmissionChanged(
                     "The admitted unavailable testing predecessor changed custody."
@@ -1347,23 +1305,14 @@ class NativeTestingRebuildExecution:
             else None,
         )
         existing_publication = read_publication(self.store, self.publication_key)
-        if (
-            historical is not None
-            and isinstance(self.intent.old, UnavailableTestingPredecessor)
-            and historical.step in {"switching", "publishing", "retiring", "rolling_back"}
-        ):
-            if existing_publication is None or allocation != existing_publication.plan.candidate:
-                raise NativeTestingRebuildPending(
-                    "The original publication custody is unavailable."
-                )
-            assert allocation is not None
-            self.allocation = allocation
-            self.publication = existing_publication.plan
-            self.route = self.publication.route
-            if historical.admission_refusal:
-                return self.resume_admission_rollback(historical, historical.admission_refusal)
-            if historical.step != "rolling_back":
-                self.require_unavailable_forward_frame(self.transport.read())
+        if historical is not None and isinstance(self.intent.old, UnavailableTestingPredecessor):
+            removal = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":remove-old-containers",
+            )
+            if removal is not None and not self.cutover_started():
+                self.remove_old_containers()
         if historical is not None and historical.step == "switching":
             dispatched = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
@@ -1484,8 +1433,49 @@ class NativeTestingRebuildExecution:
         self.check_lock()
         yield
 
+    def remove_old_containers(self) -> None:
+        if not isinstance(self.intent.old, UnavailableTestingPredecessor):
+            return
+        identifiers = self.intent.retained.get("container_ids", [])
+        if not identifiers:
+            if self.intent.old.availability == "stopped":
+                raise NativeTestingRebuildPending(
+                    "The admitted stopped container IDs are unavailable."
+                )
+            return
+
+        def absent() -> bool:
+            proof = retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload={**self.retained_payload("removal-readback"), "container_ids": identifiers},
+            )
+            return proof.get("availability") == "absent"
+
+        self.run_effect(
+            "remove-old-containers",
+            absent,
+            lambda dispatch: dispatch(
+                lambda: retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload={**self.retained_payload("remove"), "container_ids": identifiers},
+                )
+            ),
+            recovery=True,
+        )
+        self.removed_old_containers = True
+        self.transport.payload["unavailable_predecessor"] = {
+            "project": self.intent.project,
+            "availability": "absent",
+            "inventory_sha256": retained_inventory_sha256([], {"project": self.intent.project}),
+        }
+
     def prepare(self, plan: TestingRebuildPlan) -> TestingCopyReceipt:
         assert self.inputs is not None
+        self.remove_old_containers()
         try:
             self.allocation = prepare_candidate_application(
                 root=self.root,
@@ -1672,41 +1662,6 @@ class NativeTestingRebuildExecution:
             predecessor_state="present" if state in {"available", "unknown"} else state,
         )
 
-    def require_unavailable_forward_frame(self, frame: dict[str, Any]) -> None:
-        if not self.unavailable_retirement_finished(self.plan):
-            if frame["owned_file"] == route_document_content(self.route, self.route.new_backend):
-                self.require_current_unavailable(frame)
-            elif not self.transport.unavailable_predecessor_matches(frame):
-                raise NativeTestingRebuildAdmissionChanged(
-                    "The admitted unavailable testing predecessor changed."
-                )
-        if frame["owned_file"] not in {
-            route_document_content(self.route, None),
-            route_document_content(self.route, self.route.new_backend),
-        }:
-            raise NativeTestingRebuildPending("The owned testing route file changed custody.")
-        preimage = self.route.unavailable_preimage
-        assert preimage is not None
-        if (
-            testing_route_static_sha256(frame["static_configuration"], self.route.template)
-            != preimage.static_sha256
-        ):
-            raise NativeTestingRebuildAdmissionChanged(
-                "The admitted testing listener configuration changed during cutover."
-            )
-        try:
-            observe_testing_route(
-                self.route,
-                frame["raw"],
-                json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None,
-            )
-        except TestingRoutePending:
-            raise
-        except TestingRouteAuthorityChanged as error:
-            raise NativeTestingRebuildAdmissionChanged(
-                "The admitted testing ingress changed during cutover."
-            ) from error
-
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteReadback:
         frame = self.transport.read()
         if self.route.unavailable_preimage is not None:
@@ -1714,21 +1669,11 @@ class NativeTestingRebuildExecution:
                 return self.original_ingress_readback(plan, frame)
             if frame["owned_file"] != route_document_content(self.route, self.route.new_backend):
                 raise NativeTestingRebuildPending("The owned testing route file changed custody.")
-            self.require_unavailable_forward_frame(frame)
-        try:
-            backend = observe_testing_route(
-                self.route,
-                frame["raw"],
-                json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None,
-            )
-        except TestingRoutePending:
-            raise
-        except TestingRouteAuthorityChanged as error:
-            if self.route.unavailable_preimage is not None:
-                raise NativeTestingRebuildAdmissionChanged(
-                    "The admitted testing ingress changed during cutover."
-                ) from error
-            raise
+        backend = observe_testing_route(
+            self.route,
+            frame["raw"],
+            json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None,
+        )
         copy = plan.new if backend == plan.new.private_url else plan.old
         if backend is None:
             raise NativeTestingRebuildPending("Serving evidence needs an actual applied backend.")
@@ -1752,7 +1697,6 @@ class NativeTestingRebuildExecution:
         desired: TestingPredecessor,
         *,
         reconcile_only: bool,
-        abort_forward: bool = False,
     ) -> None:
         phase = "route:" + desired.copy_id
         prior = self.store.read_idempotency_record(
@@ -1795,8 +1739,7 @@ class NativeTestingRebuildExecution:
             lambda: self.route_backend() == desired.private_url,
             perform,
             reconcile_only=reconcile_only,
-            recovery=desired == plan.old or abort_forward,
-            abort_forward=abort_forward,
+            recovery=desired == plan.old,
             route_execution=execution,
             route_publish=lambda attempt, dispatch: self.transport.publish(
                 self.route,
@@ -1830,8 +1773,6 @@ class NativeTestingRebuildExecution:
     ) -> None:
         assert self.publication is not None and isinstance(self.lease, ProviderEvidenceLease)
         self.guard(recovery=True)
-        if desired == plan.new and isinstance(plan.old, UnavailableTestingPredecessor):
-            self.require_old_quiescent()
         observation = self.current_route(plan) if desired == plan.new else None
         if observation is not None and not isinstance(observation, TestingRouteObservation):
             raise NativeTestingRebuildPending("Candidate publication needs applied public health.")
@@ -1901,11 +1842,6 @@ class NativeTestingRebuildExecution:
         )
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:
-        if isinstance(plan.old, UnavailableTestingPredecessor):
-            if self.unavailable_retirement_finished(plan):
-                return
-            self.require_unavailable_retirement()
-
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
             def send() -> None:
                 api.dokploy_request(
@@ -1925,7 +1861,6 @@ class NativeTestingRebuildExecution:
             recovery=True,
         )
         if isinstance(plan.old, UnavailableTestingPredecessor):
-            self.require_unavailable_retirement()
             self.run_effect(
                 "retire-old",
                 lambda: False,
@@ -1934,7 +1869,6 @@ class NativeTestingRebuildExecution:
                 recovery=True,
                 exclude_cause="predecessor_already_unavailable",
             )
-            self.require_unavailable_retirement()
             return
 
         def stop_compose() -> None:
@@ -1959,57 +1893,6 @@ class NativeTestingRebuildExecution:
             lambda dispatch: dispatch(stop_compose),
             recovery=True,
         )
-
-    def require_unavailable_retirement(self) -> None:
-        if self.unavailable_retirement_finished(self.plan):
-            return
-        self.require_old_quiescent()
-        self.require_current_unavailable(self.transport.read())
-
-    @staticmethod
-    def require_current_unavailable(frame: dict[str, Any]) -> None:
-        if frame.get("old_availability") == "available":
-            raise NativeTestingRebuildAdmissionChanged(
-                "The unavailable predecessor changed before retirement completed."
-            )
-        if frame.get("old_availability") not in {"stopped", "absent"}:
-            raise NativeTestingRebuildPending("The current predecessor state is unavailable.")
-
-    def unavailable_retirement_finished(self, plan: TestingRebuildPlan) -> bool:
-        if not isinstance(plan.old, UnavailableTestingPredecessor):
-            return False
-        stop = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":retire-old",
-        )
-        if (
-            stop is None
-            or stop.state != "completed"
-            or stop.response_payload.get("cause") != "predecessor_already_unavailable"
-        ):
-            return False
-        if not isinstance(
-            self.retirement_exclusion(plan, after_health_failure=True), TestingStopExclusionReadback
-        ):
-            raise NativeTestingRebuildPending("The completed retirement exclusion is unverified.")
-        disable = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
-        )
-        if (
-            disable is None
-            or disable.state != "completed"
-            or disable.response_payload.get("not_dispatched") is True
-            or disable.provider_target_key != self.adapter.target_key() + ":disable-old-auto-deploy"
-            or disable.request_fingerprint
-            != canonical_json_sha256(
-                {"intent": self.intent.digest, "phase": "disable-old-auto-deploy"}
-            )
-        ):
-            raise NativeTestingRebuildPending("The completed retirement lost its disable custody.")
-        return True
 
     def retirement_exclusion(
         self, plan: TestingRebuildPlan, *, after_health_failure: bool = False
@@ -2108,15 +1991,12 @@ class NativeTestingRebuildExecution:
         exclude_undispatched: bool = False,
         exclude_cause: str = "candidate_public_health_failed",
         recovery: bool = False,
-        abort_forward: bool = False,
         route_execution: TestingRouteExecutionIntent | None = None,
         route_publish: Callable[..., object] | None = None,
     ) -> DurableProviderOperationResult:
         parent = self
         forward_route = phase == "route:" + self.plan.new.copy_id
         inverse_route = phase == "route:" + self.plan.old.copy_id
-        if abort_forward and (not forward_route or not recovery):
-            raise ValueError("Abort settlement requires the original forward route and recovery.")
         assert isinstance(self.lease, ProviderEvidenceLease)
         evidence_lease = self.lease
         route_effect = (
@@ -2152,11 +2032,6 @@ class NativeTestingRebuildExecution:
                 provider_effect_phase: str,
                 reconciliation_key: str,
             ) -> ProviderObservation:
-                if abort_forward:
-                    assert route_effect is not None
-                    if prior is None:
-                        return ProviderObservation("unknown")
-                    return route_effect.observe_for_abort(provider_effect_phase, prior.attempt)
                 if exclude_undispatched:
                     return ProviderObservation("unknown" if provider_effect_phase else "absent")
                 if route_effect is not None:
@@ -2167,23 +2042,13 @@ class NativeTestingRebuildExecution:
                     return ProviderObservation("unknown")
                 if present():
                     return ProviderObservation("present", 200)
+                if phase == "remove-old-containers":
+                    return ProviderObservation("absent", retry_safe=True)
                 return ProviderObservation("unknown" if provider_effect_phase else "absent")
 
             def apply(
                 self, provider_operation_key: str, lease: ProviderOperationLease
             ) -> ProviderMutationOutcome:
-                if abort_forward:
-                    if prior is not None:
-                        raise NativeTestingRebuildPending(
-                            "An existing forward effect must be settled without another apply."
-                        )
-                    parent.guard(recovery=True)
-                    lease.assert_current()
-                    return ProviderMutationOutcome(
-                        200,
-                        {"route_write_not_started": True, "abort_writer_outcome": "excluded"},
-                        provider_effect_performed=False,
-                    )
                 if exclude_undispatched:
                     parent.guard(recovery=recovery)
                     lease.assert_current()
@@ -2209,10 +2074,10 @@ class NativeTestingRebuildExecution:
                             )
                     parent.guard(recovery=recovery)
                     lease.assert_current()
-                    if phase == "disable-old-auto-deploy" and isinstance(
-                        parent.intent.old, UnavailableTestingPredecessor
-                    ):
-                        parent.require_unavailable_retirement()
+                    if phase == "remove-old-containers":
+                        check_testing_rebuild_protection(
+                            parent.root, parent.store, parent.operation, parent.intent
+                        )
                     parent.lease.checkpoint_effect(phase)
                     lease.checkpoint_effect(phase)
                     send()
@@ -2246,9 +2111,7 @@ class NativeTestingRebuildExecution:
             else None,
             # The child fence, including a missing reservation before any send,
             # proves whether this original effect may dispatch.
-            allow_mutation=(prior is None)
-            if abort_forward
-            else not (
+            allow_mutation=not (
                 reconcile_only
                 and prior is not None
                 and prior.provider_effect_started_at
@@ -2264,8 +2127,6 @@ class NativeTestingRebuildExecution:
         )
         if result.status not in {"completed", "adopted", "replayed"}:
             raise NativeTestingRebuildPending("The original rebuild effect requires observation.")
-        if abort_forward:
-            return result
         if forward_route and result.response_payload.get("route_write_not_started") is True:
             raise TestingRebuildRouteFailure("The original forward route writer was excluded.")
         if not exclude_undispatched and (

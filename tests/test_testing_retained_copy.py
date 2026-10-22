@@ -156,6 +156,13 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 output = json.dumps(
                     [{"Driver": "local", "Options": {}, "Mountpoint": str(self.root / name)}]
                 ).encode()
+            elif command[1] == "rm":
+                self.assertNotIn("-f", command)
+                self.assertNotIn("-v", command)
+                self.containers[:] = [
+                    item for item in self.containers if item["Id"] not in command[2:]
+                ]
+                output = b""
             elif command[1] == "exec":
                 self.assertEqual(command[2], self.containers[0]["Id"])
                 spec = json.loads(base64.b64decode(command[-1]))
@@ -296,3 +303,54 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(read["availability"], "stopped")
         self.assertIsNone(read["identity"])
         self.assertFalse(any(command[1] == "exec" for command in commands))
+
+    def test_rebuild_removes_only_admitted_stopped_containers_and_keeps_volumes(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        expected = [item["Id"] for item in self.containers]
+        volumes = [Path(item["Mounts"][0]["Source"]) for item in self.containers]
+        frame, commands = self.run_host(
+            mode="remove", extra={"allow_unavailable": True, "container_ids": expected}
+        )
+        self.assertEqual(frame["type"], "complete")
+        self.assertEqual(self.containers, [])
+        self.assertTrue(all(volume.is_dir() for volume in volumes))
+        self.assertTrue(any(command[1] == "rm" for command in commands))
+        replay, commands = self.run_host(
+            mode="remove", extra={"allow_unavailable": True, "container_ids": expected}
+        )
+        self.assertEqual(replay["availability"], "absent")
+        self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_removal_refuses_running_foreign_or_incomplete_inventory(self) -> None:
+        expected = [item["Id"] for item in self.containers]
+        for change in ("running", "foreign", "incomplete"):
+            with self.subTest(change=change):
+                for item in self.containers:
+                    item["State"]["Status"] = "exited"
+                extra = {"allow_unavailable": True, "container_ids": expected}
+                if change == "running":
+                    self.containers[0]["State"]["Status"] = "running"
+                if change == "foreign":
+                    extra["container_ids"] = ["another-copy"]
+                frame, commands = self.run_host(
+                    mode="remove",
+                    extra=extra,
+                    inspect_result=[] if change == "incomplete" else None,
+                )
+                self.assertEqual(frame["type"], "failed")
+                self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_interrupted_removal_finishes_only_the_admitted_leftovers(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        expected = [item["Id"] for item in self.containers]
+        removed = self.containers.pop()
+        extra = {"allow_unavailable": True, "container_ids": expected}
+        frame, commands = self.run_host(mode="removal-readback", extra=extra)
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(any(command[1] == "rm" for command in commands))
+        frame, commands = self.run_host(mode="remove", extra=extra)
+        self.assertEqual(frame["availability"], "absent")
+        self.assertNotIn(["docker", "rm", removed["Id"]], commands)
+        self.assertEqual(self.containers, [])

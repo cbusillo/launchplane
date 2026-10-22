@@ -250,21 +250,11 @@ class TestingRebuildRecord(FrozenRecord):
             self.step == "failed" and self.error == "candidate_private_readiness_failed"
         )
         admission_changed = self.error == "testing_rebuild_admission_changed"
-        admission_failed = admission_changed and self.step == "failed" and not self.rollback_started
         if bool(self.admission_refusal) != admission_changed:
             raise ValueError("An admission change requires its original recorded cause.")
-        if (
-            admission_changed
-            and not admission_failed
-            and (
-                not isinstance(self.plan.old, UnavailableTestingPredecessor)
-                or self.step in {"preparing", "prepared", "complete"}
-                or self.step == "failed"
-                and not isinstance(self.route, TestingOriginalIngressReadback)
-            )
-        ):
-            raise ValueError("Changed admission requires the original inverse and readback.")
-        if admission_failed and (
+        if admission_changed and self.step != "failed":
+            raise ValueError("Changed admission ends before selection.")
+        if admission_changed and (
             self.publication_started
             or self.retirement_started
             or self.rollback_started
@@ -306,7 +296,7 @@ class TestingRebuildRecord(FrozenRecord):
                 "Preparation failure requires retained custody before any traffic effect."
             )
         if (
-            not (preparation_failed or private_failed or admission_failed)
+            not (preparation_failed or private_failed or admission_changed)
             and self.step != "preparing"
             and (
                 self.preparation is None
@@ -316,7 +306,7 @@ class TestingRebuildRecord(FrozenRecord):
         ):
             raise ValueError("Rebuild progress requires its independent-copy receipt.")
         if (
-            not (preparation_failed or private_failed or admission_failed)
+            not (preparation_failed or private_failed or admission_changed)
             and self.step not in {"preparing", "prepared"}
             and (
                 self.readiness is None
