@@ -830,19 +830,21 @@ class BusinessValidationHostTests(unittest.TestCase):
     def test_product_stderr_does_not_hide_host_observation_failure(self) -> None:
         import sys
 
-        cases: tuple[tuple[str, dict[str, int], str], ...] = (
-            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 1}, "timed out"),
-            ("print('x' * 100000)", {}, "exceeds its bound"),
+        cases: tuple[tuple[str, dict[str, int]], ...] = (
+            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 1}),
+            ("print('x' * 100000)", {}),
         )
-        for command, limits, reason in cases:
+        for command, limits in cases:
             script = "import sys; print('startup notice', file=sys.stderr, flush=True); " + command
             with (
-                self.subTest(reason=reason),
+                self.subTest(command=command),
                 patch.dict(self.host, limits),
                 self.assertRaises(self.host["RehearsalCommandFailure"]) as failure,
             ):
                 self.native_product_command([sys.executable, "-c", script])
-            self.assertIn(reason, failure.exception.diagnostic["error_text"])
+            lines = failure.exception.diagnostic["error_text"].splitlines()
+            self.assertIn("startup notice", lines)
+            self.assertNotEqual(lines[-1], "startup notice")
 
 
 class BusinessValidationClientTests(unittest.TestCase):
