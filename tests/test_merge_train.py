@@ -89,7 +89,7 @@ class _FakeSnapshotReader:
 class MergeTrainDryRunTests(unittest.TestCase):
     def test_unavailable_check_observation_preserves_queue_admission(self) -> None:
         reason = "actions_read_not_granted"
-        for status in ("fail", "pass"):
+        for status in ("fail", "pass", "pending", "unknown"):
             with self.subTest(status=status):
                 pr = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
                     update={
@@ -121,7 +121,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 )
                 self.assertEqual(result.intended_next_action, baseline.intended_next_action)
                 self.assertEqual(result.queue[0].required_checks_observation_error, reason)
-                if status == "fail":
+                if status != "pass":
                     self.assertIn(reason, result.next_action_detail)
 
     def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:

@@ -230,7 +230,7 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui`; both take the normal technical merge flow, and retired human admission paths do not qualify a merge.
 - Repository classifications use exact immutable identity and CAS admin recovery without heuristics or PR label fallback.
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
-- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, reads the live required-status-check policy, filters admission projection contexts out of that policy, enforces strict base freshness when configured, and rechecks all three immediately before an expected-SHA merge. Missing or malformed required-check policy or evidence fails closed. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
+- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, and uses the [shared required-check evaluation](#candidate-validation) for the target branch and exact head. It enforces base freshness when the effective classic or ruleset policy requires strict checks, then rechecks admission, technical evidence and identity immediately before an expected-SHA merge. Missing named checks remain pending; unreadable or malformed policy or evidence cannot qualify a merge. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
 - Advisory `launchplane/engineering-review` and
   `launchplane/owner-acceptance` check runs are visibility projections and are
@@ -879,17 +879,19 @@ expected-commit comparison; exhaustion still fails closed as stale state.
 
 ### Candidate Validation
 
-The GitHub adapter distinguishes superseded Actions executions from independent
-check suites using the shared workflow execution selector. An identity-verified
-Actions job with a failed conclusion triggers a bounded, complete exact-head
-workflow inventory. Pure pending-check polls keep their existing read path. Only a
-completed superseded execution with matching job link, head and suite can be
-removed, regardless of its conclusion, after all current executions have settled
-successfully. Current failed executions keep their existing blockers. Different
-workflows, events, source repositories and PR targets remain independent; newer
-reruns and incomplete or unavailable metadata retain the existing blockers.
-A current skipped execution or job counts as passing and can clear a superseded
-failure without rerunning that job.
+The GitHub adapter uses the shared workflow execution selector to distinguish
+current Actions executions from superseded runs and independent suites.
+Identity-verified failing Actions jobs trigger a bounded, complete exact-head
+workflow inventory. A job is removed only when a
+proved newer execution supersedes its workflow, event, branch, source repository
+and PR target family, with matching head, job link, run and suite identities.
+Other workflows remain independent; their pending jobs do not preserve a
+superseded failure. A reported current required job that is still running remains
+pending. Removing a superseded failure without finding its required replacement
+also leaves that requirement pending. Successful, neutral or skipped reported
+checks count as passing. Otherwise-green reported requirements retain their
+existing path without a workflow-history dependency; these reads do not prove
+that every newly dispatched workflow has reported its jobs.
 The native token selects Actions read only when the policy's verified installation
 already advertises it, and verifies the issued token against that exact selection.
 It never requests Actions write or changes installation grants. Its issued scopes
@@ -898,13 +900,14 @@ recovery readers, including cache hits. For a proved private repository, a known
 absent Actions read skips the inventory request and records `actions_read_not_granted`. Public or unknown
 visibility keeps the provider-read path with the same credential, since public
 workflow history needs no Actions grant. Visibility comes from the exact issued
-token's repository response. Passing and pending-only heads keep their existing
-behavior. Existing cached tokens retain their verified
-scopes until the normal refresh, rather than gaining inferred capabilities.
-Unavailable metadata emits a bounded warning and a separate original-head queue
-diagnostic, without changing eligibility or dependency-hold reason cardinality.
-An already ineligible checked-ready head also includes it in its existing
-checks-failed reason; a selected failed head keeps its block action and detail.
+token's repository response. Pending-only and otherwise-green polls retain their
+existing read path.
+Cached tokens retain their verified scopes until normal refresh; no additional
+capability is inferred. Unavailable execution metadata emits a bounded warning
+and a head/candidate diagnostic. Unproved supersession retains the failing
+blocker. An unrelated optional failure or its missing history cannot invalidate
+passing required checks.
+The diagnostic does not create extra dependency-hold reasons.
 Provider refusals include the HTTP status and a redacted route, without provider
 bodies or credentials. A refused or invalid mint still fails closed without an
 alternate credential or retry through another carrier.
@@ -931,19 +934,49 @@ pass rebuilds with full CI. Landing uses fresh structural admission evidence
 and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
-All adapter check reads supersede attempts within their provider check suite.
-Missing suite or check identity retains every observation as independent evidence.
-Stale checks and startup failures block consistently in screening and admission.
-Push and PR workflows can publish identical job names from the same App on one
-SHA; a passing job in one suite cannot erase a failing or pending job in another.
-This applies to PR-head screening, candidate observation, base verification,
-head-check reuse and failure diagnostics. Failed suites on a source head can
-prevent reuse and require full candidate CI. A failing candidate enters the
-existing recovery path instead of planning a landing that fresh admission will
-refuse. A passing rerun in the failed suite can establish exact-SHA recovery
-under the existing retry budget. A new suite clears an older execution's failure
-only when the shared selector proves it supersedes that execution; otherwise
-recovery needs a rerun of the failed suite or a new candidate SHA.
+Head screening, candidate observation, base verification, head-check reuse and
+native/tenant admission share one required-check evaluator. Only signals matching
+a live required name and its App binding determine the required-check verdict.
+Same-name commit statuses and check runs both participate when they match that
+requirement; one source's pass cannot erase another matching failure or pending
+signal. A required check with no matching evidence remains pending. Optional
+checks do not fail the required verdict. Passing owner/configuration facets
+cannot replace an unavailable required verdict. Missing names are retained in
+head/candidate observations and waiting feedback. Stacked children use the train
+base's technical requirements while preserving their actual parent branch and
+comparison/review bindings.
+
+An unprotected train base or one with no enforced required checks remains visible
+in read-only queue snapshots with an unknown check verdict and a policy diagnostic.
+A policy containing only Launchplane advisory projections also leaves the
+independent technical verdict unknown unless an independently verified current
+configuration comparison supplies that facet. Candidate validation, check reuse and landing still require
+usable protected-branch technical requirements; retaining the queue view cannot
+qualify delivery.
+
+The optional `required_checks_observation_error` belongs to observation/result
+projections. The canonical batch-candidate record builder omits it from its own
+copy before hashing and persistence, preserving the old stored payload and digest
+shape. The original observation retains the diagnostic for waiting feedback.
+Native scheduler feedback records save it in their existing comment body; keyed
+service responses retain it in their existing idempotency envelope and replay it
+after restart. A direct response without an idempotency key has no such durable
+response guarantee. This introduces no stored candidate field, table, migration
+or reader-first rollback prerequisite. A private installation without Actions read still
+cannot prove a failing job superseded and retains that blocker with a diagnostic.
+An App-pinned commit status needs explicit App attribution; a creator identity
+does not establish it. These retained evidence limits do not authorize grants or
+an alternate credential and do not promise complete provider-verdict equivalence.
+
+Check-run attempts are superseded within their proved provider identity, with
+Actions execution selection as described above. Identical names from different
+Apps, workflows or independent suites are not interchangeable. A reported
+technical check-run head SHA that contradicts the requested SHA is rejected before
+supersession. Missing identity is not proof of supersession. Existing native
+compatibility for observations without a reported check-run head SHA does not
+override a present contradiction or admission's existing identity requirements.
+A failed source head cannot qualify reuse; candidate recovery still requires
+fresh exact-SHA evidence under the existing retry and landing guards.
 
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from
@@ -967,23 +1000,25 @@ spelling, keep their full CI path. Security, CodeQL and the required-check polic
 are unchanged. Actions still records two workflow events for a batch candidate,
 but only the push executes the full CI suite.
 
-Candidate observation reads the target branch's live required-status-check
-policy and requires every named check, including any pinned GitHub App id, to be
-present and successful on the candidate SHA. Partial workflow evidence cannot
-promote a candidate. It reads the enforced required-check projection from
+Shared check readers load the target branch's live requirements as the union of
+enforced classic protection and effective active branch rules, preserving each
+required name and GitHub App binding. The protected-branch projection comes from
 GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branches#get-a-branch),
-which requires `contents: read` for the repository. For a protected branch whose
-classic check projection has disabled enforcement, it reads the active rules
-applying to that branch through GitHub's effective branch-rules endpoint and
-uses their required checks, preserving any integration IDs. This endpoint needs
-only metadata read permission. Disabled and
-evaluate-only rulesets do not appear on that endpoint. Unprotected branches,
-missing protection metadata, unreadable or incomplete rule evidence, and empty
-enforced check lists fail closed; observation requests no administration access. A pinned
-app id must be proven by check-run evidence; commit statuses can satisfy only unpinned or
-GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
-missing pinned or named evidence is surfaced explicitly instead of remaining an
-unexplained pending candidate.
+using `contents: read`. Effective branch rules require metadata read and exclude
+disabled or evaluate-only rulesets. Both sources participate when classic checks
+are enforced; rulesets are not a fallback. All pages of effective rules, commit
+statuses and check runs participate, with exact-SHA and provider-identity
+validation.
+
+Unprotected branches, missing protection metadata, unreadable or incomplete
+policy, and an empty enforced native check list fail closed; observation requests
+no administration access. A pinned App requirement needs explicit matching App
+identity on its check run or commit status; a creator login cannot supply that
+identity. Commit statuses without verified App attribution can satisfy unpinned
+or `app_id = -1` any-App requirements. Tenant admission records an unprotected
+policy as unavailable. A missing named or pinned check is explicitly pending even after
+unrelated checks finish. Failed, pending, stale or unavailable required evidence
+cannot qualify a candidate.
 
 Native landing admission reads that same required-check projection. The train
 always requires current-base freshness, independently of GitHub's optional
@@ -1165,17 +1200,21 @@ branch, close a child, or rewrite historical admission or collapse proof.
 
 ### Blocker Isolation
 
-When the combined candidate fails checks, Launchplane does not assume all queued
-entries are bad. On the next pass over an unchanged queue and base, the controller reads the failed
-candidate's check runs, commit statuses and the annotations of failed runs:
+Failure diagnosis starts from an actual required-check failure under the
+[shared evaluation](#candidate-validation), on the unchanged candidate and base.
+An optional failure or missing required evidence alone cannot start isolation or
+blame a queued PR. The controller reads the relevant failed checks, statuses and
+bounded job annotations. Supporting Actions cause and counterevidence must
+belong to the same verified run and suite as the implicated required failure;
+unrelated optional workflows cannot change its classification:
 
-- **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
-  cancelled run (lost communication, a shutdown signal, or a job never acquired
-  by a runner) marks the failure as infrastructure; jobs that depend on the lost
-  job fail with a generic exit-code annotation, so they do not count against it.
+- **Infrastructure failure.** Within that verified execution, GitHub's runner-loss
+  annotation on a failed or cancelled run (lost communication, a shutdown signal,
+  or a job never acquired by a runner) marks the failure as infrastructure;
+  generic dependent-job exit annotations do not establish a separate product failure.
   Runs that were cancelled, went stale or failed to start count only when no
   run failed outright, because fail-fast also cancels the siblings of a real
-  failure. A named failed test or a failing commit status always rules
+  failure. A named failed test in that execution or a matching required failing commit status rules
   infrastructure out. The controller rebuilds the same members once on a new
   `-infrastructure-retry` candidate ref, recording `infrastructure_retry_of`;
   nobody is blamed. If the retry fails on infrastructure again, the candidate
@@ -1183,11 +1222,25 @@ candidate's check runs, commit statuses and the annotations of failed runs:
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
 - **Base checks.** Before splitting or blaming a pull request, the controller
-  reads the base's required checks and the checks that failed on the candidate,
-  on the candidate's exact base commit. Unrelated base-only checks do not stop
-  isolation. If a candidate check fails there too, or the base's required checks are pending,
-  missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
-  and a reason naming the base branch. No pull request gets `blocked_label`, and
+  reads the base's effective technical requirements on the candidate's exact
+  base commit. It retains the name and App binding of each required identity
+  that actually caused the candidate's failure. Those identities need actual
+  successful base evidence. Skipped or neutral rows supply no positive proof,
+  but do not erase an actual success for the same required identity. Matching
+  failure, pending or unreadable evidence still vetoes attribution. Missing
+  evidence or a superseded required job without its replacement cannot authorize blame.
+  A changed required identity also stops attribution with a named policy mismatch.
+  Same-execution leaf jobs remain cause and counterevidence, rather than becoming
+  additional base requirements. A successful required aggregate can therefore
+  prove a verified-tree reuse base whose optional shards were intentionally
+  skipped. A genuinely required shard still needs its own successful base evidence.
+  Advisory projections are excluded consistently; configuration checks retain
+  their separate current-comparison facet when configured. If a required
+  candidate identity fails there too, its evidence is unproved, or
+  the base's required checks are pending, missing or unreadable, it stays stopped
+  with `reason_code: base_checks_not_green`
+  and a reason naming the base branch and missing or unproved required identities.
+  The same diagnostic appears in controller details. No pull request gets `blocked_label`, and
   the failed candidate stays active for fresh reads on the next pass. A rerun
   passing on the same base allows isolation to resume; a changed base or eligible
   queue uses the existing replacement path.
