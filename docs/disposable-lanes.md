@@ -3100,7 +3100,15 @@ keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
-`ODOO_DB_NAME` set to the final upgraded copy. Its stdin is one JSON object:
+`ODOO_DB_NAME` set to the final upgraded copy. The shared Compose environment
+defaults `ODOO_FILESTORE_PATH` to `/volumes/data/filestore` for both web and the
+script-runner, preserving explicitly configured filestore paths on other lanes.
+Copy/upgrade, before-web readback, attachment checks and product validation inherit
+the same rehearsal filestore setting. Copy/upgrade keeps its per-exec flag for
+containers prepared before this environment change. Existing switched containers
+do not gain a new environment from a source deploy; an already held validation
+still requires its separately reviewed original-operation disposition.
+Its stdin is one JSON object:
 `product`, `rehearsal_id`, `artifact_id`, `source_commit`, `database`, and
 `attempt_sha256`. Launchplane establishes these from the stored rehearsal,
 verified candidate and original operation key. The product independently checks
@@ -3117,9 +3125,15 @@ connected database and holds the native workflow lock; it can access other
 rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 
 The product writes exactly one line
-`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
-discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
+`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other stdout,
+including nonzero-exit stdout, is discarded. Stderr is drained concurrently;
+on failure its bounded tail passes through the existing credential and SQL-row
+redactor into the attempt-bound private child diagnostic, alongside any host
+timeout or output-limit reason. Truncated tails discard their first partial line
+before redaction. No stderr is added to
+a successful receipt. Product code must keep copied business values out of its
+error messages; redaction is not a general Client-data classifier.
+Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
 unknown original-key custody; stopping the host observer does not prove the
 in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`

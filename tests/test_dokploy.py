@@ -4502,6 +4502,26 @@ esac
 
 
 class LaunchplaneServiceDeployTests(unittest.TestCase):
+    def test_rendered_product_services_honor_the_configured_filestore(self) -> None:
+        import yaml
+        from control_plane.testing_activation_compose import interpolate
+
+        configured = "/volumes/data/custom-filestore"
+        document = yaml.safe_load(
+            control_plane_dokploy.render_odoo_raw_compose_file(
+                image_reference="fixture-image", hold_web_until_integration_readback=False
+            )
+        )
+        for name in ("web", "script-runner"):
+            with self.subTest(service=name):
+                self.assertEqual(
+                    interpolate(
+                        document["services"][name]["environment"]["ODOO_FILESTORE_PATH"],
+                        {"ODOO_FILESTORE_PATH": configured},
+                    ),
+                    configured,
+                )
+
     @staticmethod
     def _target_payload(
         *, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123"

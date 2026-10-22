@@ -3,11 +3,13 @@
 from control_plane.contracts.native_operation_evidence import NATIVE_OPERATION_RESULT_MAX_BYTES
 
 REHEARSAL_DIAGNOSTIC_TEXT_LIMIT = 4096
+REHEARSAL_DIAGNOSTIC_TAIL_LIMIT = 64 * 1024
 REHEARSAL_DIAGNOSTIC_FILE_LIMIT = 8
 REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT = 1024 * 1024
 REHEARSAL_DIAGNOSTICS_LIBRARY = (
     r"""
 DIAGNOSTIC_TEXT_LIMIT = __TEXT_LIMIT__
+DIAGNOSTIC_TAIL_LIMIT = __TAIL_LIMIT__
 DIAGNOSTIC_FILE_LIMIT = __FILE_LIMIT__
 DIAGNOSTIC_PROCESS_LIMIT = __PROCESS_LIMIT__
 RESULT_MAX_BYTES = __RESULT_LIMIT__
@@ -34,6 +36,13 @@ def emit_rehearsal_result(result):
     if len(encoded)>RESULT_MAX_BYTES:
         raise RuntimeError('Required rehearsal evidence exceeds its transport budget')
     print('rehearsal_result='+encoded.hex(),flush=True)
+
+
+def diagnostic_tail(value):
+    if len(value)<=DIAGNOSTIC_TAIL_LIMIT:
+        return value
+    tail=value[-DIAGNOSTIC_TAIL_LIMIT-1:]
+    return tail[1:] if tail[:1]==b'\n' else tail[1:].partition(b'\n')[2]
 
 
 def diagnostic_text(value, secrets=()):
@@ -180,8 +189,8 @@ def diagnostic_process_output(arguments):
                 consumed+=len(chunk)
                 if consumed>DIAGNOSTIC_PROCESS_LIMIT:
                     return False,b''
-                tail=(tail+chunk)[-65536:]
-        return process.wait(timeout=max(0.1,deadline-time.monotonic()))==0,tail
+                tail=(tail+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
+        return process.wait(timeout=max(0.1,deadline-time.monotonic()))==0,diagnostic_tail(tail)
     except subprocess.TimeoutExpired:
         return False,b''
     finally:
@@ -236,8 +245,8 @@ def retained_upgrade_logs(spec,containers,root):
             before=os.fstat(stream.fileno())
             if not stat.S_ISREG(before.st_mode):
                 raise RuntimeError('Rehearsal log is not regular')
-            stream.seek(max(0,before.st_size-65536))
-            tail=stream.read(65536)
+            stream.seek(max(0,before.st_size-DIAGNOSTIC_TAIL_LIMIT-1))
+            tail=diagnostic_tail(stream.read(DIAGNOSTIC_TAIL_LIMIT+1))
             after=os.fstat(stream.fileno())
             if (before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_ino,after.st_size,after.st_mtime_ns):
                 raise RuntimeError('Rehearsal log changed during observation')
@@ -246,6 +255,7 @@ def retained_upgrade_logs(spec,containers,root):
             'tail':diagnostic_text(tail,secrets)})
     return {'files':logs,'runtime':runtime,'since':since,'truncated':len(candidates)>DIAGNOSTIC_FILE_LIMIT}
 """.replace("__TEXT_LIMIT__", str(REHEARSAL_DIAGNOSTIC_TEXT_LIMIT))
+    .replace("__TAIL_LIMIT__", str(REHEARSAL_DIAGNOSTIC_TAIL_LIMIT))
     .replace("__FILE_LIMIT__", str(REHEARSAL_DIAGNOSTIC_FILE_LIMIT))
     .replace("__PROCESS_LIMIT__", str(REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT))
     .replace("__RESULT_LIMIT__", str(NATIVE_OPERATION_RESULT_MAX_BYTES))
