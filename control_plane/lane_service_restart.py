@@ -414,7 +414,7 @@ class ServiceRestartAdapter:
                     ServiceRestartRefused("A release operation holds this lane.")
                 )
             try:
-                fresh, *_ = plan_service_restart(
+                fresh, expected, host, token, _ = plan_service_restart(
                     store=self.store, root=self.root, request=self.request, actor=self.plan.actor
                 )
                 if fresh.digest() != self.request.reviewed_plan_sha256:
@@ -422,14 +422,23 @@ class ServiceRestartAdapter:
                         "Restart identity changed; inspect and review again."
                     )
                 if self.require_disposable:
+                    runtime_stopped = fresh.service == "web" and not fresh.before.running
+                    if fresh.service == "database":
+                        runtime_stopped = not inspect_service(
+                            host=host,
+                            token=token,
+                            app_name=fresh.app_name,
+                            server_id=fresh.server_id,
+                            service="web",
+                            expected=expected,
+                        ).running
                     require_disposable_lane(
                         self.store,
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
-                        same_artifact_restart_service=fresh.service
-                        if not fresh.before.running
-                        else "",
+                        same_artifact_restart=not fresh.before.running,
+                        runtime_stopped=runtime_stopped,
                     )
             except DisposableLaneSafetyUnknown as error:
                 raise ProviderMutationRejectedError(error) from error

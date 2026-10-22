@@ -819,8 +819,22 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(status, 409, response)
         self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
-        self.payload.update(mode="dry-run", reviewed_plan_sha256="", service="web")
+        self.payload.update(mode="dry-run", reviewed_plan_sha256="", service="database")
         self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "web"
+        self.select_stopped_database()
+        self.provider.config["State"]["Running"] = True
+        self.review()
+        status, response = self.invoke(key="database-with-running-web")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
+        self.assertEqual(self.provider.writes, [])
+        self.provider.config["State"]["Running"] = False
+        self.payload.update(mode="dry-run", reviewed_plan_sha256="")
+        self.review()
+        status, response = self.invoke(key="down-database-restart")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.payload.update(mode="dry-run", reviewed_plan_sha256="", service="web")
         self.review()
         status, response = self.invoke(key="down-restart")
         self.assertEqual(status, 200, response)
