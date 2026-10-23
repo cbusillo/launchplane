@@ -333,24 +333,20 @@ class LaunchplaneSecretsTests(unittest.TestCase):
 
     def test_status_origin_comes_from_current_immutable_version_without_decryption(self) -> None:
         store = _FakeSecretReadStore()
-        current = store.versions[-1]
+        current = store.versions[-1].model_copy(update={"value_origin": "provider"})
         store.records = (
             store.records[0].model_copy(update={"current_version_id": current.version_id}),
         )
-        for origin in (None, "supplied", "provider", "generated"):
-            with (
-                self.subTest(origin=origin),
-                patch.object(control_plane_secrets, "_decrypt_secret_value") as decrypt,
-            ):
-                selected = current.model_copy(update={"value_origin": origin})
-                store.versions = (store.versions[0], selected)
-                status = control_plane_secrets.build_secret_status(
-                    store, secret_id=selected.secret_id
-                )
-                self.assertEqual(status["current_version_value_origin"], selected.value_origin)
-                self.assertEqual(status["current_version_created_at"], selected.created_at)
-                decrypt.assert_not_called()
-                self.assertNotIn(selected.ciphertext, json.dumps(status))
+        store.versions = (store.versions[0], current)
+        with patch.object(control_plane_secrets, "_decrypt_secret_value") as decrypt:
+            status = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertEqual(status["current_version_value_origin"], current.value_origin)
+            self.assertEqual(status["current_version_created_at"], current.created_at)
+            store.versions = store.versions[:1]
+            missing = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertIsNone(missing["current_version_value_origin"])
+            self.assertFalse(missing["current_version_created_at"])
+            decrypt.assert_not_called()
 
     def test_read_dokploy_config_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

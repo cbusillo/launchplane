@@ -849,9 +849,15 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
             app_store = PostgresRecordStore(database_url=database_url)
             record = app_store.read_secret_record(secret_ids["context"])
             version = app_store.read_secret_version(record.current_version_id).model_copy(
-                update={"value_origin": "provider"}
+                update={
+                    "version_id": f"{record.current_version_id}-provider-fixture",
+                    "value_origin": "provider",
+                }
             )
             app_store.write_secret_version(version)
+            app_store.write_secret_record(
+                record.model_copy(update={"current_version_id": version.version_id})
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_record_read_policy(
