@@ -13949,11 +13949,19 @@ def create_launchplane_fastapi_app(
                 message="Register a non-runtime product through reviewed product onboarding.",
             )
         if scan_activation:
-            scan = await run_in_threadpool(
-                control_plane_artifact_scan.qualify_product_artifact,
-                record_store,
-                product=profile.product,
-            )
+            try:
+                scan = await run_in_threadpool(
+                    control_plane_artifact_scan.qualify_product_artifact,
+                    record_store,
+                    product=profile.product,
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_conflict",
+                    message="The product changed during scan qualification; read it again.",
+                ) from error
             if scan.status != "pass":
                 raise _launchplane_http_error(
                     status_code=409,

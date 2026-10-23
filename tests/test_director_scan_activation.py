@@ -192,3 +192,17 @@ class DirectorScanActivationTests(unittest.IsolatedAsyncioTestCase):
             response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), concurrent)
+
+    async def test_retirement_during_qualification_returns_a_profile_conflict(self) -> None:
+        retired = self.before.model_copy(deep=True, update={"lifecycle_state": "retired"})
+        retired.preview.enabled = False
+
+        def retire(*args: object, **kwargs: object) -> ArtifactScanResult:
+            self.store.write_product_profile_record(retired)
+            raise ValueError("An active product profile is required.")
+
+        with patch("control_plane.artifact_scan.qualify_product_artifact", side_effect=retire):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "product_profile_conflict")
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), retired)

@@ -47,6 +47,13 @@ standing path cannot disable scanning, create a product, edit other fields,
 change access or deploy anything. Other callers retain their existing policy
 requirements.
 
+Allow up to five minutes for activation's service-side qualification. A lost or
+timed-out activation response is an uncertain write, not a scan refusal. Read
+the stored profile before any retry, and retain the original idempotency key
+and exact payload for a supported replay. A second request can encounter a busy
+scanner while the original is still running; that response does not settle the
+original request's outcome.
+
 Qualify first with `GET /v1/artifacts/scan?product=<product>`, using the existing
 whole-product `artifact_protection.read` authority. The service selects and
 verifies the current testing build through the same provenance planner and
