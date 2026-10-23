@@ -21,6 +21,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesRefused,
     SeparationResourcesRequest,
     SeparationResourcesResult,
+    SeparationResourcesStatus,
 )
 
 
@@ -60,13 +61,32 @@ def register_testing_separation_resource_routes(
         )
         try:
             if body.mode == "receipt":
+                if not idempotency_key.strip():
+                    raise ValueError("Readback requires the original preparation key.")
                 row = record_store.read_idempotency_record(
                     scope=idempotency_scope(identity),
                     route_path=ROUTE.replace("{product}", product),
                     idempotency_key=idempotency_key.strip(),
                 )
                 if row is None or row.state != "completed":
-                    raise ValueError("The original preparation has no completed receipt.")
+                    if row is not None and row.provider_target_key != adapter.target_key():
+                        raise ValueError("The original preparation belongs to another lane.")
+                    observed = SeparationResourcesStatus(
+                        product=product,
+                        context=body.context,
+                        state=row.state if row else "not_found",
+                        plan_sha256=row.reconciliation_key if row else "",
+                        provider_effect_phase=row.provider_effect_phase if row else "",
+                        created_at=row.created_at if row else "",
+                        updated_at=row.updated_at if row else "",
+                        lease_expires_at=row.lease_expires_at if row else "",
+                        provider_effect_started_at=row.provider_effect_started_at if row else "",
+                    )
+                    return accepted_evidence_response(
+                        trace_id=trace,
+                        records={},
+                        result=observed.model_dump(mode="json"),
+                    )
                 result = SeparationResourcesResult.model_validate(
                     row.response_payload.get("result")
                 )
