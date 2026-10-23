@@ -184,9 +184,25 @@ jobs:
           control = json.loads(control_text) if control_text else {}
           if not isinstance(control, dict):
               raise SystemExit("allocation_control must be a JSON object.")
+          allowed_controls = {"mode", "idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"}
+          if control.keys() - allowed_controls:
+              raise SystemExit("allocation_control contains an unsupported field.")
+          if "idempotency_key" in control:
+              key = control["idempotency_key"]
+              if not isinstance(key, str) or not key or any(ord(char) < 32 or ord(char) == 127 for char in key):
+                  raise SystemExit("allocation_control idempotency_key must be one nonempty printable line.")
+          retain = control.get("retain_allocation", False)
+          custody = control.get("expected_allocation_custody_sha256", "")
+          if not isinstance(retain, bool) or not isinstance(custody, str):
+              raise SystemExit("allocation_control retention requires a boolean and string digest.")
           recovery = "mode" in control
           if recovery and control["mode"] not in {"readback", "apply"}:
               raise SystemExit("allocation_control mode must be readback or apply.")
+          if retain:
+              if control.get("mode") != "apply" or re.fullmatch(r"[a-f0-9]{64}", custody) is None:
+                  raise SystemExit("retention requires recovery apply and the reviewed custody digest.")
+          elif custody:
+              raise SystemExit("a custody digest requires retain_allocation.")
           if recovery and control["mode"] == "apply" and mode != "apply":
               raise SystemExit("allocation recovery apply requires mode=apply and confirmation.")
           product = required("PRODUCT", 63).lower()

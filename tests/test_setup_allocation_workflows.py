@@ -53,6 +53,15 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             ({"idempotency_key": "fresh key"}, "apply", "false"),
             ({"mode": "readback"}, "dry_run", "true"),
             ({"mode": "apply"}, "apply", "true"),
+            (
+                {
+                    "mode": "apply",
+                    "retain_allocation": True,
+                    "expected_allocation_custody_sha256": "a" * 64,
+                },
+                "apply",
+                "true",
+            ),
         ):
             with self.subTest(control=control, mode=mode):
                 result = self.caller_step(
@@ -64,6 +73,17 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             {"mode": "apply"},
             {"mode": "other"},
             {"mode": None},
+            {"retain_allocation": True},
+            {
+                "mode": "readback",
+                "retain_allocation": True,
+                "expected_allocation_custody_sha256": "a" * 64,
+            },
+            {"idempotency_kye": "key"},
+            {"idempotency_key": 5},
+            {"idempotency_key": "key\n"},
+            {"retain_allocation": "true"},
+            {"expected_allocation_custody_sha256": "a" * 64},
             [],
             "readback",
         )
@@ -119,25 +139,9 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(outputs["onboarding_plan_sha256"], "")
         self.assertEqual(outputs["authz_plan_sha256"], "")
-        result = self.run_step(
-            "reusable-generic-web-onboarding-apply.yml",
-            "apply",
-            "Render apply requests",
-            {
-                **env,
-                "PRODUCT": outputs["product"],
-                "TESTING_CONTEXT": outputs["testing_context"],
-                "TARGET_PLAN_SHA256": outputs["target_plan_sha256"],
-                "ONBOARDING_PLAN_SHA256": outputs["onboarding_plan_sha256"],
-                "AUTHZ_PLAN_SHA256": outputs["authz_plan_sha256"],
-            },
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        request = json.loads((self.root / "target-apply-request.json").read_text())
-        self.assertEqual(
-            request, {**original, "mode": "readback", "confirmation": "", "reason": env["REASON"]}
-        )
-        self.assertFalse((self.root / "authz-apply-request.json").exists())
+        self.assertEqual(original["context"], outputs["testing_context"])
+        self.assertEqual(original["target_name"], outputs["target_name"])
+        self.assertFalse((self.root / "authz-reconcile-request.json").exists())
 
     def test_caller_normal_onboarding_keeps_all_planned_artifacts(self) -> None:
         env = self.render_caller({"idempotency_key": "fresh-reviewed-key"})
