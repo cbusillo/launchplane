@@ -122,7 +122,6 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             "testing",
             usage="unknown",
             data="unknown",
-            production_resources="unknown",
         )
 
         def apply(**arguments: Any) -> dict[str, object]:
@@ -132,6 +131,22 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         with patch(
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
             side_effect=apply,
+        ) as driver:
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
+
+    async def test_down_lane_keeps_the_supported_separation_step_available(self) -> None:
+        record_lane_health(self.store, "example-site", self.context, datetime.now(timezone.utc))
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            production_resources="separation_ready",
+        )
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
         ) as driver:
             self.assertEqual(await self.sync(), 202)
             driver.assert_called_once()

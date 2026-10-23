@@ -130,25 +130,62 @@ class LaneUsageTests(unittest.TestCase):
 
     def test_verified_down_repair_does_not_need_a_running_copy_safety_observation(self) -> None:
         self.health()
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            data="unknown",
+            observed_at=self.now,
+            expires_at=self.now + timedelta(minutes=5),
+        )
+        before = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
         self.assertTrue(self.require())
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(self.product, self.context, "testing"), before
+        )
+
+    def test_down_recovery_keeps_independent_isolation_and_nonrecovery_custody(self) -> None:
+        self.health()
         for facts in (
-            {"usage": "unknown", "data": "unknown", "production_resources": "unknown"},
-            {"data": "unknown"},
+            {"data": "unknown", "production_resources": "unknown"},
+            {"data": "unknown", "production_resources": "shared"},
             {
                 "observed_at": self.now - timedelta(minutes=10),
                 "expires_at": self.now - timedelta(minutes=9),
             },
         ):
             with self.subTest(facts=facts):
-                record_safety(self.store, self.product, self.context, "testing", **facts)
-                before = self.store.read_disposable_lane_safety(
-                    self.product, self.context, "testing"
+                record_safety(
+                    self.store,
+                    self.product,
+                    self.context,
+                    "testing",
+                    **{
+                        "observed_at": self.now,
+                        "expires_at": self.now + timedelta(minutes=5),
+                        **facts,
+                    },
                 )
-                self.assertTrue(self.require())
-                self.assertEqual(
-                    self.store.read_disposable_lane_safety(self.product, self.context, "testing"),
-                    before,
-                )
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    self.require()
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            data="unknown",
+            observed_at=self.now,
+            expires_at=self.now + timedelta(minutes=5),
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                now=self.now,
+            )
 
     def test_unknown_occupancy_does_not_require_downtime_or_a_non_use_declaration(self) -> None:
         for status in (None, 200, 403):

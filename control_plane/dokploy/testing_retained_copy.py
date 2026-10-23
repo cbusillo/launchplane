@@ -78,6 +78,8 @@ def retained_copy_availability(containers: list[dict[str, Any]], spec: dict[str,
         return "unknown"
     if not web or web[0]["State"]["Status"] in {"exited", "created"}:
         return "stopped"
+    if web[0]["State"].get("Health", {}).get("Status") == "unhealthy":
+        return "stopped"
     return "available"
 
 
@@ -201,7 +203,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         "identity": identity,
         "resource_binding": binding,
         "stopped": stopped,
-        "web_stopped": web is None or state in {"exited", "created", "paused"},
+        "web_stopped": availability == "stopped" or state == "paused",
         "volumes": sorted(volumes),
     }
 

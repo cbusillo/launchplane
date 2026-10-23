@@ -148,7 +148,8 @@ outcome cannot be replaced with an assertion that the old metadata still wins.
 The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
 
-A predecessor whose web service is verified stopped or absent uses an explicit unavailable record.
+A predecessor whose web service is verified stopped, absent or Docker-unhealthy
+uses an explicit unavailable record.
 It needs the existing lane's address ownership, provider target and registered
 server placement. Complete container IDs, ownership fields, states and mount
 inventory must agree; an incomplete inspection never proves absence. Stopped
@@ -158,8 +159,10 @@ storage custody unknown and preserved. Holds, positive use, needed-copy evidence
 production isolation and unresolved provider effects keep their existing gates.
 The database and other owned dependencies may still be running. Their custody is
 retained, and the ordinary fenced stop runs after the candidate passes public
-health and metadata publication. Only an original with every service already
-stopped skips that stop. A missing web or database does not invent its old data;
+health and metadata publication. A fresh retained-copy read immediately before
+retirement decides whether every service is already stopped and the stop can be
+skipped. Admission-time state cannot skip a dependency that started later.
+A missing web or database does not invent its old data;
 every remaining mounted volume is still inspected for independent backing and
 foreign consumers. Both retained-copy and route observations use the same
 web-availability classifier.
@@ -326,16 +329,22 @@ Production admission and release gates are unchanged.
 
 The common disposable guard combines this decision with the existing stopped-container
 restart exception. Runtime recovery, generic-web testing deploy/retry/reset and
-same-artifact restart opt into that shared branch. Verified downtime removes the
-requirement for an absent, stale or UNKNOWN running-copy custody/isolation observation;
-it does not rewrite the observation or assert positive safety facts. An expired
-protective only-copy or production-sharing report still blocks destructive or
-configuration-changing recovery. Restarting the exact stopped container preserves
-its needed data and retains its narrower existing exception. Serving/unverified
+same-artifact restart opt into that shared rule. Verified downtime can qualify
+UNKNOWN running-copy data custody while preserving current bound independent
+production-isolation evidence. It does not rewrite the observation or assert
+positive safety facts. Missing, stale or UNKNOWN isolation still refuses reset,
+deploy and configuration changes; physical separation is readable while down and
+is not replaced by a failed health probe. A known needed copy still blocks those
+operations. The supported configuration-only separation step retains its existing
+`separation_ready` allowance while down. Restarting the exact container preserves
+its configuration and needed data: a stopped original or a monitor-qualified down
+original uses the existing narrower restart exception. Serving/unverified
 lanes still require their current qualification. Retained-data deletion, retirement,
 source setup and other independent resource operations retain their own gates.
-Each caller still checks exact ownership, key safety, physical candidate isolation,
-original-operation fences and configuration binding. Running health, identity,
+Each caller retains its ownership, key-safety, original-operation and binding
+checks. Native rebuild independently inspects retained backing and candidate
+isolation; in-place deploy/reset/configuration uses its current isolation
+qualification. Running health, identity,
 sanitation and credential checks run on the recovered candidate before it counts
 as healthy or can be published. Down admission is never healthy evidence.
 
@@ -360,7 +369,7 @@ existing stopped-web usage probe, with matching complete before/after snapshots
 of container identity, state, start time, configuration, mounts and networks.
 That usage probe still requires the database and supported web command.
 Native rebuild instead uses its retained-copy inspection at admission and fresh
-forward checkpoints, including stopped dependencies or a removed web. Restart
+forward checkpoints, including unhealthy web, stopped dependencies or a removed web. Restart
 uses the currently inspected exact web container, stopped or Docker-unhealthy.
 Ambiguous ownership, changed physical custody and unresolved lifecycle states
 remain protected. The normal two-slot, every-URL monitor rule still applies.

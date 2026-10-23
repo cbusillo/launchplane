@@ -1936,7 +1936,15 @@ class NativeTestingRebuildExecution:
             disable_auto_deploy,
             recovery=True,
         )
-        if isinstance(plan.old, UnavailableTestingPredecessor) and self.intent.retained["stopped"]:
+        if (
+            isinstance(plan.old, UnavailableTestingPredecessor)
+            and retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload=self.retained_payload("read"),
+            )["stopped"]
+        ):
             self.require_unavailable_retirement()
             self.run_effect(
                 "retire-old",

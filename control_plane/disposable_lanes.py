@@ -227,6 +227,7 @@ def require_disposable_lane(
     separation_only: bool = False,
     preview_refresh: bool = False,
     same_artifact_restart: bool = False,
+    restart_running: bool = False,
     recovery: bool = False,
     runtime_stopped: bool = False,
     preview: PreviewRecord | None = None,
@@ -323,33 +324,18 @@ def require_disposable_lane(
     down_recovery = (
         recovery and not (preview_refresh or retirement) and usage.reason == "verified_down"
     )
-    if same_artifact_restart or down_recovery:
-        if same_artifact_restart and (instance != "testing" or preview is not None):
+    if same_artifact_restart and (not restart_running or down_recovery):
+        if instance != "testing" or preview is not None:
             raise DisposableLaneSafetyUnknown(
                 "Existing-container recovery requires an owned testing lane."
             )
         if usage.protected or (
-            evidence is not None
-            and (
-                evidence.production_resources in {"shared", "separation_ready"}
-                or not same_artifact_restart
-                and evidence.data == "only_copy"
-            )
+            evidence is not None and evidence.production_resources in {"shared", "separation_ready"}
         ):
             raise DisposableLaneSafetyUnknown(
                 "Recovery is held by use, needed data or shared production resources."
             )
-        return (
-            disposable_lane_binding_sha256(
-                profile,
-                target,
-                target_id,
-                preview,
-                disposable_lane_configuration(store, context, instance),
-            )
-            if down_recovery
-            else ""
-        )
+        return ""
     if preview_refresh:
         # Overall direction makes previews disposable unless there is an actual
         # protected use or needed copy. No source produces a universal positive
@@ -434,7 +420,9 @@ def require_disposable_lane(
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         usage.protected
+        or evidence.data == "only_copy"
         or evidence.data != "reproducible"
+        and not down_recovery
         or evidence.production_resources not in allowed_resources
     ):
         raise DisposableLaneSafetyUnknown(

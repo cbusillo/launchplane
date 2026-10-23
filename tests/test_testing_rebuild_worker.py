@@ -496,6 +496,20 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
+    def test_original_dependencies_started_after_admission_stop_after_cutover(self) -> None:
+        self.admit_unavailable("stopped")
+        switch = self.switch
+
+        def dependency_started(plan: Any, backend: str | None, **kwargs: Any) -> str:
+            result = switch(plan, backend, **kwargs)
+            if backend == plan.new_backend:
+                self.retained["stopped"] = False
+            return result
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=dependency_started):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def test_stopped_web_rebuild_qualifies_historical_usage_at_admission_and_checkpoint(
         self,
     ) -> None:

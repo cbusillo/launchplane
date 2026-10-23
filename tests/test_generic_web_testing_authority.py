@@ -309,7 +309,6 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             self.lane.instance,
             usage="unknown",
             data="unknown",
-            production_resources="unknown",
         )
         with patch(
             "control_plane.generic_web_deploy_http.execute_generic_web_deploy",

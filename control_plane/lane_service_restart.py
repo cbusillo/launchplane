@@ -440,7 +440,8 @@ class ServiceRestartAdapter:
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
-                        same_artifact_restart=not fresh.before.running,
+                        same_artifact_restart=True,
+                        restart_running=fresh.before.running,
                         recovery=True,
                         runtime_stopped=runtime_stopped,
                     )

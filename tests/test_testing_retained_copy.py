@@ -99,6 +99,13 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertFalse(frame["stopped"])
         self.assertTrue(frame["physical_binding"])
 
+    def test_unhealthy_running_web_uses_the_same_unavailable_copy_path(self) -> None:
+        self.containers[0]["State"]["Health"] = {"Status": "unhealthy"}
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
     def test_removed_web_preserves_database_custody_without_an_original_runtime(self) -> None:
         self.containers.pop(0)
         frame, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
