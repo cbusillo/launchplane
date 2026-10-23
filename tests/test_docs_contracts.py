@@ -1,6 +1,7 @@
+from unittest import TestCase
+
 from control_plane.openapi_export import canonical_openapi_document
 from tests.support.openapi import ui_openapi_document
-from unittest import TestCase
 
 
 class DocsContractsTests(TestCase):

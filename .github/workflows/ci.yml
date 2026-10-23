@@ -669,7 +669,7 @@ jobs:
         run: uv run python scripts/validate_role_words.py
 
       - name: Validate frontend
-        run: bash scripts/qualify-openapi-checkout.sh
+        run: pnpm --dir frontend validate
 
   frontend_validate_fork:
     if: >-
@@ -720,7 +720,7 @@ jobs:
         run: uv run python scripts/validate_role_words.py
 
       - name: Validate frontend
-        run: bash scripts/qualify-openapi-checkout.sh
+        run: pnpm --dir frontend validate
 
   frontend_browser_smoke:
     needs: verified_tree
@@ -951,6 +951,11 @@ jobs:
       - name: Install Python
         run: uv python install 3.14
 
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
       - name: Prepare unittest artifact directories
         run: |
           set -euo pipefail
@@ -1098,6 +1103,11 @@ jobs:
 
       - name: Install Python
         run: uv python install 3.14
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
 
       - name: Run unit tests
         run: uv run --extra dev python -m unittest

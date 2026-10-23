@@ -4,12 +4,10 @@ import base64
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-
 from tempfile import TemporaryDirectory
 from typing import get_args
 import unittest
 from unittest.mock import patch
-from tests.support.openapi import ui_openapi_document
 
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
@@ -99,6 +97,7 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.openapi import ui_openapi_document
 
 
 def _test_key(offset: int) -> str:

@@ -648,7 +648,8 @@ to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
 The frontend derives `frontend/generated/openapi-ui.json` from that export.
 Both JSON files and the TypeScript client at `frontend/src/generated/openapi.ts`
-are ignored build artifacts. Frontend tests, development, type checks and builds
+are ignored build artifacts. Each schema replaces its prior file atomically so
+concurrent readers receive a complete document. Frontend tests, development, type checks and builds
 export schemas before consuming them. Docker provides Python and uv in its
 frontend build stage. The browser-container wrapper exports on the host before
 running the Node-only `test:browser:prepared` consumer inside its private namespace.

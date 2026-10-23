@@ -34,8 +34,6 @@ After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
 and commit only the agent contract. CI still rejects drift in that runtime contract.
 For IDE type resolution before the first build, run
 `(cd frontend && pnpm generate:openapi-types)` once.
-`bash scripts/qualify-openapi-checkout.sh` tests and builds an archive of tracked
-HEAD with both JSON snapshots excluded; CI frontend validation uses this check.
 `(cd frontend && pnpm test:browser)` runs the Playwright
 browser smoke. Use [`.github/github.json`](.github/github.json) for current gates
 and [testing style](docs/style/testing.md) for choosing proportionate tests:

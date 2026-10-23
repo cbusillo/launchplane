@@ -19,10 +19,12 @@
     "test:browser": "pnpm generate:openapi-types && pnpm test:browser:prepared",
     "typecheck": "pnpm generate:openapi-types && tsc --noEmit && tsc --project tsconfig.node.json",
     "validate": "pnpm check:browser-timing && pnpm test && pnpm check:openapi-drift && pnpm build",
-    "check:browser-timing": "node scripts/check-browser-timing.mjs && pnpm typecheck:browser-support",
-    "typecheck:browser-support": "pnpm generate:openapi-types && tsc --project tsconfig.browser-support.json",
+    "check:browser-timing": "pnpm generate:openapi-types && pnpm check:browser-timing:prepared",
+    "typecheck:browser-support": "pnpm generate:openapi-types && pnpm typecheck:browser-support:prepared",
     "generate:openapi-schemas": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs",
-    "test:browser:prepared": "node scripts/check-browser-timing.mjs && tsc --project tsconfig.browser-support.json && node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && node scripts/run-browser-smoke.mjs"
+    "test:browser:prepared": "pnpm check:browser-timing:prepared && node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && node scripts/run-browser-smoke.mjs",
+    "typecheck:browser-support:prepared": "tsc --project tsconfig.browser-support.json",
+    "check:browser-timing:prepared": "node scripts/check-browser-timing.mjs && pnpm typecheck:browser-support:prepared"
   },
   "dependencies": {
     "lucide-react": "1.54.0",

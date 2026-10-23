@@ -22,6 +22,8 @@ WORKDIR /app/frontend
 RUN pnpm install --frozen-lockfile
 
 COPY pyproject.toml uv.lock README.md /app/
+RUN uv sync --frozen --no-dev --no-install-project
+ENV UV_FROZEN=1
 COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
