@@ -206,6 +206,9 @@ class TestingActivationResult(TestingActivationPlan):
     applied: Literal[True] = True
     separation_verified: Literal[True] = True
     qualified_at: str
+    external_capabilities: tuple[TestingExternalCapabilityProof, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
 
 class TestingActivationRefusedResult(TestingActivationPlan):

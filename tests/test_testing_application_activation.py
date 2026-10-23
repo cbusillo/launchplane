@@ -366,6 +366,45 @@ class ApplicationCredentialTests(unittest.TestCase):
         self.assertNotIn(token, proof.model_dump_json())
         self.assertFalse(generation_bundle(self.store, self.record).secret_records)
         self.assertFalse(runtime_activation_bundle(self.store, self.record).secret_records)
+        from control_plane.testing_external_capabilities import require_discord_capability
+        from control_plane.discord_identity import capture_identity_inputs
+
+        profile = self.store.read_product_profile_record(self.record.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"display_name": "Renamed fixture"})
+        )
+        require_discord_capability(self.store, self.record, proof)
+        with self.assertRaises(ValueError):
+            require_discord_capability(
+                self.store, self.record.model_copy(update={"plan_sha256": "f" * 64}), proof
+            )
+        with self.assertRaises(ValueError):
+            require_discord_capability(
+                self.store, self.record, proof.model_copy(update={"guild_ids": ("20",)})
+            )
+        from dataclasses import replace
+
+        captured = capture_identity_inputs(self.store, self.record.product)
+        compared = replace(
+            captured, production=((captured.binding, captured.record, captured.version),)
+        )
+        with patch(
+            "control_plane.testing_external_capabilities.capture_identity_inputs",
+            return_value=compared,
+        ):
+            with self.assertRaises(ValueError):
+                require_discord_capability(self.store, self.record, proof)
+            require_discord_capability(
+                self.store, self.record.model_copy(update={"published": True}), proof
+            )
+        rotated = captured.version.model_copy(update={"version_id": "rotated-testing-fixture"})
+        self.store.write_secret_version(rotated)
+        self.store.write_secret_record(
+            captured.record.model_copy(update={"current_version_id": rotated.version_id})
+        )
+        with self.assertRaises(ValueError):
+            require_discord_capability(self.store, self.record, proof)
+        self.store.write_secret_record(captured.record)
         version = self.store.read_secret_version("testing-version")
         self.store.write_secret_version(version.model_copy(update={"value_origin": "generated"}))
         for consume in (generation_bundle, runtime_activation_bundle):
@@ -374,7 +413,10 @@ class ApplicationCredentialTests(unittest.TestCase):
 
     def test_discord_admission_refuses_incomplete_or_foreign_guild_without_writes(self) -> None:
         self.discord_intent()
-        from control_plane.testing_external_capabilities import observe_activation_discord
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityReadRefusal,
+        )
         from control_plane.outbound_http import PublicHttpResponse
 
         for payload in (b'{"retry_after":120,"global":false}', b'[{"id":"20"}]'):
@@ -390,7 +432,7 @@ class ApplicationCredentialTests(unittest.TestCase):
             with patch(
                 "control_plane.discord_external_resources.request_public_http", side_effect=respond
             ):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ExternalCapabilityReadRefusal) as refused:
                     observe_activation_discord(
                         self.store,
                         self.record,
@@ -398,6 +440,11 @@ class ApplicationCredentialTests(unittest.TestCase):
                         check_current=lambda: None,
                         actor="fixture",
                         trace_id="launchplane_req_fixture",
+                    )
+                assert refused.exception.result.observation is not None
+                if payload.startswith(b"{"):
+                    self.assertEqual(
+                        refused.exception.result.observation.rate_limits[0].retry_after, 120
                     )
             self.assertEqual(self.store.list_secret_records(), records)
             self.assertFalse(self.record.external_capabilities)
@@ -483,6 +530,15 @@ class ApplicationCredentialTests(unittest.TestCase):
             self.assertEqual(cause.result.observation.rate_limits[0].retry_after, 120)
             for effect in (route, create, save, inspect, lease.checkpoint_effect):
                 effect.assert_not_called()
+            from fastapi import HTTPException
+
+            denied = HTTPException(status_code=403, detail="Authorization denied")
+            adapter.authorize_external = Mock(side_effect=denied)
+            with self.assertRaises(ProviderMutationRejectedError) as unauthorized:
+                adapter.apply("original-operation", lease)
+            self.assertIs(unauthorized.exception.cause, denied)
+            for effect in (route, create, save, inspect, lease.checkpoint_effect):
+                effect.assert_not_called()
 
     def test_discord_authorization_precedes_decryption(self) -> None:
         from control_plane.testing_external_capabilities import observe_activation_discord
@@ -499,6 +555,40 @@ class ApplicationCredentialTests(unittest.TestCase):
                     trace_id="launchplane_req_fixture",
                 )
             decrypt.assert_not_called()
+
+    def test_backoff_survives_input_drift_after_provider_response(self) -> None:
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityReadRefusal,
+        )
+        from control_plane.outbound_http import PublicHttpResponse
+
+        self.discord_intent()
+        changed = False
+
+        def current() -> None:
+            if changed:
+                raise ValueError("Original lease changed")
+
+        def respond(*args: Any, **kwargs: Any) -> PublicHttpResponse:
+            nonlocal changed
+            changed = True
+            return PublicHttpResponse(429, "", 0, (), b'{"retry_after":120,"global":false}')
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=respond
+        ):
+            with self.assertRaises(ExternalCapabilityReadRefusal) as refused:
+                observe_activation_discord(
+                    self.store,
+                    self.record,
+                    authorize=self.store.list_product_profile_records,
+                    check_current=current,
+                    actor="fixture",
+                    trace_id="launchplane_req_fixture",
+                )
+        assert refused.exception.result.observation is not None
+        self.assertEqual(refused.exception.result.observation.rate_limits[0].retry_after, 120)
 
     def setUp(self) -> None:
         self.enterContext(

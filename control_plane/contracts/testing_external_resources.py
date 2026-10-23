@@ -29,6 +29,7 @@ class TestingExternalCapabilityProof(BaseModel):
     observed_at: str
     trace_id: str
     inputs_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    rate_limits: tuple["DiscordRateLimitEvidence", ...] = Field(default=(), max_length=2)
     old_writer_exclusion: Literal["not_evaluated"] = "not_evaluated"
 
 

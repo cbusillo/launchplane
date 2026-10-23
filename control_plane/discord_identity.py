@@ -76,7 +76,9 @@ class DiscordIdentityInputs:
     production: tuple[tuple[SecretBinding, SecretRecord, SecretVersion], ...]
 
 
-def capture_identity_inputs(store: TestingCredentialStore, product: str) -> DiscordIdentityInputs:
+def capture_identity_inputs(
+    store: TestingCredentialStore, product: str, *, compare_production: bool = True
+) -> DiscordIdentityInputs:
     profiles = tuple(sorted(store.list_product_profile_records(), key=lambda item: item.product))
     profile = next(item for item in profiles if item.product == product)
     lanes = [lane for lane in profile.lanes if lane.instance == "testing"]
@@ -116,7 +118,7 @@ def capture_identity_inputs(store: TestingCredentialStore, product: str) -> Disc
     ):
         raise ValueError("Testing credential unavailable")
     production = []
-    for source in profiles:
+    for source in profiles if compare_production else ():
         for source_lane in source.lanes:
             if source_lane.instance != "prod":
                 continue
@@ -176,6 +178,7 @@ def read_discord_identity(
     activation_plan_sha256: str = "",
     before_read: Callable[[], None] | None = None,
 ) -> DiscordIdentityResult:
+    observation: DiscordBotResourceObservation | None = None
     try:
         captured = captured_inputs or capture_identity_inputs(store, product)
         if captured.profiles != tuple(sorted(profiles, key=lambda item: item.product)):
@@ -248,9 +251,11 @@ def read_discord_identity(
             observation=observation,
         )
     except ExternalResourceInputsChanged:
-        return DiscordIdentityResult(failure_code="inputs_changed")
+        return DiscordIdentityResult(failure_code="inputs_changed", observation=observation)
     except Exception:
         _logger.warning(
             "Discord identity unavailable: trace=%s code=configuration_unavailable", trace_id
         )
-        return DiscordIdentityResult(failure_code="configuration_unavailable")
+        return DiscordIdentityResult(
+            failure_code="configuration_unavailable", observation=observation
+        )

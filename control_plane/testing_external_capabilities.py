@@ -30,14 +30,15 @@ class ExternalCapabilityReadRefusal(TestingActivationRefusal):
 def discord_inputs_digest(captured: DiscordIdentityInputs) -> str:
     return canonical_json_sha256(
         {
-            "profiles": [item.model_dump(mode="json") for item in captured.profiles],
-            "testing": [
-                item.model_dump(mode="json")
-                for item in (captured.binding, captured.record, captured.version)
-            ],
-            "production": [
-                [item.model_dump(mode="json") for item in row] for row in captured.production
-            ],
+            "testing": (
+                captured.binding.binding_id,
+                captured.record.secret_id,
+                captured.version.version_id,
+            ),
+            "production": sorted(
+                (binding.binding_id, secret.secret_id, version.version_id)
+                for binding, secret, version in captured.production
+            ),
         }
     )
 
@@ -51,7 +52,9 @@ def require_discord_capability(
     if specification is None or len(specification.external_credentials) != 1:
         raise ValueError("A reviewed external credential is required.")
     reviewed = specification.external_credentials[0]
-    captured = capture_identity_inputs(store, record.product)
+    captured = capture_identity_inputs(
+        store, record.product, compare_production=not record.published
+    )
     if (
         captured.binding.context != record.context
         or proof.activation_plan_sha256 != record.plan_sha256
@@ -64,7 +67,7 @@ def require_discord_capability(
         )
         or captured.binding.binding_key != reviewed.binding_key
         or not set(proof.guild_ids).issubset(reviewed.guild_ids)
-        or proof.inputs_sha256 != discord_inputs_digest(captured)
+        or (not record.published and proof.inputs_sha256 != discord_inputs_digest(captured))
     ):
         raise ValueError("The original external credential proof changed.")
 
@@ -100,7 +103,6 @@ def observe_activation_discord(
         activation_plan_sha256=record.plan_sha256,
         before_read=check_current,
     )
-    check_current()
     observation = result.observation
     if (
         result.status != "observed"
@@ -111,9 +113,16 @@ def observe_activation_discord(
         or (result.binding_key, result.version_id)
         != (reviewed.binding_key, captured.version.version_id)
         or not set(observation.guild_ids).issubset(reviewed.guild_ids)
-        or capture_identity_inputs(store, record.product) != captured
     ):
         raise ExternalCapabilityReadRefusal(result)
+    try:
+        check_current()
+        if capture_identity_inputs(store, record.product) != captured:
+            raise ValueError("External inputs changed.")
+    except Exception:
+        raise ExternalCapabilityReadRefusal(
+            result.model_copy(update={"status": "unavailable", "failure_code": "inputs_changed"})
+        ) from None
     return TestingExternalCapabilityProof(
         activation_plan_sha256=record.plan_sha256,
         binding_key=result.binding_key,
@@ -126,4 +135,5 @@ def observe_activation_discord(
         observed_at=observation.finished_at,
         trace_id=trace_id,
         inputs_sha256=discord_inputs_digest(captured),
+        rate_limits=observation.rate_limits,
     )

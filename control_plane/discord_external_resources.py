@@ -182,8 +182,14 @@ def observe_discord_bot(
     result: dict[str, Any] = {"started_at": started}
     rate_limits: list[DiscordRateLimitEvidence] = []
 
+    def require_current() -> None:
+        try:
+            check_current()
+        except Exception:
+            raise DiscordResourceReadError("inputs_changed") from None
+
     def read(path: str) -> Any:
-        return discord_json_read(path, token, deadline, check_current, rate_limits)
+        return discord_json_read(path, token, deadline, require_current, rate_limits)
 
     try:
         user = read("/users/@me")

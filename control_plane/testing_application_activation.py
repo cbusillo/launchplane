@@ -8,6 +8,7 @@ import re
 from typing import Any, Iterator, cast
 
 import yaml
+from fastapi import HTTPException
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_activation import (
@@ -2289,7 +2290,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if not started:
                     raise ProviderMutationRejectedError(
                         error
-                        if isinstance(error, TestingActivationRefusal)
+                        if isinstance(error, (TestingActivationRefusal, HTTPException))
                         else ValueError("Activation refused before provider effects.")
                     ) from error
                 raise ProviderMutationUnknownError(

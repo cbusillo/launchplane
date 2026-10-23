@@ -68,8 +68,12 @@ Before the first activation provider effect, the service authorizes the current
 profile comparison reads and observes the bot using the exact managed version.
 It requires complete identity and guild enumeration, no production credential
 match, and actual guilds contained in the reviewed private set. The saved native
-proof binds the original plan and the current testing and production comparison
-inputs. Generation and runtime publication both revalidate that proof. A legacy
+proof binds the original plan and the compared testing and production version
+identities. Generation and runtime publication both revalidate that proof.
+Unrelated profile metadata does not invalidate it. After publication, comparison
+rotations cannot strand readback or hold lift; the exact testing version must
+still match. The supported result exposes the safe proof and any backoff evidence.
+A legacy
 version with no recorded origin may qualify from verified bytes; its origin is
 never rewritten. Planning performs no Discord request, and continuation reuses
 the original saved proof while refusing changed inputs.
