@@ -18,6 +18,7 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRefusalCode,
 )
 from control_plane.discord_identity import DiscordIdentityResult
+from control_plane.operator_error_evidence import public_error_reference
 from control_plane.testing_activation import ROUTE
 
 
@@ -156,7 +157,9 @@ def main() -> int:
                 json.dumps(
                     {
                         "status": "rejected",
-                        "trace_id": transport["public_trace_id"](payload.get("trace_id", "")),
+                        "trace_id": public_error_reference(
+                            payload.get("trace_id", ""), transport["public_trace_id"]
+                        ),
                         "external_identity": observed.model_dump(mode="json"),
                         "retain_original_key": submitted,
                     }

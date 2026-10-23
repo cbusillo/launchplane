@@ -30,7 +30,12 @@ class ActivationClientTests(unittest.TestCase):
     def test_provider_backoff_survives_supported_caller_refusal(self) -> None:
         self.exercise_review_and_replay(refused=False, external_refusal=True)
 
-    def exercise_review_and_replay(self, *, refused: bool, external_refusal: bool = False) -> None:
+    def test_invalid_trace_keeps_provider_backoff_and_original_key(self) -> None:
+        self.exercise_review_and_replay(refused=False, external_refusal=True, invalid_trace=True)
+
+    def exercise_review_and_replay(
+        self, *, refused: bool, external_refusal: bool = False, invalid_trace: bool = False
+    ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
         )
@@ -122,6 +127,10 @@ class ActivationClientTests(unittest.TestCase):
             "request_launchplane": post,
             "public_trace_id": lambda trace: trace,
         }
+        if invalid_trace:
+            transport["public_trace_id"] = Mock(
+                side_effect=["trace-0", ValueError("private-trace-fixture")]
+            )
         with TemporaryDirectory() as directory:
             root = Path(directory)
             helper = root / "launchplane-write-action.py"
@@ -163,6 +172,9 @@ class ActivationClientTests(unittest.TestCase):
                         returned["external_identity"], observed.model_dump(mode="json")
                     )
                     self.assertTrue(returned["retain_original_key"])
+                    if invalid_trace:
+                        self.assertEqual(returned["trace_id"], "")
+                        self.assertNotIn("private-trace-fixture", output.getvalue())
                     return
                 if mode != "dry-run":
                     self.assertEqual(

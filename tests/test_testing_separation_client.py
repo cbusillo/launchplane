@@ -158,7 +158,14 @@ class TestingSeparationClientTests(unittest.TestCase):
     def test_pre_effect_conflict_stays_a_refusal(self) -> None:
         self._exercise_apply("testing_separation_stale", unknown=False)
 
-    def _exercise_apply(self, code: str, *, unknown: bool, status_code: int = 409) -> None:
+    def test_malformed_gateway_metadata_keeps_uncertain_key_and_omits_private_values(self) -> None:
+        for code in (503, {"private": "fixture"}, ["private-fixture"]):
+            with self.subTest(code=code):
+                self._exercise_apply(code, unknown=True, status_code=503, invalid_metadata=True)
+
+    def _exercise_apply(
+        self, code: object, *, unknown: bool, status_code: int = 409, invalid_metadata: bool = False
+    ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -213,6 +220,11 @@ class TestingSeparationClientTests(unittest.TestCase):
                 "request_launchplane": call,
                 "emit_http_error_payload": emit,
             }
+            if invalid_metadata:
+                transport["public_code"] = Mock(side_effect=ValueError("private-code-fixture"))
+                transport["public_trace_id"] = Mock(
+                    side_effect=["fixture-trace", ValueError("private-trace-fixture")]
+                )
             common = [
                 "--operator-helper",
                 str(helper),
@@ -258,8 +270,10 @@ class TestingSeparationClientTests(unittest.TestCase):
             if unknown:
                 result = json.loads(output.getvalue())
                 self.assertTrue(result["retain_original_key"])
-                self.assertEqual(result["trace_id"], "launchplane_req_fixture")
-                self.assertEqual(result["error_code"], code)
+                self.assertEqual(
+                    result["trace_id"], "" if invalid_metadata else "launchplane_req_fixture"
+                )
+                self.assertEqual(result["error_code"], "unknown" if invalid_metadata else code)
                 self.assertEqual(result["http_status"], status_code)
                 self.assertNotIn("private-error-fixture", output.getvalue())
                 emit.assert_not_called()
