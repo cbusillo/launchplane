@@ -2029,7 +2029,9 @@ never rewrites runtime health or gates merge, deploy, promotion or acceptance.
 A later successful deployment of the lane's current desired candidate resolves
 its earlier delivery attention, including an exhausted candidate superseded by
 a newer verified build. An unrelated build, production success or passing
-old-build health cannot do so. A pre-plan source-read incident also resolves
+old-build health cannot do so. An older retained-database credential refusal
+does not prevent that recovery after a successful desired-candidate rebuild;
+it still creates no new delivery incident. A pre-plan source-read incident also resolves
 when a later successful reconciliation confirms the desired build is already
 deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
 incident to a lane that already has delivery attention. Product deactivation or
