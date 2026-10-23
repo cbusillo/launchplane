@@ -679,15 +679,14 @@ class SeparationResourceTests(unittest.TestCase):
             + "})",
         )
         self.fixture.payload["applicationId"] = resources.target_id
-        self.fixture.responses["/api/schedule.list"] = [
-            {
-                "name": RETAINED_CAPABILITY_PROGRAM_NAME,
-                "appName": resources.namespace,
-                "scheduleId": "original-capability",
-                "script": historical,
-                "enabled": False,
-            }
-        ]
+        capability_schedule = {
+            "name": RETAINED_CAPABILITY_PROGRAM_NAME,
+            "appName": resources.namespace,
+            "scheduleId": "original-capability",
+            "script": historical,
+            "enabled": False,
+        }
+        self.fixture.responses["/api/schedule.list"] = [capability_schedule]
         self.fixture.responses["/api/deployment.allByType"] = [
             {
                 "scheduleId": "original-capability",
@@ -725,7 +724,7 @@ class SeparationResourceTests(unittest.TestCase):
             ("", "retained_capability"),
             (" readback", "retained_capability_readback"),
         ):
-            self.fixture.responses["/api/schedule.list"][0].update(
+            capability_schedule.update(
                 name=RETAINED_CAPABILITY_PROGRAM_NAME + suffix,
                 script=historical.replace("set -euo pipefail", "set -euO pipefail", 1),
             )
