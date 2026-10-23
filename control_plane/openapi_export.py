@@ -6,6 +6,7 @@ from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fastapi import FastAPI
@@ -136,10 +137,12 @@ def canonical_openapi_document() -> dict[str, Any]:
 def write_canonical_openapi(output_path: Path) -> Path:
     payload = canonical_openapi_document()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    with TemporaryDirectory(dir=output_path.parent, prefix=".openapi-") as directory:
+        temporary_path = Path(directory) / "schema.json"
+        temporary_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary_path.replace(output_path)
     return output_path
 
 

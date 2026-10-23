@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const frontendRoot = path.resolve(new URL("..", import.meta.url).pathname);
@@ -213,7 +213,14 @@ async function main() {
   const { inputPath, outputPath } = parseArgs(process.argv.slice(2));
   const openapi = JSON.parse(await readFile(inputPath, "utf-8"));
   const uiSchema = buildUiSchema(openapi);
-  await writeFile(outputPath, `${JSON.stringify(uiSchema, null, 2)}\n`, "utf-8");
+  const staging = await mkdtemp(path.join(path.dirname(outputPath), ".openapi-"));
+  try {
+    const stagedPath = path.join(staging, "schema.json");
+    await writeFile(stagedPath, `${JSON.stringify(uiSchema, null, 2)}\n`, "utf-8");
+    await rename(stagedPath, outputPath);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
 }
 
 main().catch((error) => {
