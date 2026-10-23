@@ -532,6 +532,7 @@ def resolve_effective_secret_bindings_from_store(
     context_name: str = "",
     instance_name: str = "",
     scopes: frozenset[SecretScope] | None = None,
+    excluded_binding_ids: frozenset[str] = frozenset(),
 ) -> dict[str, tuple[SecretBinding, SecretRecord]]:
     """Return the binding, and its secret record, that supplies each key. Reads no value.
 
@@ -558,7 +559,7 @@ def resolve_effective_secret_bindings_from_store(
             context_name=record.context,
             instance_name=record.instance,
         )
-        if binding is None:
+        if binding is None or binding.binding_id in excluded_binding_ids:
             continue
         effective[binding.binding_key] = (binding, record)
     return effective

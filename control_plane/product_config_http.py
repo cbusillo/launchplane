@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane import provider_key_adoption
 from control_plane.product_secret_copy import ProductSecretCopyFrom
+from control_plane.product_config import ProductConfigSecretBindingDisableInput
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
     ScalarValue,
@@ -220,7 +221,7 @@ class ProductConfigRuntimeKeySafetyResult(BaseModel):
 class ProductConfigSecretResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["created", "rotated", "unchanged"]
+    action: Literal["created", "rotated", "unchanged", "disabled"]
     scope: SecretScope
     integration: str
     name: str
@@ -380,6 +381,9 @@ class ProductConfigApplyEnvelope(BaseModel):
         union_mode="left_to_right",
     )
     secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
+    disable_secret_bindings: list[ProductConfigSecretBindingDisableInput] = Field(
+        default_factory=list
+    )
     public_hosts: tuple[str, ...] | None = None
 
     @field_validator("public_hosts", mode="before")
@@ -420,7 +424,11 @@ class ProductConfigApplyEnvelope(BaseModel):
         return any(secret.adopt_from_provider for secret in self.secrets)
 
     def reads_lane_provider_env(self) -> bool:
-        return self.adopts_provider_keys() or self.adopts_provider_secrets()
+        return (
+            self.adopts_provider_keys()
+            or self.adopts_provider_secrets()
+            or bool(self.disable_secret_bindings)
+        )
 
     def product_config_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -436,6 +444,10 @@ class ProductConfigApplyEnvelope(BaseModel):
             payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
         if self.public_hosts is not None:
             payload["public_hosts"] = list(self.public_hosts)
+        if self.disable_secret_bindings:
+            payload["disable_secret_bindings"] = [
+                item.model_dump() for item in self.disable_secret_bindings
+            ]
         return payload
 
 
