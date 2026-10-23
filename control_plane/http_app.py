@@ -776,6 +776,7 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.preview_override_authorization import director_preview_override_allowed
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     NotificationPolicyScopeConflict,
@@ -13724,17 +13725,28 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
+        policy_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=profile.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        director_preview_write = not policy_profile_write and director_agent_identity(identity)
+        if not policy_profile_write and not director_preview_write:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
+            )
+        if director_preview_write and (
+            not request.headers.get("If-Match", "") or not idempotency_key.strip()
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="conditional_preview_review_required",
+                message="Preview settings require If-Match and an Idempotency-Key.",
             )
         if profile.preview.historical_transport:
             raise _launchplane_http_error(
@@ -13815,6 +13827,19 @@ def create_launchplane_fastapi_app(
                         "review or clear them through their supported configuration operation."
                     ),
                 ) from error
+        if director_preview_write:
+            list_bindings = getattr(record_store, "list_secret_bindings", None)
+            if not callable(list_bindings) or not director_preview_override_allowed(
+                existing=existing_profile,
+                replacement=profile,
+                secret_bindings=tuple(list_bindings(limit=None)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Director agents may conditionally set one non-secret preview override.",
+                )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None
         ):

@@ -5,9 +5,12 @@ product profile's `preview.override_env`. Keep preview-specific values in that
 layer rather than changing the template or shared context.
 
 From this repository, use `scripts/set-preview-override.py` with the installed
-Launchplane admin helper and existing private admin configuration. It
-edits one key, preserves every other profile field, and prints no supplied
-value. It creates no scope or grant and starts no deployment.
+Launchplane write-action helper and its existing private configuration. The
+service-authenticated Director agent can conditionally set one nonsecret key
+on an existing enabled Odoo preview. Deletion and edits to other profile
+fields still require full product-profile authority. The helper preserves
+every other profile field and prints no supplied value. It creates no scope
+or grant and starts no deployment.
 
 Write the string value to a mode-0600 file outside Git checkouts. The helper
 trims surrounding whitespace. The evidence file must also be outside the
@@ -32,8 +35,12 @@ revision and submits it as `If-Match` to the existing profile POST. The service 
 revision before saving and retains atomic compare-and-write protection.
 Same-key idempotent replay precedes the revision precondition. The helper
 refuses services without revision support, changed input, concurrent profile
-edits, or evidence changing anything beyond the selected preview key. A save
-records intent; runtime delivery and login verification remain separate.
+edits, or evidence changing anything beyond the selected preview key.
+The service reconstructs the one-key change from its stored profile and compares the entire replacement before its atomic save. Secret-bearing keys,
+managed-secret destinations and credential payloads are refused on this
+Director-agent path. Encoded addon payloads must contain only literal
+nonsecret addon settings for the preview; Shopify uses its own managed
+settings route. A save records intent; runtime delivery and login verification remain separate.
 
 Refusals include a fixed `reason` code without input values. For
 `profile_changed_since_review`, read the changed profile and create a new dry
