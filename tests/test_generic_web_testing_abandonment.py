@@ -8,7 +8,11 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    format_launchplane_mutation_timestamp,
+    parse_launchplane_mutation_timestamp,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_testing_abandonment import inspect_testing_abandonment
@@ -221,6 +225,12 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         self.assertNotIn(self.key, detail.model_dump_json())
 
     def test_legacy_fence_recovers_only_with_complete_retained_abandonment_history(self) -> None:
+        self.assert_legacy_fence_recovers(with_nonce=False)
+
+    def test_joined_legacy_witnesses_recover_only_with_complete_retained_history(self) -> None:
+        self.assert_legacy_fence_recovers(with_nonce=True)
+
+    def assert_legacy_fence_recovers(self, *, with_nonce: bool) -> None:
         from dataclasses import replace
         from control_plane.provider_target_holds import project_provider_target_hold
         from control_plane.workflows.public_ingress_monitor import (
@@ -267,25 +277,23 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         )
 
         assert observation.material_fingerprint is not None
-        original_origin = self.store.read_provider_target_origin(self.original)
-        assert original_origin is not None
+        reference_values = {
+            *observation.material_fingerprint.route_authority.target_keys,
+            ProviderOperationAttentionReference(self.original.record_id).encode(),
+        }
+        if with_nonce:
+            original_origin = self.store.read_provider_target_origin(self.original)
+            assert original_origin is not None
+            reference_values.add(
+                ProviderOperationReference(
+                    self.original.record_id, original_origin.operation_nonce
+                ).encode()
+            )
         attention_fingerprint = observation.material_fingerprint.model_copy(
             update={
                 "route_authority": observation.material_fingerprint.route_authority.model_copy(
                     update={
-                        "target_keys": tuple(
-                            sorted(
-                                {
-                                    *observation.material_fingerprint.route_authority.target_keys,
-                                    ProviderOperationAttentionReference(
-                                        self.original.record_id
-                                    ).encode(),
-                                    ProviderOperationReference(
-                                        self.original.record_id, original_origin.operation_nonce
-                                    ).encode(),
-                                }
-                            )
-                        ),
+                        "target_keys": tuple(sorted(reference_values)),
                     }
                 ),
             }
@@ -378,6 +386,8 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
     def record_completed_later_fence(
         self,
     ) -> tuple[PublicIngressObservationRecord, LaunchplaneIdempotencyRecord]:
+        from dataclasses import replace
+        from control_plane.provider_target_holds import ProviderOperationAttentionReference
         from control_plane.contracts.idempotency_record import (
             format_launchplane_mutation_timestamp,
             parse_launchplane_mutation_timestamp,
@@ -396,6 +406,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
         capsule = self.store.read_provider_target_origin(self.original)
         assert capsule is not None
+        attention = ProviderOperationAttentionReference(self.original.record_id).encode()
         clock = parse_launchplane_mutation_timestamp(opening.observed_at, field_name="observed_at")
         created = format_launchplane_mutation_timestamp(clock + timedelta(minutes=1))
         with patch.object(self.store, "_database_mutation_timestamp", return_value=created):
@@ -433,6 +444,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                                 {
                                     *record.material_fingerprint.route_authority.target_keys,
                                     "provider-operation:unavailable",
+                                    attention,
                                 }
                             )
                         )
@@ -448,15 +460,21 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                 ),
             }
         )
-        incident = reconcile_public_ingress_incident(record_store=self.store, record=record)[0]
-        self.store.write_public_ingress_observation_record(
-            record.model_copy(
+
+        def retain(observation: PublicIngressObservationRecord) -> PublicIngressObservationRecord:
+            incident = reconcile_public_ingress_incident(
+                record_store=self.store, record=observation
+            )[0]
+            observation = observation.model_copy(
                 update={
                     "incident_id": incident.incident_id,
                     "incident_event_id": incident.latest_material_event_id,
                 }
             )
-        )
+            self.store.write_public_ingress_observation_record(observation)
+            return observation
+
+        record = retain(record)
         self.assertTrue(self.read_captured_fence_snapshot(record).unavailable_references)
         completed = later.model_copy(
             update={
@@ -467,7 +485,24 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
             }
         )
         self.store.write_idempotency_record(completed)
-        return record, completed
+        assert target.provider_hold_snapshot is not None
+        missing = (attention, "provider-operation:unavailable")
+        latest = check_public_ingress_target(
+            target=replace(
+                target,
+                provider_hold_snapshot=replace(
+                    target.provider_hold_snapshot,
+                    holds=(),
+                    references=missing,
+                    unavailable_references=missing,
+                ),
+            ),
+            checked_at=format_launchplane_mutation_timestamp(clock + timedelta(minutes=4)),
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        return retain(latest), completed
 
     def read_captured_fence_snapshot(
         self, record: PublicIngressObservationRecord, *, extra: tuple[str, ...] = ()
@@ -495,6 +530,31 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         snapshot = self.read_captured_fence_snapshot(record)
         self.assertFalse(snapshot.unavailable_references)
         self.assertFalse(snapshot.holds)
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_public_ingress_monitor_targets,
+            run_public_ingress_monitor_once,
+        )
+
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == record.check_name
+        )
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.discover_public_ingress_monitor_targets",
+            return_value=(target,),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store,
+                checked_at=format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        record.observed_at, field_name="observed_at"
+                    )
+                    + timedelta(minutes=1)
+                ),
+                notify=False,
+            )
+        self.assertEqual(result.resolved_incident_count, 1)
 
     def test_terminal_history_requires_current_epoch_custody_and_captured_attention(self) -> None:
         from copy import deepcopy
@@ -506,6 +566,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
             parse_launchplane_mutation_timestamp,
         )
         from control_plane.provider_target_holds import ProviderOperationAttentionReference
+        from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
         from control_plane.storage.postgres import (
             LaunchplaneIdempotencyRow,
             ORIGINAL_MUTATION_INTENT_ROUTE,
@@ -535,6 +596,20 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
             self.assertTrue(snapshot().unavailable_references)
         finally:
             self.store.write_idempotency_record(completed)
+        partial_archives: tuple[dict[str, object], ...] = (
+            {"abandonment": {}},
+            {"testing_settlement": TESTING_ORIGINAL_ABANDONED},
+            {"recovery": {"recovery_action": "abandon_testing_original"}},
+        )
+        for partial_archive in partial_archives:
+            with self.subTest(partial_archive=tuple(partial_archive)):
+                self.store.write_idempotency_record(
+                    completed.model_copy(update={"response_payload": partial_archive})
+                )
+                try:
+                    self.assertTrue(snapshot().unavailable_references)
+                finally:
+                    self.store.write_idempotency_record(completed)
         with self.store._session_factory() as session:
             row = session.scalar(
                 select(LaunchplaneIdempotencyRow).where(
