@@ -2,7 +2,9 @@
 
 from typing import Annotated, cast
 
-from fastapi import Depends, Response
+from fastapi import Depends, Request, Response
+
+from control_plane import discord_identity
 
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
@@ -195,4 +197,49 @@ def register_testing_credential_routes(
         operation_id="audit_testing_credentials",
         summary="Audit all products' testing lanes without credential values",
         responses={code: {"model": dependencies.error_response_model} for code in (401, 403, 503)},
+    )
+
+    def identify_discord(
+        product: str,
+        environment: str,
+        request: Request,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> discord_identity.DiscordIdentityResponse:
+        trace = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace,
+                code="invalid_request",
+                message="Discord identity reads require testing and accept no overrides.",
+            )
+        authorize(product, response, identity, record_store)
+        store = cast(TestingCredentialStore, record_store)
+        profiles = store.list_product_profile_records()
+        for profile in profiles:
+            authorize(profile.product, response, identity, record_store)
+        return discord_identity.DiscordIdentityResponse(
+            trace_id=trace,
+            result=discord_identity.read_discord_identity(
+                store,
+                product,
+                profiles=profiles,
+                trace_id=trace,
+                actor=getattr(identity, "subject", getattr(identity, "login", "")),
+            ),
+        )
+
+    app.add_api_route(
+        discord_identity.ROUTE,
+        identify_discord,
+        methods=["GET"],
+        response_model=discord_identity.DiscordIdentityResponse,
+        operation_id="read_testing_discord_identity",
+        summary="Identify the stored testing Discord bot without credential output or qualification",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 404, 503)
+        },
     )

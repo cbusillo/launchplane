@@ -359,14 +359,81 @@ class ShopifyComparisonTests(unittest.TestCase):
         for status, reason in (
             ("unavailable", "database_driver_unavailable"),
             ("token_rejected", "token_rejected"),
+            ("unavailable", "settings_changed"),
+            ("unavailable", "runtime_changed"),
+            ("unavailable", "probe_failed"),
         ):
-            with self.subTest(status=status):
+            with self.subTest(status=status, reason=reason):
                 self.production_probe.return_value = {"status": status, "reason": reason}
                 result = self.run_comparison().model_dump()
                 self.assertEqual(result["stage"], "production_probe")
                 self.assertEqual(result["reason"], reason)
                 self.assertEqual(result["probe"], status)
                 self.assertEqual(result["separation"], "unknown")
+                self.assertEqual(result["testing_domain_sha256"], "")
+                self.assertEqual(result["testing_shop_id_sha256"], "")
+
+    def test_verified_identity_rejects_malformed_hashes(self) -> None:
+        for field in ("domain_sha256", "shop_id_sha256"):
+            for value in ("", "invalid", self.observation[field][1:]):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.comparison.validate_identity({**self.observation, field: value})
+
+    def test_verified_testing_hashes_survive_unavailable_production_settings(self) -> None:
+        self.production_probe.return_value = {
+            "status": "unavailable",
+            "reason": "settings_unavailable",
+        }
+        result = self.run_comparison()
+        self.assertEqual(result.testing_domain_sha256, self.observation["domain_sha256"])
+        self.assertEqual(result.testing_shop_id_sha256, self.observation["shop_id_sha256"])
+        self.assertEqual(result.production_domain_sha256, "")
+        self.assertEqual(result.production_shop_id_sha256, "")
+        self.assertEqual(result.separation, "unknown")
+        self.assertEqual(result.probe, "unavailable")
+        self.assertEqual(result.reason, "settings_unavailable")
+
+    def test_failed_production_probe_rechecks_authority_before_publishing_testing_hashes(
+        self,
+    ) -> None:
+        def unavailable(*args: Any) -> dict[str, str]:
+            self.settings = self.settings.model_copy(update={"source_label": "changed"})
+            return {"status": "unavailable", "reason": "settings_unavailable"}
+
+        self.production_probe.side_effect = unavailable
+        result = self.run_comparison()
+        self.assertEqual(result.reason, "authority_changed")
+        self.assertEqual(result.testing_domain_sha256, "")
+        self.assertEqual(result.testing_shop_id_sha256, "")
+
+    def test_failed_production_probe_discards_testing_hashes_on_runtime_drift(self) -> None:
+        self.production_probe.return_value = {
+            "status": "unavailable",
+            "reason": "settings_unavailable",
+        }
+        with patch.object(
+            reads,
+            "assert_selection_current",
+            side_effect=[None, reads.OdooRuntimeReadError("runtime_changed", "fixture drift")],
+        ):
+            result = self.run_comparison()
+        self.assertEqual(result.reason, "runtime_changed")
+        self.assertEqual(result.testing_domain_sha256, "")
+        self.assertEqual(result.testing_shop_id_sha256, "")
+
+    def test_domain_mismatch_never_publishes_testing_hashes_when_production_is_unavailable(
+        self,
+    ) -> None:
+        self.observation["domain_sha256"] = self.comparison.digest("other-fixture.myshopify.com")
+        self.production_probe.return_value = {
+            "status": "unavailable",
+            "reason": "settings_unavailable",
+        }
+        result = self.run_comparison()
+        self.assertEqual(result.reason, "domain_mismatch")
+        self.assertEqual(result.testing_domain_sha256, "")
+        self.assertEqual(result.testing_shop_id_sha256, "")
+        self.production_probe.assert_not_called()
 
     def test_same_shop_id_under_different_domains_never_proves_separation(self) -> None:
         self.observation["shop_id_sha256"] = self.comparison.digest("gid://shopify/Shop/456")

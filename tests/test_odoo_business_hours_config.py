@@ -773,6 +773,7 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
             {"runtime_env": {}},
             {"secrets": [{"name": "secret", "value": "inert"}]},
             {"public_hosts": []},
+            {"disable_secret_bindings": [{"binding_key": "OLD_TOKEN", "version_id": "v1"}]},
         )
         for update in updates:
             response = await self.post({**self.request_payload, **update})

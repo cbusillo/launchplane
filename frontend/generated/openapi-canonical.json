@@ -6038,6 +6038,15 @@
             "title": "Qualification",
             "type": "string"
           },
+          "rate_limits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DiscordRateLimitEvidence"
+            },
+            "maxItems": 2,
+            "title": "Rate Limits",
+            "type": "array"
+          },
           "started_at": {
             "title": "Started At",
             "type": "string"
@@ -6048,6 +6057,181 @@
           "finished_at"
         ],
         "title": "DiscordBotResourceObservation",
+        "type": "object"
+      },
+      "DiscordIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/DiscordIdentityResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "DiscordIdentityResponse",
+        "type": "object"
+      },
+      "DiscordIdentityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "default": "",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "configuration_unavailable",
+                  "inputs_changed",
+                  "credential_ineligible"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiscordBotResourceObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable",
+              "matches_production"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version_id": {
+            "default": "",
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "title": "DiscordIdentityResult",
+        "type": "object"
+      },
+      "DiscordRateLimitEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cloudflare_error_page": {
+            "default": false,
+            "title": "Cloudflare Error Page",
+            "type": "boolean"
+          },
+          "global_limit": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Limit"
+          },
+          "header_global": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Global"
+          },
+          "header_retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Retry After"
+          },
+          "non_json_body": {
+            "default": false,
+            "title": "Non Json Body",
+            "type": "boolean"
+          },
+          "phase": {
+            "enum": [
+              "identity",
+              "application",
+              "gateway",
+              "guilds"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "global",
+                  "shared"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "title": "DiscordRateLimitEvidence",
         "type": "object"
       },
       "DiscussionTopicInput": {
@@ -33699,7 +33883,8 @@
             "enum": [
               "created",
               "rotated",
-              "unchanged"
+              "unchanged",
+              "disabled"
             ],
             "title": "Action",
             "type": "string"
@@ -50174,6 +50359,23 @@
           "current_version_id": {
             "title": "Current Version Id",
             "type": "string"
+          },
+          "current_version_value_origin": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "provider",
+                  "generated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Value Origin",
+            "x-launchplane-optional-response": true
           },
           "description": {
             "title": "Description",
@@ -83422,6 +83624,27 @@
                     "title": "ProductConfigRuntimeInput",
                     "type": "object"
                   },
+                  "ProductConfigSecretBindingDisableInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "binding_key": {
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+                        "title": "Binding Key",
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "minLength": 1,
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "binding_key",
+                      "version_id"
+                    ],
+                    "title": "ProductConfigSecretBindingDisableInput",
+                    "type": "object"
+                  },
                   "ProductConfigSecretInput": {
                     "additionalProperties": true,
                     "properties": {
@@ -83652,6 +83875,13 @@
                     "default": "",
                     "title": "Context",
                     "type": "string"
+                  },
+                  "disable_secret_bindings": {
+                    "items": {
+                      "$ref": "#/$defs/ProductConfigSecretBindingDisableInput"
+                    },
+                    "title": "Disable Secret Bindings",
+                    "type": "array"
                   },
                   "instance": {
                     "default": "",
@@ -92557,6 +92787,124 @@
           }
         },
         "summary": "Plan or apply product environment config"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/discord-identity": {
+      "get": {
+        "operationId": "read_testing_discord_identity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscordIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Identify the stored testing Discord bot without credential output or qualification"
       }
     },
     "/v1/products/{product}/environments/{environment}/health-history": {

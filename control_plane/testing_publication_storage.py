@@ -20,7 +20,6 @@ from control_plane.contracts.testing_publication import (
 )
 from control_plane.contracts.testing_rebuild import TestingRouteObservation
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
@@ -190,7 +189,7 @@ def _sources(
 
     require_original_candidate_inputs(plan)
     profiles = tuple(
-        LaunchplaneProductProfileRecord.model_validate(row.payload)
+        store._read_product_profile_payload(row.payload)
         for row in session.scalars(select(db.LaunchplaneProductProfileRow))
     )
     require_bundle_context_owner(
@@ -530,7 +529,7 @@ def _write_serving_snapshot(
     bundle = ProductAuthorityBundle(
         required_context_owner=(plan.candidate.product, plan.candidate.context),
         expected_product_profiles=(
-            LaunchplaneProductProfileRecord.model_validate(
+            store._read_product_profile_payload(
                 session.get(db.LaunchplaneProductProfileRow, plan.profile.product).payload
             ),
         ),

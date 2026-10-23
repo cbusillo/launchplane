@@ -753,6 +753,38 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertEqual(github.check_runs[0]["conclusion"], "failure")
 
+    def test_engineering_notes_preserve_rejection_after_head_moves_until_client_accepts(
+        self,
+    ) -> None:
+        github = _GitHub(labels=())
+        self.store.write_product_review_decision_record(
+            _decision(
+                decision="changes_requested",
+                head_sha=_OLDER_HEAD_SHA,
+                decided_at="2026-09-20T10:00:00Z",
+            )
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertEqual(github.check_runs[0]["conclusion"], "failure")
+        github.labels = ("owner-review",)
+        github.body = "## Client test notes\nTry the corrected page."
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        github.labels = ()
+        github.body = "## Client test notes\nNothing for the Client to test: CI only."
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T11:00:00Z")
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+
     def test_release_testing_engineering_notes_publish_neutral_without_acceptance(self) -> None:
         github = _GitHub(labels=())
         github.body = (

@@ -39,6 +39,7 @@ from control_plane.testing_never_served import (
     NeverServedRecords,
 )
 from tests.support.disposable_lanes import record_safety
+from tests.support.stored_profiles import persist_historical_preview_transport
 from tests.test_odoo_testing_restore import generation
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
 from control_plane.workflows.public_ingress_monitor import (
@@ -140,6 +141,9 @@ class NeverServedTestingTests(unittest.TestCase):
         ).model_copy(update={"record_id": f"{kind}-{'pass' if passed else 'fail'}"})
 
     def test_private_checks_bind_to_endpoint_authority_without_a_public_hostname(self) -> None:
+        persist_historical_preview_transport(
+            self.store, self.product, seed_command="", migration_command=""
+        )
         private = self.check("private_http")
         self.assertFalse(private.base_url)
         self.assertEqual(self.read().usage, "unused")

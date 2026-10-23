@@ -69,6 +69,15 @@ authoritative application custody/isolation collector prerequisite
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
 
+The Odoo generation collector can qualify current resources and copy custody
+while an `isolation_staging` hold remains set. It uses the same generation
+authority checks and physical receiver inspection. Every resource collection,
+including an unheld native-published copy, compares testing-local credentials
+against the managed production credentials. A staff-testing hold still blocks collection, and missing or failed
+qualification supplies no positive fact. This read path does not lift a hold or
+change ordinary deployment admission; later hold continuation must independently
+bind and recheck its required evidence.
+
 For an existing application testing recipient, opt into read-only resource
 metadata with `include_application_resources=true` on `collect`, or run the
 repository client with `collect --application-resources`. The client uses the
@@ -175,13 +184,19 @@ web-availability classifier.
 
 An unavailable predecessor has no invented private endpoint, runtime identity or
 healthy public observation. The candidate route comes from the original recorded
-template or the provider's converted web-router declaration, checked against the
-current proxy listeners, TLS resolver and applied conflicts. Missing placement or
-ingress declaration is a record/capability prerequisite; repairing or starting
-the old application is not an admission step. Forward checkpoints retain the
-normalized web-ingress declaration and listener witnesses. Unrelated application
-environment, image or Compose formatting changes do not change that declaration
-witness. Listener witnesses cover the entrypoints and certificate resolvers used
+template or the provider's explicit raw web-router declaration for this host.
+When no raw rule may match that host, the provider's converted declaration
+supplies its domain routes. Ambiguous or malformed matching raw rules refuse
+instead of falling back. Generated aliases do not replace explicit raw authority.
+The same selection runs at admission and forward rechecks, and the selected declaration is
+checked against current proxy listeners, TLS resolver and applied conflicts.
+Missing placement or ingress declaration is a record/capability prerequisite;
+repairing or starting the old application is not an admission step. Identical repeated provider labels
+normalize to the same declaration; contradictory values still refuse admission.
+Forward checkpoints retain the normalized web-ingress declaration and listener
+witnesses. Unrelated application environment, image or Compose formatting changes
+do not change that declaration witness. Listener witnesses cover the entrypoints
+and certificate resolvers used
 by this lane; unrelated proxy logging and other listeners do not change them.
 Candidate serving readback verifies these dependencies and external redirect
 behavior after the file is selected, as well as before its forward write.
@@ -1410,6 +1425,11 @@ container, volume or credential is removed. A lost connection, incomplete probe,
 running/unknown original job or permission denial cannot qualify that failure.
 The first failure timestamp cannot be reset to prolong the same operation.
 
+The private endpoint probe treats Docker's null network aliases as an empty
+alias set. The candidate still requires its explicit private alias; another
+container's aliases, DNS names or container name cannot resolve that name,
+including a case variation. Malformed network-name evidence remains unavailable.
+
 Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent
 outcome does not permit a blind duplicate. A crashed queue worker resumes
@@ -1547,6 +1567,24 @@ the current original operation without resetting a running worker. The worker
 rechecks current authority and observes existing effects before continuing.
 Requeueing does not certify that an original writer is excluded, regardless of
 the held error code. Only the original provider fences can qualify dispatch.
+
+An unexpected failure, denial or materialization refusal before the first
+provider effect can still leave the original native reservation held. The worker
+keeps that operation in `reconciliation_required` for explicit original-caller
+resume. Older workers could record this shape as terminal `fail`; the same
+resume route accepts it only when its exact matching outer receipt remains
+`reconcile_required` and the existing native custody/effect check finds no
+started effects. A missing, completed, running or conflicting receipt refuses,
+as does a failed operation with started effects. Resume clears only terminal
+operation bookkeeping and retains every provider receipt, original intent and
+dispatch fence. It does not establish absent provider effects.
+
+Candidate allocation, non-use qualification, serving publication and their
+guarded profile comparisons use the same stored-profile decoder as ordinary
+profile reads. Retired preview transport fields remain inert historical data;
+their presence on any product cannot block another product's testing recovery.
+New profile input stays strict, and actual authority changes still fail the
+existing comparisons.
 This is not the legacy denied-operation fence-release flow: it releases no
 provider fence and grants no alternate identity a replay.
 

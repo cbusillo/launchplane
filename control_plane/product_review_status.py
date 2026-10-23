@@ -93,18 +93,22 @@ def owner_review_status(
     owner = profile.owner
     if not owner.is_set:
         return OwnerReviewStatus(state="pending", description=NO_OWNER_DESCRIPTION)
-    decision = next(
-        iter(
-            applicable_product_review_decisions(
-                decisions=decisions,
-                profile=profile,
-                pull_request_number=pull_request_number,
-                head_sha=head_sha,
-                base_branch=base_branch,
-            )
-        ),
-        None,
+    applicable = applicable_product_review_decisions(
+        decisions=decisions,
+        profile=profile,
+        pull_request_number=pull_request_number,
+        base_branch=base_branch,
     )
+    decision = next(iter(applicable), None)
+    if decision is not None and decision.decision != "changes_requested":
+        decision = next(
+            (
+                record
+                for record in applicable
+                if record.head_sha.strip().casefold() == head_sha.strip().casefold()
+            ),
+            None,
+        )
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
@@ -380,7 +384,6 @@ class OwnerReviewStatusPublisher:
                         decisions=decisions,
                         profile=profile,
                         pull_request_number=pull_request_number,
-                        head_sha=facts.head_sha,
                         base_branch=facts.base_branch,
                     )
                 ),
@@ -396,7 +399,7 @@ class OwnerReviewStatusPublisher:
                 status = owner_review_status(
                     profile=profile,
                     pull_request_number=pull_request_number,
-                    head_sha=facts.head_sha,
+                    head_sha=current.head_sha,
                     decisions=decisions,
                     base_branch=facts.base_branch,
                 )

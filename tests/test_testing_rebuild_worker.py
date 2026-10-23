@@ -375,6 +375,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         execution: Any = None,
         execution_key: str = "",
         writer_attempt: Any = None,
+        desired_compose_project: str | None = None,
     ) -> str:
         def publish() -> None:
             if backend == plan.new_backend:
@@ -489,6 +490,94 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, ["switch-new"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertTrue(self.retained["stopped"])
+
+    def admit_raw_unavailable(self) -> None:
+        self.admit_unavailable("stopped")
+        self.old_provider.update(sourceType="raw", composeFile=self.converted_compose.return_value)
+        converted = yaml.safe_load(self.converted_compose.return_value)
+        labels = converted["services"]["web"]["labels"]
+        labels.update(
+            {
+                "traefik.http.routers.provider-alias.rule": f"Host(`{self.fixture.route.host}`)",
+                "traefik.http.routers.provider-alias.entrypoints": "websecure",
+                "traefik.http.routers.provider-alias.tls": "false",
+            }
+        )
+        self.converted_compose.return_value = yaml.safe_dump(converted)
+        self.intent = self.capture_function(
+            root=self.root, store=self.store, operation=self.operation
+        )
+        self.capture.return_value = self.intent
+
+    def test_explicit_raw_ingress_recovers_without_provider_generated_aliases(self) -> None:
+        self.admit_raw_unavailable()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertTrue(self.retained["stopped"])
+
+    def test_changed_explicit_raw_ingress_ends_admission_before_cutover(self) -> None:
+        self.admit_raw_unavailable()
+        self.hold_after_private_candidate_effects()
+        changed = yaml.safe_load(self.old_provider["composeFile"])
+        changed["services"]["web"]["labels"]["traefik.http.routers.testing.tls"] = "false"
+        self.old_provider["composeFile"] = yaml.safe_dump(changed)
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_non_raw_source_cannot_supply_an_explicit_raw_ingress_authority(self) -> None:
+        self.admit_unavailable("stopped")
+        self.old_provider.update(sourceType="git", composeFile=self.converted_compose.return_value)
+        self.converted_compose.return_value = "services: {}"
+        with self.assertRaises(service.TestingRebuildRefused):
+            self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        self.assertEqual(self.effects, [])
+
+    def test_raw_source_without_routers_uses_its_converted_domain_declaration(self) -> None:
+        self.admit_unavailable("stopped")
+        self.old_provider.update(sourceType="raw", composeFile="services: {web: {}}")
+        self.intent = self.capture_function(
+            root=self.root, store=self.store, operation=self.operation
+        )
+        self.capture.return_value = self.intent
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+
+    def test_foreign_raw_router_does_not_hide_the_owned_converted_domain(self) -> None:
+        self.admit_unavailable("stopped")
+        raw = yaml.safe_load(self.converted_compose.return_value)
+        raw["services"]["web"]["labels"]["traefik.http.routers.testing.rule"] = (
+            "Host(`another.example.invalid`)"
+        )
+        self.old_provider.update(sourceType="raw", composeFile=yaml.safe_dump(raw))
+        self.intent = self.capture_function(
+            root=self.root, store=self.store, operation=self.operation
+        )
+        self.capture.return_value = self.intent
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+
+    def test_invalid_explicit_raw_declaration_cannot_fall_back_to_converted_routes(self) -> None:
+        self.admit_unavailable("stopped")
+        raw = yaml.safe_load(self.converted_compose.return_value)
+        for field, value in (
+            ("tls", "invalid"),
+            ("rule", f"Host(`{self.fixture.route.host}`) || Host(`another.example.invalid`)"),
+            ("rule", "Host(`unterminated"),
+        ):
+            with self.subTest(field=field, value=value):
+                changed = deepcopy(raw)
+                changed["services"]["web"]["labels"]["traefik.http.routers.testing." + field] = (
+                    value
+                )
+                self.old_provider.update(sourceType="raw", composeFile=yaml.safe_dump(changed))
+                with self.assertRaises(service.TestingRebuildRefused):
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+        self.assertEqual(self.effects, [])
 
     def test_web_down_rebuild_stops_remaining_dependencies_after_healthy_cutover(self) -> None:
         self.admit_unavailable("stopped", partial=True)
@@ -1340,7 +1429,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.admit_unavailable("absent")
         preimage = deepcopy(self.raw)
         self.fail_public = True
-        result = self.execute()
+
+        def publish(plan: Any, backend: str | None, **kwargs: Any) -> str:
+            self.assertEqual(
+                kwargs["desired_compose_project"],
+                self.prepared.compose_project if backend == plan.new_backend else None,
+            )
+            return self.switch(plan, backend, **kwargs)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=publish):
+            result = self.execute()
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertEqual(self.raw, preimage)
@@ -1377,6 +1475,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         switch = self.switch
 
         def lost(*args: Any, **kwargs: Any) -> str:
+            self.assertEqual(kwargs["desired_compose_project"], self.prepared.compose_project)
             switch(*args, **kwargs)
             raise NativeSourceUnavailable("fixture lost original route reply")
 
@@ -1967,6 +2066,31 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.list_secret_records(), secrets)
         self.assertEqual(self.execute(), result)
         self.capture.assert_called_once()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_stored_profiles_with_retired_preview_fields_do_not_block_rebuild_publication(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import product_profile_payload
+        from tests.support.stored_profiles import persist_historical_preview_transport
+
+        persist_historical_preview_transport(
+            self.store, self.operation.product, seed_command="", migration_command=""
+        )
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("historical-site")
+        )
+        self.store.write_product_profile_record(foreign)
+        persist_historical_preview_transport(
+            self.store, foreign.product, data_transport_mode="bootstrap", seed_command="old-seed"
+        )
+        profiles = self.store.list_product_profile_records()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.store.list_product_profile_records(), profiles)
+        self.assertEqual(self.execute(), result)
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_failed_public_candidate_restores_the_old_route_without_retiring_it(self) -> None:
@@ -3325,6 +3449,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 runtime_identity=inputs.plan.runtime_identity,
                 private_endpoint=self.fixture.route.new_backend,
                 deployment_id="candidate-deployment",
+                compose_project=namespace + "-abc123",
                 source_witness="empty:" + inputs.plan.digest,
                 integration_isolation_verified=True,
                 credentials_verified=True,
@@ -3474,6 +3599,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
+                    return_value=effects_started,
+                ),
+                patch.object(
+                    self.store,
+                    "native_testing_rebuild_requires_reconciliation",
                     return_value=effects_started,
                 ),
                 patch.object(
@@ -4155,6 +4285,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execution: Any = None,
             execution_key: str = "",
             writer_attempt: Any = None,
+            desired_compose_project: str | None = None,
         ) -> None:
             def send() -> None:
                 pending.append(
@@ -4164,6 +4295,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         expected_backend=expected_backend,
                         dispatch_guard=lambda write: write(),
                         desired_runtime_identity=desired_runtime_identity,
+                        desired_compose_project=desired_compose_project,
                     )
                 )
                 raise NativeSourceUnavailable("fixture proxy writer has not returned")
@@ -4232,7 +4364,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             (
                 "new",
                 shell.plan.new_backend,
-                str(urlsplit(shell.plan.new_backend).hostname),
+                self.prepared.compose_project,
                 shell.new_identity,
             ),
         ):

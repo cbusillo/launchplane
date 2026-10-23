@@ -29385,7 +29385,8 @@
             "enum": [
               "created",
               "rotated",
-              "unchanged"
+              "unchanged",
+              "disabled"
             ],
             "title": "Action",
             "type": "string"
