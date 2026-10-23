@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import uuid4
 
 import click
+from click.core import ParameterSource
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -27,9 +28,7 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    ProductImageProfile,
     ProductLaneProfile,
-    ProductPreviewProfile,
     validate_product_profile_history_transition,
 )
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -44,6 +43,10 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductProfileConflictError,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -771,40 +774,67 @@ def product_profiles_upsert(
     allow_direct_db_mutation: bool,
 ) -> None:
     _require_direct_db_mutation_acknowledgement(allow_direct_db_mutation)
-    try:
-        record = LaunchplaneProductProfileRecord(
-            product=product,
-            display_name=display_name,
-            repository=repository,
-            driver_id=driver_id,
-            image=ProductImageProfile(repository=image_repository),
-            runtime_port=runtime_port,
-            health_path=health_path,
-            lanes=_parse_product_profile_lanes(lanes_json),
-            preview=ProductPreviewProfile(
-                enabled=preview_enabled,
-                context=preview_context,
-                slug_template=preview_slug_template,
-            ),
-            updated_at=updated_at.strip() or utc_now_timestamp(),
-            source=source_label,
-        )
-    except ValidationError as exc:
-        raise click.ClickException(f"Product profile failed validation: {exc}") from exc
+    context = click.get_current_context()
     store = _product_profile_store(database_url)
     try:
         try:
-            existing_record = store.read_product_profile_record(record.product)
+            existing_record = store.read_product_profile_record(product)
         except (FileNotFoundError, KeyError):
             existing_record = None
         try:
+            payload = existing_record.model_dump(mode="json") if existing_record else {}
+            image = existing_record.image.model_dump(mode="json") if existing_record else {}
+            preview = existing_record.preview.model_dump(mode="json") if existing_record else {}
+            image["repository"] = image_repository
+            payload.update(
+                product=product,
+                display_name=display_name,
+                repository=repository,
+                image=image,
+                runtime_port=runtime_port,
+                health_path=health_path,
+                updated_at=updated_at.strip() or utc_now_timestamp(),
+                source=source_label,
+            )
+            if existing_record is None or context.get_parameter_source("driver_id") is not (
+                ParameterSource.DEFAULT
+            ):
+                payload["driver_id"] = driver_id
+            if existing_record is None or context.get_parameter_source("lanes_json") is not (
+                ParameterSource.DEFAULT
+            ):
+                payload["lanes"] = _parse_product_profile_lanes(lanes_json)
+            for option, field, value in (
+                ("preview_enabled", "enabled", preview_enabled),
+                ("preview_context", "context", preview_context),
+                ("preview_slug_template", "slug_template", preview_slug_template),
+            ):
+                if existing_record is None or context.get_parameter_source(option) is not (
+                    ParameterSource.DEFAULT
+                ):
+                    preview[field] = value
+            payload["preview"] = preview
+            record = LaunchplaneProductProfileRecord.model_validate(payload)
             validate_product_profile_history_transition(
                 existing_profile=existing_record,
                 replacement_profile=record,
             )
+        except ValidationError as exc:
+            raise click.ClickException(f"Product profile failed validation: {exc}") from exc
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
-        store.write_product_profile_record(record)
+        try:
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    product_profiles=(record,),
+                    expected_product_profiles=(existing_record,)
+                    if existing_record is not None
+                    else (),
+                    absent_product_ids=() if existing_record is not None else (record.product,),
+                )
+            )
+        except ProductProfileConflictError as error:
+            raise click.ClickException(str(error)) from error
     finally:
         store.close()
     click.echo(
