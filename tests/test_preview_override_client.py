@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+from email.message import Message
 import io
 import http.client
 import json
@@ -68,7 +69,7 @@ class PreviewOverrideClientTests(unittest.TestCase):
                 ({"profile": before}, etag),
                 ({"profile": before}, etag),
                 ({"status": "accepted"}, ""),
-                urllib.error.HTTPError("https://example.invalid", 403, "denied", None, None),
+                urllib.error.HTTPError("https://example.invalid", 403, "denied", Message(), None),
             ]
         with TemporaryDirectory() as directory:
             root = Path(directory)
