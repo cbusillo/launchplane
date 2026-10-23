@@ -144,8 +144,7 @@ from control_plane.outbound_http import request_private_http
 from control_plane.outbound_http import PublicHttpResponse
 from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
-    default_odoo_health_url,
-    is_legacy_derived_odoo_health_url,
+    resolve_odoo_health_url,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -3521,13 +3520,11 @@ def _monitor_health_url(
 ) -> str:
     lane_health_url = lane.health_url.strip()
     if profile.driver_id == "odoo":
-        if lane_health_url and not is_legacy_derived_odoo_health_url(
-            health_url=lane_health_url,
+        return resolve_odoo_health_url(
             base_url=base_url,
+            lane_health_url=lane_health_url,
             profile_health_path=profile.health_path,
-        ):
-            return lane_health_url
-        return default_odoo_health_url(base_url=base_url)
+        )
     if lane_health_url:
         return lane_health_url
     return _health_url(base_url, profile.health_path).strip()
