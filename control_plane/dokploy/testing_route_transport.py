@@ -516,7 +516,10 @@ def main(spec):
                     raise RuntimeError('The candidate testing alias is absent or shared')
                 candidate=matching[0]
                 labels=candidate.get('Config',{}).get('Labels') or {}
-                if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired.hostname or labels.get('com.docker.compose.service')!='web':
+                desired_project=spec.get('desired_compose_project') or desired.hostname
+                if not isinstance(desired_project,str) or not re.fullmatch(re.escape(desired.hostname)+r'(?:-[a-z0-9]{6})?',desired_project):
+                    raise RuntimeError('The candidate testing project crossed its namespace')
+                if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired_project or labels.get('com.docker.compose.service')!='web':
                     raise RuntimeError('The candidate testing alias changed ownership')
                 environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
                 port=environment.get('ODOO_HTTP_PORT') or '8069'
@@ -898,6 +901,7 @@ class DokployTestingRouteTransport:
         execution: TestingRouteExecutionIntent,
         execution_key: str,
         writer_attempt: TestingRouteWriterAttempt,
+        desired_compose_project: str | None = None,
     ) -> Literal["applied", "excluded", "busy", "unknown", "superseded"]:
         if plan.unavailable_preimage is None and self.old_runtime_identity is None:
             raise ValueError("Publication requires the originally observed retained runtime.")
@@ -1017,6 +1021,7 @@ class DokployTestingRouteTransport:
                 else None,
                 "retained_backend": plan.old_backend,
                 "desired_backend": backend,
+                "desired_compose_project": desired_compose_project,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
                 "expected_old_identity_sha256": canonical_json_sha256(frame["old_identity"]),
                 "expected_desired_identity_sha256": canonical_json_sha256(desired_identity),
