@@ -31530,6 +31530,11 @@
           "summary": {
             "title": "Summary",
             "type": "string"
+          },
+          "testing_recovery_reference": {
+            "default": "",
+            "title": "Testing Recovery Reference",
+            "type": "string"
           }
         },
         "required": [
@@ -31543,7 +31548,8 @@
           "purpose",
           "record_id",
           "status",
-          "summary"
+          "summary",
+          "testing_recovery_reference"
         ],
         "title": "ProductIncidentObservationSummary",
         "type": "object"
