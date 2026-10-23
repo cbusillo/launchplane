@@ -986,9 +986,9 @@ def declared_testing_ingress(configured_compose: str) -> dict[str, str]:
         if any(not isinstance(item, str) or "=" not in item for item in supplied):
             raise ValueError("The declared testing router labels are incomplete.")
         pairs = [item.split("=", 1) for item in supplied]
-        if len({pair[0] for pair in pairs}) != len(pairs):
-            raise ValueError("The declared testing router labels conflict.")
         labels = dict(pairs)
+        if any(labels[key] != value for key, value in pairs):
+            raise ValueError("The declared testing router labels conflict.")
     elif isinstance(supplied, dict) and all(
         isinstance(key, str) and isinstance(value, str) for key, value in supplied.items()
     ):

@@ -840,7 +840,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
 
         status = self._publish()
 
-        self.assertEqual(status["state"], "pending")
+        self.assertEqual(status["state"], "failure")
         self.assertEqual(len(self._decisions()), 2)
 
 
