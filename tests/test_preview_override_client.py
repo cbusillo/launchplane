@@ -13,8 +13,8 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    product_profile_record_sha256,
 )
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 
 
@@ -55,7 +55,7 @@ class PreviewOverrideClientTests(unittest.TestCase):
                 "--product",
                 "fixture-product",
                 "--key",
-                "GITHUB_TOKEN",
+                sorted(PLATFORM_CREDENTIAL_KEYS)[0],
                 "--reason",
                 "fixture-reason",
                 "--value-file",
@@ -83,9 +83,11 @@ class PreviewOverrideClientTests(unittest.TestCase):
         before["preview"]["override_env"] = {"ODOO_INSTALL_MODULES": "fixture-addon"}
         if scenario == "historical-transport":
             before["preview"]["historical_transport"] = {"data_transport_mode": "legacy"}
+        if scenario == "opaque-revision":
+            before["future_profile_field"] = {"preserve": "server-owned"}
         after = json.loads(json.dumps(before))
         after["preview"]["override_env"]["ODOO_PROXY_MODE"] = "private-fixture-value"
-        etag = f'"{product_profile_record_sha256(LaunchplaneProductProfileRecord.model_validate(before))}"'
+        etag = '"server-fixture-revision"'
         transport = {
             "resolve_settings": lambda args: {
                 "service_url": "https://example.invalid",
@@ -107,13 +109,20 @@ class PreviewOverrideClientTests(unittest.TestCase):
         if scenario == "stale":
             changed = json.loads(json.dumps(before))
             changed["display_name"] = "Concurrent change"
-            changed_etag = f'"{product_profile_record_sha256(LaunchplaneProductProfileRecord.model_validate(changed))}"'
+            changed_etag = '"concurrent-server-revision"'
             network.side_effect = [
                 ({"profile": before}, etag),
                 ({"profile": changed}, changed_etag),
             ]
         elif scenario == "unsupported-service":
             network.side_effect = [({"profile": before}, etag), ({"profile": before}, "")]
+        elif scenario in {"weak-revision", "multiple-revisions"}:
+            revision = 'W/"fixture"' if scenario == "weak-revision" else '"first", "second"'
+            network.side_effect = [({"profile": before}, etag), ({"profile": before}, revision)]
+        elif scenario == "rollback-readback":
+            after["future_profile_field"] = "unrelated-service-change"
+            after["preview"]["enabled"] = False
+            network.side_effect = [({"profile": before}, etag), ({"profile": after}, "")]
         elif scenario == "lost-apply":
             network.side_effect = [
                 ({"profile": before}, etag),
@@ -139,6 +148,13 @@ class PreviewOverrideClientTests(unittest.TestCase):
                 ({"profile": before}, etag),
                 ({"profile": before}, etag),
                 urllib.error.HTTPError("https://example.invalid", 408, "timeout", Message(), None),
+            ]
+        elif scenario in {"precondition-refused", "server-error"}:
+            code = 412 if scenario == "precondition-refused" else 503
+            network.side_effect = [
+                ({"profile": before}, etag),
+                ({"profile": before}, etag),
+                urllib.error.HTTPError("https://example.invalid", code, "fixture", Message(), None),
             ]
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,13 +197,27 @@ class PreviewOverrideClientTests(unittest.TestCase):
                     saved = json.loads(evidence.read_text())
                     saved["after"]["display_name"] = "Unexpected field"
                     evidence.write_text(json.dumps(saved))
-                args[1] = "apply"
+                args[1] = "readback" if scenario == "rollback-readback" else "apply"
                 args.extend(("--reviewed-dry-run", "--idempotency-key", "fixture-key"))
                 with patch("sys.argv", args):
-                    self.assertEqual(client["main"](), 1 if scenario else 0)
+                    self.assertEqual(
+                        client["main"](),
+                        0 if scenario in {"", "opaque-revision", "rollback-readback"} else 1,
+                    )
             posts = [call for call in network.call_args_list if call.args[2] == "POST"]
             self.assertEqual(
-                len(posts), 0 if scenario in {"stale", "tampered", "unsupported-service"} else 1
+                len(posts),
+                0
+                if scenario
+                in {
+                    "stale",
+                    "tampered",
+                    "unsupported-service",
+                    "weak-revision",
+                    "multiple-revisions",
+                    "rollback-readback",
+                }
+                else 1,
             )
             if posts:
                 self.assertEqual(posts[0].kwargs["body"], after)
@@ -199,6 +229,10 @@ class PreviewOverrideClientTests(unittest.TestCase):
 
     def test_reviewed_save_changes_only_one_preview_key_without_echoing_the_value(self) -> None:
         self._exercise()
+        self._exercise("opaque-revision")
+
+    def test_readback_survives_service_rollback_and_unrelated_profile_changes(self) -> None:
+        self._exercise("rollback-readback")
 
     def test_historical_transport_is_refused_before_review_is_created(self) -> None:
         output, _ = self._exercise("historical-transport")
@@ -209,6 +243,8 @@ class PreviewOverrideClientTests(unittest.TestCase):
             ("stale", "profile_changed_since_review"),
             ("tampered", "review_changes_other_fields"),
             ("unsupported-service", "conditional_save_unsupported"),
+            ("weak-revision", "conditional_save_unsupported"),
+            ("multiple-revisions", "conditional_save_unsupported"),
         ):
             with self.subTest(scenario=scenario):
                 output, _ = self._exercise(scenario)
@@ -222,10 +258,17 @@ class PreviewOverrideClientTests(unittest.TestCase):
             ("lost-readback", "accepted_unverified"),
             ("denied-readback", "accepted_unverified"),
             ("intermediary-timeout", "outcome_unknown"),
+            ("server-error", "outcome_unknown"),
         ):
             with self.subTest(scenario=scenario):
                 output, _ = self._exercise(scenario)
                 self.assertEqual(json.loads(output.splitlines()[-1])["status"], status)
+
+    def test_server_precondition_refusal_is_definite_and_actionable(self) -> None:
+        output, _ = self._exercise("precondition-refused")
+        result = json.loads(output.splitlines()[-1])
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "profile_changed_since_review")
 
     def test_transport_sends_conditional_save_headers_and_reads_revision(self) -> None:
         client = runpy.run_path(

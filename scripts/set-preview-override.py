@@ -12,10 +12,6 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote
 
-from control_plane.contracts.product_profile_record import (
-    LaunchplaneProductProfileRecord,
-    product_profile_record_sha256,
-)
 from control_plane.runtime_platform_credentials import (
     PlatformCredentialRefusedError,
     refuse_platform_credentials,
@@ -89,7 +85,7 @@ def main() -> int:
         parser.error("Choose one runtime key and give a reason.")
     if args.mode == "apply" and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
         parser.error("Apply requires reviewed evidence and a stable idempotency key.")
-    submitted = accepted = False
+    submitted = accepted = refused = False
     reason = "invalid_input_or_response"
     transport: dict[str, Any] = {}
     try:
@@ -117,17 +113,18 @@ def main() -> int:
         path = f"/v1/product-profiles/{quote(args.product, safe='')}"
         response, revision = _request(transport, settings, "GET", path)
         current = response["profile"]
-        profile = LaunchplaneProductProfileRecord.model_validate(current)
-        if profile.product != args.product or not profile.preview.enabled:
-            raise PreviewOverrideRefused("preview_enabled_product_required")
-        if profile.preview.historical_transport:
-            raise PreviewOverrideRefused("unsupported_preview_transport_history")
-        if revision != f'"{product_profile_record_sha256(profile)}"':
-            raise PreviewOverrideRefused("conditional_save_unsupported")
+        if current["product"] != args.product:
+            raise PreviewOverrideRefused("product_identity_differs")
+        if args.mode != "readback":
+            if current["preview"]["enabled"] is not True:
+                raise PreviewOverrideRefused("preview_enabled_product_required")
+            if current["preview"].get("historical_transport"):
+                raise PreviewOverrideRefused("unsupported_preview_transport_history")
+            if not re.fullmatch(r'"[^"\r\n]+"', revision):
+                raise PreviewOverrideRefused("conditional_save_unsupported")
         if args.mode == "dry-run":
             after = copy.deepcopy(current)
             after.setdefault("preview", {}).setdefault("override_env", {})[args.key] = value
-            LaunchplaneProductProfileRecord.model_validate(after).validate_write_contract()
             with os.fdopen(
                 os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
@@ -181,8 +178,10 @@ def main() -> int:
             operation="preview-override", request={"mode": args.mode}, exc=error
         )
         if not accepted and (not submitted or error.code in {400, 403, 409, 412}):
-            return 1
-        reason = "http_response_unverified"
+            refused = True
+            reason = "profile_changed_since_review" if error.code == 412 else "service_refused"
+        else:
+            reason = "http_response_unverified"
     except PreviewOverrideRefused as error:
         reason = error.code
     except PlatformCredentialRefusedError:
@@ -204,7 +203,7 @@ def main() -> int:
                 "status": "accepted_unverified"
                 if accepted
                 else "outcome_unknown"
-                if submitted
+                if submitted and not refused
                 else "unverified",
                 "mode": args.mode,
                 "reason": reason,
