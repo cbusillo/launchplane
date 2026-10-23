@@ -544,13 +544,38 @@ class NativeTestingWorkerTests(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
 
+    def test_foreign_raw_router_does_not_hide_the_owned_converted_domain(self) -> None:
+        self.admit_unavailable("stopped")
+        raw = yaml.safe_load(self.converted_compose.return_value)
+        raw["services"]["web"]["labels"]["traefik.http.routers.testing.rule"] = (
+            "Host(`another.example.invalid`)"
+        )
+        self.old_provider.update(sourceType="raw", composeFile=yaml.safe_dump(raw))
+        self.intent = self.capture_function(
+            root=self.root, store=self.store, operation=self.operation
+        )
+        self.capture.return_value = self.intent
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+
     def test_invalid_explicit_raw_declaration_cannot_fall_back_to_converted_routes(self) -> None:
         self.admit_unavailable("stopped")
         raw = yaml.safe_load(self.converted_compose.return_value)
-        raw["services"]["web"]["labels"]["traefik.http.routers.testing.tls"] = "invalid"
-        self.old_provider.update(sourceType="raw", composeFile=yaml.safe_dump(raw))
-        with self.assertRaises(service.TestingRebuildRefused):
-            self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        for field, value in (
+            ("tls", "invalid"),
+            ("rule", f"Host(`{self.fixture.route.host}`) || Host(`another.example.invalid`)"),
+            ("rule", "Host(`unterminated"),
+        ):
+            with self.subTest(field=field, value=value):
+                changed = deepcopy(raw)
+                changed["services"]["web"]["labels"]["traefik.http.routers.testing." + field] = (
+                    value
+                )
+                self.old_provider.update(sourceType="raw", composeFile=yaml.safe_dump(changed))
+                with self.assertRaises(service.TestingRebuildRefused):
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
         self.assertEqual(self.effects, [])
 
     def test_web_down_rebuild_stops_remaining_dependencies_after_healthy_cutover(self) -> None:

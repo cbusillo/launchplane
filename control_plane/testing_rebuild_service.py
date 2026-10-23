@@ -59,6 +59,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRouteReadback,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.native_copy_stream import (
     require_registered_remote_server,
     NativeSourceUnavailable,
@@ -274,14 +275,19 @@ def unavailable_provider_placement(
 
 
 def unavailable_ingress_declaration(
-    *, host: str, token: str, compose_id: str, provider: dict[str, Any]
+    *, host: str, token: str, compose_id: str, provider: dict[str, Any], public_host: str
 ) -> str:
     if provider.get("sourceType") == "raw":
         configured = provider.get("composeFile")
         if not isinstance(configured, str):
             raise ValueError("The provider's raw testing source is unavailable.")
         labels = declared_testing_ingress(configured)
-        if any(key.startswith("traefik.http.routers.") for key in labels):
+        if any(
+            key.startswith("traefik.http.routers.")
+            and key.endswith(".rule")
+            and host_rule_may_match(value, public_host)
+            for key, value in labels.items()
+        ):
             return configured
     return compose.fetch_dokploy_converted_compose_file(
         host=host, token=token, compose_id=compose_id
@@ -412,6 +418,7 @@ def capture_rebuild_intent(
                     token=token,
                     compose_id=before.target_id.target_id,
                     provider=provider,
+                    public_host=str(urlsplit(lane.base_url).hostname),
                 )
             )
             route = compile_unavailable_testing_route(
@@ -997,6 +1004,7 @@ class NativeTestingRebuildExecution:
                         token=self.token,
                         compose_id=self.intent.old.target_id,
                         provider=provider,
+                        public_host=self.intent.unavailable_route.host,
                     )
                     declaration = declared_testing_ingress(declared)
                 except api.DokployRequestFailed:
