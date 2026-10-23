@@ -775,6 +775,34 @@ never retries a dispatched mutation. An already-ended session counts as a
 successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
+### Human OAuth credential retirement
+
+A valid logout removes its current database session and encrypted credential.
+Failed identity verification also removes local custody. Neither path makes a
+GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+update guards prevent renewal from recreating a deleted session; they do not
+prevent restoration from an older database backup.
+
+Expired rows are deleted by normal session reads and by opportunistic sign-in
+or provider-refresh sweeps, which skip locked rows. An inactive service performs
+no sweep. Reaching the claims ceiling alone does not collect an inactive
+browser's credential, and ciphertext can remain beyond stored session expiry
+until a later read or sweep.
+
+Database backups may retain earlier encrypted credentials and the identifiers
+needed to decrypt them. Someone holding that backup and its original session
+root can recover the historical credential; local deletion does not erase the
+backup or establish that the credential has expired at GitHub. Rotating the
+current root invalidates current service cookies and custody, but does not
+invalidate GitHub credentials or prevent decryption with the old root. Restoring
+an older database with the same root can also restore unexpired session rows.
+Keep the root separate from database exports and preserve existing backup access
+and retention controls.
+
+Provider revocation is not implemented. Neither per-browser credential isolation
+nor complete refresh-pair retirement has been established. Supported provider
+expiry and rotation do not establish immediate retirement on logout.
+
 ### Browser Mutation Boundary
 
 `SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF
@@ -1476,22 +1504,11 @@ session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React Launchplane UI.
 Hosted requests reload the current DB policy before authorization and re-evaluate
-the session role. OAuth organization/team claims expire for authorization after
-24 hours; the session is revoked and the user must sign in again to refresh
-those mutable GitHub claims.
-
-The cookie's `Max-Age` and stored session expiry are 14 days (1,209,600 seconds),
-with renewal eligible after 24 hours (86,400 seconds) since issue or last renewal.
-This is separate from the production admin/read-only authorization-claims
-limit: those claims expire absolutely 24 hours after sign-in, and the service
-revokes the session before attempting cookie renewal. Background reads enter
-the same check but do not refresh GitHub claims or the sign-in time; there is no
-separate short idle timeout. Confined Client sessions follow their current
-product-ownership checks instead of this admin/read-only claims branch.
-The OAuth callback uses the GitHub token to read identity and membership, then
-retains only the Launchplane identity/session; it does not store the token or
-its expiry/refresh metadata. Later Launchplane session reads do not use that
-token. OAuth login state lasts 10 minutes (600 seconds).
+the session role. The [human auth/session contract](#service-route-checklist)
+above owns renewal, provider verification, credential custody, Client
+confinement, concurrency and logout. See
+[credential retirement](#human-oauth-credential-retirement) for the local/provider
+and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an
