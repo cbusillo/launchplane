@@ -122,26 +122,29 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         return env
 
     def test_caller_recovery_finalizes_only_original_target_artifact(self) -> None:
-        env = self.render_caller({"mode": "readback"})
+        self.render_caller({"idempotency_key": "original-key"})
         target = self.root / "target-plan-request.json"
-        original = json.loads(target.read_text())
+        original_bytes = target.read_bytes()
         for name in (
             "generic-web-intent.json",
             "onboarding-plan-request.json",
             "authz-plan-request.json",
         ):
-            self.assertFalse((self.root / name).exists(), name)
-        result = self.caller_step("Finalize onboarding plan", env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        outputs = self.output_values()
-        self.assertEqual(
-            outputs["target_plan_sha256"], hashlib.sha256(target.read_bytes()).hexdigest()
-        )
-        self.assertEqual(outputs["onboarding_plan_sha256"], "")
-        self.assertEqual(outputs["authz_plan_sha256"], "")
-        self.assertEqual(original["context"], outputs["testing_context"])
-        self.assertEqual(original["target_name"], outputs["target_name"])
-        self.assertFalse((self.root / "authz-reconcile-request.json").exists())
+            (self.root / name).unlink()
+        for mode in ("readback", "apply"):
+            with self.subTest(mode=mode):
+                env = self.render_caller({"mode": mode, "idempotency_key": "original-key"})
+                self.assertEqual(target.read_bytes(), original_bytes)
+                self.assertEqual({path.name for path in self.root.glob("*.json")}, {target.name})
+                result = self.caller_step("Finalize onboarding plan", env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = self.output_values()
+                self.assertEqual(
+                    outputs["target_plan_sha256"], hashlib.sha256(original_bytes).hexdigest()
+                )
+                self.assertEqual(outputs["onboarding_plan_sha256"], "")
+                self.assertEqual(outputs["authz_plan_sha256"], "")
+                self.assertFalse((self.root / "authz-reconcile-request.json").exists())
 
     def test_caller_normal_onboarding_keeps_all_planned_artifacts(self) -> None:
         env = self.render_caller({"idempotency_key": "fresh-reviewed-key"})
