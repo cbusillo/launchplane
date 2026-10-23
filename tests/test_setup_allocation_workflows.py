@@ -110,14 +110,16 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(self.setup_request(control).returncode, 0)
                 self.assertFalse((self.root / "dokploy-target-setup-payload.json").exists())
 
-    def onboarding_request(self, control: object) -> subprocess.CompletedProcess[str]:
+    def onboarding_request(
+        self, control: object, *, context: str = "fixture-testing"
+    ) -> subprocess.CompletedProcess[str]:
         target = self.root / "target-plan-request.json"
         target.write_text(
             json.dumps(
                 {
                     "mode": "dry-run",
                     "operation": "create-application",
-                    "context": "fixture-testing",
+                    "context": context,
                     "instance": "testing",
                 }
             )
@@ -138,7 +140,7 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             "Render apply requests",
             {
                 "PRODUCT": "fixture",
-                "TESTING_CONTEXT": "fixture-testing",
+                "TESTING_CONTEXT": context,
                 "REASON": "fixture recovery",
                 "ONBOARDING_PLAN_SHA256": "records-plan",
                 "AUTHZ_PLAN_SHA256": "authz-plan",
@@ -168,6 +170,26 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 self.assertEqual(outputs["recovery"], "true")
                 if mode == "apply":
                     self.assertEqual(payload, original_request)
+
+    def test_existing_printable_keys_remain_available_for_setup_and_onboarding_recovery(
+        self,
+    ) -> None:
+        for context in ("a" * 300, "fixture context", "fixture-é"):
+            with self.subTest(context=context):
+                normal = self.onboarding_request(None, context=context)
+                self.assertEqual(normal.returncode, 0, normal.stderr)
+                outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+                key = outputs["idempotency_key"]
+                (self.root / "authz-apply-request.json").unlink()
+                recovered = self.onboarding_request({"mode": "readback"}, context=context)
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+                self.assertEqual(outputs["idempotency_key"], key)
+                self.assertFalse((self.root / "authz-apply-request.json").exists())
+                setup = self.setup_request({"idempotency_key": key}, mode="readback")
+                self.assertEqual(setup.returncode, 0, setup.stderr)
+                outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+                self.assertEqual(outputs["idempotency_key"], key)
 
     def test_normal_onboarding_keeps_records_and_authz_apply_requests(self) -> None:
         result = self.onboarding_request(None)
