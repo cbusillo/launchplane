@@ -256,6 +256,11 @@ reservation. The webhook request never waits on a deploy.
     Request-body completion expectations register synchronously before browser
     events resume, so a queued completion cannot pass the listener. The bounded
     wait still requires the matching finished request and a successful response.
+    Aborted GET/HEAD requests without an action header settle only for the
+    verifier's known read routes. Signup, server actions and public verification
+    (which records a scan) still require response completion; a read with no
+    terminal event remains unknown. Pages close before fixture deletion so late
+    prefetches cannot race cleanup or leave unfinished read receipts.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.
