@@ -1,8 +1,3 @@
-"""Read value-free retirement evidence through the existing operator transport.
-
-This client has no apply mode. Routes come from the canonical OpenAPI artifact.
-"""
-
 import argparse
 import http.client
 import json
