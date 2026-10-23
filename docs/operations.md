@@ -2175,10 +2175,16 @@ possible fixture residue remains recorded.
 
 The natural monitor can reconcile the legacy unavailable-reference marker only
 when the complete retained incident observation history and material-event chain
-prove every captured operation completed through that same supported abandonment.
+prove each legacy original completed through that same supported abandonment.
+Retained attention references and the unavailable marker remain attached until
+that history is proved. Later operations with a captured strong reference can
+instead use the existing completed-state proof with matching retained origin,
+nonce and captured creation time. Completion settles that operation without
+claiming successful deployment verification. Dated and nonce-backed witnesses
+for one operation are joined; conflicting epochs, nonces or custody remain held.
 Later observations without a new material event are included. Dated historical
 witnesses can bind an earlier legacy attention reference only when the exact
-incarnation predates that reference. Missing history, archive, custody, incarnation
+incarnation predates that reference. Missing history, required archive, custody, incarnation
 or receipt evidence keeps the incident open. The monitor locks and rechecks the
 proof with the existing provider-source gate before publication. This changes no
 provider resource, replays no executor, invents no nonce and supplies no deployment

@@ -29,7 +29,7 @@ class CapturedTestingFence:
 
 
 @dataclass(frozen=True)
-class TestingFenceAbandonment:
+class TestingFenceSettlement:
     reservation: LaunchplaneIdempotencyRecord
     receipt: LaunchplaneIdempotencyRecord | None
     recovery_reference: str
@@ -109,16 +109,34 @@ def capture_testing_fences(
             )
     return tuple(
         sorted(
-            captures, key=lambda item: (item.record_id, item.created_at, str(item.operation_nonce))
+            _join_capture_witnesses(captures),
+            key=lambda item: (item.record_id, item.created_at, str(item.operation_nonce)),
         )
     )
+
+
+def _join_capture_witnesses(captures: set[CapturedTestingFence]) -> set[CapturedTestingFence]:
+    joined: set[CapturedTestingFence] = set()
+    for capture in captures:
+        peers = {peer for peer in captures if peer.record_id == capture.record_id}
+        if capture.created_at:
+            nonces: set[UUID | None] = {
+                peer.operation_nonce for peer in peers if peer.operation_nonce is not None
+            }
+            joined.update(
+                CapturedTestingFence(capture.record_id, capture.created_at, nonce)
+                for nonce in nonces or {None}
+            )
+        elif not any(peer.created_at for peer in peers):
+            joined.add(capture)
+    return joined
 
 
 def prove_testing_fence_history(
     incident: PublicIngressIncidentRecord,
     events: tuple[PublicIngressIncidentEventRecord, ...],
     observations: tuple[PublicIngressObservationRecord, ...],
-    read_abandonment: Callable[[CapturedTestingFence], TestingFenceAbandonment | None],
+    read_settlement: Callable[[CapturedTestingFence], TestingFenceSettlement | None],
 ) -> object | None:
     if incident.instance != "testing" or incident.status != "open" or not events:
         return None
@@ -172,7 +190,11 @@ def prove_testing_fence_history(
         for capture in observation_captures:
             if capture.created_at:
                 dated_captures.setdefault(capture.record_id, set()).add(capture)
-    evidence: dict[CapturedTestingFence, TestingFenceAbandonment] = {}
+    dated_captures = {
+        record_id: _join_capture_witnesses(captures)
+        for record_id, captures in dated_captures.items()
+    }
+    evidence: dict[CapturedTestingFence, TestingFenceSettlement] = {}
     for record in sorted(
         observations,
         key=lambda item: (
@@ -242,7 +264,7 @@ def prove_testing_fence_history(
         for capture in sorted(
             captures, key=lambda item: (item.record_id, item.created_at, str(item.operation_nonce))
         ):
-            proof = evidence.get(capture) or read_abandonment(capture)
+            proof = evidence.get(capture) or read_settlement(capture)
             if proof is None:
                 return None
             if parse_launchplane_mutation_timestamp(
