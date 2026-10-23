@@ -18741,6 +18741,8 @@ def create_launchplane_fastapi_app(
                         code="idempotency_key_required",
                         message="Non-runtime onboarding apply requires Idempotency-Key.",
                     )
+        adopted_onboarding_target = None
+        adopted_onboarding_target_id = None
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -18823,6 +18825,35 @@ def create_launchplane_fastapi_app(
                     intent=onboarding_request.generic_web,
                     target_id=onboarding_request.resolved_target_id,
                 )
+                try:
+                    adopted_onboarding_target = database_store.read_dokploy_target_record(
+                        context_name=onboarding_request.generic_web.testing_context,
+                        instance_name="testing",
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
+                        context_name=adopted_onboarding_target.context,
+                        instance_name="testing",
+                    )
+                    if (
+                        adopted_onboarding_target.target_type != "application"
+                        or adopted_onboarding_target_id.target_id
+                        != onboarding_request.resolved_target_id
+                    ):
+                        raise ValueError(
+                            "Generic-web onboarding must preserve the adopted application identity."
+                        )
+                    target = onboarding_manifest.provider_targets[0].model_copy(
+                        update={
+                            "target_name": adopted_onboarding_target.target_name,
+                            "project_name": adopted_onboarding_target.project_name,
+                        }
+                    )
+                    onboarding_manifest = onboarding_manifest.model_copy(
+                        update={"provider_targets": (target,)}
+                    )
             except ValueError as error:
                 raise _launchplane_http_error(
                     status_code=400,
@@ -18858,6 +18889,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_onboarding_manifest",
                 message=str(error),
             ) from error
+        if adopted_onboarding_target is not None:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "expected_dokploy_targets": (adopted_onboarding_target,),
+                    "expected_dokploy_target_ids": (adopted_onboarding_target_id,),
+                }
+            )
         if nonruntime_registration:
             resolved_owner = await run_in_threadpool(
                 resolve_profile_owner,
@@ -18953,7 +18991,11 @@ def create_launchplane_fastapi_app(
                     response=onboarding_response,
                 )
             )
-        except (RuntimeEnvironmentConflictError, ProductProfileConflictError) as error:
+        except (
+            RuntimeEnvironmentConflictError,
+            ProductProfileConflictError,
+            DokployTargetRecordChanged,
+        ) as error:
             replay_response = replay_stored_apply_idempotency(
                 record_store=database_store,
                 identity=identity,
@@ -18964,6 +19006,13 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
+            if isinstance(error, DokployTargetRecordChanged):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_target_changed",
+                    message=str(error),
+                ) from error
             if isinstance(error, ProductProfileConflictError):
                 raise _launchplane_http_error(
                     status_code=409,
@@ -27531,13 +27580,15 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         if ordinary_preview:
-            result["allocation"] = {
+            setup_result = result["setup"]
+            assert isinstance(setup_result, dict)
+            setup_result["allocation"] = {
                 "project_name": ordinary_preview["project_marker"],
                 "environment_name": ordinary_preview["environment_marker"],
                 "target_name": ordinary_preview["target_marker"],
                 "app_name": ordinary_preview["app_name"],
             }
-            result["allocation_preview"] = (
+            setup_result["allocation_preview"] = (
                 "exact-for-key" if idempotency_key.strip() else "requires-original-key"
             )
         response = accepted_evidence_response(

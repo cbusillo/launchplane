@@ -2829,6 +2829,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("test:discord-blue-onboarding", json.dumps(payload, sort_keys=True))
 
     def test_generic_web_onboarding_dry_run_binds_apply_and_repository_identity(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2911,6 +2914,55 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "resolved_target_id": "app-demo-web",
                 "generic_web": generic_web,
             }
+            store = PostgresRecordStore(database_url=database_url)
+            adopted_target = DokployTargetRecord(
+                context="demo-web-testing",
+                instance="testing",
+                target_type="application",
+                project_name="generated-project",
+                target_name="generated-target",
+                updated_at="2026-10-23T00:00:00Z",
+                source_label="test:adopted",
+            )
+            adopted_id = DokployTargetIdRecord(
+                context=adopted_target.context,
+                instance=adopted_target.instance,
+                target_id="app-demo-web",
+                updated_at=adopted_target.updated_at,
+                source_label=adopted_target.source_label,
+            )
+            store.write_dokploy_target_record(adopted_target)
+            store.write_dokploy_target_id_record(adopted_id)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=adopted_target,
+                    target_id_record=adopted_id,
+                )
+            )
+            write_bundle = PostgresRecordStore.write_product_authority_bundle
+
+            def race_target(current_store: PostgresRecordStore, bundle: Any) -> None:
+                concurrent = adopted_target.model_copy(update={"target_name": "concurrent-target"})
+                store.write_dokploy_target_record(concurrent)
+                store.write_provider_target_record(
+                    ProviderTargetRecord.from_dokploy_records(
+                        target_record=concurrent,
+                        target_id_record=adopted_id,
+                    )
+                )
+                write_bundle(current_store, bundle)
+
+            with patch.object(PostgresRecordStore, "write_product_authority_bundle", race_target):
+                race_status, race_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(race_status, 409, race_payload)
+            self.assertFalse(store.list_product_profile_records())
+            store.close()
             apply_status, apply_payload = _invoke_app(
                 app,
                 method="POST",
@@ -2961,6 +3013,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 self.assertEqual(raced_payload["result"], apply_payload["result"])
                 profiles = store.list_product_profile_records()
                 profile = store.read_product_profile_record("demo-web")
+                registered_target = store.read_dokploy_target_record(
+                    context_name="demo-web-testing", instance_name="testing"
+                )
+                self.assertEqual(registered_target.target_name, "concurrent-target")
+                self.assertEqual(registered_target.project_name, adopted_target.project_name)
                 runtime_environments = store.list_runtime_environment_records(
                     context_name="demo-web-preview"
                 )

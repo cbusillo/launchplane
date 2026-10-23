@@ -17,6 +17,51 @@ from tests.test_application_state_volume import _ApplicationStateVolumeFixture
 
 
 class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
+    async def test_adopted_onboarding_snapshot_refuses_concurrent_name_change(self) -> None:
+        from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.profile.lanes[0].context, instance_name="testing"
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        concurrent = target.model_copy(update={"target_name": "concurrent-name"})
+        self.store.write_dokploy_target_record(concurrent)
+        with self.assertRaises(DokployTargetRecordChanged):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    dokploy_targets=(target,),
+                    expected_dokploy_targets=(target,),
+                    expected_dokploy_target_ids=(identity,),
+                )
+            )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=target.context, instance_name=target.instance
+            ),
+            concurrent,
+        )
+
+    async def test_ordinary_apply_preserves_creation_response_and_nests_custody(self) -> None:
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["mode"], "apply")
+        self.assertEqual(result["reason"], self.payload["reason"])
+        self.assertEqual(result["route_domain_ids"], [])
+        setup = result["setup"]
+        self.assertEqual(setup["project_id"], "created-project")
+        self.assertEqual(setup["environment_id"], "created-environment")
+        self.assertEqual(
+            setup["plan"]["application"]["target_name"], setup["target_record"]["target_name"]
+        )
+        self.assertTrue(setup["provider_requests"])
+        self.assertEqual(setup["allocation"]["allocation_state"], "adopted")
+
     def setUp(self) -> None:
         super().setUp()
         self.payload["state_volume_path"] = ""
@@ -179,7 +224,10 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         ):
             recovered = await self.post()
         self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(recovered.json()["result"]["configuration_evidence"], "unavailable")
+        self.assertEqual(
+            recovered.json()["result"]["setup"]["allocation"]["configuration_evidence"],
+            "unavailable",
+        )
         self.assertEqual(self.provider.call_args_list, calls)
 
     async def recover_receipt_after_owner_change(
@@ -759,6 +807,8 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
     async def test_dry_run_without_a_key_reports_non_exact_generated_names(self) -> None:
         dry = await self.post(mode="dry-run", idempotency_key="")
         self.assertEqual(dry.status_code, 202, dry.text)
-        self.assertEqual(dry.json()["result"]["allocation_preview"], "requires-original-key")
+        self.assertEqual(
+            dry.json()["result"]["setup"]["allocation_preview"], "requires-original-key"
+        )
         self.provider.assert_not_called()
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())

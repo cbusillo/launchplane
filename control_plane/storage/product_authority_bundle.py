@@ -330,6 +330,8 @@ class ProductAuthorityBundle(BaseModel):
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     absent_product_ids: tuple[str, ...] = ()
+    expected_dokploy_targets: tuple[DokployTargetRecord, ...] = ()
+    expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()

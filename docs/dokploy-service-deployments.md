@@ -236,7 +236,7 @@ Ordinary non-storage `create-application` setup through
 `POST /v1/dokploy-targets/setup` preserves direct apply with its original request
 and `Idempotency-Key`. Send that same key with a dry run to preview the exact
 service-generated names used by apply. Without a key, dry-run names are explicit
-placeholders and `allocation_preview` reports `requires-original-key`; that is
+placeholders and `setup.allocation_preview` reports `requires-original-key`; that is
 not an exact allocation review. A dry run creates no provider resource or saved
 allocation intent. Apply saves
 the allocation intent before dispatch and binds that key to the unchanged request,
@@ -244,7 +244,7 @@ even if a later refusal confirms that no effect began. Corrected input uses a
 new key only after confirmed pre-effect refusal; an unknown effect must recover
 or retain the original custody first. The service uses the same durable runner as
 state-volume setup. The service generates unique names for each newly created
-project, environment and application, returned in `allocation`; supplied labels
+project, environment and application, returned in `setup.allocation`; supplied labels
 are not recovery identities. Existing placement ids remain exact existing
 placement. As in direct setup, a supplied environment selects its actual project;
 a redundant project id does not override that environment. An omitted project name is resolved during adoption; an omitted server
@@ -282,6 +282,36 @@ independent names. Already adopted allocations recover their original completion
 receipt instead of being retained. The shared custody refusal codes below still
 apply. This adds no grant or cross-caller transfer; preserve original receipts
 when the original caller is unavailable.
+
+Ordinary dry-run and successful apply retain the setup response contract: mode,
+operation, context, instance, applied, route_domain_ids, reason and setup. Apply
+keeps setup.plan, project_id, environment_id and provider_requests; additional
+allocation and configuration evidence stays under setup.allocation. Readback and
+retention retain their custody-specific response contracts.
+
+Dokploy Target Setup accepts mode readback and a closed allocation_control JSON
+input. For ordinary testing applications supply idempotency_key with the same
+value on dry-run, apply, readback and retention dispatches. For retention also
+supply retain_allocation: true and expected_allocation_custody_sha256 from the
+reviewed readback. Keep every other setup input unchanged. Apply retains its
+exact confirmation and reason. Other operations do not accept allocation controls.
+
+The protected generic-web onboarding worker accepts an optional allocation_control
+JSON input with mode readback or apply. A nonempty control selects recovery only:
+it never applies product records or authorization records. Its original key stays
+`generic-web-onboarding:target:<product>:<testing_context>:v1`; an optional
+idempotency_key must equal that key. Retention additionally requires
+retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
+the original target request artifact digest even during recovery. Recovery needs
+no product or authorization plan artifacts. Successful product registration keeps
+the adopted target and project names, and compares both target and identity
+snapshots atomically before writing records.
+
+The worker interface and caller migration follow the two-landing policy in
+[GitHub Actions security](github-actions-security.md). The worker contract lands
+first with caller pins unchanged. A later change pins every caller to that exact
+landed commit before forwarding allocation_control. Neither source landing grants
+access or activates the new worker trust anchor; those remain separate operations.
 
 ### Testing application state volume
 

@@ -714,6 +714,61 @@ class ApplicationStateVolumeAdapter:
                 provider_target_record=current,
             )
         )
+        if not self.request.state_volume_path:
+            from control_plane.workflows.dokploy_target_adoption import (
+                DokployTargetCreateResult,
+                plan_dokploy_application_target,
+                planned_application_provider_requests,
+            )
+
+            named = named_application_request(self.request, self.intent)
+            creation = dokploy_target_setup_result_payload(
+                DokployTargetCreateResult(
+                    applied=True,
+                    plan=plan_dokploy_application_target(
+                        project_id=named.project_id,
+                        project_name=named.project_name,
+                        environment_id=named.environment_id,
+                        environment_name=named.environment_name or "testing",
+                        target_name=named.target_name,
+                        app_name=named.app_name,
+                        server_id=named.server_id,
+                    ),
+                    project_id=data.get("project", self.request.project_id),
+                    environment_id=environment_id,
+                    target_record=target,
+                    target_id_record=target_id,
+                    provider_target_record=current,
+                    provider_requests=planned_application_provider_requests(
+                        project_id=named.project_id,
+                        project_name=named.project_name,
+                        project_description=named.project_description,
+                        environment_id=named.environment_id,
+                        environment_name=named.environment_name or "testing",
+                        environment_description=named.environment_description,
+                        target_name=named.target_name,
+                        app_name=named.app_name,
+                        application_description=named.description,
+                        server_id=named.server_id,
+                    ),
+                )
+            )
+            creation["allocation"] = {
+                **self.plan_result(),
+                "configuration_matches": configuration_verified,
+                "configuration_evidence": "matches" if configuration_verified else "unavailable",
+                "allocation_state": "adopted",
+            }
+            return {
+                "mode": "apply",
+                "operation": self.request.operation,
+                "context": self.request.context,
+                "instance": self.request.instance,
+                "applied": True,
+                "route_domain_ids": [],
+                "reason": self.request.reason,
+                "setup": creation,
+            }
         return {
             **self.plan_result(),
             "applied": True,

@@ -6758,6 +6758,27 @@ class PostgresRecordStore(HumanSessionStore):
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
                 )
+            for orm_type, model_type, expected_records in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, bundle.expected_dokploy_targets),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    bundle.expected_dokploy_target_ids,
+                ),
+            ):
+                for expected in expected_records:
+                    row = session.scalar(
+                        select(orm_type)
+                        .where(
+                            orm_type.context == expected.context,
+                            orm_type.instance == expected.instance,
+                        )
+                        .with_for_update()
+                    )
+                    if row is None or model_type.model_validate(_payload_from_row(row)) != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 current_profile_row = session.scalar(
                     select(LaunchplaneProductProfileRow)
