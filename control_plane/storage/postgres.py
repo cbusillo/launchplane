@@ -11455,32 +11455,27 @@ class PostgresRecordStore(HumanSessionStore):
     def native_testing_rebuild_requires_reconciliation(
         self, operation: OdooStableTargetReplacementOperationRecord
     ) -> bool:
-        with self._session_factory() as session:
-            return self._native_testing_rebuild_requires_reconciliation(session, operation)
-
-    def _native_testing_rebuild_requires_reconciliation(
-        self, session: Session, operation: OdooStableTargetReplacementOperationRecord
-    ) -> bool:
         from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
 
         if not operation.is_native_testing_rebuild:
             return False
-        if self._native_testing_rebuild_effects_started(session, operation):
-            return True
-        row = session.scalar(
-            self._idempotency_statement(
-                scope=REBUILD_SCOPE,
-                route_path=REBUILD_ROUTE,
-                idempotency_key=operation.operation_id,
+        with self._session_factory() as session:
+            if self._native_testing_rebuild_effects_started(session, operation):
+                return True
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE,
+                    idempotency_key=operation.operation_id,
+                )
             )
-        )
-        if row is None:
-            return False
-        receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-        return (
-            receipt.state == "reconcile_required"
-            and receipt.request_fingerprint == operation.request_fingerprint
-        )
+            if row is None:
+                return False
+            receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            return (
+                receipt.state == "reconcile_required"
+                and receipt.request_fingerprint == operation.request_fingerprint
+            )
 
     def _native_testing_rebuild_effects_started(
         self, session: Session, operation: OdooStableTargetReplacementOperationRecord
@@ -11647,6 +11642,8 @@ class PostgresRecordStore(HumanSessionStore):
                 raise TestingRebuildResumeRefused(
                     "Inspect the current held operation before resuming."
                 )
+            if current.status not in {"reconciliation_required", "fail"}:
+                raise TestingRebuildResumeRefused("The original operation is not held.")
             other_owner = self._active_odoo_stable_lane_operation_owner(
                 session,
                 product=current.product,
@@ -11675,7 +11672,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             legacy_pre_effect_failure = (
                 current.status == "fail"
-                and self._native_testing_rebuild_requires_reconciliation(session, current)
+                and original.state == "reconcile_required"
                 and not self._native_testing_rebuild_effects_started(session, current)
             )
             if current.status != "reconciliation_required" and not legacy_pre_effect_failure:

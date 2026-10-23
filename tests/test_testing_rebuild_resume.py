@@ -336,6 +336,25 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assert_original_fences()
 
+    async def test_running_refusal_does_not_lock_the_live_provider_receipt(self) -> None:
+        current = self.held.model_copy(update={"status": "running", "phase": "running"})
+        self.store.write_odoo_stable_target_replacement_operation_record(current)
+        statement = self.store._idempotency_statement
+
+        def preserve_live_receipt(**kwargs: Any) -> Any:
+            if kwargs["scope"] == REBUILD_SCOPE and kwargs.get("for_update"):
+                self.fail("A refused running operation must not lock its live provider receipt")
+            return statement(**kwargs)
+
+        with patch.object(self.store, "_idempotency_statement", side_effect=preserve_live_receipt):
+            response = await self.resume()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(current.operation_id),
+            current,
+        )
+        self.assert_original_fences()
+
     async def test_resume_receipt_failure_rolls_back_the_queue_transition(self) -> None:
         from control_plane.testing_rebuild_resume import RESUME_SCOPE
 
@@ -604,7 +623,6 @@ class TestingRebuildBeforeEffectsTests(
                 self.store,
                 "native_testing_rebuild_requires_reconciliation",
                 return_value=False,
-                create=True,
             )
             if legacy
             else nullcontext(),
@@ -695,6 +713,7 @@ class TestingRebuildBeforeEffectsTests(
         )
         self.assertEqual(operation.status, "fail")
         receipt = self.outer(operation)
+        assert receipt is not None
         with self.assertRaises(ValueError):
             self.store.write_odoo_stable_target_replacement_operation_record(
                 operation.model_copy(update={"status": "pending", "phase": "created"})
@@ -725,6 +744,69 @@ class TestingRebuildBeforeEffectsTests(
             self.store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
             resumed,
         )
+        from datetime import timedelta
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementApplyResult,
+        )
+        from control_plane.provider_operations import ProviderMutationOutcome
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+
+        result = OdooStableTargetReplacementApplyResult(
+            product=operation.product,
+            context=operation.context,
+            instance=operation.instance,
+            strategy=operation.request.strategy,
+            deployment_record_id=self.fixture.app.plan.runtime_identity.deployment_record_id,
+            deploy_status="pass",
+            post_deploy_status="pass",
+            health_status="pass",
+        )
+        now = datetime.now(UTC)
+        claimed = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="resumed-before-effects-worker",
+            claimed_at=now.isoformat(),
+            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        assert claimed is not None
+        self.assertEqual(claimed.operation_id, operation.operation_id)
+        intent = self.store.read_original_mutation_intent(receipt)
+        with patch.object(
+            service.NativeTestingRebuildAdapter,
+            "apply",
+            return_value=ProviderMutationOutcome(
+                200, {"result": result.model_dump(mode="json")}, provider_effect_performed=False
+            ),
+        ) as apply:
+            self.assertTrue(
+                worker._execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=self.fixture.root,
+                    operation=claimed,
+                    lease_owner=claimed.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+            completed = self.store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            self.assertEqual(completed.status, "pass")
+            self.assertEqual(completed.request, operation.request)
+            self.assertEqual(completed.idempotency_key, operation.idempotency_key)
+            self.assertEqual(self.store.read_original_mutation_intent(receipt), intent)
+            settled = self.outer(operation)
+            assert settled is not None
+            self.assertEqual(settled.state, "completed")
+            self.assertEqual(settled.reconciliation_key, receipt.reconciliation_key)
+            repeated = await self.resume_original(operation)
+            self.assertTrue(repeated.is_success, repeated.text)
+            self.assertEqual(
+                self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ),
+                completed,
+            )
+            apply.assert_called_once()
 
     async def test_legacy_failed_original_requires_the_matching_held_receipt(self) -> None:
         operation = self.fail_before_effects(
