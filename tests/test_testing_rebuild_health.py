@@ -58,6 +58,15 @@ class TestingPublicHealthTests(unittest.TestCase):
         self.assertEqual(health.observed_runtime_identity, self.identity)
         self.assertEqual(health.urls, (self.base_url + "/launchplane/health",))
 
+    def test_explicit_health_url_keeps_its_path_and_query(self) -> None:
+        request_target = "/identity?mode=testing"
+        url = self.base_url + request_target
+        health = read_public_testing_health(url)
+        self.assertTrue(health.verified)
+        self.assertEqual(health.observed_runtime_identity, self.identity)
+        self.assertEqual(health.urls, (url,))
+        self.assertEqual(self.requests, [request_target])
+
     def test_redirect_remains_pending_and_is_never_followed(self) -> None:
         self.status = 302
         health = read_public_testing_health(self.base_url, "/health")

@@ -389,6 +389,13 @@ original publication proof; it does not discover a replacement project. A later
 readiness probe refuses a different project when the original proof recorded one.
 Legacy proof without a project retains the exact unsuffixed comparison and fails closed
 for a suffixed project.
+Native public qualification shares Odoo's lane health URL resolution with
+monitoring, ordinary replacement and restore planning. It uses the frozen admitted
+lane URL, with legacy profile-derived URLs resolved to the canonical runtime
+identity endpoint. Explicit URLs retain their origin and query; the native stable
+origin and exact identity checks still apply. Retained-copy private qualification
+uses the canonical loopback identity path. An application health response without
+identity cannot complete publication.
 Warm-up and replacement tasks can become healthy on the original key. Redirects,
 transport/framing/JSON errors and nonmapping bodies stay unknown; a final stable
 attributed failure is recovery-only under the original receipt. No fixture or

@@ -32,6 +32,7 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
+from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 from control_plane.dokploy.testing_route import (
     route_document,
     compile_testing_route,
@@ -309,7 +310,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def physical(self, **kwargs: Any) -> dict[str, Any]:
         result = dict(self.retained)
         if kwargs["payload"]["mode"] == "readiness":
-            result["healthy"] = self.old_private_healthy
+            result["healthy"] = self.old_private_healthy and (
+                kwargs["payload"].get("health_path") == DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+            )
         return result
 
     def route_read(
@@ -402,7 +405,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         dispatch_guard(publish)
         return "applied"
 
-    def health(self, base_url: str, path: str) -> HealthcheckEvidence:
+    def health(self, base_url: str, path: str | None = None) -> HealthcheckEvidence:
+        url = base_url if path is None else base_url.rstrip("/") + "/" + path.lstrip("/")
         identity = (
             self.original_identity
             if self.owned is None
@@ -414,7 +418,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         return self.fixture.health.model_copy(
             update={
-                "observed_runtime_identity": identity,
+                "observed_runtime_identity": identity
+                if urlsplit(url).path == DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+                else None,
+                "urls": (url,),
                 "status": "fail"
                 if self.fail_public and identity != self.original_identity
                 else "pass",
@@ -1799,7 +1806,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         self.store.write_odoo_stable_target_replacement_operation_record(self.operation)
 
-        def health(base_url: str, path: str) -> HealthcheckEvidence:
+        def health(base_url: str, path: str | None = None) -> HealthcheckEvidence:
             if self.owned is not None:
                 return HealthcheckEvidence(status="pending", urls=(base_url,))
             return self.health(base_url, path)
@@ -3184,7 +3191,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_hold_after_interrupted_cutover_still_allows_original_inverse_on_resume(self) -> None:
         from control_plane.contracts.promotion_record import HealthcheckEvidence
 
-        def health(base_url: str, path: str) -> HealthcheckEvidence:
+        def health(base_url: str, path: str | None = None) -> HealthcheckEvidence:
             if self.owned is not None:
                 return HealthcheckEvidence(status="pending", urls=(base_url,))
             return self.health(base_url, path)
@@ -3888,7 +3895,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             durable_operation_policy_record,
         )
 
-        def health(base_url: str, path: str) -> HealthcheckEvidence:
+        def health(base_url: str, path: str | None = None) -> HealthcheckEvidence:
             if self.owned is not None:
                 return HealthcheckEvidence(status="pending", urls=(base_url,))
             return self.health(base_url, path)
@@ -4382,7 +4389,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             patch.object(TestingRouteFenceController, "ensure", self.real_route_fence_ensure)
         )
 
-        def health(base_url: str, path: str) -> HealthcheckEvidence:
+        def health(base_url: str, path: str | None = None) -> HealthcheckEvidence:
             self.owned = (
                 json.loads(shell.route_file.read_text()) if shell.route_file.exists() else None
             )
