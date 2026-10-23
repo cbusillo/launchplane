@@ -8,9 +8,12 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
-SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
+SecretEventType = Literal[
+    "created", "rotated", "imported", "validated", "disabled", "relabelled", "resolution_attempted"
+]
 SecretSharingKind = IntegrationAllowanceKind | Literal["site_shared"]
 SecretValueSource = Literal["supplied", "copy", "provider", "generated"]
+SecretValueOrigin = Literal["supplied", "provider", "generated"]
 
 
 class SecretRecord(BaseModel):
@@ -64,6 +67,11 @@ class SecretVersion(BaseModel):
     cipher_alg: Literal["fernet-v1"] = "fernet-v1"
     key_id: str = "launchplane-master-key"
     ciphertext: str
+    value_origin: SecretValueOrigin | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "SecretVersion":

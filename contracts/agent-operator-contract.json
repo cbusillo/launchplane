@@ -46,6 +46,63 @@
     },
     "operations": [
       {
+        "idempotency": "original",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "readback"
+        ],
+        "operation_id": "dry_run_generic_web_deploy_recovery",
+        "path": "/v1/admin/generic-web/deploy-recovery/dry-run",
+        "purpose": "Inspect an exact generic-web original without mutation, including completed testing abandonment readback by its retained reference.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "8cfbb235e6a5cf86aefb0d2cca62a133d4afa53f049b119ba716353002f6ba2c",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "original",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "apply"
+        ],
+        "operation_id": "apply_generic_web_deploy_recovery",
+        "path": "/v1/admin/generic-web/deploy-recovery/apply",
+        "purpose": "Recover a reviewed original or abandon only a fenced testing verifier, preserving unknown history without provider mutation.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_recovery_digest"
+        ],
+        "schema_fingerprint_sha256": "386933a4bfe1b123111068ee033fe1387a1c6a4fe72f6cfd051aa3a7cbdb8dd0",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -68,7 +125,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "266176fbfbe415872876cd0a3f5f1a20395e99f1e10eea8aefefb4f8338da2ac",
+        "schema_fingerprint_sha256": "7d7b87bb458d0fa5dbe3e9ef102590d26e7fb33c002c2ddd0f2b7bc2e9c56a89",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1022,8 +1079,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "61d4f5fb6908c237d74ffaa6161293067bb89665"
+    "source_commit_sha": "ddc39bc89113c1a1659970cd66e248409ccb4d96"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "e679d8bf148ab6cc10bcddc14d18a50ce9f93aec50ec111b53a49ae886da736f"
+  "semantic_digest_sha256": "ddf86755a033262af5b9f50be7531124cf52e4feb2b0b2bcdf0eb841ade90135"
 }

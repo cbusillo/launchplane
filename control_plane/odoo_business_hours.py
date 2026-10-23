@@ -45,6 +45,9 @@ class BusinessHoursHeld(ValueError):
     """No forward effects started; retry the same accepted release later."""
 
 
+_MAXIMUM_COMPANIES = 128
+
+
 def _rows(value: object, *, maximum: int = 128) -> list[dict[str, object]]:
     if not isinstance(value, list) or len(value) > maximum:
         raise ValueError("Calendar evidence is unavailable or truncated.")
@@ -87,7 +90,7 @@ def _permitted_companies(authenticated: object) -> tuple[int, ...]:
         raise ValueError("Company visibility is unavailable.")
     companies = authenticated.get("user_companies")
     allowed = companies.get("allowed_companies") if isinstance(companies, dict) else None
-    if not isinstance(allowed, dict) or not allowed or len(allowed) > 128:
+    if not isinstance(allowed, dict) or not allowed or len(allowed) > _MAXIMUM_COMPANIES:
         raise ValueError("Company visibility is unavailable or exceeds its bound.")
     identifiers: list[int] = []
     for key, value in allowed.items():

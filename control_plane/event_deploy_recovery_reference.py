@@ -26,9 +26,12 @@ class EventDeployRecoveryCoordinates:
     reservation: LaunchplaneIdempotencyRecord
     original_deploy: GenericWebDeployEnvelope
     context: str
+    retained_reference: str = ""
 
     @property
     def reference(self) -> str:
+        if self.retained_reference:
+            return self.retained_reference
         return "event-deploy-" + build_generic_web_deploy_recovery_digest(
             {
                 "reservation": self.reservation.model_dump(mode="json"),
@@ -43,7 +46,45 @@ def resolve_event_deploy_recovery_coordinates(
     product: str,
     context: str,
     fingerprint: Callable[..., str],
+    recovery_reference: str = "",
 ) -> EventDeployRecoveryCoordinates:
+    if recovery_reference:
+        completed = store.read_abandoned_testing_original(product, recovery_reference)
+        if completed is not None:
+            archive = completed.response_payload["abandonment"]
+            original = LaunchplaneIdempotencyRecord.model_validate(archive["original"])
+            changed = {
+                "state",
+                "updated_at",
+                "response_status_code",
+                "response_trace_id",
+                "recorded_at",
+                "response_payload",
+            }
+            if (
+                completed.response_payload.get("recovery", {}).get("recovery_action")
+                != "abandon_testing_original"
+                or original.state != "reconcile_required"
+                or original.model_dump(exclude=changed) != completed.model_dump(exclude=changed)
+            ):
+                raise ValueError("Abandoned original custody changed.")
+            snapshot = decode_generic_web_provider_reconciliation_target(
+                original.reconciliation_key
+            )
+            envelope = GenericWebDeployEnvelope.model_validate(snapshot.original_event_deploy)
+            archived = EventDeployRecoveryCoordinates(original, envelope, context)
+            if (
+                snapshot.product != product
+                or snapshot.context != context
+                or snapshot.instance != "testing"
+                or archived.reference != recovery_reference
+                or fingerprint(
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=envelope.model_dump(mode="json")
+                )
+                != original.request_fingerprint
+            ):
+                raise ValueError("Abandoned original reference changed.")
+            return EventDeployRecoveryCoordinates(completed, envelope, context, recovery_reference)
     candidates = []
     for record in store.list_held_provider_target_reservations():
         if (

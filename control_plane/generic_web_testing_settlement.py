@@ -52,6 +52,7 @@ from control_plane.workflows.ship import build_deployment_record, utc_now_timest
 
 TESTING_PRE_IMAGE_SETTLEMENT_PHASE = "testing_pre_image_settlement"
 TESTING_POST_IMAGE_SETTLEMENT_PHASE = "testing_failure_settlement"
+TESTING_ORIGINAL_ABANDONED = "testing_original_abandoned"
 TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
 TESTING_DISPATCH_REFUSED_SETTLED = "testing_deploy_dispatch_refused_settled"
 TESTING_INERT_INVENTORY_REFUSAL_SETTLED = "testing_deploy_inert_inventory_refusal_settled"
@@ -66,7 +67,8 @@ class _SettlementStore(TestingInputStore, ExecutionRecordStore, Protocol):
 def testing_attempt_was_settled(record: LaunchplaneIdempotencyRecord) -> bool:
     result = record.response_payload.get("result")
     return record.state == "completed" and (
-        record.provider_effect_phase == TESTING_POST_IMAGE_SETTLEMENT_PHASE
+        record.response_payload.get("testing_settlement") == TESTING_ORIGINAL_ABANDONED
+        or record.provider_effect_phase == TESTING_POST_IMAGE_SETTLEMENT_PHASE
         or (
             not record.provider_effect_phase
             and not record.provider_effect_started_at

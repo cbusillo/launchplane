@@ -203,8 +203,6 @@ def evaluate_lane_usage(
         and target.policies.staff_testing_hold.purpose == "staff_testing"
     ):
         return LaneUsageDecision(True, "staff_testing_hold")
-    if usage == "unused":
-        return LaneUsageDecision(False, "unused")
     if not require_unused:
         # This mode protects positive use without requiring negative evidence.
         # Call repair with require_unused=True to evaluate a positive report
@@ -225,7 +223,7 @@ def evaluate_lane_usage(
                 "Non-production repair monitor evidence unavailable",
                 extra={"product": profile.product, "context": target.context, "instance": instance},
             )
-            return LaneUsageDecision(usage != "unknown", "monitor_evidence_unavailable")
+            return LaneUsageDecision(usage == "in_use", "monitor_evidence_unavailable")
         if records:
             ordered = sorted(records, key=lambda record: _timestamp(record.observed_at))
             decision = LaneUsageDecision(
@@ -245,6 +243,8 @@ def evaluate_lane_usage(
                 },
             )
             return decision
+    if usage == "unused":
+        return LaneUsageDecision(False, "unused")
     if usage == "unknown" and instance != "prod":
         return LaneUsageDecision(False, "usage_unknown")
     return LaneUsageDecision(True, "usage_protected")

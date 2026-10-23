@@ -649,6 +649,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
+    require_product_profile_writes,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6782,6 +6783,16 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if bundle.product_profiles or bundle.absent_product_ids:
+                require_product_profile_writes(
+                    bundle.product_profiles,
+                    (
+                        self._read_product_profile_payload(row.payload)
+                        for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                    ),
+                    inventory_records=self._iter_repository_inventory_records(session),
+                    absent_product_ids=bundle.absent_product_ids,
+                )
             if guard_provider is not None:
                 guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
@@ -8310,6 +8321,84 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def _prepare_public_ingress_notification_backlog(self, session: Session, now: str) -> None:
+        from control_plane.contracts.outbox_delivery import (
+            PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
+        )
+
+        scope = "system:incident-notification-backlog"
+        route = "outbox:incident-backlog"
+        key = "current-incident-summary"
+        receipt_id = build_launchplane_mutation_reservation_id(
+            scope=scope, route_path=route, idempotency_key=key
+        )
+        if session.get(LaunchplaneIdempotencyRow, receipt_id) is not None:
+            return
+        statement = (
+            select(LaunchplaneOutboxDeliveryRow)
+            .where(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.provider_operation_key == "",
+                or_(
+                    LaunchplaneOutboxDeliveryRow.state == "pending",
+                    and_(
+                        LaunchplaneOutboxDeliveryRow.state == "running",
+                        LaunchplaneOutboxDeliveryRow.lease_expires_at < now,
+                    ),
+                ),
+            )
+            .order_by(
+                LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        groups: dict[
+            tuple[str, str, str, str],
+            list[tuple[LaunchplaneOutboxDeliveryRow, OutboxDeliveryRecord]],
+        ] = {}
+        for row in session.scalars(statement):
+            record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            attempt = record.payload.get("attempt")
+            destination = record.payload.get("destination")
+            if not isinstance(attempt, dict) or not isinstance(destination, dict):
+                continue
+            if destination.get("kind") not in {"email", "discord"}:
+                continue
+            group_key = (
+                record.aggregate_id,
+                str(attempt.get("policy_id", "")),
+                str(destination.get("kind", "")),
+                str(destination.get("destination_id", "")),
+            )
+            groups.setdefault(group_key, []).append((row, record))
+        for group in groups.values():
+            summary_delivery_id = group[-1][1].delivery_id
+            for row, record in group:
+                self._sync_outbox_delivery_row(
+                    row,
+                    record.model_copy(
+                        update={
+                            "payload": {
+                                **record.payload,
+                                PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY: summary_delivery_id,
+                            }
+                        }
+                    ),
+                )
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=receipt_id,
+            scope=scope,
+            route_path=route,
+            idempotency_key=key,
+            request_fingerprint=receipt_id,
+            response_status_code=200,
+            response_trace_id=receipt_id,
+            recorded_at=now,
+        )
+        session.add(self._idempotency_row(receipt))
+
     def claim_next_outbox_delivery_record(
         self,
         *,
@@ -8322,9 +8411,12 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Outbox delivery claim requires lease_owner.")
         observed_at = now.strip()
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
             if not observed_at:
                 observed_at = self._database_mutation_timestamp(session)
+            self._prepare_public_ingress_notification_backlog(session, observed_at)
             lease_expires_at = self._mutation_lease_expiry(
                 observed_at=observed_at,
                 lease_seconds=lease_seconds,
@@ -8350,10 +8442,18 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 .limit(1)
             )
+            if not admission_allowed(session, observed_at):
+                statement = statement.where(
+                    or_(
+                        LaunchplaneOutboxDeliveryRow.kind != "github_workflow_dispatch",
+                        LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
+                    )
+                )
             if not self.database_url.startswith("sqlite"):
                 statement = statement.with_for_update(skip_locked=True)
             row = session.scalar(statement)
             if row is None:
+                session.commit()
                 return OutboxDeliveryClaimResult(status="empty")
             record = self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
             if record.state == "running" and record.provider_operation_key:
@@ -8440,8 +8540,12 @@ class PostgresRecordStore(HumanSessionStore):
         if not normalized_lease_owner:
             raise ValueError("Outbox delivery update requires lease_owner.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            observed_at = self._database_mutation_timestamp(session)
+            if require_terminal:
+                self._begin_serialized_write(session)
+            else:
+                from control_plane.service_deploy_drain import lock
+
+                lock(self, session)
             statement = (
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(LaunchplaneOutboxDeliveryRow.delivery_id == record.delivery_id)
@@ -8452,6 +8556,7 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.scalar(statement)
             if row is None:
                 return OutboxDeliveryCompletionResult(status="missing")
+            observed_at = self._database_mutation_timestamp(session)
             current_record = self._read_payload(
                 model_type=OutboxDeliveryRecord,
                 payload=row.payload,
@@ -8580,6 +8685,31 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def read_abandoned_testing_original(
+        self, product: str, recovery_reference: str
+    ) -> LaunchplaneIdempotencyRecord | None:
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        records = self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
+                LaunchplaneIdempotencyRow.route_path == GENERIC_WEB_DEPLOY_ROUTE,
+                LaunchplaneIdempotencyRow.state == "completed",
+                LaunchplaneIdempotencyRow.payload["response_payload"]["abandonment"][
+                    "recovery_reference"
+                ].as_string()
+                == recovery_reference,
+            ),
+            order_by=(LaunchplaneIdempotencyRow.record_id,),
+            limit=2,
+        )
+        if len(records) > 1:
+            raise ValueError("Abandoned testing reference is ambiguous.")
+        return records[0] if records else None
 
     def read_generic_web_source_snapshot(
         self, *, product: str, context_name: str, instance_name: str
@@ -21719,6 +21849,12 @@ class PostgresRecordStore(HumanSessionStore):
         assert insert_error is not None
         raise insert_error
 
+    def _iter_repository_inventory_records(
+        self, session: Any
+    ) -> Iterator[RepositoryInventoryRecord]:
+        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)):
+            yield self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
+
     def list_repository_inventory_records(
         self,
         *,
@@ -28720,6 +28856,14 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
+            require_product_profile_writes(
+                (record,),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+                inventory_records=self._iter_repository_inventory_records(session),
+            )
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29050,6 +29194,14 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
+        require_product_profile_writes(
+            (replacement_record,),
+            (
+                self._read_product_profile_payload(item.payload)
+                for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            ),
+            inventory_records=self._iter_repository_inventory_records(session),
+        )
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id

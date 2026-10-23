@@ -59,6 +59,11 @@ from control_plane.dokploy.api import (
     is_transient_dokploy_error,
 )
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.memory_capacity import (
+    PreviewMemoryCapacityRefused,
+    preview_memory_failure_details,
+)
+from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_MESSAGES
 from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
@@ -397,6 +402,8 @@ def resolve_build_provenance_transport(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> BuildProvenanceTransport:
     """Mint the product's read-only build-provenance token from its merge-train App."""
+    if not profile.is_managed_runtime:
+        raise ProductReconcileError("Product has no managed runtime.")
     identity, repository_id = _merge_train_app_identity(
         record_store, profile, purpose="build-provenance"
     )
@@ -521,6 +528,10 @@ def reconcile_testing_target(
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
 ) -> ReconcileOutcome:
     """Deploy the testing lane's desired artifact when it runs anything else."""
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": "testing", "action": "none", "reason": "product_has_no_runtime"}
+        )
     plan, desired = _plan_testing_target(
         record_store=record_store,
         profile=profile,
@@ -931,26 +942,26 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
-        existing = record_store.read_idempotency_record(
-            scope=reconcile_reservation_scope(profile.product),
-            route_path=GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-        )
         from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
 
+        def current_attempt(base_key: str) -> tuple[str, LaunchplaneIdempotencyRecord | None]:
+            key = base_key
+            while True:
+                current = record_store.read_idempotency_record(
+                    scope=reconcile_reservation_scope(profile.product),
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                    idempotency_key=key,
+                )
+                if current is None or not testing_attempt_was_settled(current):
+                    return key, current
+                predecessor = hashlib.sha256(current.record_id.encode()).hexdigest()
+                key = f"{base_key}:after-{predecessor}"
+
         base_idempotency_key = idempotency_key
-        while existing is not None and testing_attempt_was_settled(existing):
-            # A settled operation is immutable. Returning to the same inputs
-            # starts one deterministic successor instead of replaying its failure.
-            predecessor = hashlib.sha256(existing.record_id.encode()).hexdigest()
-            idempotency_key = f"{base_idempotency_key}:after-{predecessor}"
-            existing = record_store.read_idempotency_record(
-                scope=reconcile_reservation_scope(profile.product),
-                route_path=GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key=idempotency_key,
-            )
+        idempotency_key, existing = current_attempt(base_idempotency_key)
         plan["deploy_idempotency_key"] = idempotency_key
-        if existing is None and not _scan_deploy_artifact(profile, plan, desired):
+        artifact_scanned = existing is None
+        if artifact_scanned and not _scan_deploy_artifact(profile, plan, desired):
             return ReconcileOutcome(plan)
         provider = (
             default_generic_web_deploy_provider(
@@ -993,6 +1004,14 @@ def _deploy_generic_web_testing(
                     hold_recorded_by=hold.recorded_by,
                     hold_recorded_at=hold.recorded_at,
                 )
+                return ReconcileOutcome(plan)
+            idempotency_key, existing = current_attempt(base_idempotency_key)
+            plan["deploy_idempotency_key"] = idempotency_key
+            if (
+                existing is None
+                and not artifact_scanned
+                and not _scan_deploy_artifact(profile, plan, desired)
+            ):
                 return ReconcileOutcome(plan)
             adapter.execution_check = check_execution_lock
             # The target execution lock excludes an old worker through provider effects. A new
@@ -1829,6 +1848,10 @@ def reconcile_preview_target(
     lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": "preview", "action": "none", "reason": "product_has_no_runtime"}
+        )
     from control_plane.preview_reservation_recovery import (
         classify_preview_reservation,
         held_preview_reservations,
@@ -2499,6 +2522,9 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        return _preview_failure(plan, error.code)
     except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
         return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
@@ -2517,6 +2543,8 @@ def _run_preview_operation(
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
     summary = record_failure_summary(code)
+    if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
+        summary += preview_memory_failure_details(plan)
     if code == "preview_config_refused":
         keys = env_key_names(cast(list[object], plan.get("missing_keys", [])))
         plan["missing_keys"] = list(keys)
@@ -2633,6 +2661,10 @@ def _run_generic_web_preview_operation(
                 profile=profile,
             )
             status = str(result.get("destroy_status") or "")
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        plan["preview_result_status"] = "refused"
+        return _preview_failure(plan, error.code)
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
@@ -2765,6 +2797,10 @@ def reconcile_product_request(
     if not profile.is_active:
         return ReconcileOutcome(
             {"target": request.target_kind, "action": "none", "reason": "product_inactive"}
+        )
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": request.target_kind, "action": "none", "reason": "product_has_no_runtime"}
         )
     identity = product_repository_identity(record_store, profile)
     if request.target_kind == "preview" and (
@@ -2899,6 +2935,7 @@ def run_product_reconcile_once(
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
             *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            *PREVIEW_MEMORY_FAILURE_MESSAGES,
             "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
@@ -3089,8 +3126,10 @@ def request_product_reconcile_sweep(
     inventory_records = record_store.list_repository_inventory_records()
     profiles = record_store.list_product_profile_records()
     for profile in profiles:
-        if not profile.is_active or not _has_repository_identity(
-            profile, inventory_records, profiles
+        if (
+            not profile.is_active
+            or not profile.is_managed_runtime
+            or not _has_repository_identity(profile, inventory_records, profiles)
         ):
             continue
         if any(lane.instance == "testing" for lane in profile.lanes):

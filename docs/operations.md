@@ -377,20 +377,73 @@ cannot have committed the atomic profile write.
 ## Transactional Outbox Workers
 
 External deliveries now use PostgreSQL outbox rows instead of request-thread
-provider calls when the business transition must commit before the effect. Run
-outbox workers only against Launchplane shared storage:
+provider calls when the business transition must commit before the effect.
+The normal Compose deployment owns the `launchplane-outbox-workers` service,
+which runs the existing dispatcher against shared storage after the API is
+healthy. It uses the same image, bootstrap database wiring, runtime volume and
+managed destination resolver as the service. SIGTERM finishes the current
+delivery and durable attempt before exiting; the container has a five-minute
+stop grace for bounded provider/reconciliation calls and loop waits.
+Standalone workers also require Launchplane shared storage:
 
 ```bash
 uv run launchplane service outbox-workers run \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
 
-For a bounded operational probe or smoke check, run one claim/delivery step:
+The one-step command claims work and can send a real message or dispatch a
+workflow. It is a mutation, not a diagnostic probe:
 
 ```bash
 uv run launchplane service outbox-workers run-once \
   --database-url "$LAUNCHPLANE_DATABASE_URL"
 ```
+
+Before activating a consumer on an existing database, read
+`GET /v1/outbox/inspection` using service-context `operations.read` authority.
+This read sends nothing. It covers pending, running and reconciliation-required
+rows across every delivery kind, including inactive or orphaned aggregates,
+and current enabled notification-policy destinations. It omits message bodies
+and credential values. `limit` defaults to 1000 and may be raised to 5000;
+`complete: false` means counts and destination coverage are incomplete. The
+read is a bounded census, not a transactionally frozen activation approval.
+Destination references still need ownership verification before sending.
+Incident rows include their policy reference, event, existing GitHub issue URL
+and current incident status. Missing incidents remain `unknown`. Workflow rows
+include their queued inputs and credential context name, so a reviewer can
+distinguish dry runs from production effects. These are routing inputs, not
+credential values. Discussion reminders still need their own routing review;
+notification-policy ownership alone does not settle those effects.
+Starting or replacing this composition immediately attempts due queued work;
+deploying it is activation, not a diagnostic read.
+
+Queued incident deliveries whose incident is already resolved complete without
+a provider call. Their terminal outbox action and durable skipped attempt record
+say `superseded_incident_resolved`. This includes queued recovery messages.
+An existing provider-start marker remains an unknown outcome instead of being
+reported as superseded.
+The first dispatcher claim groups the existing pending email and Discord
+incident deliveries by incident, policy and destination in one transaction.
+It includes expired unmarked claims and excludes provider-start markers and
+active leases. Each group retains one summary delivery; the other rows complete
+with `superseded_incident_backlog` and skipped attempts. The summary reads the
+incident's current observation when it sends. This selection is persisted in
+the existing row payload, so a restart cannot revive the discarded backlog.
+The existing idempotency store retains a completion receipt in that same
+transaction, making this a one-time snapshot without a schema change. Worker
+restarts and the `run-once` path reuse its selection; new alerts queued after
+that transaction follow the normal delivery rules.
+The selection receipt does not prove delivery. Activation readback must inspect
+all selected incidents for failed deliveries or exhausted retries as well as
+successful and skipped attempts; an unavailable destination or exhausted summary
+leaves a visible failure and does not revive the superseded backlog.
+GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
+Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
+
+Historical provider retirement records may retain an empty target list. They
+remain skipped reconciliation evidence with `monitoring_intent_changed`, never
+a passing or failing health probe. Incident detail reads preserve that missing
+target evidence rather than inventing a replacement target.
 
 Outbox workers claim due rows with leases and PostgreSQL row locks. Multiple
 workers may run concurrently; the claim query uses `FOR UPDATE SKIP LOCKED` so
@@ -402,6 +455,15 @@ exponential backoff and retain any provider marker so the next attempt
 reconciles before resending. Attempts are bounded by the row's `max_attempts`;
 invalid payloads and exhausted retries become terminal failures. Do not update
 outbox rows manually or clear provider markers to force a retry.
+
+Release-affecting workflow-dispatch claims and all provider-start markers share
+the existing service-deploy admission lock. Replacement waits for an admitted
+dispatch to finish. New
+unstarted dispatches stay queued until the matching replacement image and
+deployment marker confirm startup; an old image cannot resume them. Marked
+deliveries can still reconcile, and notifications can still progress. An expired
+claim without a provider-start marker cannot start a provider and does not hold
+replacement indefinitely. No separate outbox replacement fence is used.
 
 Generic-web promotion workflow dispatches are queued by
 the automation route `POST /v1/drivers/generic-web/prod-promotion-workflow` or
@@ -435,14 +497,11 @@ crash or network ambiguity between marker persistence and run observation stays
 `reconcile_required` with `workflow_dispatch_in_doubt`; admins must not clear
 the marker to force a resend.
 
-Public-ingress monitor GitHub issue notifications are also queued when the
-record store supports the transactional outbox. Observation, incident, and
-pending notification rows commit atomically. Mixed policies queue only the
-GitHub destinations while continuing to deliver and record email and Discord
-attempts directly. Resolved-incident reconciliation verifies the issue is
-actually closed after finding the marker, covering a crash between the marker
-comment and the close request. Email and Discord notification paths remain
-direct-delivery until they are explicitly migrated.
+Public-ingress notifications use the same outbox for GitHub, email and Discord.
+Observation, incident and pending notification rows commit atomically. The
+[incident delivery contract](#lane-health-monitoring) below describes
+destination resolution, retries and uncertain sends. Only file-backed
+rehearsals deliver synchronously.
 
 ## Durable Provider Operations
 
@@ -861,12 +920,59 @@ truthful historical original result while leaving that inventory unchanged.
 Automatic observation is read-only and can adopt only an already saved qualified
 result with matching durable inventory; adoption compares both again in the
 reservation transaction. Other scopes retain direct reviewed-evidence adoption.
+`abandon_testing_original` is a separate, explicit testing-only disposition for
+an exact held event-reconciler original. It requires a `reconcile_required`
+reservation after a post-deploy checkpoint, one unfinished final in-process
+product verifier, terminal preceding provider effects, and the exact original
+successful image deployment. The original lifecycle must retain its prepared
+or held deployment baseline. Production, another lane's target, a staff or
+staging hold, recorded protected use/data/resources, an active worker, unknown
+schedule work, missing receipts or changed evidence refuse abandonment.
+
+Apply holds the product serializer, the original target's execution lock and
+the existing testing authority guard. It rechecks the review and atomically
+completes only the original reservation with a failure receipt. The archive
+contains the original journal and deployment verbatim, `original_outcome:
+unknown`, and possible fixture residue. It changes no provider resource,
+deployment, inventory, lifecycle or execution evidence; it invents no terminal
+fact for the verifier. It neither restores nor enables schedules. The ordinary
+testing reconciler can then deploy its recorded current main, carry the
+captured lifecycle baseline forward and run normal product qualification.
+An equal desired key receives the existing deterministic successor key.
+
+This rebuild keeps the existing testing database. It does not erase or reseed
+data, allocate an independent PostgreSQL recipient, qualify the failed image,
+or promote production. Independent application allocation continues to use
+[testing separation and activation](testing-activation.md); its PostgreSQL
+prerequisite remains separate.
+
+Use the installed `launchplane-write-action.py` recovery commands with an
+outside-checkout request containing `product`, `instance: testing`, the fresh
+service-owned `recovery_reference`, and `reason`. Save
+`generic-web-deploy-recovery-dry-run --payload-file <request>` output privately.
+Review `abandon_testing_original`, `unknown`, and `retry_safe: false`, then use
+`generic-web-deploy-recovery-apply --payload-file <same-request>
+--reviewed-dry-run --expected-recovery-digest <digest>
+--dry-run-evidence-file <saved-output>`. Re-run the same reference dry-run for
+readback: require `completed`, `replay_completed`, and the saved recovery digest.
+A lost apply response retains the request and review for this readback.
+The retained reference reads only that immutable abandonment, even after another
+deployment starts; a missing held reference alone never proves completion.
+Legacy originals without a saved event request remain held. A changed safety
+observation or binding makes the reviewed digest stale; repeat dry-run and review
+before applying. Explicit original-request service calls retain their existing
+deploy authorization; the installed helper uses the safer opaque reference flow.
+The service-marked Director `local_operator` can perform this bounded event-testing
+abandonment and its exact completed replay without the mixed deploy grant.
+Other recovery actions and identities retain their existing authority requirements.
+
 `settle_testing_failure` requires attributable terminal execution and runs only
 the original schedule hold before publishing truthful failure. Its HTTP 202
 recovery envelope preserves the original failed HTTP 502 result and replays
 without effects. An unqualified healthy image retains its separate image fact;
 settlement never creates a successful lane projection. Missing execution proof
-stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+stays `hold_unknown` outside the explicit testing abandonment above, even if
+cleanup is the last saved phase. Receiptless legacy
 `records_commit` alone does not prove image-only work: a current configuration
 without an executor does not establish what the original required. Such originals
 need attributable terminal proof. Where the provider cannot supply it,
@@ -1559,7 +1665,7 @@ and route `service:health-monitor-scheduler`; testing slot keys are namespaced
 separately. The v2 activation starts a new evidence epoch: older half-hour
 receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
-records show alert and recovery delivery.
+records show alert delivery, recovery and superseded resolved-incident deliveries.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
@@ -1794,9 +1900,10 @@ Acknowledgement suppresses reminders for the acknowledged fingerprint. A
 material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
-failure can emit the current reminder. Resolution is never silenced because
-GitHub issue sinks must be closed and other admins must see recovery. Public,
-private, and provider checks use the configured consecutive-pass recovery
+failure can emit the current reminder. Resolution remains a durable incident
+event; the outbox supersedes delivery once the incident is resolved. External
+GitHub issues are therefore not automatically closed by durable recovery
+delivery. Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2045,9 +2152,9 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
-The outbox worker sends email and Discord as well as GitHub notifications, so a
-healthy probe after recovery does not need to manufacture another resolution
-for delivery to resume. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications for
+still-open incidents. Recovery does not manufacture another notification to
+resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
@@ -2065,11 +2172,12 @@ The file-backed rehearsal path retains synchronous delivery; durable service
 recovery uses the DB-backed transition and worker.
 
 GitHub delivery bodies carry a material-event marker for exact replay and a
-stable incident marker for issue recovery. Updates, reminders, and resolutions
+stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
-opening attempt record, then comment or close the recovered issue rather than
-creating a duplicate. Do not clear provider markers or outbox rows to force a
-retry.
+opening attempt record, then comment on the recovered issue rather than
+creating a duplicate. File-backed rehearsals retain synchronous resolution
+delivery and issue closure. Durable deliveries for resolved incidents are
+superseded instead. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped
@@ -3454,8 +3562,9 @@ alone is not proof that an existing testing copy has been repaired.
     testing or dev lane, and a lane with no tracked target record. Every other
     target policy, including the Shopify protected store keys, is left as it is.
   - An unchanged allowance keeps its original `recorded_by` and `recorded_at`.
-  - Both routes first prove the product owns the lane, because authorization
-    names a product while storage selects by context and instance.
+  - Both routes first prove the product owns the lane for every driver,
+    including generic-web, because authorization names a product while storage
+    selects by context and instance.
   - Apply writes with a locking compare-and-write, so a target record changed
     after the review, for example by a domain repair, is refused as `stale`
     rather than overwritten. A retried apply whose first attempt wrote but lost

@@ -92,6 +92,70 @@ class RetainedTestingCopyTests(unittest.TestCase):
             qualify_retained_copy(self.containers, original)
         self.assertEqual(raised.exception.predicate, ReadbackPredicate.CUSTODY)
 
+    def test_unavailable_web_does_not_need_its_database_to_stop_before_rebuild(self) -> None:
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
+    def test_unhealthy_running_web_uses_the_same_unavailable_copy_path(self) -> None:
+        self.containers[0]["State"]["Health"] = {"Status": "unhealthy"}
+        self.containers[0]["State"]["StartedAt"] = "fixture-original-start"
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+        self.assertEqual(
+            frame["web_process"],
+            {
+                "id": self.containers[0]["Id"],
+                "status": "running",
+                "started_at": self.containers[0]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
+
+    def test_removed_web_preserves_database_custody_without_an_original_runtime(self) -> None:
+        self.containers.pop(0)
+        frame, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.assertEqual(frame["type"], "complete")
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertIsNone(frame.get("identity"))
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
+    def test_admitted_unhealthy_process_can_recover_without_inventing_old_identity(self) -> None:
+        self.containers[0]["State"].update(
+            StartedAt="fixture-original-start", Health={"Status": "unhealthy"}
+        )
+        self.containers[0]["Config"]["Env"] = [
+            item
+            for item in self.containers[0]["Config"]["Env"]
+            if not item.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+        ]
+        admitted, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.containers[0]["State"]["Health"]["Status"] = "healthy"
+        current, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(current["type"], "complete")
+        self.assertIsNone(current["identity"])
+        self.assertEqual(current["physical_binding"], admitted["physical_binding"])
+        self.containers[0]["State"]["StartedAt"] = "replacement-start"
+        refused, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(refused["type"], "failed")
+
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
     ) -> None:
@@ -129,7 +193,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
             qualify_retained_copy(self.containers, self.spec)
 
     def run_host(
-        self, *, mode: str = "read", deny: bool = False, extra: dict[str, Any] | None = None
+        self,
+        *,
+        mode: str = "read",
+        deny: bool = False,
+        extra: dict[str, Any] | None = None,
+        inspect_result: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
         payload = {**self.spec, "mode": mode, "identity": self.identity, **(extra or {})}
         commands: list[list[str]] = []
@@ -144,7 +213,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 output = "\n".join(item["Id"] for item in self.containers).encode()
             elif command[1] == "inspect":
                 output = json.dumps(
-                    [item for item in self.containers if item["Id"] in command[2:]]
+                    inspect_result
+                    if inspect_result is not None
+                    else [item for item in self.containers if item["Id"] in command[2:]]
                 ).encode()
             elif command[1:3] == ["volume", "inspect"]:
                 name = command[-1]
@@ -222,3 +293,82 @@ class RetainedTestingCopyTests(unittest.TestCase):
         frame, commands = self.run_host(mode="stop")
         self.assertEqual(frame["kind"], "unavailable")
         self.assertFalse(any(command[1] in {"stop", "rm"} for command in commands))
+
+    def test_stopped_inventory_is_bound_without_starting_a_copy_or_reading_health(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        read, commands = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(read["availability"], "stopped")
+        self.assertEqual(read["identity"], self.identity)
+        self.assertTrue(read["physical_binding"])
+        self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0],
+            read,
+        )
+        for item in self.containers:
+            item["State"].update(
+                Pid=0,
+                ExitCode=1,
+                StartedAt="2026-10-20T11:00:00Z",
+                FinishedAt="2026-10-20T11:01:00Z",
+            )
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0],
+            read,
+        )
+        self.containers[0]["Id"] = "different-stopped-web"
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0]["type"],
+            "failed",
+        )
+
+    def test_absence_requires_complete_inventory_and_never_invents_old_resources(self) -> None:
+        self.assertEqual(
+            self.run_host(extra={"allow_unavailable": True}, inspect_result=[])[0]["type"], "failed"
+        )
+        self.containers = []
+        read, commands = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(read["availability"], "absent")
+        for field in ("identity", "web_id", "physical_binding", "resource_binding"):
+            self.assertNotIn(field, read)
+        self.assertTrue(read["observation_sha256"])
+        self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
+        with self.assertRaises(CopyReadbackRefused) as raised:
+            qualify_retained_copy([], self.spec)
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.SERVICES)
+
+    def test_matching_ids_with_missing_inspect_fields_cannot_establish_absence_or_isolation(
+        self,
+    ) -> None:
+        for field in ("Config", "Mounts", "State"):
+            with self.subTest(field=field):
+                incomplete = deepcopy(self.containers)
+                for item in incomplete:
+                    item.pop(field)
+                self.assertEqual(
+                    self.run_host(extra={"allow_unavailable": True}, inspect_result=incomplete)[0][
+                        "type"
+                    ],
+                    "failed",
+                )
+
+    def test_stopped_legacy_copy_needs_no_fabricated_runtime_identity(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        self.containers[0]["Config"]["Env"] = [
+            item
+            for item in self.containers[0]["Config"]["Env"]
+            if not item.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+        ]
+        read, commands = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.assertEqual(read["type"], "complete")
+        self.assertEqual(read["availability"], "stopped")
+        self.assertIsNone(read["identity"])
+        self.assertFalse(any(command[1] == "exec" for command in commands))

@@ -907,6 +907,8 @@ ODOO_DRIVER_ID = "odoo"
 
 
 def product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
+    if not profile.is_managed_runtime:
+        return False
     profile_driver_id = profile.driver_id.strip()
     if profile_driver_id == ODOO_DRIVER_ID:
         return True

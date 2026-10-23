@@ -13,11 +13,27 @@ from control_plane.testing_local_credentials import (
     TestingCredentialInventoryResponse,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.testing_external_resources import (
+    ExternalResourceInputSnapshot,
+    audit_external_resources,
+    capture_external_resource_inputs,
+)
 
 
 def register_testing_credential_routes(
     app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
 ) -> None:
+    def capture(
+        store: TestingCredentialStore,
+        profiles: tuple[LaunchplaneProductProfileRecord, ...],
+        *,
+        inventory: bool = False,
+    ) -> ExternalResourceInputSnapshot | None:
+        try:
+            return capture_external_resource_inputs(store, profiles, inventory=inventory)
+        except Exception:
+            return None
+
     def authorize(
         product: str,
         response: Response,
@@ -75,14 +91,37 @@ def register_testing_credential_routes(
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_external_resources: bool = False,
     ) -> TestingCredentialAuditResponse:
         profile = authorize(product, response, identity, record_store)
+        snapshot = (
+            capture(cast(TestingCredentialStore, record_store), (profile,))
+            if include_external_resources
+            else None
+        )
+        trace = dependencies.next_trace_id()
+        lanes = audit_testing_credentials(
+            cast(TestingCredentialStore, record_store), product, profile_snapshot=profile
+        )
+        external = (
+            audit_external_resources(
+                cast(TestingCredentialStore, record_store),
+                (profile,),
+                captured=snapshot,
+                trace_id=trace,
+                actor=type(identity).__name__,
+            )
+            if include_external_resources
+            else None
+        )
+        if external is not None and external.failure_code == "inputs_changed":
+            for lane in lanes:
+                lane.status = "unavailable"
         return TestingCredentialAuditResponse(
-            trace_id=dependencies.next_trace_id(),
+            trace_id=trace,
             product=product,
-            lanes=audit_testing_credentials(
-                cast(TestingCredentialStore, record_store), product, profile_snapshot=profile
-            ),
+            lanes=lanes,
+            external_resources=external,
         )
 
     app.add_api_route(
@@ -101,11 +140,15 @@ def register_testing_credential_routes(
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_external_resources: bool = False,
     ) -> TestingCredentialInventoryResponse:
         store = cast(TestingCredentialStore, record_store)
         profiles = store.list_product_profile_records()
         for profile in profiles:
             authorize(profile.product, response, identity, record_store)
+        snapshot = (
+            capture(store, tuple(profiles), inventory=True) if include_external_resources else None
+        )
         lanes = [
             lane
             for profile in profiles
@@ -121,10 +164,27 @@ def register_testing_credential_routes(
                 message="Product inventory changed during the credential audit.",
             )
         # Reading every stored product is complete or refuses; no silently filtered inventory.
+        trace = dependencies.next_trace_id()
+        external = (
+            audit_external_resources(
+                store,
+                tuple(profiles),
+                captured=snapshot,
+                trace_id=trace,
+                actor=type(identity).__name__,
+                inventory=True,
+            )
+            if include_external_resources
+            else None
+        )
+        if external is not None and external.failure_code == "inputs_changed":
+            for lane in lanes:
+                lane.status = "unavailable"
         return TestingCredentialInventoryResponse(
-            trace_id=dependencies.next_trace_id(),
+            trace_id=trace,
             products=sorted(profile.product for profile in profiles),
             lanes=lanes,
+            external_resources=external,
         )
 
     app.add_api_route(

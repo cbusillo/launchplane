@@ -247,6 +247,15 @@ reservation. The webhook request never waits on a deploy.
     reservation and generic-web recovery path. After interruption, the recovery
     admin can derive the reserved fixture email from the deployment ID using
     `fixture_email`; no cleanup mutation runs after its effect fence is lost.
+    Unknown VeriReel exchanges emit a fixed reason and catch site in service logs,
+    with allowlisted method, route, HTTP status and resource type when observable.
+    Verification routes omit their fixture identifier; queries, request values and
+    exception text are never logged. The verifier logs the deployment record ID
+    separately for correlation. These diagnostics leave qualification unknown and
+    do not release the reservation or permit cleanup or replay.
+    Request-body completion expectations register synchronously before browser
+    events resume, so a queued completion cannot pass the listener. The bounded
+    wait still requires the matching finished request and a successful response.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.

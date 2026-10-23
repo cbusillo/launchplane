@@ -1618,6 +1618,7 @@ class GenericWebDeployProviderMutationAdapter:
                 product=profile.product,
                 context=lane.context,
                 instance=lane.instance,
+                recovery=True,
             )
             target = self._resolve_deploy_target()
             provider_target = cast(

@@ -286,6 +286,8 @@ def _canonical_generic_web_lane(lane: ProductLaneProfile) -> ProductLaneProfile:
 
 
 def product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileRecord) -> bool:
+    if not profile.is_managed_runtime:
+        return False
     driver_id = profile.driver_id.strip()
     if driver_id == "generic-web":
         return True
@@ -922,6 +924,7 @@ def _execute_generic_web_deploy_unserialized(
                     cast(DisposableLaneStore, record_store),
                     product=resolved_profile.product,
                     context=resolved_lane.context,
+                    recovery=True,
                     instance=resolved_lane.instance,
                 )
             except (ValueError, AttributeError) as error:

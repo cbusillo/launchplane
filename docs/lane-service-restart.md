@@ -19,21 +19,36 @@ explicit product, context and instance; no access rule is installed.
 
 The service-authenticated Director `local_operator` can also restart an eligible
 testing service under standing direction without a write grant. Immediately
-before the restart checkpoint, under the release lane reservation, it must pass
-the existing [disposable-lane qualification](disposable-lanes.md): current bound
-reproducible and production-isolated evidence, protected-use checks, no staff-testing hold,
-and no target alias. This qualification applies even with an explicit grant.
-Inspect or collect current evidence through `/v1/disposable-lanes/observations`
-before a fresh apply; missing or expired resource/custody evidence returns
-`disposable_lane_safety_unknown`. Completed replay and
+before the restart checkpoint, under the release lane reservation, it checks
+[disposable-lane protections](disposable-lanes.md). Starting its own stopped
+container preserves the image, configuration and volumes, so no fresh collection
+or positive data-custody/isolation proof is required. Staff-testing holds,
+protected use, target aliases and recorded production sharing still block. A
+running service uses that same recovery rule when the existing lane monitors
+verify it is down; a currently unhealthy Odoo web also qualifies repeated HTTP404
+observations from the managed Docker route. Otherwise a running service keeps
+the full current disposable qualification. These checks
+apply to the Director's testing restart even with an explicit grant; other
+callers and production keep their existing policy checks. Resolve holds through
+the testing-hold action and protective observations through
+`/v1/disposable-lanes/observations` before apply. Reset, rebuild, retirement and
+target changes keep their own data and isolation gates. Completed replay and
 original-request reconciliation remain observational when that eligibility
-changes. Production and other scoped callers keep their policy checks;
-terminal-agent credentials cannot restart a service.
+changes. Terminal-agent credentials cannot restart a service.
 
 The active Odoo product lane must have agreeing provider/Compose records and a
-settled current deployment with a runtime identity and immutable artifact
-manifest. Production also requires recorded acceptance of that exact artifact
+passing deployment named by its environment inventory, with an agreeing runtime
+identity and immutable artifact manifest. Newer attempts may be skipped only when
+each is a completed failed deploy with a recognized pre-provider-write `deploy_blocked.*`
+code, no attempted post-deploy work and no uncertain provider outcome. Attempts
+started or finished since the current deployment began are checked regardless
+of their position in history. Newer unfinished attempts, successes, unclassified
+failures and uncertain effects refuse recovery and name the blocking deployment record. The same selection is checked during
+apply and original-request reconciliation. Production also requires recorded acceptance of that exact artifact
 and source commit. The same requirements apply to generic-web Compose lanes.
+Historical rows may omit a start or finish time: their latest available timestamp
+places them relative to the current deployment's required start time. Missing
+both timestamps or a malformed recorded timestamp refuses recovery.
 Other drivers and application targets are refused. Odoo uses
 the lane reservation respected by release enqueues, workers and synchronous
 releases. Generic-web holds its existing product serializer exclusively through
@@ -55,13 +70,21 @@ image, a valid timezone-aware start time and a container health check. Missing o
 without a restart. `web` additionally verifies the lane's HTTP runtime identity
 after restart and requires that endpoint before the restart; other named services verify their own container health and identity.
 
-These checks also apply to generic-web dependency services. A database container
-without the recorded application runtime identity, immutable artifact image or
-container health check is refused. Merely sharing the Compose project does not
-qualify it. This action does not install missing evidence, change a health check,
-or start an unqualified dependency as a workaround. Typical database containers
-cannot qualify through this action. A dependent application restart does not
-recover its database.
+Odoo testing additionally supports the stopped `database` dependency. It must be
+the sole non-one-off database container in the recorded Compose project, created
+no later than the inventory deployment finished. A sole `web` sibling in that
+project must match the inventory's application identity and immutable image,
+whether running or stopped. The database needs a valid start time and container
+health check; its own image ID, configuration and mounts are bound in the plan.
+Inspection and verification accept that same database after it starts;
+fresh dispatch requires it still stopped. Production and generic-web database
+dependencies are refused.
+
+For a stopped Odoo testing lane, inspect, apply and read back `database`, `web`, and `script-runner` in that order.
+Use a separate review file and idempotency key per service. Web's HTTP identity
+verification proves the recovered application on its recorded artifact.
+A web restart alone does not start its Compose dependencies. This action never
+changes database credentials, configuration, health checks or volumes.
 
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
@@ -71,6 +94,8 @@ runtime identity, and health. A failed verification remains a failed receipt.
 Verification retries unavailable inventory and transient provider reads within
 its bounded window; identity changes fail verification and never cause another
 restart. Policy-authorized callers use the current policy, including live revocations.
+Planner refusals retain their fixed, credential-free reason under
+`restart_refused`; unsettled original requests retain reconciliation responses.
 
 ## Product Ops
 

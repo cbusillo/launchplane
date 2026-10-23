@@ -1,3 +1,4 @@
+import control_plane.odoo_business_hours as business_hours
 import json
 import unittest
 from datetime import UTC, datetime
@@ -812,12 +813,29 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
             "POST",
             "/v1/product-profiles",
             headers={"Authorization": "Bearer valid-token"},
-            payload=self.profile.model_copy(update={"odoo_business_hours": None}).model_dump(
-                mode="json"
-            ),
+            payload={**self.profile.model_dump(mode="json"), "odoo_business_hours": None},
         )
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_generic_profile_write_preserves_omitted_policy(self) -> None:
+        from tests.support.http import request
+
+        payload = self.profile.model_dump(mode="json")
+        payload.pop("odoo_business_hours", None)
+        payload["source"] = "profile-metadata-update"
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product),
+            self.profile.model_copy(update={"source": payload["source"]}),
+        )
 
     async def test_generic_profile_write_cannot_overwrite_a_concurrent_policy_apply(self) -> None:
         from tests.support.http import request
@@ -1034,7 +1052,8 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
                             "authenticate"
                         ):
                             response["result"]["user_companies"]["allowed_companies"] = {
-                                str(i): {"id": i, "name": "Company"} for i in range(1, 130)
+                                str(i): {"id": i, "name": "Company"}
+                                for i in range(1, business_hours._MAXIMUM_COMPANIES + 2)
                             }
                         elif params.get("model") == "res.company":
                             if contradiction == "duplicate":

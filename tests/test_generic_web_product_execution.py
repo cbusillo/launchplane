@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 import click
@@ -40,6 +40,7 @@ class _Request:
     def __init__(self, response: _Response, method: str) -> None:
         self.url = response.url
         self.method = method
+        self.resource_type = "fetch" if method == "POST" else "document"
         self.headers = {"next-action": "fixture"}
         self._response = response
 
@@ -103,12 +104,26 @@ class _Page:
             callback(value)
 
     def wait_for_event(self, event: str, *, predicate: Callable[[Any], bool], timeout: int) -> None:
+        self.finish_pending_request(predicate, timeout)
+        if self.browser.failure == "signup-buffered":
+            raise TimeoutError("Completion arrived before the asynchronous waiter registered")
+
+    @contextmanager
+    def expect_request_finished(
+        self, *, predicate: Callable[[Any], bool], timeout: int
+    ) -> Iterator[None]:
+        yield
+        self.finish_pending_request(predicate, timeout)
+
+    def finish_pending_request(self, predicate: Callable[[Any], bool], timeout: int) -> None:
         if timeout <= 0:
             raise AssertionError("Request completion needs a bounded built-in wait.")
         self.browser.events.append("bounded-body-wait")
         for request in self.browser.requests:
             if (
-                self.browser.failure == "billing-pending"
+                self.browser.failure == "signup-buffered"
+                and request.url.endswith("/api/auth/sign-up/email")
+                or self.browser.failure == "billing-pending"
                 and request.url.endswith("/billing")
                 or ("?_rsc=" in request.url and self.browser.failure != "refresh-unknown")
             ) and predicate(request):
@@ -126,6 +141,7 @@ class _Page:
         if path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
             "signup",
             "body_pending",
+            "signup-buffered",
         }:
             if self.browser.failure == "signup":
                 self.event("requestfailed", request)
@@ -321,6 +337,7 @@ class ProductExecutionTests(unittest.TestCase):
     def test_real_verifier_finishes_dynamic_refresh_and_action_responses(self) -> None:
         for failure in (
             "",
+            "signup-buffered",
             "billing-pending",
             "signup-refresh",
             "qr-refresh",
@@ -353,6 +370,52 @@ class ProductExecutionTests(unittest.TestCase):
                 self.assertNotIn("delete-user", self.actions)
                 self.assertEqual(self.recorder.receipt.entries[0].terminal, "")
                 self.assertTrue(self.browser.closed)
+
+    def test_unknown_signup_retains_safe_exchange_cause_without_request_values(self) -> None:
+        with (
+            self.assertLogs(verification.__name__, level="WARNING") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
+            self.verify("signup")
+        output = "\n".join(logs.output)
+        request = next(request for request in self.browser.requests if request.method == "POST")
+        for value in (
+            request.method,
+            request.url.removeprefix("https://video.test"),
+            request.resource_type,
+        ):
+            self.assertIn(value, output)
+        self.assertIn(f"status={request.response().status}", output)
+        self.assertNotIn("https://video.test", output)
+        self.assertNotIn("next-action", output)
+        self.assertNotIn(verification.fixture_email(context().deployment_record_id), output)
+
+    def test_failed_exchange_diagnostic_omits_dynamic_paths_queries_and_transport_errors(
+        self,
+    ) -> None:
+        page = Mock()
+        guard = GenericWebPostDeployGuard()
+        exchanges = verification._TestingPageExchanges(page, "https://video.test", guard)
+        request = Mock(
+            url="https://video.test/v/private-record?_rsc=private-query",
+            method="GET",
+            resource_type="fetch",
+        )
+        response = Mock(request=request, status=200)
+        exchanges.started(request)
+        exchanges.responded(response)
+        page.expect_request_finished.side_effect = TimeoutError("private-transport-detail")
+        with (
+            self.assertLogs(verification.__name__, level="WARNING") as logs,
+            self.assertRaises(TimeoutError),
+        ):
+            exchanges.finish()
+        output = "\n".join(logs.output)
+        self.assertIn("/v/", output)
+        self.assertNotIn("private-", output)
+        self.assertNotIn("?_rsc", output)
+        with self.assertRaises(ProviderMutationUnknownError):
+            guard.require_completed_exchanges()
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
         for failure in ("fill", "assertion", "signup-click", "qr-click"):

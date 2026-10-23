@@ -6467,6 +6467,172 @@
         "summary": "Dry-run or apply a testing lane's staff-testing hold"
       }
     },
+    "/v1/product-onboarding/apply": {
+      "post": {
+        "operationId": "apply_product_onboarding",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "generic_web": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/GenericWebOnboardingIntent"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "manifest": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ProductOnboardingManifest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "mode": {
+                    "default": "apply",
+                    "enum": [
+                      "dry_run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "resolved_target_id": {
+                    "default": "",
+                    "title": "Resolved Target Id",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product"
+                ],
+                "title": "ProductOnboardingApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply product onboarding records"
+      }
+    },
     "/v1/product-profiles/expected-config/apply": {
       "post": {
         "operationId": "apply_product_expected_config",
@@ -15455,6 +15621,112 @@
         "title": "GenericWebMaintenanceCommand",
         "type": "object"
       },
+      "GenericWebOnboardingIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "default_branch": {
+            "default": "main",
+            "title": "Default Branch",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "domain_certificate_type": {
+            "default": "none",
+            "enum": [
+              "none",
+              "letsencrypt"
+            ],
+            "title": "Domain Certificate Type",
+            "type": "string"
+          },
+          "health_path": {
+            "title": "Health Path",
+            "type": "string"
+          },
+          "image_repository": {
+            "title": "Image Repository",
+            "type": "string"
+          },
+          "preview_app_name_prefix": {
+            "default": "",
+            "title": "Preview App Name Prefix",
+            "type": "string"
+          },
+          "preview_base_url": {
+            "title": "Preview Base Url",
+            "type": "string"
+          },
+          "preview_context": {
+            "default": "",
+            "title": "Preview Context",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "project_name": {
+            "default": "",
+            "title": "Project Name",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "testing_context": {
+            "default": "",
+            "title": "Testing Context",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "display_name",
+          "repository",
+          "repository_id",
+          "repository_owner_id",
+          "image_repository",
+          "runtime_port",
+          "health_path",
+          "preview_base_url"
+        ],
+        "title": "GenericWebOnboardingIntent",
+        "type": "object"
+      },
       "GenericWebPreviewDeclaration": {
         "additionalProperties": false,
         "properties": {
@@ -16958,6 +17230,18 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification": {
+            "default": "managed_runtime",
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Classification",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "default_branch": {
             "default": "main",
             "title": "Default Branch",
@@ -16968,6 +17252,7 @@
             "type": "string"
           },
           "driver_id": {
+            "default": "",
             "title": "Driver Id",
             "type": "string"
           },
@@ -17071,7 +17356,8 @@
               "director_standing"
             ],
             "title": "Release On Acceptance",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "repository": {
             "title": "Repository",
@@ -17124,7 +17410,6 @@
           "product",
           "production_use",
           "promotion_workflow",
-          "release_on_acceptance",
           "repository",
           "repository_id",
           "repository_owner_id",
@@ -21253,6 +21538,13 @@
       "MergeTrainStallObservation": {
         "additionalProperties": false,
         "properties": {
+          "blocked_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Blocked Since",
+            "type": "object"
+          },
           "progress_key": {
             "default": "",
             "title": "Progress Key",
@@ -21295,6 +21587,7 @@
         "title": "MergeTrainStallObservation",
         "type": "object",
         "required": [
+          "blocked_since",
           "progress_key",
           "progress_since",
           "queue_suspended",
@@ -32736,6 +33029,570 @@
           "require_logo_verification"
         ]
       },
+      "ProductOnboardingExpectedConfigManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_secret_bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductSecretConfigRequirement"
+            },
+            "title": "Managed Secret Bindings",
+            "type": "array"
+          },
+          "runtime_environment_keys": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductRuntimeConfigRequirement"
+            },
+            "title": "Runtime Environment Keys",
+            "type": "array"
+          }
+        },
+        "title": "ProductOnboardingExpectedConfigManifest",
+        "type": "object"
+      },
+      "ProductOnboardingLaneManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "default": "",
+            "title": "Base Url",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductLaneHealthMonitoringPolicy"
+          },
+          "health_url": {
+            "default": "",
+            "title": "Health Url",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "odoo_data_policy": {
+            "$ref": "#/components/schemas/ProductOdooLaneDataPolicy"
+          },
+          "odoo_prelaunch_rebuild": {
+            "$ref": "#/components/schemas/ProductOdooPrelaunchRebuildPolicy"
+          },
+          "odoo_stable_bootstrap": {
+            "$ref": "#/components/schemas/ProductOdooStableBootstrapPolicy"
+          }
+        },
+        "required": [
+          "instance",
+          "context"
+        ],
+        "title": "ProductOnboardingLaneManifest",
+        "type": "object"
+      },
+      "ProductOnboardingManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "default": "managed_runtime",
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Classification",
+            "type": "string"
+          },
+          "default_branch": {
+            "default": "main",
+            "title": "Default Branch",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "driver_id": {
+            "default": "generic-web",
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "expected_config": {
+            "$ref": "#/components/schemas/ProductOnboardingExpectedConfigManifest"
+          },
+          "health_path": {
+            "default": "",
+            "title": "Health Path",
+            "type": "string"
+          },
+          "historical_contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Historical Contexts",
+            "type": "array"
+          },
+          "image_repository": {
+            "default": "",
+            "title": "Image Repository",
+            "type": "string"
+          },
+          "lanes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOnboardingLaneManifest"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ProductOwnerProfile"
+          },
+          "preview": {
+            "$ref": "#/components/schemas/ProductOnboardingPreviewManifest"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_workflow": {
+            "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
+          },
+          "provider_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOnboardingTargetManifest"
+            },
+            "title": "Provider Targets",
+            "type": "array"
+          },
+          "release_on_acceptance": {
+            "default": "held",
+            "enum": [
+              "held",
+              "promote",
+              "promote_with_rollback_drill",
+              "director_standing"
+            ],
+            "title": "Release On Acceptance",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "runtime_environments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOnboardingRuntimeEnvironmentManifest"
+            },
+            "title": "Runtime Environments",
+            "type": "array"
+          },
+          "runtime_port": {
+            "default": 0,
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "secret_bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOnboardingSecretBindingManifest"
+            },
+            "title": "Secret Bindings",
+            "type": "array"
+          },
+          "source_label": {
+            "default": "product-onboarding",
+            "title": "Source Label",
+            "type": "string"
+          },
+          "updated_at": {
+            "default": "",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "display_name",
+          "repository"
+        ],
+        "title": "ProductOnboardingManifest",
+        "type": "object"
+      },
+      "ProductOnboardingPreviewManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "app_name_prefix": {
+            "default": "",
+            "title": "App Name Prefix",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "copied_env_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Copied Env Keys",
+            "type": "array"
+          },
+          "data_transport_mode": {
+            "default": "none",
+            "enum": [
+              "none",
+              "driver"
+            ],
+            "title": "Data Transport Mode",
+            "type": "string"
+          },
+          "domain_certificate_type": {
+            "default": "none",
+            "enum": [
+              "none",
+              "letsencrypt"
+            ],
+            "title": "Domain Certificate Type",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "omitted_env_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Omitted Env Keys",
+            "type": "array"
+          },
+          "override_env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Override Env",
+            "type": "object"
+          },
+          "preview_domain_env_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Preview Domain Env Keys",
+            "type": "array"
+          },
+          "preview_url_env_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Preview Url Env Keys",
+            "type": "array"
+          },
+          "required_provider_fields": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Provider Fields",
+            "type": "array"
+          },
+          "required_template_env_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Template Env Keys",
+            "type": "array"
+          },
+          "slug_template": {
+            "default": "pr-{number}",
+            "title": "Slug Template",
+            "type": "string"
+          },
+          "template_instance": {
+            "default": "testing",
+            "title": "Template Instance",
+            "type": "string"
+          }
+        },
+        "title": "ProductOnboardingPreviewManifest",
+        "type": "object"
+      },
+      "ProductOnboardingRuntimeEnvironmentManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "title": "Env",
+            "type": "object"
+          },
+          "instance": {
+            "default": "",
+            "title": "Instance",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "env"
+        ],
+        "title": "ProductOnboardingRuntimeEnvironmentManifest",
+        "type": "object"
+      },
+      "ProductOnboardingSecretBindingManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "default": "",
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "default": "",
+            "title": "Instance",
+            "type": "string"
+          },
+          "integration": {
+            "default": "runtime_environment",
+            "title": "Integration",
+            "type": "string"
+          },
+          "secret_id": {
+            "default": "",
+            "title": "Secret Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "disabled",
+            "enum": [
+              "configured",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "context"
+        ],
+        "title": "ProductOnboardingSecretBindingManifest",
+        "type": "object"
+      },
+      "ProductOnboardingTargetManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "compose_path": {
+            "default": "",
+            "title": "Compose Path",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "custom_git_branch": {
+            "default": "",
+            "title": "Custom Git Branch",
+            "type": "string"
+          },
+          "custom_git_url": {
+            "default": "",
+            "title": "Custom Git Url",
+            "type": "string"
+          },
+          "deploy_timeout_seconds": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Timeout Seconds"
+          },
+          "domains": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "enable_submodules": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enable Submodules"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Env",
+            "type": "object"
+          },
+          "healthcheck_enabled": {
+            "default": true,
+            "title": "Healthcheck Enabled",
+            "type": "boolean"
+          },
+          "healthcheck_path": {
+            "default": "",
+            "title": "Healthcheck Path",
+            "type": "string"
+          },
+          "healthcheck_timeout_seconds": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Healthcheck Timeout Seconds"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "project_name": {
+            "default": "",
+            "title": "Project Name",
+            "type": "string"
+          },
+          "require_prod_gate": {
+            "default": false,
+            "title": "Require Prod Gate",
+            "type": "boolean"
+          },
+          "require_test_gate": {
+            "default": false,
+            "title": "Require Test Gate",
+            "type": "boolean"
+          },
+          "source_git_ref": {
+            "default": "origin/main",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "source_type": {
+            "default": "",
+            "title": "Source Type",
+            "type": "string"
+          },
+          "target_id": {
+            "default": "",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "default": "application",
+            "enum": [
+              "compose",
+              "application"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          },
+          "watch_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Watch Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "context",
+          "instance"
+        ],
+        "title": "ProductOnboardingTargetManifest",
+        "type": "object"
+      },
       "ProductOperationalReadiness": {
         "additionalProperties": false,
         "properties": {
@@ -35873,6 +36730,19 @@
             "default": "",
             "title": "Context",
             "type": "string"
+          },
+          "external_provider": {
+            "anyOf": [
+              {
+                "const": "discord_bot",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Provider",
+            "x-launchplane-optional-response": true
           },
           "instance": {
             "default": "",
@@ -39219,6 +40089,15 @@
       "RepoProductMapping": {
         "additionalProperties": false,
         "properties": {
+          "ambiguous_repositories": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous Repositories",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "generated_at": {
             "title": "Generated At",
             "type": "string"
@@ -39274,7 +40153,8 @@
           "driver_id": {
             "default": "",
             "title": "Driver Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "environments": {
             "default": [],
@@ -39317,7 +40197,6 @@
           "classification",
           "contexts",
           "display_name",
-          "driver_id",
           "environments",
           "preview_context",
           "product",

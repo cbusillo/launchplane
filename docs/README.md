@@ -46,6 +46,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   without the product repository calling Launchplane.
 - [testing-deploy-retry.md](testing-deploy-retry.md) — reviewed exact-artifact
   recovery of an exhausted Odoo testing retry budget with retained data.
+- [preview-memory-admission.md](preview-memory-admission.md) — service-owned host
+  memory floors and read-only preview-start admission.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
@@ -134,8 +136,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
   image and secret boundary, and ongoing public hygiene.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
-- [testing-local-credentials.md](testing-local-credentials.md) — Service-generated
-  testing passwords, creation/rebuild integration and names-only overlap audit.
+- [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider
+  observations, service-generated testing passwords, creation/rebuild integration
+  and names-only overlap audit.
 - [testing-local-consumer.md](testing-local-consumer.md) — Recipient-encrypted
   delivery of one testing bridge credential to a local client.
 - [private-testing-transport.md](private-testing-transport.md) — private testing

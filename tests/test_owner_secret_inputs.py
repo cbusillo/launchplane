@@ -159,6 +159,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             secrets._decrypt_secret_value(version.ciphertext, version.key_id), "mail-secret-value"
         )
         self.assertEqual(version.created_by, "github:9001")
+        self.assertEqual(version.value_origin, "supplied")
 
     async def test_non_owner_and_stale_owner_cannot_submit(self) -> None:
         payload = await self.submission()

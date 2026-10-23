@@ -1200,3 +1200,9 @@ export function readProviderHoldAttention(
   if (page.cursor) query.set("cursor", page.cursor);
   return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
 }
+
+export function applyProductOnboarding(
+  payload: import("./generated/openapi.ts").ApplyProductOnboardingData["body"], options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productOnboarding, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
+}

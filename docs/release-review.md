@@ -31,7 +31,9 @@ The policy applies only when that product's `production_use` is `live`.
 Configure it for staff-facing Odoo products before live activation; website
 products remain unselected. A reviewed `operation: clear` disables scheduling for that
 product without requiring a healthy calendar read. Whole-profile POST cannot
-set, change or clear the policy. Re-onboarding and explicitly acknowledged
+set, change or clear the policy; an omitted field preserves the stored selection.
+An explicit null is still a policy change and requires the reviewed clear operation.
+Re-onboarding and explicitly acknowledged
 bootstrap/recovery profile CLI upserts preserve the existing policy and refuse
 concurrent profile changes. The CLI preserves profile fields outside its supported
 flags, including nested image and preview settings. Its direct-DB acknowledgement

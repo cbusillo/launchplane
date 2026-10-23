@@ -48,6 +48,9 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
 from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.testing_rebuild_resume import TestingRebuildResumeRefused, caller_binding
+from control_plane.testing_rebuild_authorization import (
+    capture_director_testing_rebuild_authorization,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 TestingRebuildSource = Literal["empty", "production_restore", "upstream_restore"]
@@ -462,24 +465,33 @@ def register_testing_rebuild_routes(
             ) from error
         now = utc_now_timestamp()
         try:
-            policy_record = read_active_authz_policy_record(record_store)
-        except (LookupError, TypeError) as error:
-            raise common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="authorization_provenance_unavailable",
-                message="The current authorization policy is unavailable.",
-            ) from error
-        try:
-            authorization = capture_durable_operation_authorization(
-                identity=identity,
-                action=action,
-                product=original.product,
-                context=original.context,
-                instances=("testing",),
-                policy_record=policy_record,
-                authorized_at=now,
-            )
+            if original.authorization.grant == "director_testing_rebuild":
+                authorization = capture_director_testing_rebuild_authorization(
+                    identity=identity,
+                    request=original.request,
+                    context=original.context,
+                    store=record_store,
+                    authorized_at=now,
+                )
+            else:
+                try:
+                    policy_record = read_active_authz_policy_record(record_store)
+                except (LookupError, TypeError) as error:
+                    raise common.http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="authorization_provenance_unavailable",
+                        message="The current authorization policy is unavailable.",
+                    ) from error
+                authorization = capture_durable_operation_authorization(
+                    identity=identity,
+                    action=action,
+                    product=original.product,
+                    context=original.context,
+                    instances=("testing",),
+                    policy_record=policy_record,
+                    authorized_at=now,
+                )
             resumed = record_store.resume_native_testing_rebuild(
                 operation=original,
                 authorization=authorization,
