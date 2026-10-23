@@ -147,6 +147,11 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         )
 
     def test_onboarding_recovery_only_renders_original_target_request(self) -> None:
+        normal = self.onboarding_request(None)
+        self.assertEqual(normal.returncode, 0, normal.stderr)
+        original_outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+        original_request = json.loads((self.root / "target-apply-request.json").read_text())
+        (self.root / "authz-apply-request.json").unlink()
         for mode in ("readback", "apply"):
             with self.subTest(mode=mode):
                 result = self.onboarding_request({"mode": mode})
@@ -157,9 +162,11 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
                 self.assertEqual(
                     outputs["idempotency_key"],
-                    "generic-web-onboarding:target:fixture:fixture-testing:v1",
+                    original_outputs["idempotency_key"],
                 )
                 self.assertEqual(outputs["recovery"], "true")
+                if mode == "apply":
+                    self.assertEqual(payload, original_request)
 
     def test_normal_onboarding_keeps_records_and_authz_apply_requests(self) -> None:
         result = self.onboarding_request(None)
