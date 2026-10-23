@@ -936,6 +936,128 @@ the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
 
+A product that Launchplane does not deploy can record its repository, Client,
+standing acceptance and lifecycle metadata when an authorized signed-in admin
+explicitly attests that its Client is the Director. The service verifies the
+Client's GitHub identity and records that attestation through `director_standing`;
+it does not independently determine who the Director is. Other-Client review is
+unsupported here and requires a preview-independent flow before registration.
+Its explicit `classification` is
+`active_awareness`, `support_dependency` or `out_of_scope`, from the existing
+repository-mapping vocabulary. Omitted classification means `managed_runtime`
+and keeps existing serialized profiles unchanged. A non-runtime profile has no
+driver, image, lanes, historical contexts, preview configuration, runtime config
+requirements or business-hours policy. Acceptance metadata does not grant runtime
+authority. Repository mappings retain its real product id and classification;
+ambiguous active repositories are named in `ambiguous_repositories` and omitted
+from the mapping, including its work-request fallback. Other entries stay available.
+
+Before reviewing a registration, confirm that the canonical repository has one
+current tracked [repository-inventory record](#repository-inventory) and that the
+configured [Delivery App](operations.md#github-delivery-identity) already has the
+required read capabilities for that repository. Planning and apply use this
+repository-scoped credential to verify the Client's GitHub identity. Inventory
+records do not install the App or grant access. Missing inventory or unavailable
+installation credentials stops registration; use the existing
+[repository-inventory administration](operations.md#repository-inventory) and
+Delivery App procedures rather than another credential source.
+
+In Product Ops, a signed-in admin opens **Register a Director product**, enters
+its key, name, repository and Client GitHub identity, and explicitly confirms
+that the Client is the Director. **Review registration** writes nothing;
+**Register product** applies that reviewed input and reads the saved profile
+back. Editing the draft invalidates its review. An interrupted apply preserves
+the original draft and operation key for an explicit same-request retry after
+reload. The service verifies the Client login and numeric ID on both planning
+and apply. That verifies the GitHub identity, not whether that person is the
+Director; the signed-in admin's explicit attestation supplies Director standing,
+as on the existing runtime production-use setting.
+If the apply's outcome is known but readback fails, **Review registration again**
+clears only the tab's saved review and keeps its draft for a fresh dry run. If
+that key is already registered, another registration needs a new product key and
+an unclaimed repository; this action does not edit the saved product. Matching
+readback proves the current product matches the reviewed registration, not which
+request created it.
+An uncertain apply retains its original same-request retry even after a later
+refusal. **Open separate registration** opens a fresh tab for another product
+without copying or clearing the original tab's reviewed request or key. Keep the
+original tab open for its same-request retry: closing it or clearing its storage
+loses local recovery information and does not cancel or settle the service
+request. The separate tab uses the existing signed-in session and requires its
+own valid input, fresh review and explicit apply. Its result does not prove the
+earlier registration's outcome.
+
+The existing `POST /v1/product-onboarding/apply` surface uses
+`product_onboarding.plan` for planning (existing apply callers may also plan)
+and `product_onboarding.apply` for apply. A non-runtime manifest carries its
+classification, identity, Client and explicit `director_standing`; its omitted
+driver defaults empty and it has no runtime resources. Apply additionally needs
+a CSRF-checked signed-in admin, the reviewed `plan_sha256` and an
+`Idempotency-Key`. It atomically rechecks product absence and repository
+ownership; committed same-key requests replay their original result. The
+browser form uses this same audited surface. Runtime onboarding retains its
+existing bearer route and bounded Client/acceptance settings.
+
+Runtime-manifest plans and generic-web dry runs also preflight the same profile
+classification and known repository collisions. Runtime planning checks before
+building its resource bundle. A generic-web dry run checks only its planned
+profile with the placeholder target;
+it does not require an already created provider target or a full resource bundle.
+The reviewed digest remains bound to the generic-web intent, and apply retains
+its serialized commit-time ownership check.
+
+Full-profile writes cannot transfer standing acceptance to another repository
+or copied repository identity. Hold acceptance through the existing reviewed
+production-use setting before changing repository fields, then have a signed-in
+admin attest standing again for the new identity. For a non-runtime product,
+retire it first; restore standing before reactivating it. The same retired
+continuation permits changing the recorded Client identity. Reactivation requires
+the same recorded Director-standing attestation.
+
+The ordinary full-profile write cannot create a non-runtime product. Neither
+onboarding nor another profile writer can change an existing profile's
+classification. This registration path cannot convert or hide an existing
+runtime, its resources or its recovery evidence. Runtime webhook/reconcile,
+build, deploy, preview, promotion and health admissions do not activate a
+non-runtime record. Lifecycle activity continues to control repository and
+Client visibility independently of runtime classification.
+
+To replace an inert record with a managed runtime, first read the inert profile
+and submit that complete profile to `POST /v1/product-profiles` with only its
+`lifecycle_state` changed to `retired`, using the existing `product_profile.write`
+authorization and an `Idempotency-Key`. Read it back to verify that its Client
+and acceptance evidence remain, and verify its removal from the active repository
+mapping. Then use existing runtime onboarding with a new product key. Set that
+new record's Client and acceptance mode through their existing bounded routes;
+they are not inherited. An attempted classification change on the old key returns
+`product_classification_change_blocked`. This lifecycle-only replacement applies
+to an inert profile, which cannot own runtime configuration. Retiring runtime
+resources still requires the existing resource-retirement service.
+
+Active mixed/runtime and non-runtime profile writes always refuse equal normalized
+repository names or equal nonempty copied repository IDs. Creating or activating
+an active profile, or changing its repository name or copied IDs, also compares
+known immutable IDs from the highest revision of each inventory stream. This
+includes possible matches from tied revisions and retired inventory as negative
+collision evidence. If no highest-revision stream names a profile's repository,
+retained inventory history for that name supplies possible negative IDs instead.
+A current name claim takes precedence over that history, so reuse of an old name
+does not reserve every repository that previously used it. Existing copied IDs
+remain negative evidence. This also detects an unclaimed historical name when
+both profiles omit copied IDs. Retired profiles do not retain active repository
+ownership.
+
+Missing or ambiguous inventory does not prove distinctness or complete alias
+coverage; only known intersections refuse the acquisition. An unrelated profile's
+stale inventory cannot block ordinary settings writes or add a new inventory
+prerequisite to runtime onboarding. Canonical inventory/profile administration
+remains the supported way to correct stale identity metadata. Inventory evidence
+does not authorize runtime activation or repair names, copied IDs, Client
+acceptance, credentials or enrollment. Mapping still suppresses known
+profile-name/copied-ID conflicts without choosing a winner. The comparison
+snapshot does not serialize PostgreSQL inventory changes with profile writes or
+establish ownership against future inventory changes.
+
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
 instance. These requirements are declarative intent for admin readiness

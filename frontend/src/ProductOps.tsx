@@ -21,6 +21,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
 import { ProductDisplayNamePanel } from "./ProductDisplayNamePanel";
+import { DirectorProductRegistration } from "./DirectorProductRegistration";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
@@ -113,7 +114,7 @@ export function ProductIndexRoute({
     );
   }
   if (resource.status === "ready" && !products.length) {
-    return <><NoProducts onRetry={onRetry} />{attentionPanel}</>;
+    return <>{admin && !fixtureMode ? <DirectorProductRegistration onRefresh={onRetry} /> : null}<NoProducts onRetry={onRetry} canRegister={admin && !fixtureMode} />{attentionPanel}</>;
   }
 
   return (
@@ -142,6 +143,7 @@ export function ProductIndexRoute({
         />
       ) : null}
 
+      {admin && !fixtureMode ? <DirectorProductRegistration onRefresh={onRetry} /> : null}
       <ProductIncidentOverview products={products} serviceAttentionQualifier={serviceAttentionQualifier} />
       {attentionPanel}
 
@@ -1061,7 +1063,7 @@ function ProductWorkspaceSkeleton() {
   );
 }
 
-function NoProducts({ onRetry }: { onRetry: () => void }) {
+function NoProducts({ onRetry, canRegister }: { onRetry: () => void; canRegister: boolean }) {
   return (
     <section className="state-page state-page-onboarding">
       <span className="state-page-icon" aria-hidden="true">
@@ -1072,9 +1074,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use the supported Product Onboarding workflow to record a product profile,
-        stable lanes, runtime target authority, and required grants. This browser
-        does not invent a sample product or infer provider state.
+        {canRegister ? "Use Register a Director product for a product Launchplane does not deploy. For a product with environments, use Product Onboarding to record its lanes and runtime targets." : "Use Product Onboarding to record the product, its lanes and runtime targets."}
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>

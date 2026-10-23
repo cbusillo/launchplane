@@ -16514,6 +16514,18 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification": {
+            "default": "managed_runtime",
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Classification",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "default_branch": {
             "default": "main",
             "title": "Default Branch",
@@ -16524,6 +16536,7 @@
             "type": "string"
           },
           "driver_id": {
+            "default": "",
             "title": "Driver Id",
             "type": "string"
           },
@@ -16627,7 +16640,8 @@
               "director_standing"
             ],
             "title": "Release On Acceptance",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "repository": {
             "title": "Repository",
@@ -16669,8 +16683,6 @@
           "product",
           "display_name",
           "repository",
-          "driver_id",
-          "image",
           "updated_at",
           "source"
         ],
@@ -44848,6 +44860,15 @@
       "RepoProductMapping": {
         "additionalProperties": false,
         "properties": {
+          "ambiguous_repositories": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous Repositories",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "generated_at": {
             "title": "Generated At",
             "type": "string"
@@ -44902,7 +44923,8 @@
           "driver_id": {
             "default": "",
             "title": "Driver Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "environments": {
             "default": [],
@@ -84721,6 +84743,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -85141,6 +85173,17 @@
                   "ProductOnboardingManifest": {
                     "additionalProperties": false,
                     "properties": {
+                      "classification": {
+                        "default": "managed_runtime",
+                        "enum": [
+                          "managed_runtime",
+                          "active_awareness",
+                          "support_dependency",
+                          "out_of_scope"
+                        ],
+                        "title": "Classification",
+                        "type": "string"
+                      },
                       "default_branch": {
                         "default": "main",
                         "title": "Default Branch",
@@ -85177,11 +85220,15 @@
                         "type": "string"
                       },
                       "lanes": {
+                        "default": [],
                         "items": {
                           "$ref": "#/$defs/ProductOnboardingLaneManifest"
                         },
                         "title": "Lanes",
                         "type": "array"
+                      },
+                      "owner": {
+                        "$ref": "#/$defs/ProductOwnerProfile"
                       },
                       "preview": {
                         "$ref": "#/$defs/ProductOnboardingPreviewManifest"
@@ -85200,6 +85247,17 @@
                         },
                         "title": "Provider Targets",
                         "type": "array"
+                      },
+                      "release_on_acceptance": {
+                        "default": "held",
+                        "enum": [
+                          "held",
+                          "promote",
+                          "promote_with_rollback_drill",
+                          "director_standing"
+                        ],
+                        "title": "Release On Acceptance",
+                        "type": "string"
                       },
                       "repository": {
                         "title": "Repository",
@@ -85258,8 +85316,7 @@
                     "required": [
                       "product",
                       "display_name",
-                      "repository",
-                      "lanes"
+                      "repository"
                     ],
                     "title": "ProductOnboardingManifest",
                     "type": "object"
@@ -85611,6 +85668,29 @@
                       "instance"
                     ],
                     "title": "ProductOnboardingTargetManifest",
+                    "type": "object"
+                  },
+                  "ProductOwnerProfile": {
+                    "additionalProperties": false,
+                    "description": "The person who accepts or rejects what customers see for this product.\n\nAn Owner can veto a change but never merge or deploy one. The numeric GitHub id\nis the identity; the login is for mentions and display and may be renamed.",
+                    "properties": {
+                      "github_id": {
+                        "default": "",
+                        "title": "Github Id",
+                        "type": "string"
+                      },
+                      "github_login": {
+                        "default": "",
+                        "title": "Github Login",
+                        "type": "string"
+                      },
+                      "review_label": {
+                        "default": "owner-review",
+                        "title": "Review Label",
+                        "type": "string"
+                      }
+                    },
+                    "title": "ProductOwnerProfile",
                     "type": "object"
                   },
                   "ProductOwnerSecretInput": {
@@ -103887,6 +103967,7 @@
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
+    "/v1/product-onboarding/apply": "apply_product_onboarding",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",
