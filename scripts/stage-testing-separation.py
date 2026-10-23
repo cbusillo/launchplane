@@ -64,6 +64,7 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    retain_original_key = bool(args.idempotency_key.strip())
     applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
     resources = args.mode.startswith("resources-")
     resource_read = args.mode == "resources-read"
@@ -317,7 +318,9 @@ def main() -> int:
                 )
             else:
                 transport["emit_http_error_payload"](
-                    operation="testing-separation", request={"mode": args.mode}, exc=error
+                    operation="testing-separation",
+                    request={"mode": args.mode, "retain_original_key": retain_original_key},
+                    exc=error,
                 )
     except (
         KeyError,
@@ -331,7 +334,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "outcome_unknown" if submitted else "unverified",
-                    "retain_original_key": submitted,
+                    "retain_original_key": retain_original_key,
                 }
             )
         )

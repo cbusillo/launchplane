@@ -9,7 +9,7 @@ import runpy
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 class TestingSeparationClientTests(unittest.TestCase):
@@ -29,7 +29,18 @@ class TestingSeparationClientTests(unittest.TestCase):
             }
         )
 
-    def exercise_resource_roundtrip(self, application: dict[str, object] | None) -> None:
+    def test_original_resource_key_survives_read_transport_and_http_failures(self) -> None:
+        for failure in (
+            URLError("private-read-fixture"),
+            ValueError("private-response-fixture"),
+            HTTPError("https://service.invalid", 403, "refused", Message(), io.BytesIO(b"{}")),
+        ):
+            with self.subTest(failure=type(failure)):
+                self.exercise_resource_roundtrip(None, read_error=failure)
+
+    def exercise_resource_roundtrip(
+        self, application: dict[str, object] | None, *, read_error: Exception | None = None
+    ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -89,8 +100,16 @@ class TestingSeparationClientTests(unittest.TestCase):
                 },
                 "validate_service_url": lambda value: None,
                 "public_trace_id": lambda value: value,
+                "public_code": lambda value: value,
                 "request_launchplane": call,
+                "emit_http_error_payload": lambda **kwargs: print(
+                    json.dumps({"status": "refused", "request": kwargs["request"]})
+                ),
             }
+            if read_error is not None:
+                replies = list(call.side_effect)
+                replies[-1] = read_error
+                call.side_effect = replies
             common = [
                 "--operator-helper",
                 str(helper),
@@ -107,12 +126,14 @@ class TestingSeparationClientTests(unittest.TestCase):
                 application_file = root / "application.json"
                 application_file.write_text(json.dumps(application))
                 common += ["--application-file", str(application_file)]
-            for mode in (
-                "resources-dry-run",
-                "resources-apply",
-                "resources-apply",
-                "resources-read",
-                "resources-read",
+            for index, mode in enumerate(
+                (
+                    "resources-dry-run",
+                    "resources-apply",
+                    "resources-apply",
+                    "resources-read",
+                    "resources-read",
+                )
             ):
                 args = ["client", mode, *common]
                 if mode.endswith("apply"):
@@ -125,13 +146,25 @@ class TestingSeparationClientTests(unittest.TestCase):
                     patch("sys.argv", args),
                     redirect_stdout(output),
                 ):
-                    self.assertEqual(client["main"](), 0, output.getvalue())
+                    self.assertEqual(
+                        client["main"](),
+                        int(read_error is not None and index == 4),
+                        output.getvalue(),
+                    )
                 self.assertNotIn("private-volume", output.getvalue())
             receipt = evidence.with_name(evidence.name + ".receipt.json")
             self.assertEqual(json.loads(receipt.read_text())["result"], completed)
-            self.assertEqual(
-                json.loads(output.getvalue())["preparation"]["state"], "reconcile_required"
-            )
+            returned = json.loads(output.getvalue())
+            if read_error is None:
+                self.assertEqual(returned["preparation"]["state"], "reconcile_required")
+            else:
+                custody = returned.get("request", returned)
+                self.assertTrue(custody["retain_original_key"])
+                self.assertNotIn("private-read-fixture", output.getvalue())
+                self.assertNotIn("private-response-fixture", output.getvalue())
+                if not isinstance(read_error, HTTPError):
+                    self.assertEqual(returned["status"], "unverified")
+                self.assertEqual(call.call_count, 5)
             self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(evidence.read_text())["result"], plan)
             self.assertEqual(

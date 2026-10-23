@@ -65,6 +65,7 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    retain_original_key = bool(args.idempotency_key.strip())
     submitted = False
     try:
         for path in (args.request_file, args.evidence_file):
@@ -161,7 +162,7 @@ def main() -> int:
                             payload.get("trace_id", ""), transport["public_trace_id"]
                         ),
                         "external_identity": observed.model_dump(mode="json"),
-                        "retain_original_key": submitted,
+                        "retain_original_key": retain_original_key,
                     }
                 )
             )
@@ -170,10 +171,10 @@ def main() -> int:
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw)
         ) as replay:
             transport["emit_http_error_payload"](
-                operation="testing-activation", request={"mode": args.mode}, exc=replay
+                operation="testing-activation",
+                request={"mode": args.mode, "retain_original_key": retain_original_key},
+                exc=replay,
             )
-        if submitted:
-            print(json.dumps({"retain_original_key": True}))
     except (
         ValueError,
         KeyError,
@@ -186,7 +187,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "outcome_unknown" if submitted else "unverified",
-                    "retain_original_key": submitted,
+                    "retain_original_key": retain_original_key,
                 }
             )
         )

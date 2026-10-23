@@ -33,8 +33,28 @@ class ActivationClientTests(unittest.TestCase):
     def test_invalid_trace_keeps_provider_backoff_and_original_key(self) -> None:
         self.exercise_review_and_replay(refused=False, external_refusal=True, invalid_trace=True)
 
+    def test_original_activation_key_survives_read_transport_and_http_failures(self) -> None:
+        for mode in ("receipt", "readback"):
+            for failure in (
+                urllib.error.URLError("private-read-fixture"),
+                ValueError("private-response-fixture"),
+                urllib.error.HTTPError(
+                    "https://service.invalid", 403, "refused", Message(), io.BytesIO(b"{}")
+                ),
+            ):
+                with self.subTest(mode=mode, failure=type(failure)):
+                    self.exercise_review_and_replay(
+                        refused=False, read_error=failure, read_mode=mode
+                    )
+
     def exercise_review_and_replay(
-        self, *, refused: bool, external_refusal: bool = False, invalid_trace: bool = False
+        self,
+        *,
+        refused: bool,
+        external_refusal: bool = False,
+        invalid_trace: bool = False,
+        read_error: Exception | None = None,
+        read_mode: str = "receipt",
     ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
@@ -118,6 +138,9 @@ class ActivationClientTests(unittest.TestCase):
                 ),
             ]
             modes = ("dry-run", "apply")
+        if read_error is not None:
+            post.side_effect = [post.side_effect.__next__(), read_error]
+            modes = ("dry-run", read_mode)
         transport: dict[str, Any] = {
             "resolve_settings": lambda args: {
                 "service_url": "https://service.invalid",
@@ -126,6 +149,9 @@ class ActivationClientTests(unittest.TestCase):
             "validate_service_url": lambda url: None,
             "request_launchplane": post,
             "public_trace_id": lambda trace: trace,
+            "emit_http_error_payload": lambda **kwargs: print(
+                json.dumps({"status": "refused", "request": kwargs["request"]})
+            ),
         }
         if invalid_trace:
             transport["public_trace_id"] = Mock(
@@ -155,7 +181,7 @@ class ActivationClientTests(unittest.TestCase):
                 if mode == "apply":
                     args.extend(["--reviewed-dry-run", "--idempotency-key", "original-activation"])
                     apply_args = args
-                elif mode == "receipt":
+                elif mode == "receipt" or (read_error is not None and mode == "readback"):
                     args.extend(["--idempotency-key", "original-activation"])
                 output = io.StringIO()
                 with (
@@ -164,8 +190,23 @@ class ActivationClientTests(unittest.TestCase):
                     redirect_stdout(output),
                 ):
                     expected_refusal = external_refusal and mode == "apply"
-                    self.assertEqual(client["main"](), int(expected_refusal), output.getvalue())
+                    expected_error = read_error is not None and mode == read_mode
+                    self.assertEqual(
+                        client["main"](), int(expected_refusal or expected_error), output.getvalue()
+                    )
                 self.assertNotIn("fixture-private-token", output.getvalue())
+                if expected_error:
+                    returned = json.loads(output.getvalue())
+                    self.assertTrue(returned.get("request", returned)["retain_original_key"])
+                    if not isinstance(read_error, urllib.error.HTTPError):
+                        self.assertEqual(returned["status"], "unverified")
+                    self.assertEqual(
+                        json.loads(evidence.read_text())["result"], plan.model_dump(mode="json")
+                    )
+                    if mode == "readback":
+                        self.assertNotIn("idempotency_key", post.call_args.kwargs)
+                    self.assertEqual(post.call_count, 2)
+                    return
                 if expected_refusal:
                     returned = json.loads(output.getvalue())
                     self.assertEqual(

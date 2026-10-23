@@ -44,6 +44,11 @@ changing the reservation. This status is not resource qualification; keep the
 original key, review and interlock. The client preserves any completed receipt
 and prints the status separately. An uncertain apply also preserves the bounded
 service error code, HTTP status and trace, without response prose or headers.
+Both testing clients keep a supplied original key after a failed read or response
+validation, independently of whether this request submitted work. Their custom
+results report `retain_original_key`; standard HTTP error envelopes keep it in
+`request.retain_original_key`, preserving one result and the helper's refusal
+evidence. Activation readback still sends no idempotency header.
 
 The reviewed specification supplies the profile's actual `runtime_port` and
 `health_path`, the existing provider network name and one explicit state shape:
