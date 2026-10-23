@@ -603,7 +603,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
         def changed(**kwargs: Any) -> dict[str, Any]:
             proof = physical(**kwargs)
             if proof.get("availability") == "available":
-                proof["physical_binding"] = "different-physical-backing"
+                proof.update(
+                    physical_binding="different-physical-backing",
+                    availability="stopped",
+                    web_process={},
+                )
             return proof
 
         with (
@@ -614,6 +618,26 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             self.assert_failed_checkpoint(self.execute())
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
+
+    def test_original_may_stop_between_route_and_custody_reads(self) -> None:
+        self.admit_unhealthy_running()
+        physical = self.physical
+
+        def stopped(**kwargs: Any) -> dict[str, Any]:
+            proof = physical(**kwargs)
+            if proof.get("availability") == "available":
+                proof.update(availability="stopped", web_stopped=True, web_process={})
+            return proof
+
+        with (
+            patch.object(service, "retained_copy_operation", side_effect=stopped),
+            patch.object(
+                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_recovered_original_requires_admitted_process_and_custody(self) -> None:
         self.doCleanups()

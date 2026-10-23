@@ -2017,7 +2017,10 @@ class NativeTestingRebuildExecution:
                 if all(
                     proof.get(key) == self.intent.retained.get(key)
                     for key in ("resource_binding", "physical_binding", "identity")
-                ) and matches_unavailable_web_process(original, proof.get("web_process")):
+                ) and (
+                    proof.get("availability") == "stopped"
+                    or matches_unavailable_web_process(original, proof.get("web_process"))
+                ):
                     return
             raise NativeTestingRebuildAdmissionChanged(
                 "The unavailable predecessor changed before retirement completed."
