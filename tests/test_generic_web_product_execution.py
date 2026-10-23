@@ -8,6 +8,7 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import URLError
+from urllib.parse import urlparse
 
 import click
 
@@ -40,8 +41,12 @@ class _Request:
     def __init__(self, response: _Response, method: str) -> None:
         self.url = response.url
         self.method = method
-        self.resource_type = "fetch" if method == "POST" else "document"
-        self.headers = {"next-action": "fixture"}
+        self.resource_type = "fetch" if method == "POST" or "?_rsc=" in self.url else "document"
+        self.headers = (
+            {"next-action": "fixture"}
+            if method == "POST" and self.url.endswith("/dashboard")
+            else {}
+        )
         self._response = response
 
     def response(self) -> _Response:
@@ -92,14 +97,25 @@ class _Page:
         self.url = "https://video.test"
         self.listeners: dict[str, list[Callable[[Any], None]]] = {}
         self.expected: tuple[Callable[[Any], bool], Any] | None = None
+        self.closed = False
+        browser.pages.append(self)
 
     def on(self, event: str, callback: Callable[[Any], None]) -> None:
         self.listeners.setdefault(event, []).append(callback)
 
     def is_closed(self) -> bool:
-        return self.browser.failure == "disconnected"
+        return self.closed or self.browser.failure == "disconnected"
+
+    def close(self) -> None:
+        if self.browser.failure == "close":
+            raise OSError("Browser connection lost while closing the page")
+        if self.browser.failure == "read-at-close":
+            self.emit("GET", "/billing?_rsc=fixture")
+        self.closed = True
 
     def event(self, event: str, value: Any) -> None:
+        if event == "requestfailed":
+            self.browser.failed.add(value)
         for callback in self.listeners.get(event, []):
             callback(value)
 
@@ -112,6 +128,8 @@ class _Page:
     def expect_request_finished(
         self, *, predicate: Callable[[Any], bool], timeout: int
     ) -> Iterator[None]:
+        if self.is_closed():
+            raise OSError("Page closed before request settlement")
         yield
         self.finish_pending_request(predicate, timeout)
 
@@ -120,6 +138,13 @@ class _Page:
             raise AssertionError("Request completion needs a bounded built-in wait.")
         self.browser.events.append("bounded-body-wait")
         for request in self.browser.requests:
+            if (
+                self.browser.failure == "billing-aborted-in-wait"
+                and request.url.endswith("/billing")
+                and predicate(request)
+            ):
+                self.event("requestfailed", request)
+                raise TimeoutError("Only a request-failed event arrived during the finished wait")
             if (
                 self.browser.failure == "signup-buffered"
                 and request.url.endswith("/api/auth/sign-up/email")
@@ -138,14 +163,32 @@ class _Page:
         self.browser.requests.append(request)
         self.event("request", request)
         self.event("response", response)
-        if path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
+        if path == "/billing" and self.browser.failure in {
+            "billing-aborted",
+            "billing-action-aborted",
+        }:
+            if self.browser.failure == "billing-action-aborted":
+                request.headers["next-action"] = "fixture"
+            self.event("requestfailed", request)
+        elif (
+            path == "/dashboard"
+            and method == "POST"
+            and self.browser.failure == "qr-aborted"
+            or path.startswith("/v/")
+            and self.browser.failure == "public-aborted"
+        ):
+            self.event("requestfailed", request)
+        elif path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
             "signup",
             "body_pending",
             "signup-buffered",
         }:
             if self.browser.failure == "signup":
                 self.event("requestfailed", request)
-        elif path == "/billing" and self.browser.failure == "billing-pending":
+        elif path == "/billing" and self.browser.failure in {
+            "billing-pending",
+            "billing-aborted-in-wait",
+        }:
             pass
         elif "?_rsc=" in path:
             pass
@@ -179,7 +222,12 @@ class _Page:
 
     def require_drained_requests(self) -> None:
         for request in self.browser.requests:
-            if "?_rsc=" in request.url and request not in self.browser.finished:
+            if (
+                request._response.page is self
+                and "?_rsc=" in request.url
+                and request not in self.browser.finished
+                and request not in self.browser.failed
+            ):
                 self.event("requestfailed", request)
                 raise OSError("Navigation or submission abandoned an outstanding product request.")
 
@@ -229,6 +277,8 @@ class _Browser:
         self.events: list[str] = []
         self.requests: list[_Request] = []
         self.finished: set[_Request] = set()
+        self.failed: set[_Request] = set()
+        self.pages: list[_Page] = []
         self.closed = False
 
     def new_context(self) -> Any:
@@ -274,10 +324,14 @@ class ProductExecutionTests(unittest.TestCase):
             browser.events.append("maintenance:" + action)
             if action == "grant-sponsored":
                 self.billing_at_grant = [
-                    request in browser.finished
+                    request in browser.finished or request in browser.failed
                     for request in browser.requests
-                    if request.url.endswith("/billing")
+                    if urlparse(request.url).path == "/billing"
                 ]
+            if action == "delete-user" and failure == "late-read":
+                for page in browser.pages:
+                    if not page.is_closed():
+                        page.emit("GET", "/billing?_rsc=fixture")
             if failure == "maintenance" and action == "grant-sponsored":
                 with patch(
                     "control_plane.workflows.verireel_app_maintenance.urlopen",
@@ -298,7 +352,12 @@ class ProductExecutionTests(unittest.TestCase):
 
         def expect(locator: _Locator) -> Any:
             def visible(**_kwargs: Any) -> None:
-                if failure == "assertion" and locator.role == "heading":
+                if locator.role == "heading" and (
+                    failure == "assertion"
+                    and "/site-config" in locator.page.url
+                    or failure == "billing-assertion"
+                    and urlparse(locator.page.url).path == "/billing"
+                ):
                     raise AssertionError("answered page has unexpected presentation")
                 if failure == "public-refresh" and locator.role == "link":
                     locator.page.emit("GET", "/v/fixture?_rsc=fixture")
@@ -339,6 +398,10 @@ class ProductExecutionTests(unittest.TestCase):
             "",
             "signup-buffered",
             "billing-pending",
+            "billing-aborted",
+            "billing-aborted-in-wait",
+            "late-read",
+            "read-at-close",
             "signup-refresh",
             "qr-refresh",
             "navigation-refresh",
@@ -363,6 +426,10 @@ class ProductExecutionTests(unittest.TestCase):
             "initial-refusal",
             "redirect-refusal",
             "gateway-error",
+            "billing-action-aborted",
+            "qr-aborted",
+            "public-aborted",
+            "close",
         ):
             with self.subTest(failure=failure):
                 with self.assertRaises(ProviderMutationUnknownError):
@@ -418,7 +485,7 @@ class ProductExecutionTests(unittest.TestCase):
             guard.require_completed_exchanges()
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
-        for failure in ("fill", "assertion", "signup-click", "qr-click"):
+        for failure in ("fill", "assertion", "billing-assertion", "signup-click", "qr-click"):
             with self.subTest(failure=failure):
                 with self.assertRaises(click.ClickException):
                     self.verify(failure)

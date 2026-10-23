@@ -51,14 +51,22 @@ from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
 MAX_TRANSIENT_QUALIFICATION_ATTEMPTS = 3
-_TESTING_REQUEST_PATHS = {
+_TESTING_READ_PATHS = {
     "/sign-up",
     "/billing",
     "/dashboard",
     "/site-config",
     "/site-config/billing",
-    "/api/auth/sign-up/email",
 }
+_TESTING_REQUEST_PATHS = _TESTING_READ_PATHS | {"/api/auth/sign-up/email"}
+
+
+def _is_testing_read(request: BrowserRequest) -> bool:
+    return (
+        request.method in {"GET", "HEAD"}
+        and "next-action" not in request.headers
+        and urlparse(request.url).path in _TESTING_READ_PATHS
+    )
 
 
 def _testing_request_path(url: str) -> str:
@@ -400,14 +408,7 @@ class _TestingPageExchanges:
         self.finish_request(response.request)
 
     def finish_request(self, request: BrowserRequest) -> None:
-        if request in self.failed:
-            raise _unknown_testing_effect(
-                "finish_request",
-                "request_failed",
-                request=request,
-                response=self.responses.get(request),
-            )
-        if request not in self.completed:
+        if request not in self.completed and request not in self.failed:
             try:
                 with self.page.expect_request_finished(
                     predicate=lambda finished: finished == request,
@@ -415,22 +416,31 @@ class _TestingPageExchanges:
                 ):
                     pass
             except Exception:
-                _unknown_testing_effect(
-                    "finish_request",
-                    "request_completion_unobserved",
-                    request=request,
-                    response=self.responses.get(request),
-                )
-                raise
+                if request not in self.failed:
+                    _unknown_testing_effect(
+                        "finish_request",
+                        "request_completion_unobserved",
+                        request=request,
+                        response=self.responses.get(request),
+                    )
+                    raise
         response = self.responses.get(request)
-        if response is None or response.status >= 400 or request in self.failed:
+        read_aborted = (
+            request in self.failed
+            and _is_testing_read(request)
+            and (response is None or response.status < 400)
+        )
+        if not read_aborted and (
+            response is None or response.status >= 400 or request in self.failed
+        ):
             raise _unknown_testing_effect(
                 "finish_request",
-                "response_unavailable_or_failed",
+                "request_failed" if request in self.failed else "response_unavailable_or_failed",
                 request=request,
                 response=response,
             )
-        self.completed.add(request)
+        if not read_aborted:
+            self.completed.add(request)
         if request in self.requests:
             self.guard.complete_exchange(self.requests[request])
 
@@ -440,6 +450,18 @@ class _TestingPageExchanges:
         ]:
             for request in pending:
                 self.finish_request(request)
+
+    def close(self) -> None:
+        try:
+            self.page.close()
+        except Exception as error:
+            raise _unknown_testing_effect("close", "browser_lost") from error
+        self.failed.update(
+            request
+            for request in self.requests
+            if request not in self.completed and _is_testing_read(request)
+        )
+        self.finish()
 
 
 def _finish_action(
@@ -506,6 +528,9 @@ def verify_verireel_testing_product(
                         _finish_action(signup.value, exchanges)
                         page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
                         exchanges.finish()
+                        expect(
+                            page.get_by_role("heading", level=1, name=re.compile("billing", re.I))
+                        ).to_be_visible(timeout=30_000)
                         assert_verireel_testing_identity(base_url, context)
                         # Exercise creator denial before turning this fixture into an admin.
                         for path in ("/site-config", "/site-config/billing"):
@@ -564,6 +589,7 @@ def verify_verireel_testing_product(
                                 public_page.get_by_role("link", name=destination, exact=True)
                             ).to_be_visible(timeout=30_000)
                             public_exchanges.finish()
+                            public_exchanges.close()
                         assert_verireel_testing_identity(base_url, context)
                         evidence["creator_verification_status"] = "pass"
                         exchanges.finish()
@@ -615,6 +641,7 @@ def verify_verireel_testing_product(
                             try:
                                 exchanges.finish()
                                 guard.require_completed_exchanges()
+                                exchanges.close()
                                 _maintenance(
                                     root,
                                     context,
