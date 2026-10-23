@@ -406,6 +406,8 @@ export function incidentForFixture(
         incident_event_id: eventId,
         material_fingerprint_sha256: incident.material_fingerprint_sha256,
         notification_sent: !resolved,
+        provider_operation_references: [],
+        provider_reservation_ids: [],
       },
       ...(!resolved
         ? [
@@ -419,6 +421,8 @@ export function incidentForFixture(
               incident_event_id: eventId,
               material_fingerprint_sha256: incident.material_fingerprint_sha256,
               notification_sent: true,
+              provider_operation_references: [],
+              provider_reservation_ids: [],
             },
           ]
         : []),

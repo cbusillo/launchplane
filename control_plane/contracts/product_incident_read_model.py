@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal, Protocol, cast
 
 import click
@@ -38,6 +39,10 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTlsStatus,
 )
 from control_plane.secrets import keyed_secret_payload_fingerprint
+from control_plane.provider_target_holds import (
+    ProviderOperationAttentionReference,
+    ProviderOperationReference,
+)
 
 
 ProductIncidentStatusFilter = Literal["all", "open", "resolved"]
@@ -59,6 +64,10 @@ class ProductIncidentReadStore(Protocol):
     def read_public_ingress_incident_record(
         self, incident_id: str
     ) -> PublicIngressIncidentRecord: ...
+
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord: ...
 
     def list_public_ingress_incident_records(
         self,
@@ -206,6 +215,8 @@ class ProductIncidentObservationSummary(BaseModel):
     incident_event_id: str = ""
     material_fingerprint_sha256: str = ""
     notification_sent: bool = False
+    provider_operation_references: tuple[str, ...] = ()
+    provider_reservation_ids: tuple[str, ...] = ()
 
 
 class ProductIncidentEventSummary(BaseModel):
@@ -288,6 +299,7 @@ class ProductIncidentDetail(BaseModel):
 
     incident: ProductIncidentSummary
     material_evidence: ProductIncidentMaterialEvidence | None = None
+    opening_observation: ProductIncidentObservationSummary | None = None
     observations: tuple[ProductIncidentObservationSummary, ...] = ()
     events: tuple[ProductIncidentEventSummary, ...] = ()
     reminders: tuple[ProductIncidentReminderSummary, ...] = ()
@@ -298,6 +310,7 @@ class ProductIncidentDetail(BaseModel):
 _PRODUCT_INCIDENT_READ_STORE_METHODS = (
     "read_product_profile_record",
     "read_public_ingress_incident_record",
+    "read_public_ingress_observation_record",
     "list_public_ingress_incident_records",
     "list_public_ingress_observation_records",
     "list_public_ingress_incident_event_records",
@@ -448,6 +461,31 @@ def build_product_environment_incident_detail(
         aggregate_id=incident_id,
         limit=200,
     )
+    try:
+        opening = record_store.read_public_ingress_observation_record(
+            incident.opened_observation_id
+        )
+    except FileNotFoundError:
+        opening = None
+    if opening is not None and (
+        opening.record_id != incident.opened_observation_id
+        or opening.incident_id != incident.incident_id
+        or (
+            opening.product,
+            opening.context,
+            opening.instance,
+            opening.check_name,
+            opening.check_kind,
+        )
+        != (
+            incident.product,
+            incident.context,
+            incident.instance,
+            incident.check_name,
+            incident.check_kind,
+        )
+    ):
+        opening = None
     return ProductIncidentDetail(
         incident=build_product_incident_summary(
             reminder_states=record_store.list_public_ingress_incident_reminder_state_records(
@@ -458,20 +496,8 @@ def build_product_environment_incident_detail(
             incident=incident,
         ),
         material_evidence=_material_evidence(incident.material_fingerprint),
-        observations=tuple(
-            ProductIncidentObservationSummary(
-                record_id=record.record_id,
-                purpose=record.purpose,
-                observed_at=record.observed_at,
-                status=record.status,
-                failure_code=record.failure_code or "",
-                summary=_observation_summary(record),
-                incident_event_id=_display_reference("event", record.incident_event_id),
-                material_fingerprint_sha256=record.material_fingerprint_sha256,
-                notification_sent=record.notification_sent,
-            )
-            for record in observations
-        ),
+        opening_observation=_observation_read_summary(opening) if opening else None,
+        observations=tuple(_observation_read_summary(record) for record in observations),
         events=tuple(
             ProductIncidentEventSummary(
                 event_id=_display_reference("event", record.event_id),
@@ -708,6 +734,42 @@ def _observation_summary(record: PublicIngressObservationRecord) -> str:
 def _event_summary(record: PublicIngressIncidentEventRecord) -> str:
     return (
         f"Launchplane recorded the '{record.event}' incident event with reason '{record.reason}'."
+    )
+
+
+def _observation_read_summary(
+    record: PublicIngressObservationRecord,
+) -> ProductIncidentObservationSummary:
+    references: set[str] = set()
+    reservation_ids: set[str] = set()
+    if record.check_kind == "provider" and record.failure_code == "deploy_fence_held":
+        fingerprint = record.material_fingerprint
+        for value in fingerprint.route_authority.target_keys if fingerprint else ():
+            reference = ProviderOperationReference.parse(
+                value
+            ) or ProviderOperationAttentionReference.parse(value)
+            if reference is not None:
+                references.add(reference.encode())
+                reservation_ids.add(reference.record_id)
+            elif value == "provider-operation:unavailable":
+                references.add(value)
+        for target in record.targets:
+            if target.target == "provider":
+                reservation_ids.update(
+                    re.findall(r"\bmutation-reservation-[0-9a-f]{64}\b", target.summary)
+                )
+    return ProductIncidentObservationSummary(
+        record_id=record.record_id,
+        purpose=record.purpose,
+        observed_at=record.observed_at,
+        status=record.status,
+        failure_code=record.failure_code or "",
+        summary=_observation_summary(record),
+        incident_event_id=_display_reference("event", record.incident_event_id),
+        material_fingerprint_sha256=record.material_fingerprint_sha256,
+        notification_sent=record.notification_sent,
+        provider_operation_references=tuple(sorted(references)),
+        provider_reservation_ids=tuple(sorted(reservation_ids)),
     )
 
 
