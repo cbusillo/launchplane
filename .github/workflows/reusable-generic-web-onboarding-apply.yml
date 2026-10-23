@@ -6,9 +6,9 @@ name: Reusable Generic Web Onboarding Apply
     inputs:
       allocation_control:
         description: >-
-          Closed recovery JSON: mode (readback or apply), optional original
+          Closed allocation JSON: mode (readback or apply), optional original
           idempotency_key, retain_allocation, expected_allocation_custody_sha256.
-          Recovery never applies product or authorization records.
+          Including mode selects recovery without product or authz record apply.
         required: false
         default: ""
         type: string
@@ -78,21 +78,22 @@ jobs:
           retain=false
           custody=""
           if [ -n "$ALLOCATION_CONTROL" ]; then
-            jq -e --arg key "$idempotency_key" '
+            jq -e '
               type == "object"
               and (keys - ["mode", "idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"] | length == 0)
-              and (.mode == "readback" or .mode == "apply")
-              and ((.idempotency_key // $key) == $key)
-              and ((.retain_allocation // false) | type == "boolean")
-              and ((.expected_allocation_custody_sha256 // "") | type == "string")
+              and ((has("mode") | not) or .mode == "readback" or .mode == "apply")
+              and (if has("idempotency_key") then (.idempotency_key | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")) else true end)
+              and (if has("retain_allocation") then (.retain_allocation | type == "boolean") else true end)
+              and (if has("expected_allocation_custody_sha256") then (.expected_allocation_custody_sha256 | type == "string") else true end)
             ' <<< "$ALLOCATION_CONTROL" >/dev/null
-            recovery=true
-            mode="$(jq -r '.mode' <<< "$ALLOCATION_CONTROL")"
+            recovery="$(jq -r 'has("mode")' <<< "$ALLOCATION_CONTROL")"
+            mode="$(jq -r '.mode // "apply"' <<< "$ALLOCATION_CONTROL")"
+            idempotency_key="$(jq -r --arg key "$idempotency_key" '.idempotency_key // $key' <<< "$ALLOCATION_CONTROL")"
             retain="$(jq -r '.retain_allocation // false' <<< "$ALLOCATION_CONTROL")"
             custody="$(jq -r '.expected_allocation_custody_sha256 // ""' <<< "$ALLOCATION_CONTROL")"
           fi
           if [ "$retain" = true ]; then
-            if [ "$mode" != apply ] || ! [[ "$custody" =~ ^[a-f0-9]{64}$ ]]; then
+            if [ "$recovery" != true ] || [ "$mode" != apply ] || ! [[ "$custody" =~ ^[a-f0-9]{64}$ ]]; then
               echo "Retention requires apply and the reviewed custody digest." >&2
               exit 1
             fi

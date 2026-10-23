@@ -428,6 +428,14 @@ class ApplicationStateVolumeAdapter:
         )
         if plan is None:
             if request.mode == "readback" or request.retain_allocation:
+                legacy = store.read_idempotency_record(
+                    scope=scope, route_path=ROUTE, idempotency_key=operation_key
+                )
+                if legacy is not None and not legacy.reconciliation_key:
+                    raise StateVolumeRefusal(
+                        "application_allocation_legacy_receipt",
+                        "Original setup has a legacy receipt without allocation custody; repeat unchanged apply with the original key to replay it.",
+                    )
                 raise ValueError("Original allocation is unavailable to this caller.")
             host, _token = source.read_dokploy_config(control_plane_root=root)
             intent: dict[str, Any] = {
@@ -753,8 +761,12 @@ class ApplicationStateVolumeAdapter:
                     ),
                 )
             )
+            allocation_names = self.plan_result()["allocation"]
+            assert isinstance(allocation_names, dict)
             creation["allocation"] = {
-                **self.plan_result(),
+                **allocation_names,
+                "allocation_id": self.intent["plan_id"],
+                "plan_sha256": self.intent["plan_sha256"],
                 "configuration_matches": configuration_verified,
                 "configuration_evidence": "matches" if configuration_verified else "unavailable",
                 "allocation_state": "adopted",

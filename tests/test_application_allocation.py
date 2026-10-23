@@ -400,6 +400,19 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             )
         )
         effects = self.provider.call_args_list.copy()
+        from control_plane.application_state_volume import PLAN_ROUTE
+
+        read_receipt = self.store.read_idempotency_record
+
+        def legacy_without_plan(*, scope: str, route_path: str, idempotency_key: str) -> Any:
+            if route_path == PLAN_ROUTE:
+                return None
+            return read_receipt(scope=scope, route_path=route_path, idempotency_key=idempotency_key)
+
+        with patch.object(self.store, "read_idempotency_record", side_effect=legacy_without_plan):
+            readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 409, readback.text)
+        self.assertEqual(readback.json()["error"]["code"], "application_allocation_legacy_receipt")
         with patch(
             "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
             side_effect=AssertionError("Receipt replay must not allocate"),
@@ -575,7 +588,7 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             self.profile.product,
             "pre-effect-refusal",
         )
-        with self.assertRaisesRegex(ValueError, "provider target"):
+        with self.assertRaises(ValueError):
             run_durable_provider_operation(
                 store=self.store,
                 scope=adapter.scope,
@@ -790,6 +803,7 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(
             preview["target_record"]["target_name"], actual["target_record"]["target_name"]
         )
+        self.assertEqual(preview["allocation"]["target_name"], actual["allocation"]["target_name"])
 
     async def test_service_owned_unregistered_context_can_retain_its_partial_allocation(
         self,

@@ -128,7 +128,7 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             json.dumps({"result": {"plan_sha256": "authz-plan", "configuration": {}}})
         )
         (self.root / "authz-reconcile-request.json").write_text("{}")
-        if control is not None:
+        if isinstance(control, dict) and "mode" in control:
             for name in ("onboarding-plan.json", "authz-plan.json", "authz-reconcile-request.json"):
                 (self.root / name).unlink()
         return self.run_step(
@@ -192,10 +192,25 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         self.assertTrue(payload["retain_allocation"])
         self.assertFalse((self.root / "authz-apply-request.json").exists())
 
-    def test_onboarding_refuses_control_that_changes_original_scope_or_key(self) -> None:
+    def test_onboarding_can_use_a_fresh_explicit_key_after_custody_resolution(self) -> None:
+        normal = self.onboarding_request(None)
+        self.assertEqual(normal.returncode, 0, normal.stderr)
+        original = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+        for control, recovery in (
+            ({"idempotency_key": "fresh-reviewed-key"}, "false"),
+            ({"mode": "readback", "idempotency_key": "fresh-reviewed-key"}, "true"),
+        ):
+            result = self.onboarding_request(control)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+            self.assertEqual(outputs["idempotency_key"], control["idempotency_key"])
+            self.assertNotEqual(outputs["idempotency_key"], original["idempotency_key"])
+            self.assertEqual(outputs["recovery"], recovery)
+
+    def test_onboarding_refuses_control_that_changes_scope_or_has_invalid_key(self) -> None:
         for control in (
             {"mode": "readback", "context": "other"},
-            {"mode": "readback", "idempotency_key": "different"},
+            {"mode": "readback", "idempotency_key": "key\ninjected=value"},
             {"mode": "readback", "retain_allocation": True},
         ):
             with self.subTest(control=control):

@@ -422,6 +422,8 @@ def _assert_write_bundle_absent(
 
 class ProductAuthorityBundleTransactionTests(unittest.TestCase):
     def test_adopted_target_snapshot_fences_the_entire_bundle(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+
         for backend in ("sqlite", "filesystem"):
             for changed in ("target", "identity"):
                 with (
@@ -457,7 +459,7 @@ class ProductAuthorityBundleTransactionTests(unittest.TestCase):
                         store.write_dokploy_target_id_record(
                             identity.model_copy(update={"target_id": "changed"})
                         )
-                    with self.assertRaises(ValueError):
+                    with self.assertRaises(DokployTargetRecordChanged):
                         store.write_product_authority_bundle(bundle)
                     self.assertFalse(store.list_product_profile_records())
 

@@ -567,11 +567,13 @@ class FilesystemRecordStore:
                             _context_instance_record_id(expected.context, expected.instance),
                         )
                     except FileNotFoundError as error:
-                        raise ValueError(
+                        raise DokployTargetRecordChanged(
                             "Adopted target disappeared before onboarding commit."
                         ) from error
                     if current != expected:
-                        raise ValueError("Adopted target changed before onboarding commit.")
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")

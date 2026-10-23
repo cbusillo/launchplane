@@ -18854,7 +18854,7 @@ def create_launchplane_fastapi_app(
                     onboarding_manifest = onboarding_manifest.model_copy(
                         update={"provider_targets": (target,)}
                     )
-            except ValueError as error:
+            except (ValueError, FileNotFoundError) as error:
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,

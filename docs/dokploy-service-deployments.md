@@ -297,10 +297,13 @@ reviewed readback. Keep every other setup input unchanged. Apply retains its
 exact confirmation and reason. Other operations do not accept allocation controls.
 
 The protected generic-web onboarding worker accepts an optional allocation_control
-JSON input with mode readback or apply. A nonempty control selects recovery only:
-it never applies product records or authorization records. Its original key stays
-`generic-web-onboarding:target:<product>:<testing_context>:v1`; an optional
-idempotency_key must equal that key. Retention additionally requires
+JSON input. Including mode readback or apply selects recovery only: it never
+applies product records or authorization records. The default key stays
+`generic-web-onboarding:target:<product>:<testing_context>:v1`. An explicit
+idempotency_key selects a stable original key for both normal apply and recovery.
+Use a fresh key only after reviewed retention or a confirmed pre-effect refusal;
+the service refuses fresh keys while unresolved custody still holds the lane.
+A key-only envelope runs normal onboarding under that key. Retention additionally requires
 retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
 the original target request artifact digest even during recovery. Recovery needs
 no product or authorization plan artifacts. Successful product registration keeps
@@ -310,7 +313,11 @@ snapshots atomically before writing records.
 The worker interface and caller migration follow the two-landing policy in
 [GitHub Actions security](github-actions-security.md). The worker contract lands
 first with caller pins unchanged. A later change pins every caller to that exact
-landed commit before forwarding allocation_control. Neither source landing grants
+landed commit before forwarding allocation_control. During that source window,
+the old pinned onboarding worker can only continue by rerunning its original
+apply; its readback and retention interface becomes callable after the follow-up
+pin migration. Complete the caller landing immediately after the worker landing.
+Neither source landing grants
 access or activates the new worker trust anchor; those remain separate operations.
 
 ### Testing application state volume

@@ -2941,6 +2941,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             write_bundle = PostgresRecordStore.write_product_authority_bundle
 
+            with patch.object(
+                PostgresRecordStore,
+                "read_dokploy_target_id_record",
+                side_effect=FileNotFoundError("fixture missing identity"),
+            ):
+                missing_status, missing_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(missing_status, 400, missing_payload)
+            self.assertFalse(store.list_product_profile_records())
+
             def race_target(current_store: PostgresRecordStore, bundle: Any) -> None:
                 concurrent = adopted_target.model_copy(update={"target_name": "concurrent-target"})
                 store.write_dokploy_target_record(concurrent)
