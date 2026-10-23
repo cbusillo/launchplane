@@ -13784,6 +13784,17 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        expected_revision = request.headers.get("If-Match", "")
+        if expected_revision and (
+            existing_profile is None
+            or expected_revision != f'"{product_profile_record_sha256(existing_profile)}"'
+        ):
+            raise _launchplane_http_error(
+                status_code=412,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message="Product profile changed since review; read and review it again.",
+            )
         if existing_profile is not None:
             preserved_fields = {
                 field: getattr(existing_profile, field)
