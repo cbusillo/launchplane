@@ -334,6 +334,20 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
 
+    def test_successful_rebuild_recovers_attention_despite_retained_credential_refusal(
+        self,
+    ) -> None:
+        self.reconcile(last_failed_error_code="deployment_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.reconcile(last_failed_error_code="deploy_blocked.retained_database_credential_changed")
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+        self.now += timedelta(minutes=1)
+        self.deploy("new", self.now)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
     def test_preplan_read_failure_recovers_without_an_unnecessary_redeploy(self) -> None:
         self.reconcile(desired_artifact_id="", last_failed_error_code="testing_reconcile_failed")
         self.monitor()
