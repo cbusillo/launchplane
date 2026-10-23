@@ -79,6 +79,18 @@ prerequisite failed.
 | `token_rejected` | That side's existing token was rejected; use the Director's credential-entry process. |
 | `probe_failed`, `runtime_changed`, `authority_changed` or `evidence` | Inspect correlated service/runtime evidence; do not replay the identity check or change the hold to diagnose it. |
 
+When production's probe returns typed `settings_unavailable`, the response retains
+the two verified testing hashes only after checking testing authority and
+production runtime selection again. All other production failures, a testing-domain
+mismatch or detected authority/runtime drift discard them. The response still reports
+`separation=unknown` and exits nonzero. These partial hashes are testing identity,
+not a successful comparison with the managed production lane. An agent with
+an independently verified business-store identity can compare the same forms:
+SHA-256 of the exact lowercase canonical `myshopify.com` domain and the full
+`gid://shopify/Shop/<id>` string, with no trailing newline. A numeric ID hash
+cannot be compared with a GraphQL GID hash. Both hashes must differ; equality of
+either identifies the same store.
+
 Completed comparisons use `stage=complete` and an empty reason. Both `same`
 and `separate` are completed comparisons; only `separate` permits exit zero.
 
