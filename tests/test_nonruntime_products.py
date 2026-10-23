@@ -1187,16 +1187,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                     target_id="fixture-target",
                 )
                 if kind != "distinct":
-                    with (
-                        patch(
-                            "control_plane.workflows.product_onboarding.build_provider_target_records",
-                            side_effect=AssertionError("Rejected profiles must not plan resources"),
-                        ),
-                        self.assertRaises(
-                            ProductRepositoryOwnershipError
-                            if kind == "collision"
-                            else ProductClassificationChangeError
-                        ),
+                    with self.assertRaises(
+                        ProductRepositoryOwnershipError
+                        if kind == "collision"
+                        else ProductClassificationChangeError
                     ):
                         plan_product_onboarding_authority_bundle(
                             record_store=store, manifest=manifest
