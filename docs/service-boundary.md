@@ -646,15 +646,21 @@ Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
-The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-from that canonical export. `(cd frontend && pnpm check:openapi-drift)` regenerates
-the checked schemas and agent contract in temporary paths and fails on backend
-contract drift. The TypeScript client at `frontend/src/generated/openapi.ts` is
-ignored rather than committed, so concurrent client generation cannot create a
-merge conflict. Development and both TypeScript checks regenerate it from the
-checked UI schema; production builds (including the container) run the type check.
-Use `(cd frontend && pnpm generate:openapi-types)` for generation alone. No custom
-merge driver or train candidate regeneration is required. The canonical
+The frontend derives `frontend/generated/openapi-ui.json` from that export.
+Both JSON files and the TypeScript client at `frontend/src/generated/openapi.ts`
+are ignored build artifacts. Each schema replaces its prior file atomically so
+concurrent readers receive a complete document. Frontend tests, development, type checks and builds
+export schemas before consuming them. Docker provides Python and uv in its
+frontend build stage. The browser-container wrapper exports on the host before
+running the Node-only `test:browser:prepared` consumer inside its private namespace.
+That prepared command requires the wrapper's generated schemas.
+Python tests generate their UI fixtures in temporary paths; inventory reads derive
+the canonical document directly from the Python exporter.
+`(cd frontend && pnpm check:openapi-drift)` still compares the committed runtime
+agent contract with a temporary Python export. Use
+`(cd frontend && pnpm generate:openapi)` after a backend contract change and commit
+only the agent contract. No custom merge driver or train candidate regeneration
+is required. The canonical
 `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
 browser-safe POST path and stable operation id; slicing fails closed when a

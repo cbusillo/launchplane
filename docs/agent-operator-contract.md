@@ -26,7 +26,7 @@ uv run launchplane service export-agent-contract \
   --output contracts/agent-operator-contract.json
 ```
 
-Check every generated contract without changing checked-in files:
+Check the runtime agent/admin contract without changing checked-in files:
 
 ```bash
 (cd frontend && pnpm check:openapi-drift)
