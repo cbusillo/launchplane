@@ -6050,6 +6050,89 @@
         "title": "DiscordBotResourceObservation",
         "type": "object"
       },
+      "DiscordIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/DiscordIdentityResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "DiscordIdentityResponse",
+        "type": "object"
+      },
+      "DiscordIdentityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "default": "",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "configuration_unavailable",
+                  "inputs_changed",
+                  "credential_ineligible"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiscordBotResourceObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable",
+              "matches_production"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version_id": {
+            "default": "",
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "title": "DiscordIdentityResult",
+        "type": "object"
+      },
       "DiscussionTopicInput": {
         "additionalProperties": false,
         "properties": {
@@ -92352,6 +92435,124 @@
           }
         },
         "summary": "Plan or apply product environment config"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/discord-identity": {
+      "get": {
+        "operationId": "read_testing_discord_identity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscordIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Identify the stored testing Discord bot without credential output or qualification"
       }
     },
     "/v1/products/{product}/environments/{environment}/health-history": {
