@@ -2,6 +2,7 @@ import socket
 from urllib import request as urllib_request
 import configparser
 import importlib
+from http.client import IncompleteRead
 import os
 import base64
 import subprocess
@@ -198,58 +199,53 @@ class ShopifyComparisonTests(unittest.TestCase):
                 update={"instance": "prod", "runtime_identity": self.production_runtime_identity}
             )
         )
-        self.environment = {
-            "PLATFORM_INSTANCE": "testing",
-            RUNTIME_IDENTITY_ENV_KEY: self.fixture.identity.model_dump_json(),
-        }
-        self.real_runtime_identity = comparison.runtime_identity
+        self.real_production_identity = comparison.production_identity
+        self.real_testing_identity = comparison.testing_identity
         self.observation: dict[str, str] = {}
         network = patch.object(
             socket, "create_connection", side_effect=AssertionError("No network in fixture")
         )
         network.start()
         self.addCleanup(network.stop)
-        self.calls = []
+        mocks = []
         for patcher in (
             patch.object(
                 reads,
                 "connect_runtime",
-                side_effect=lambda **kw: (
-                    self.fixture.connection
-                    if kw["selection"].identity.instance == "testing"
-                    else replace(self.fixture.connection, selection=kw["selection"])
+                side_effect=lambda **kw: replace(
+                    self.fixture.connection, selection=kw["selection"]
                 ),
             ),
             patch.object(
                 reads,
                 "inspect_runtime_container",
-                side_effect=lambda *args: (
-                    self.environment
-                    if args[-1].instance == "testing"
-                    else {
-                        "PLATFORM_INSTANCE": "prod",
-                        "ODOO_DB_NAME": "fixture-db",
-                        RUNTIME_IDENTITY_ENV_KEY: self.production_runtime_identity.model_dump_json(),
-                    }
-                ),
+                return_value={
+                    "PLATFORM_INSTANCE": "prod",
+                    "ODOO_DB_NAME": "fixture-db",
+                    RUNTIME_IDENTITY_ENV_KEY: self.production_runtime_identity.model_dump_json(),
+                },
             ),
+            patch.object(comparison, "testing_identity", side_effect=lambda spec: self.observation),
             patch.object(comparison, "_decrypt_secret_value", return_value="fixture-secret"),
             patch.object(
                 comparison,
-                "runtime_identity",
-                side_effect=lambda connection, selected, *args: (
-                    self.observation
-                    if selected
-                    else {
-                        "status": "verified",
-                        "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
-                        "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
-                    }
-                ),
+                "production_identity",
+                return_value={
+                    "status": "verified",
+                    "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
+                    "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
+                },
             ),
         ):
-            self.calls.append(patcher.start())
+            mocks.append(patcher.start())
             self.addCleanup(patcher.stop)
+        (
+            self.connect_runtime,
+            self.inspect_runtime,
+            self.testing_probe,
+            self.decrypt_token,
+            self.production_probe,
+        ) = mocks
         self.observation = {
             "status": "verified",
             "domain_sha256": comparison.digest("fixture-testing.myshopify.com"),
@@ -278,11 +274,40 @@ class ShopifyComparisonTests(unittest.TestCase):
         self.assertFalse(
             [name for name, _, _ in self.store.mock_calls if name.startswith("write_")]
         )
-        reads_seen = self.calls[-1].call_args_list
-        testing_index = next(
-            index for index, call in enumerate(reads_seen) if call.args[1] is not None
+        selected = self.comparison.authority(self.store, self.fixture.profile.product)
+        self.testing_probe.assert_called_once_with(
+            {
+                "domain": selected.domain,
+                "api_version": selected.api_version,
+                "token": self.decrypt_token.return_value,
+            }
         )
-        self.assertTrue(any(call.args[1] is None for call in reads_seen[testing_index + 1 :]))
+        self.production_probe.assert_called_once()
+
+    def test_stopped_testing_can_prove_separation_from_stored_credentials(self) -> None:
+        connect = self.connect_runtime.side_effect
+
+        def production_only(**kwargs: Any) -> Any:
+            if kwargs["selection"].identity.instance == "testing":
+                raise reads.OdooRuntimeReadError("container_unavailable", "Testing is stopped")
+            return connect(**kwargs)
+
+        self.connect_runtime.side_effect = production_only
+        inventory = self.store.read_environment_inventory.side_effect
+
+        def production_inventory(**kwargs: Any) -> Any:
+            if kwargs["instance_name"] == "testing":
+                raise FileNotFoundError("No running testing inventory")
+            return inventory(**kwargs)
+
+        self.store.read_environment_inventory.side_effect = production_inventory
+        self.assertEqual(self.run_comparison().separation, "separate")
+        self.assertTrue(
+            all(
+                call.kwargs["selection"].identity.instance == "prod"
+                for call in self.connect_runtime.call_args_list
+            )
+        )
 
     def test_equal_or_unavailable_identity_never_proves_separation(self) -> None:
         for observation in (
@@ -297,27 +322,38 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.observation = observation
                 self.assertNotEqual(self.run_comparison().separation, "separate")
 
-    def test_unavailable_prerequisites_identify_the_side_without_private_errors(self) -> None:
-        for instance in ("prod", "testing"):
-            with self.subTest(instance=instance):
-                connect = self.calls[0].side_effect
+    def test_testing_probe_timeout_stops_comparison_without_leaking_credentials(self) -> None:
+        with (
+            patch.object(self.comparison, "testing_identity", self.real_testing_identity),
+            patch.object(
+                subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(
+                    "probe", comparison.TESTING_PROBE_TIMEOUT_SECONDS
+                ),
+            ) as execute,
+        ):
+            result = self.run_comparison()
+        self.assertEqual(result.separation, "unknown")
+        self.assertEqual(result.stage, "testing_probe")
+        self.production_probe.assert_not_called()
+        execute.assert_called_once()
+        command = execute.call_args.args[0]
+        self.assertNotIn(self.decrypt_token.return_value, repr(command))
+        self.assertEqual(
+            execute.call_args.kwargs["timeout"], comparison.TESTING_PROBE_TIMEOUT_SECONDS
+        )
 
-                def unavailable(**kwargs: Any) -> Any:
-                    if kwargs["selection"].identity.instance == instance:
-                        raise reads.OdooRuntimeReadError(
-                            "container_unavailable", "fixture-secret private provider response"
-                        )
-                    return connect(**kwargs)
-
-                self.calls[0].side_effect = unavailable
-                result = self.run_comparison().model_dump()
-                self.assertEqual(
-                    result["stage"],
-                    f"{instance if instance == 'testing' else 'production'}_runtime",
-                )
-                self.assertEqual(result["reason"], "runtime_unavailable")
-                self.assertNotIn("fixture-secret", json.dumps(result))
-                self.calls[0].side_effect = connect
+    def test_unavailable_production_runtime_never_decrypts_or_probes(self) -> None:
+        self.connect_runtime.side_effect = reads.OdooRuntimeReadError(
+            "container_unavailable", "fixture-secret private provider response"
+        )
+        result = self.run_comparison().model_dump()
+        self.assertEqual(result["stage"], "production_runtime")
+        self.assertEqual(result["reason"], "runtime_unavailable")
+        self.assertNotIn("fixture-secret", json.dumps(result))
+        for call in (self.testing_probe, self.decrypt_token, self.production_probe):
+            call.assert_not_called()
 
     def test_production_probe_reason_and_token_rejection_survive_comparison(self) -> None:
         for status, reason in (
@@ -325,9 +361,7 @@ class ShopifyComparisonTests(unittest.TestCase):
             ("token_rejected", "token_rejected"),
         ):
             with self.subTest(status=status):
-                self.calls[-1].side_effect = lambda connection, selected, *args: (
-                    self.observation if selected else {"status": status, "reason": reason}
-                )
+                self.production_probe.return_value = {"status": status, "reason": reason}
                 result = self.run_comparison().model_dump()
                 self.assertEqual(result["stage"], "production_probe")
                 self.assertEqual(result["reason"], reason)
@@ -339,17 +373,11 @@ class ShopifyComparisonTests(unittest.TestCase):
         self.assertNotEqual(self.run_comparison().separation, "separate")
 
     def test_authority_drift_discards_success(self) -> None:
-        def observe(connection: object, selected: object, *args: object) -> dict[str, str]:
-            if selected is None:
-                return {
-                    "status": "verified",
-                    "domain_sha256": comparison.digest("fixture-production.myshopify.com"),
-                    "shop_id_sha256": comparison.digest("gid://shopify/Shop/456"),
-                }
+        def observe(spec: object) -> dict[str, str]:
             self.settings = self.settings.model_copy(update={"source_label": "changed"})
             return self.observation
 
-        self.calls[-1].side_effect = observe
+        self.testing_probe.side_effect = observe
         result = self.run_comparison()
         self.assertEqual(result.separation, "unknown")
         self.assertEqual(result.reason, "authority_changed")
@@ -379,8 +407,9 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.bindings = dict(original_bindings)
                 self.fixture.versions = dict(original_versions)
                 self.store.read_secret_record.side_effect = original_record_read
-                self.calls[-2].reset_mock()
-                self.calls[-1].reset_mock()
+                self.decrypt_token.reset_mock()
+                self.production_probe.reset_mock()
+                self.testing_probe.reset_mock()
                 if kind == "target_alias":
                     self.store.list_dokploy_target_id_records.return_value = (
                         *original_target_ids,
@@ -448,8 +477,9 @@ class ShopifyComparisonTests(unittest.TestCase):
                         version_id
                     ].model_copy(update={"secret_id": "foreign"})
                 self.assertEqual(self.run_comparison().separation, "unknown")
-                self.calls[-2].assert_not_called()
-                self.calls[-1].assert_not_called()
+                self.decrypt_token.assert_not_called()
+                self.production_probe.assert_not_called()
+                self.testing_probe.assert_not_called()
 
     def execute_program(self, program: str, input_text: str, argv: list[str] | None = None) -> str:
         with (
@@ -461,16 +491,22 @@ class ShopifyComparisonTests(unittest.TestCase):
             exec(compile(program, "<identity-probe>", "exec"), {"__name__": "__main__"})
         return output.getvalue()
 
-    def test_real_remote_program_chain_consumes_token_only_on_stdin_and_detects_drift(self) -> None:
+    def test_service_testing_probe_and_production_remote_chain_detect_drift(self) -> None:
         commands = []
         inspections = 0
         drift = False
-        current_environment = dict(self.environment)
+        current_environment: dict[str, str] = {}
 
         def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             nonlocal inspections
             commands.append(command)
             self.assertNotIn("fixture-secret", repr(command))
+            if command[0] == sys.executable:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=self.execute_program(Path(command[-1]).read_text(), kwargs["input"]),
+                )
             if command[:2] == ["docker", "inspect"]:
                 inspections += 1
                 return subprocess.CompletedProcess(
@@ -493,10 +529,7 @@ class ShopifyComparisonTests(unittest.TestCase):
                                 },
                                 "State": {
                                     "Running": True,
-                                    "Pid": inspections
-                                    if drift
-                                    and current_environment["PLATFORM_INSTANCE"] == "testing"
-                                    else 1,
+                                    "Pid": inspections if drift else 1,
                                 },
                             }
                         ]
@@ -509,6 +542,7 @@ class ShopifyComparisonTests(unittest.TestCase):
 
         def remote(**kwargs: Any) -> None:
             nonlocal current_environment
+            self.assertNotIn("fixture-secret", json.dumps(kwargs["payload"]))
             identity = kwargs["payload"]["identity"]
             current_environment = {
                 "PLATFORM_INSTANCE": identity["instance"],
@@ -548,7 +582,8 @@ class ShopifyComparisonTests(unittest.TestCase):
 
         opener.open.side_effect = open_request
         with (
-            patch.object(self.comparison, "runtime_identity", self.real_runtime_identity),
+            patch.object(self.comparison, "production_identity", self.real_production_identity),
+            patch.object(self.comparison, "testing_identity", self.real_testing_identity),
             patch.object(configparser.ConfigParser, "read", side_effect=lambda path: [path]),
             patch.object(
                 configparser.ConfigParser,
@@ -576,8 +611,31 @@ class ShopifyComparisonTests(unittest.TestCase):
             result = self.run_comparison()
             self.assertEqual(result.separation, "unknown")
             self.assertEqual(result.reason, "runtime_changed")
+            drift = False
+            for side in ("testing", "production"):
+                with self.subTest(side=side):
+
+                    def fail_transport(request: Any, **kwargs: Any) -> Any:
+                        production = (
+                            request.get_header("X-shopify-access-token")
+                            == "fixture-production-secret"
+                        )
+                        if production == (side == "production"):
+                            raise IncompleteRead(b"fixture-secret", 42)
+                        return open_request(request, **kwargs)
+
+                    opener.open.side_effect = fail_transport
+                    result = self.run_comparison()
+                    self.assertEqual(result.separation, "unknown")
+                    self.assertEqual(result.stage, f"{side}_probe")
+                    self.assertEqual(result.reason, "request_failed")
+                    self.assertNotIn("fixture-secret", result.model_dump_json())
         self.assertTrue(
-            all(command[:2] in (["docker", "inspect"], ["docker", "exec"]) for command in commands)
+            all(
+                command[0] == sys.executable
+                or command[:2] in (["docker", "inspect"], ["docker", "exec"])
+                for command in commands
+            )
         )
 
 
