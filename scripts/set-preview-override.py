@@ -167,7 +167,7 @@ def main() -> int:
                     "mode": args.mode,
                     "product": args.product,
                     "key": args.key,
-                    "applied": args.mode != "dry-run",
+                    "applied": accepted,
                     "read_back_matches": args.mode != "dry-run",
                 }
             )

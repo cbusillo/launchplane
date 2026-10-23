@@ -22,7 +22,8 @@ uv run python scripts/set-preview-override.py dry-run \
 ```
 
 Inspect the private evidence, then use `apply` instead of `dry-run`, adding
-`--reviewed-dry-run --idempotency-key <stable-key>`. Use `readback` with the same
+`--reviewed-dry-run --idempotency-key <new-key-for-this-review>`. Keep that key
+for this review's retries; a new review needs a new key. Use `readback` with the same
 files to verify an uncertain outcome without writing. Preserve the files and
 original key after an uncertain apply. A denial stops the operation.
 

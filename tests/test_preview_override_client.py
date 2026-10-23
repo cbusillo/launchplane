@@ -119,10 +119,14 @@ class PreviewOverrideClientTests(unittest.TestCase):
         elif scenario in {"weak-revision", "multiple-revisions"}:
             revision = 'W/"fixture"' if scenario == "weak-revision" else '"first", "second"'
             network.side_effect = [({"profile": before}, etag), ({"profile": before}, revision)]
-        elif scenario == "rollback-readback":
-            after["future_profile_field"] = "unrelated-service-change"
-            after["preview"]["enabled"] = False
-            network.side_effect = [({"profile": before}, etag), ({"profile": after}, "")]
+        elif scenario in {"rollback-readback", "already-current"}:
+            if scenario == "rollback-readback":
+                after["future_profile_field"] = "unrelated-service-change"
+                after["preview"]["enabled"] = False
+            network.side_effect = [
+                ({"profile": before}, etag),
+                ({"profile": after}, '"after-revision"' if scenario == "already-current" else ""),
+            ]
         elif scenario == "lost-apply":
             network.side_effect = [
                 ({"profile": before}, etag),
@@ -202,7 +206,10 @@ class PreviewOverrideClientTests(unittest.TestCase):
                 with patch("sys.argv", args):
                     self.assertEqual(
                         client["main"](),
-                        0 if scenario in {"", "opaque-revision", "rollback-readback"} else 1,
+                        0
+                        if scenario
+                        in {"", "opaque-revision", "rollback-readback", "already-current"}
+                        else 1,
                     )
             posts = [call for call in network.call_args_list if call.args[2] == "POST"]
             self.assertEqual(
@@ -216,6 +223,7 @@ class PreviewOverrideClientTests(unittest.TestCase):
                     "weak-revision",
                     "multiple-revisions",
                     "rollback-readback",
+                    "already-current",
                 }
                 else 1,
             )
@@ -225,6 +233,8 @@ class PreviewOverrideClientTests(unittest.TestCase):
             self.assertFalse(evidence.stat().st_mode & 0o077)
             self.assertNotIn("private-fixture-value", output.getvalue())
             self.assertNotIn("private-fixture-token", output.getvalue())
+            if scenario in {"rollback-readback", "already-current"}:
+                self.assertFalse(json.loads(output.getvalue().splitlines()[-1])["applied"])
             return output.getvalue(), network
 
     def test_reviewed_save_changes_only_one_preview_key_without_echoing_the_value(self) -> None:
@@ -233,6 +243,7 @@ class PreviewOverrideClientTests(unittest.TestCase):
 
     def test_readback_survives_service_rollback_and_unrelated_profile_changes(self) -> None:
         self._exercise("rollback-readback")
+        self._exercise("already-current")
 
     def test_historical_transport_is_refused_before_review_is_created(self) -> None:
         output, _ = self._exercise("historical-transport")
