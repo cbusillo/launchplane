@@ -642,7 +642,7 @@ class ApplicationCredentialTests(unittest.TestCase):
         from control_plane.provider_operations import ProviderMutationRejectedError
         from control_plane.outbound_http import PublicHttpResponse
 
-        token = self.discord_intent()
+        self.discord_intent()
         adapter = ApplicationActivationAdapter(
             self.fixture.adapter.root,
             self.store,
@@ -709,32 +709,6 @@ class ApplicationCredentialTests(unittest.TestCase):
                 adapter.apply("original-operation", lease)
             self.assertIs(unauthorized.exception.cause, denied)
             for effect in (route, create, save, inspect, lease.checkpoint_effect):
-                effect.assert_not_called()
-
-            from control_plane.testing_external_capabilities import observe_activation_discord
-            from control_plane.contracts.testing_activation import TestingActivationRefusal
-
-            adapter.authorize_external = self.store.list_product_profile_records
-            with patch(
-                "control_plane.discord_external_resources.request_public_http",
-                side_effect=self.discord_response,
-            ):
-                proof = observe_activation_discord(
-                    self.store,
-                    self.record,
-                    authorize=self.store.list_product_profile_records,
-                    check_current=lambda: None,
-                    actor="fixture",
-                    trace_id="launchplane_req_fixture",
-                )
-            self.record.external_capabilities = (proof,)
-            self.production_value(token, "production-new-match")
-            route.return_value = None
-            inspect.side_effect = lambda **kwargs: kwargs["before_effect"]("fixture-effect")
-            with self.assertRaises(ProviderMutationRejectedError) as shared:
-                adapter.apply("original-operation", lease)
-            self.assertIsInstance(shared.exception.cause, TestingActivationRefusal)
-            for effect in (create, save, lease.checkpoint_effect):
                 effect.assert_not_called()
 
     def test_discord_authorization_precedes_decryption(self) -> None:

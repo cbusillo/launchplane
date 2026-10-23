@@ -69,9 +69,12 @@ profile comparison reads and observes the bot using the exact managed version.
 It requires complete identity and guild enumeration, no production credential
 match, and actual guilds contained in the reviewed private set. The saved native
 proof binds the original plan and exact testing binding, secret and version.
-Generation and runtime publication both revalidate that proof. Before each
-forward effect checkpoint, the service authorizes and repeats the local managed
-credential comparison against current production values and decoded bot identity.
+Generation and runtime publication both revalidate that proof. Before environment
+writes, deployment, forward route dispatch and publication, the service authorizes
+and repeats the local managed credential comparison against current production
+values and decoded bot identity. Fixed metadata-only inspection and placement
+keep the current proof, lease and custody guards and can observe original jobs
+without decrypting production credentials. New effect phases default to comparison.
 Unrelated rotations can continue; actual credential/account matches refuse.
 After effects start, a positively observed capability conflict records the
 existing private-refusal or route-restoration phase under the original lease,

@@ -2251,25 +2251,32 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
                     def checkpoint(phase: str) -> None:
                         nonlocal started
-                        try:
-                            self.require_production_separation(record, require_current)
-                        except ExternalCapabilityConflict:
-                            if (
-                                started
-                                or isinstance(lease, ProviderEvidenceLease)
-                                and lease.evidence_reservation().provider_effect_started_at
-                            ):
-                                require_current()
-                                latest = self.current()
-                                self.require_unchanged(latest)
-                                self.save(
-                                    latest,
-                                    phase="restoring_application_route"
-                                    if latest.application_readiness is not None
-                                    and latest.application_readiness.route is not None
-                                    else "refusing_private_candidate",
-                                )
-                            raise
+                        if phase not in {
+                            APPLICATION_CAPABILITY_PHASE,
+                            "create_project",
+                            "create_environment",
+                            "create_application",
+                            "create_application_mount",
+                        }:
+                            try:
+                                self.require_production_separation(record, require_current)
+                            except ExternalCapabilityConflict:
+                                if (
+                                    started
+                                    or isinstance(lease, ProviderEvidenceLease)
+                                    and lease.evidence_reservation().provider_effect_started_at
+                                ):
+                                    require_current()
+                                    latest = self.current()
+                                    self.require_unchanged(latest)
+                                    self.save(
+                                        latest,
+                                        phase="restoring_application_route"
+                                        if latest.application_readiness is not None
+                                        and latest.application_readiness.route is not None
+                                        else "refusing_private_candidate",
+                                    )
+                                raise
                         require_current()
                         lease.checkpoint_effect(phase)
                         started = True

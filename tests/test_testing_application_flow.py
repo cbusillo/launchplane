@@ -2865,6 +2865,38 @@ class ApplicationFlowTests(unittest.TestCase):
             len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
         )
 
+    def test_lost_deployment_is_adopted_before_external_conflict_refusal(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        self.lost_image_reply = True
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required")
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=conflict):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(
+            record.state_recipient["application_deployment_id"],
+            api.deployment_key(self.deployments[record.target_id][0]),
+        )
+        self.assertEqual(
+            len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
+        )
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
+
     def test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation(
         self,
     ) -> None:
