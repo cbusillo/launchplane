@@ -262,6 +262,9 @@ reservation. The webhook request never waits on a deploy.
     this rule. Native read redirects retain actual browser navigation. Each known
     same-origin read descendant requires its own successful response and matching
     finished request, because Playwright does not route redirect descendants.
+    A cancelled native descendant remains unknown. Same-origin sign-in redirects
+    retain their own receipt, so a lost application session can fail the product
+    check and clean up its acknowledged fixture.
     Closing fences new routed requests before upstream dispatch and waits for
     handlers already in flight. No cancelled-read or page-close inference completes
     an exchange. A failed page close remains unknown, with cleanup skipped.

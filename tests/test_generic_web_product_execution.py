@@ -137,7 +137,16 @@ class _Page:
 
     def emit(self, method: str, path: str) -> _Response:
         response = _Response(self, method, path)
+        if (
+            path == "/site-config"
+            and self.browser.failure == "signin-redirect"
+            and not self.browser.admin
+        ):
+            response.status = 307
+            response.headers = {"location": "/sign-in"}
         request = response.request
+        if path == "/billing" and self.browser.failure == "billing-action-aborted":
+            request.headers["next-action"] = "fixture"
         self.browser.requests.append(request)
         self.event("request", request)
         self.event("response", response)
@@ -160,6 +169,21 @@ class _Page:
             else "https://video.test/dashboard"
         )
         response = self.emit("GET", path)
+        if (
+            self.browser.failure == "signin-redirect"
+            and path == "/site-config"
+            and not self.browser.admin
+        ):
+            self.url = "https://video.test/sign-in"
+            final = _Response(self, "GET", "/sign-in")
+            final.request.redirected_from = response.request
+            self.browser.requests.append(final.request)
+            self.browser.effects.append(final.request)
+            self.browser.upstream_completed.add(final.request)
+            self.event("request", final.request)
+            self.event("response", final)
+            self.event("requestfinished", final.request)
+            return final
         if self.browser.failure == "redirect-refusal":
             raise OSError("Connection refused after following the original response redirect.")
         if self.browser.failure == "gateway-error":
@@ -597,6 +621,66 @@ class ProductExecutionTests(unittest.TestCase):
                     with self.assertRaises(ProviderMutationUnknownError):
                         guard.require_completed_exchanges()
 
+    def test_signin_read_redirect_has_its_own_receipt(self) -> None:
+        browser = _Browser("")
+        page: Any = _Page(browser)
+        guard = GenericWebPostDeployGuard()
+        exchanges: Any = verification._TestingPageExchanges(page, "https://video.test", guard)
+        initial = _Response(page, "GET", "/site-config")
+        initial.status = 307
+        initial.headers = {"location": "/sign-in"}
+        exchanges.capture(_Route(page, initial))
+        final = _Response(page, "GET", "/sign-in")
+        final.request.redirected_from = initial.request
+        page.event("request", final.request)
+        page.event("requestfinished", final.request)
+        exchanges.finish_response(final)
+        guard.require_completed_exchanges()
+
+    def test_redirect_from_untracked_head_cannot_hide_a_tracked_mutation(self) -> None:
+        for method, path, finished in (
+            ("GET", "/dashboard", True),
+            ("POST", "/dashboard", True),
+            ("GET", "/v/fixture", True),
+            ("GET", "/dashboard", False),
+        ):
+            with self.subTest(method=method, path=path, finished=finished):
+                browser = _Browser("")
+                page: Any = _Page(browser)
+                guard = GenericWebPostDeployGuard()
+                exchanges: Any = verification._TestingPageExchanges(
+                    page, "https://video.test", guard
+                )
+                initial = _Response(page, "GET", "/dashboard/")
+                final = _Response(page, method, path)
+                final.request.redirected_from = initial.request
+                page.event("request", final.request)
+                if finished:
+                    page.event("requestfinished", final.request)
+                else:
+                    final.request.failure = "net::ERR_ABORTED"
+                if method == "GET" and path == "/dashboard" and finished:
+                    exchanges.finish()
+                    guard.require_completed_exchanges()
+                else:
+                    with self.assertRaises(ProviderMutationUnknownError):
+                        exchanges.finish()
+                    with self.assertRaises(ProviderMutationUnknownError):
+                        guard.require_completed_exchanges()
+
+    def test_routing_a_previously_observed_redirect_keeps_one_receipt(self) -> None:
+        browser = _Browser("")
+        page: Any = _Page(browser)
+        guard = GenericWebPostDeployGuard()
+        exchanges: Any = verification._TestingPageExchanges(page, "https://video.test", guard)
+        initial = page.emit("GET", "/site-config")
+        final = _Response(page, "GET", "/dashboard")
+        final.request.redirected_from = initial.request
+        page.event("request", final.request)
+        exchanges.capture(_Route(page, final))
+        exchanges.finish()
+        guard.require_completed_exchanges()
+
     def test_unexpected_redirect_is_aborted_before_browser_replay(self) -> None:
         for method, path, location in (
             ("POST", "/dashboard", "/dashboard"),
@@ -621,7 +705,14 @@ class ProductExecutionTests(unittest.TestCase):
                     exchanges.finish_response(response)
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
-        for failure in ("fill", "assertion", "billing-assertion", "signup-click", "qr-click"):
+        for failure in (
+            "fill",
+            "assertion",
+            "billing-assertion",
+            "signup-click",
+            "qr-click",
+            "signin-redirect",
+        ):
             with self.subTest(failure=failure):
                 with self.assertRaises(click.ClickException):
                     self.verify(failure)

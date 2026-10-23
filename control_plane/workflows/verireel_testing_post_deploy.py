@@ -66,8 +66,8 @@ def _is_testing_read(request: BrowserRequest) -> bool:
     return (
         request.method in {"GET", "HEAD"}
         and "next-action" not in request.headers
-        and urlparse(request.url).path in _TESTING_REQUEST_PATHS
         and urlparse(request.url).path != "/api/auth/sign-up/email"
+        and not urlparse(request.url).path.startswith("/v/")
     )
 
 
@@ -380,14 +380,16 @@ class _TestingPageExchanges:
         page.on("requestfinished", lambda request: self.completed.add(request))
         page.context.route(self.matches, self.capture)
 
-    def matches(self, url: str) -> bool:
+    def same_origin(self, url: str) -> bool:
         parsed = urlparse(url)
-        return (parsed.scheme, parsed.netloc) == (
-            self.origin.scheme,
-            self.origin.netloc,
-        ) and _testing_request_path(url) != "unknown"
+        return (parsed.scheme, parsed.netloc) == (self.origin.scheme, self.origin.netloc)
+
+    def matches(self, url: str) -> bool:
+        return self.same_origin(url) and _testing_request_path(url) != "unknown"
 
     def enroll(self, request: BrowserRequest) -> str:
+        if request in self.requests:
+            return self.requests[request]
         name = f"dynamic-request:{len(self.guard.exchanges)}"
         self.requests[request] = name
         self.guard.begin_exchange(name)
@@ -400,7 +402,9 @@ class _TestingPageExchanges:
         return name
 
     def started_redirect(self, request: BrowserRequest) -> None:
-        if request.redirected_from in self.requests:
+        if request.redirected_from is not None and (
+            request.redirected_from in self.requests or self.matches(request.url)
+        ):
             self.enroll(request)
             self.redirects.add(request)
 
@@ -411,9 +415,9 @@ class _TestingPageExchanges:
         return (
             300 <= status < 400
             and _is_testing_read(request)
-            and self.matches(target.geturl())
-            and target.path in _TESTING_REQUEST_PATHS
+            and self.same_origin(target.geturl())
             and target.path != "/api/auth/sign-up/email"
+            and not target.path.startswith("/v/")
         )
 
     def capture(self, route: Route) -> None:
@@ -429,9 +433,11 @@ class _TestingPageExchanges:
             status = response.status
             response.body()
             if not self.acceptable(request, status, response.headers):
-                raise _unknown_testing_effect(
+                _unknown_testing_effect(
                     "capture", "response_unavailable_or_failed", request=request, status=status
                 )
+                route.abort()
+                return
             self.guard.complete_exchange(name)
             try:
                 if self.closing:
@@ -469,7 +475,7 @@ class _TestingPageExchanges:
             return
         if (
             request not in self.redirects
-            or not self.matches(request.url)
+            or not self.same_origin(request.url)
             or not _is_testing_read(request)
         ):
             raise _unknown_testing_effect(
@@ -480,7 +486,8 @@ class _TestingPageExchanges:
             raise _unknown_testing_effect(
                 "finish_request", "redirect_receipt_unavailable", request=request
             )
-        self.finish_request(parent, deadline)
+        if parent in self.requests:
+            self.finish_request(parent, deadline)
         if request not in self.completed and not request.failure:
             try:
                 with self.page.expect_request_finished(
