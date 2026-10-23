@@ -51,7 +51,7 @@ def discord_retry_seconds(value: object) -> float | None:
 
 
 def discord_rate_limit(response: PublicHttpResponse, path: str) -> DiscordRateLimitEvidence:
-    non_json_body = False
+    non_json_body = len(response.body) > DISCORD_RESPONSE_LIMIT
     try:
         payload = (
             json.loads(response.body) if len(response.body) <= DISCORD_RESPONSE_LIMIT else None

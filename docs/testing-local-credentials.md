@@ -175,8 +175,9 @@ On HTTP 429 the observer retains a bounded `rate_limits` list, including the
 request phase, JSON `retry_after` and `global` (as `global_limit`), and the
 `X-RateLimit-Scope`, `X-RateLimit-Global` and `Retry-After` headers (as `scope`,
 `header_global` and `header_retry_after`). Only finite nonnegative delays,
-booleans and documented scope values are retained. `non_json_body` identifies
-an absent or invalid JSON body; `cloudflare_error_page` identifies a non-JSON
+booleans and documented scope values are retained. `non_json_body` means no JSON
+could be parsed within the response bounds, including absent, malformed
+or oversized bodies; `cloudflare_error_page` identifies such a
 body containing Cloudflare's name. Non-JSON alone suggests an intermediary
 response and does not establish its cause. No body text, authorization header
 or credential is returned.
@@ -187,7 +188,7 @@ before sending. There is no guessed delay or further automatic retry. An absent,
 invalid or out-of-budget delay returns the evidence immediately; callers must
 wait at least the reported delay before a separately authorized attempt. Evidence
 survives a successful retry. The invariant is that provider refusal preserves
-safe evidence needed for the next decision while incomplete enumeration remains
+safe evidence needed for the next decision for unchanged captured inputs, while incomplete enumeration remains
 unavailable. See [Discord rate limits](https://docs.discord.com/developers/topics/rate-limits).
 
 The service captures authorized profiles, delivered bindings and the managed
@@ -241,7 +242,8 @@ failure prevents external use. Authorized profiles, selected bindings, versions
 and the production comparison read set are checked before external use, before
 each provider request and after collection; drift discards the result.
 
-After compatible source deployment, use the existing caller:
+After compatible source deployment, use the existing caller from a checkout
+containing that source. Older strict response models cannot read the new fields:
 
 ```sh
 uv run python scripts/prepare-testing-credentials.py audit --discord-identity \

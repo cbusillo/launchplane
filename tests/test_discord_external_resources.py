@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from control_plane import discord_external_resources as reader
 from control_plane.outbound_http import PublicHttpResponse, request_public_http
+from control_plane.testing_external_resources import ExternalResourceInputsChanged
 from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
 
 
@@ -88,6 +89,19 @@ class DiscordExternalResourcesTests(unittest.TestCase):
                 self.assertNotIn("synthetic-bot-token", result.model_dump_json())
                 sleep.assert_not_called()
 
+    def test_oversized_rate_limit_body_is_not_reported_as_usable_json(self) -> None:
+        result = self.observe(
+            lambda *_, **__: PublicHttpResponse(
+                429,
+                "",
+                0,
+                (),
+                b" " * (reader.DISCORD_RESPONSE_LIMIT + 1),
+            )
+        )
+        self.assertEqual(result.http_status, 429)
+        self.assertTrue(result.rate_limits[0].non_json_body)
+
     def test_invalid_backoff_and_untrusted_header_values_never_escape_or_retry(self) -> None:
         for delay in (True, -1, "synthetic-bot-token", float("nan"), float("inf")):
             with self.subTest(delay=delay):
@@ -111,7 +125,7 @@ class DiscordExternalResourcesTests(unittest.TestCase):
     def test_retry_rechecks_inputs_after_backoff_before_provider_call(self) -> None:
         from unittest.mock import Mock
 
-        current = Mock(side_effect=[None, reader.DiscordResourceReadError("inputs_changed")])
+        current = Mock(side_effect=[None, ExternalResourceInputsChanged()])
         with (
             patch.object(reader, "sleep", create=True) as sleep,
             patch.object(
@@ -126,10 +140,10 @@ class DiscordExternalResourcesTests(unittest.TestCase):
                 ),
             ) as request,
         ):
-            result = reader.observe_discord_bot(
-                "synthetic-bot-token", deadline=monotonic() + 60, check_current=current
-            )
-        self.assertEqual(result.failure_code, "inputs_changed")
+            with self.assertRaises(ExternalResourceInputsChanged):
+                reader.observe_discord_bot(
+                    "synthetic-bot-token", deadline=monotonic() + 60, check_current=current
+                )
         request.assert_called_once()
         sleep.assert_called_once_with(0.25)
         with (
