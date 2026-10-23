@@ -311,6 +311,102 @@ class PublishedTestingCopyTests(unittest.TestCase):
                 ),
                 fixture.current().generation,
             )
+            from datetime import datetime, timezone
+            from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+            from control_plane.disposable_lane_collection import collect_testing_resource_facts
+            from control_plane.contracts.product_profile_record import ProductOdooLaneDataPolicy
+
+            profile = fixture.store.read_product_profile_record(fixture.candidate.product)
+            fixture.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(
+                                update={
+                                    "odoo_data_policy": ProductOdooLaneDataPolicy(
+                                        data_authority="resettable"
+                                    )
+                                }
+                            )
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in profile.lanes
+                        )
+                    }
+                )
+            )
+
+            target = fixture.store.read_dokploy_target_record(
+                context_name=fixture.candidate.context, instance_name="testing"
+            )
+            target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Inspect original published copy", purpose="isolation_staging"
+            )
+            fixture.store.write_dokploy_target_record(target)
+            with (
+                patch(
+                    "control_plane.odoo_testing_drill_usage.read_drill_recent_signins",
+                    return_value=None,
+                ) as inspect,
+                patch(
+                    "control_plane.odoo_testing_restore.require_distinct_testing_credentials"
+                ) as credentials,
+            ):
+                facts = collect_testing_resource_facts(
+                    fixture.store,
+                    product=fixture.candidate.product,
+                    context=fixture.candidate.context,
+                    now=datetime.now(timezone.utc),
+                )
+                assert facts is not None
+                self.assertEqual(facts.get("production_resources"), "isolated")
+                inspect.assert_called_once()
+                credentials.assert_called_once()
+                with self.assertRaises(ValueError):
+                    read_current_testing_generation(
+                        fixture.store,
+                        product=fixture.candidate.product,
+                        context=fixture.candidate.context,
+                        instance="testing",
+                    )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_record(
+                        context_name=fixture.candidate.context, instance_name="testing"
+                    ),
+                    target,
+                )
+                inspect.reset_mock()
+                credentials.side_effect = ValueError("credentials changed")
+                self.assertEqual(
+                    collect_testing_resource_facts(
+                        fixture.store,
+                        product=fixture.candidate.product,
+                        context=fixture.candidate.context,
+                        now=datetime.now(timezone.utc),
+                    ),
+                    {},
+                )
+                inspect.assert_not_called()
+                credentials.side_effect = None
+                target.policies.staff_testing_hold.purpose = "staff_testing"
+                fixture.store.write_dokploy_target_record(target)
+                self.assertIsNone(
+                    collect_testing_resource_facts(
+                        fixture.store,
+                        product=fixture.candidate.product,
+                        context=fixture.candidate.context,
+                        now=datetime.now(timezone.utc),
+                    )
+                )
+                inspect.assert_not_called()
+                with self.assertRaises(ValueError):
+                    read_current_testing_generation(
+                        fixture.store,
+                        product=fixture.candidate.product,
+                        context=fixture.candidate.context,
+                        instance="testing",
+                        isolation_staging_read=True,
+                    )
         finally:
             fixture.doCleanups()
 

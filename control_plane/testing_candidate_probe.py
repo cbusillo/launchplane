@@ -106,6 +106,31 @@ def one_inspection(identifier):
         raise RuntimeError('Candidate runtime inventory is incomplete')
     return values[0]
 
+def dokploy_endpoint_names(container: dict, *, include_dns_names: bool = False) -> list[str]:
+    networks = container['NetworkSettings']['Networks']
+    if not isinstance(networks, dict):
+        raise RuntimeError('Candidate endpoint names are unreadable')
+    if 'dokploy-network' not in networks:
+        return []
+    endpoint = networks['dokploy-network']
+    if not isinstance(endpoint, dict):
+        raise RuntimeError('Candidate endpoint names are unreadable')
+    names = []
+    for key in ('Aliases', 'DNSNames') if include_dns_names else ('Aliases',):
+        aliases = endpoint.get(key)
+        if aliases is None:
+            continue
+        if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+            raise RuntimeError('Candidate endpoint names are unreadable')
+        names.extend(aliases)
+    if include_dns_names:
+        name = container.get('Name', '')
+        if not isinstance(name, str):
+            raise RuntimeError('Candidate endpoint name is unreadable')
+        if name:
+            names.append(name.lstrip('/'))
+    return names
+
 def probe(spec):
     global inspection_predicate
     inspection_predicate = ReadbackPredicate.RESOURCES
@@ -123,16 +148,13 @@ def probe(spec):
     if labels.get('traefik.enable') != 'false' or any(key.startswith('traefik.http.routers.') for key in labels):
         raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     namespace = spec['generation']['namespace']
-    aliases = observed['NetworkSettings']['Networks']['dokploy-network'].get('Aliases')
-    if not isinstance(aliases, list):
-        raise RuntimeError('Candidate endpoint aliases are unreadable')
-    if namespace not in aliases:
+    if namespace not in dokploy_endpoint_names(observed):
         raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     for identifier in docker('ps','-aq').decode().splitlines():
         other = one_inspection(identifier)
         if other['Id'] == observed['Id']:
             continue
-        if namespace in other.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases',[]):
+        if namespace.casefold() in {name.casefold() for name in dokploy_endpoint_names(other, include_dns_names=True)}:
             raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     if observed['Image'] != containers['script-runner'][1]['Image']:
         raise CopyReadbackRefused(ReadbackPredicate.IMAGE)

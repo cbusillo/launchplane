@@ -145,6 +145,69 @@ class CandidateHostProbeTests(unittest.TestCase):
             any(command[1] in {"stop", "start", "rm", "cp"} for command in self.fixture.calls)
         )
 
+    def other_endpoint(self, **endpoint: object) -> dict[str, Any]:
+        other = {
+            "Id": "other",
+            "Config": {"Labels": {}},
+            "Mounts": [],
+            "NetworkSettings": {"Networks": {"dokploy-network": endpoint}},
+        }
+        self.fixture.containers["other"] = other
+        return other
+
+    def test_other_containers_without_network_aliases_allow_private_readiness(self) -> None:
+        aliases: object
+        for aliases in (None, []):
+            with self.subTest(aliases=aliases):
+                self.other_endpoint(Aliases=aliases)
+                self.assertTrue(self.run_probe()["private_readiness_verified"])
+        other = self.other_endpoint()
+        other["NetworkSettings"]["Networks"] = {}
+        self.assertTrue(self.run_probe()["private_readiness_verified"])
+
+    def test_other_container_cannot_resolve_the_candidate_private_name(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        name = self.fixture.gen.namespace
+        for endpoint, container_name in (
+            ({"Aliases": [name]}, ""),
+            ({"Aliases": [name.upper()]}, ""),
+            ({"Aliases": None, "DNSNames": [name]}, ""),
+            ({"Aliases": None}, "/" + name),
+        ):
+            with self.subTest(endpoint=endpoint, container_name=container_name):
+                self.fixture.calls.clear()
+                self.other_endpoint(**endpoint)["Name"] = container_name
+                frame = self.failure_frame()
+                self.assertEqual(frame["predicate"], ReadbackPredicate.PRIVATE_ENDPOINT)
+                self.assertEqual(frame["kind"], "refused")
+                self.assertFalse(
+                    any(probe.CANDIDATE_CONTAINER_PROBE in call for call in self.fixture.calls)
+                )
+
+    def test_malformed_alias_evidence_stays_unavailable(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        aliases: object
+        for aliases in ("", {}, [1], self.fixture.gen.namespace):
+            with self.subTest(aliases=aliases):
+                self.other_endpoint(Aliases=aliases)
+                frame = self.failure_frame()
+                self.assertEqual(frame["predicate"], ReadbackPredicate.PRIVATE_ENDPOINT)
+                self.assertEqual(frame["kind"], "unavailable")
+
+    def test_candidate_without_its_explicit_alias_is_refused(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        endpoint = self.fixture.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"]
+        aliases: object
+        for aliases in (None, []):
+            with self.subTest(aliases=aliases):
+                endpoint["Aliases"] = aliases
+                frame = self.failure_frame()
+                self.assertEqual(frame["predicate"], ReadbackPredicate.PRIVATE_ENDPOINT)
+                self.assertEqual(frame["kind"], "refused")
+
     def test_changed_copy_image_gate_or_credentials_refuses(self) -> None:
         for field, bad in (
             ("witness", "other-copy"),

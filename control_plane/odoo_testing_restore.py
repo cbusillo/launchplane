@@ -9,6 +9,7 @@ from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALID
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
@@ -1253,6 +1254,17 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 )
 
 
+def _testing_generation_hold_blocks_read(
+    target: DokployTargetRecord, *, task_account_cleanup: bool, isolation_staging_read: bool
+) -> bool:
+    hold = target.policies.staff_testing_hold
+    return (
+        hold is not None
+        and not task_account_cleanup
+        and not (isolation_staging_read and hold.purpose == "isolation_staging")
+    )
+
+
 def read_current_testing_generation(
     store: object,
     *,
@@ -1261,6 +1273,7 @@ def read_current_testing_generation(
     instance: str,
     bootstrap_preparation: bool = False,
     task_account_cleanup: bool = False,
+    isolation_staging_read: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -1272,8 +1285,16 @@ def read_current_testing_generation(
         publication = published_testing_copy(store, product=product, context=context)
         if publication is not None:
             target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
-            if target.policies.staff_testing_hold is not None and not task_account_cleanup:
+            if _testing_generation_hold_blocks_read(
+                target,
+                task_account_cleanup=task_account_cleanup,
+                isolation_staging_read=isolation_staging_read,
+            ):
                 raise ValueError("The adopted testing copy has a staff testing hold.")
+            if isolation_staging_read:
+                require_distinct_testing_credentials(
+                    store, store.read_product_profile_record(product), context
+                )
             # Native publication's queue/copy/route receipt replaces the old
             # bootstrap and resource-adoption receipts. Empty copies carry none.
             return store.read_fresh_odoo_testing_generation(product, context)
@@ -1312,7 +1333,11 @@ def read_current_testing_generation(
         context_name=context, instance_name="testing"
     )
     if (
-        target.policies.staff_testing_hold is not None and not task_account_cleanup
+        _testing_generation_hold_blocks_read(
+            target,
+            task_account_cleanup=task_account_cleanup,
+            isolation_staging_read=isolation_staging_read,
+        )
     ) or target.pending_public_host_effects:
         raise ValueError("Fresh testing generation has a use or route hold.")
     values: dict[str, object] = {}

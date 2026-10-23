@@ -125,7 +125,7 @@ def collect_testing_resource_facts(
         ):
             return None
         generation = read_current_testing_generation(
-            store, product=product, context=context, instance="testing"
+            store, product=product, context=context, instance="testing", isolation_staging_read=True
         )
         if generation is None or not generation.completed_at:
             return None

@@ -69,6 +69,14 @@ authoritative application custody/isolation collector prerequisite
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
 
+The Odoo generation collector can qualify current resources and copy custody
+while an `isolation_staging` hold remains set. It uses the same generation
+authority checks, testing-local credential comparison and physical receiver
+inspection. A staff-testing hold still blocks collection, and missing or failed
+qualification supplies no positive fact. This read path does not lift a hold or
+change ordinary deployment admission; later hold continuation must independently
+bind and recheck its required evidence.
+
 For an existing application testing recipient, opt into read-only resource
 metadata with `include_application_resources=true` on `collect`, or run the
 repository client with `collect --application-resources`. The client uses the
@@ -1415,6 +1423,11 @@ The failed candidate remains retained, with its historic receipts intact; no
 container, volume or credential is removed. A lost connection, incomplete probe,
 running/unknown original job or permission denial cannot qualify that failure.
 The first failure timestamp cannot be reset to prolong the same operation.
+
+The private endpoint probe treats Docker's null network aliases as an empty
+alias set. The candidate still requires its explicit private alias; another
+container's aliases, DNS names or container name cannot resolve that name,
+including a case variation. Malformed network-name evidence remains unavailable.
 
 Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent
