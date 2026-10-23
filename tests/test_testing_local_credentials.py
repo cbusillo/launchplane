@@ -271,7 +271,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(override.status_code, 400)
             provider.assert_not_called()
 
-    async def test_discord_identification_discards_drift_and_refuses_missing_audit(self) -> None:
+    async def test_discord_identification_refuses_drift_and_missing_audit(self) -> None:
         self.historical_discord_fixture()
         with (
             patch.object(self.store, "write_secret_audit_event", side_effect=OSError("private")),
@@ -294,7 +294,8 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         ):
             report = await self.discord_identity()
         self.assertEqual(report.json()["result"]["failure_code"], "inputs_changed")
-        self.assertIsNone(report.json()["result"]["observation"])
+        self.assertEqual(report.json()["result"]["observation"]["failure_code"], "inputs_changed")
+        self.assertFalse(report.json()["result"]["observation"]["guild_enumeration_complete"])
 
     async def test_discord_identification_client_preserves_incomplete_evidence_and_exits_nonzero(
         self,
@@ -431,7 +432,8 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         ):
             report = await self.discord_identity()
         self.assertEqual(report.json()["result"]["failure_code"], "inputs_changed")
-        self.assertIsNone(report.json()["result"]["observation"])
+        self.assertEqual(report.json()["result"]["observation"]["failure_code"], "inputs_changed")
+        self.assertFalse(report.json()["result"]["observation"]["guild_enumeration_complete"])
 
     async def test_external_reads_require_both_opt_in_and_explicit_stored_purpose(self) -> None:
         with patch("control_plane.discord_external_resources.request_public_http") as request:
