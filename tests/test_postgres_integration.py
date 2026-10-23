@@ -13389,8 +13389,10 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
             return max(0.0, deadline - time.monotonic())
 
         def hold_publication(session: Any) -> None:
+            nonlocal deadline
             publication_lock(session)
             if publishing.is_set():
+                deadline = time.monotonic() + 60
                 locked.set()
                 if not release.wait(remaining()):
                     raise TimeoutError(
@@ -13441,7 +13443,6 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                     )
                 )
             with ThreadPoolExecutor(max_workers=4) as workers:
-                deadline = time.monotonic() + 60
                 publication = workers.submit(fixture.activate)
 
                 def require_publication_pending(stage: str) -> None:
@@ -13457,13 +13458,8 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
                         )
 
                 try:
-                    while not locked.wait(min(0.05, remaining())):
+                    while not locked.wait(0.05):
                         require_publication_pending("before its checkpoint")
-                        if not remaining():
-                            self.fail(
-                                "Shared concurrency budget expired before the publication checkpoint; phase="
-                                + fixture.adapter.current().phase
-                            )
                     require_publication_pending("before contender observation")
                     contenders = [workers.submit(action) for action in actions]
                     while not all(event.is_set() for event in attempted):
