@@ -333,6 +333,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertTrue(summary["image_matches_expected"])
         self.assertNotIn("private-", str(summary))
         self.assertNotIn("inner", str(summary))
+
         for extra in (
             ["BAD-NAME=private-malformed"],
             ["APP_TOKEN=private-one", "APP_TOKEN=private-two"],
@@ -352,6 +353,27 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 self.assertFalse(keys.complete)
                 self.assertLessEqual(len(keys.names), MAX_APPLICATION_ENVIRONMENT_KEYS)
                 self.assertNotIn("private-", str(asdict(observed)))
+
+    def test_nonrunning_task_container_identity_is_observed_without_values(self) -> None:
+        for state in ("ready", "failed"):
+            for captured, expected in (
+                (None, False),
+                ({}, False),
+                ({"ContainerID": ""}, False),
+                ({"ContainerID": _CONTAINER_ID}, True),
+                ({"ContainerID": "private-invalid-id"}, None),
+                ({"ContainerID": 123}, None),
+                ("private-invalid-status", None),
+            ):
+                with self.subTest(state=state, captured=captured):
+                    self.task["Status"] = {"State": state, "ContainerStatus": captured}
+                    observed = self.read()
+                    self.assertIs(observed.tasks[0].container_id_present, expected)
+                    summary = summarize_application_runtime(
+                        observed, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+                    )
+                    self.assertNotIn("private-", str(summary))
+                    self.assertFalse(observed.ready)
 
     def test_exact_convergence_proves_actual_image_digest_and_exposes_no_values(self) -> None:
         observed = self.read()

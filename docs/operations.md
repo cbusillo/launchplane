@@ -2687,6 +2687,13 @@ diagnostic coverage. An incomplete set cannot prove
 that a key is absent. A stopped or restarting process may leave no attributable
 running-container evidence, even when the service still lists the desired input.
 
+Each task's nullable `container_id_present` reports whether its captured status
+contains a well-formed Docker container ID, including for nonrunning tasks.
+False means that ID is missing or empty; malformed or unobserved metadata stays
+null. The ID itself is not added to the task output. This uses the existing task
+read and proves neither that a container still exists nor that its image is
+immutable. It changes no readiness, image, capability or settlement verdict.
+
 The read rechecks provider placement and the tracked lane binding before
 returning. `diagnostic_complete`, task coverage, observation time and
 `details_truncated` disclose partial or bounded results; image agreement is

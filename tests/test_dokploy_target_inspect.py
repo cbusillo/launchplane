@@ -293,6 +293,21 @@ class ApplicationRuntimeInspectTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DokployTargetInspectRequest(context="fixture", instance="testing", event="event")
 
+    def test_task_container_identity_presence_stays_nullable_and_is_not_readiness(self) -> None:
+        for present in (None, False, True):
+            with self.subTest(present=present):
+                task = replace(self.observed.tasks[0], container_id_present=present)
+                self.fetch.return_value = replace(self.observed, tasks=(task,))
+                runtime = _require_mapping(
+                    self.inspect(expected_image=self.expected)["runtime_evidence"]
+                )
+                tasks = runtime["tasks"]
+                assert isinstance(tasks, list)
+                self.assertIs(_require_mapping(tasks[0])["container_id_present"], present)
+                self.assertTrue(runtime["process_ready"])
+                self.assertFalse(runtime["image_matches_expected"])
+                self.assertNotIn("private-value", str(runtime))
+
     def test_incomplete_empty_or_over_bound_reads_cannot_credit_actual_image(self) -> None:
         cases = (
             replace(self.observed, task_evidence_complete=False),
