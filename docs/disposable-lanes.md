@@ -1553,6 +1553,24 @@ the current original operation without resetting a running worker. The worker
 rechecks current authority and observes existing effects before continuing.
 Requeueing does not certify that an original writer is excluded, regardless of
 the held error code. Only the original provider fences can qualify dispatch.
+
+An unexpected failure, denial or materialization refusal before the first
+provider effect can still leave the original native reservation held. The worker
+keeps that operation in `reconciliation_required` for explicit original-caller
+resume. Older workers could record this shape as terminal `fail`; the same
+resume route accepts it only when its exact matching outer receipt remains
+`reconcile_required` and the existing native custody/effect check finds no
+started effects. A missing, completed, running or conflicting receipt refuses,
+as does a failed operation with started effects. Resume clears only terminal
+operation bookkeeping and retains every provider receipt, original intent and
+dispatch fence. It does not establish absent provider effects.
+
+Candidate allocation, non-use qualification, serving publication and their
+guarded profile comparisons use the same stored-profile decoder as ordinary
+profile reads. Retired preview transport fields remain inert historical data;
+their presence on any product cannot block another product's testing recovery.
+New profile input stays strict, and actual authority changes still fail the
+existing comparisons.
 This is not the legacy denied-operation fence-release flow: it releases no
 provider fence and grants no alternate identity a replay.
 
