@@ -491,14 +491,13 @@ class SeparationResourceTests(unittest.TestCase):
             schedule.assert_not_called()
         self.assert_retained()
 
-    def test_http_plan_and_apply_use_the_same_identity_and_preserve_replay(self) -> None:
+    async def call_http(self, *, key: str = "http-prepare", **changes: object) -> Response:
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import BearerIdentityConfig
         from tests.support.auth import (
             StubVerifier,
             identity,
             local_operator_policy,
-            scoped_agent_transport,
         )
         from tests.support.http import request
 
@@ -514,17 +513,61 @@ class SeparationResourceTests(unittest.TestCase):
             ),
         )
 
-        async def call(*, key: str = "http-prepare", **changes: object) -> Response:
-            return await request(
-                app,
-                "POST",
-                ROUTE.replace("{product}", self.product),
-                headers={"Authorization": "Bearer fixture", "Idempotency-Key": key},
-                payload={**self.body.model_dump(mode="json"), **changes},
-            )
+        return await request(
+            app,
+            "POST",
+            ROUTE.replace("{product}", self.product),
+            headers={"Authorization": "Bearer fixture", "Idempotency-Key": key},
+            payload={**self.body.model_dump(mode="json"), **changes},
+        )
+
+    def test_http_plan_and_apply_use_the_same_identity_and_preserve_replay(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
+        call = self.call_http
 
         plan = asyncio.run(call(mode="dry-run", reviewed_plan_sha256=""))
         self.assertEqual(plan.status_code, 202, plan.text)
+        with scoped_agent_transport():
+            denied = asyncio.run(call(mode="dry-run"))
+        self.assertEqual(denied.status_code, 403, denied.text)
+        for injected in (
+            {"instance": "prod"},
+            {"target_id": "production"},
+            {"volumes": {"database": "production-db"}},
+            {"credentials": {"password": "production-key"}},
+            {"deploy": True},
+        ):
+            with self.subTest(injected=tuple(injected)):
+                rejected = asyncio.run(call(mode="dry-run", **injected))
+                self.assertEqual(rejected.status_code, 400, rejected.text)
+        with patch(
+            "control_plane.testing_separation_resources.run_preparation_schedule",
+            side_effect=self.prepare,
+        ):
+            result = asyncio.run(call())
+            if self.store.database_dialect_name == "postgresql":
+                self.assertEqual(result.status_code, 202, result.text)
+                replay = asyncio.run(call())
+                self.assertEqual(replay.status_code, 202, replay.text)
+                self.assertEqual(self.effects, ["new empty storage"])
+                stored = result.json()["result"]
+                changed = self.retained.model_copy(deep=True)
+                changed.env["NEW_CONFIG"] = "different"
+                self.store.write_dokploy_target_record(changed)
+                receipt = asyncio.run(
+                    call(mode="receipt", reason="Read stored original preparation.")
+                )
+                self.assertEqual(receipt.status_code, 202, receipt.text)
+                self.assertEqual(receipt.json()["result"], stored)
+                self.store.write_dokploy_target_record(self.retained)
+            else:
+                self.assertEqual(result.status_code, 503, result.text)
+                self.assertFalse(self.effects)
+        self.assert_retained()
+
+    def test_http_pending_status_preserves_its_original_reservation(self) -> None:
+        call = self.call_http
         missing = asyncio.run(call(mode="receipt", key="http-status"))
         self.assertEqual(missing.status_code, 202, missing.text)
         self.assertEqual(missing.json()["result"]["state"], "not_found")
@@ -587,40 +630,4 @@ class SeparationResourceTests(unittest.TestCase):
             )
         foreign = asyncio.run(call(mode="receipt", key="http-status", context="foreign"))
         self.assertEqual(foreign.status_code, 409, foreign.text)
-        with scoped_agent_transport():
-            denied = asyncio.run(call(mode="dry-run"))
-        self.assertEqual(denied.status_code, 403, denied.text)
-        for injected in (
-            {"instance": "prod"},
-            {"target_id": "production"},
-            {"volumes": {"database": "production-db"}},
-            {"credentials": {"password": "production-key"}},
-            {"deploy": True},
-        ):
-            with self.subTest(injected=tuple(injected)):
-                rejected = asyncio.run(call(mode="dry-run", **injected))
-                self.assertEqual(rejected.status_code, 400, rejected.text)
-        with patch(
-            "control_plane.testing_separation_resources.run_preparation_schedule",
-            side_effect=self.prepare,
-        ):
-            result = asyncio.run(call())
-            if self.store.database_dialect_name == "postgresql":
-                self.assertEqual(result.status_code, 202, result.text)
-                replay = asyncio.run(call())
-                self.assertEqual(replay.status_code, 202, replay.text)
-                self.assertEqual(self.effects, ["new empty storage"])
-                stored = result.json()["result"]
-                changed = self.retained.model_copy(deep=True)
-                changed.env["NEW_CONFIG"] = "different"
-                self.store.write_dokploy_target_record(changed)
-                receipt = asyncio.run(
-                    call(mode="receipt", reason="Read stored original preparation.")
-                )
-                self.assertEqual(receipt.status_code, 202, receipt.text)
-                self.assertEqual(receipt.json()["result"], stored)
-                self.store.write_dokploy_target_record(self.retained)
-            else:
-                self.assertEqual(result.status_code, 503, result.text)
-                self.assertFalse(self.effects)
         self.assert_retained()
