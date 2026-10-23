@@ -21945,6 +21945,7 @@ def create_launchplane_fastapi_app(
                     product=live_target_runtime_request.product,
                     context=live_target_runtime_request.context,
                     instance=live_target_runtime_request.instance,
+                    recovery=True,
                     separation_only=not live_target_runtime_request.deploy,
                 )
             except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
@@ -21966,6 +21967,7 @@ def create_launchplane_fastapi_app(
                     product=live_target_runtime_request.product,
                     context=live_target_runtime_request.context,
                     instance=live_target_runtime_request.instance,
+                    recovery=True,
                     separation_only=not live_target_runtime_request.deploy,
                 )
                 if current_binding != disposable_runtime_binding:

@@ -45,6 +45,8 @@ from control_plane.dokploy.testing_route import (
 )
 from control_plane.dokploy.testing_retained_copy import (
     retained_inventory_sha256,
+    retained_copy_availability,
+    retained_web_process,
     require_complete_container_inventory,
 )
 
@@ -90,6 +92,8 @@ def testing_route_host_program() -> str:
         + "\n"
         + inspect.getsource(parse_testing_route_fence)
         + inspect.getsource(retained_inventory_sha256)
+        + inspect.getsource(retained_copy_availability)
+        + inspect.getsource(retained_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
@@ -451,10 +455,9 @@ def main(spec):
         if expected and expected!=application_file_sha256:
             raise RuntimeError('The original application route file changed')
     old_project=spec['old_project']
-    members=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project]
-    states={item['State']['Status'] for item in members}
-    old_availability='absent' if not members else 'stopped' if states<={'exited','created'} else 'available' if states&{'running','restarting','paused'} else 'unknown'
+    old_availability=retained_copy_availability(containers,{'project':old_project})
     old_inventory_sha256=retained_inventory_sha256(containers,{'project':old_project})
+    old_web_process=retained_web_process(containers,{'project':old_project})
     unavailable=spec.get('unavailable_predecessor')
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
     endpoints=[]
@@ -564,7 +567,7 @@ def main(spec):
         return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_web_process':old_web_process,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
 
 if __name__=='__main__':
     payload={}

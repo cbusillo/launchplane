@@ -422,22 +422,27 @@ class ServiceRestartAdapter:
                         "Restart identity changed; inspect and review again."
                     )
                 if self.require_disposable:
-                    runtime_stopped = fresh.service == "web" and not fresh.before.running
+                    runtime_stopped = fresh.service == "web" and (
+                        not fresh.before.running or fresh.before.health == "unhealthy"
+                    )
                     if fresh.service == "database":
-                        runtime_stopped = not inspect_service(
+                        web = inspect_service(
                             host=host,
                             token=token,
                             app_name=fresh.app_name,
                             server_id=fresh.server_id,
                             service="web",
                             expected=expected,
-                        ).running
+                        )
+                        runtime_stopped = not web.running or web.health == "unhealthy"
                     require_disposable_lane(
                         self.store,
                         product=self.plan.product,
                         context=self.plan.context,
                         instance=self.plan.instance,
-                        same_artifact_restart=not fresh.before.running,
+                        same_artifact_restart=True,
+                        restart_running=fresh.before.running,
+                        recovery=True,
                         runtime_stopped=runtime_stopped,
                     )
             except DisposableLaneSafetyUnknown as error:
