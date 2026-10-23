@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import contextlib
 import io
 import os
@@ -154,6 +155,193 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             else []
         )
         return PublicHttpResponse(200, url, 0, (), json.dumps(payload).encode())
+
+    def historical_discord_fixture(self) -> str:
+        self.external_fixture()
+        token = base64.urlsafe_b64encode(b"123").decode().rstrip("=") + ".fixture.signature"
+        binding = next(
+            row for row in self.store.list_secret_bindings() if row.binding_key == "BOT_ACCESS"
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        version = self.store.read_secret_version(record.current_version_id)
+        self.store.write_secret_binding(
+            binding.model_copy(update={"declared_secret_class": "testing"})
+        )
+        self.store.write_secret_version(
+            version.model_copy(
+                update={"ciphertext": secrets._encrypt_secret_value(token)[0], "value_origin": None}
+            )
+        )
+        return token
+
+    async def discord_identity(self, suffix: str = "") -> Any:
+        return await _asgi_request(
+            self.app,
+            "GET",
+            "/v1/products/example-site/environments/testing/discord-identity" + suffix,
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+
+    async def test_historical_discord_identification_does_not_change_origin_or_audit_eligibility(
+        self,
+    ) -> None:
+        token = self.historical_discord_fixture()
+        before = self.store.list_secret_records()
+        secret_id = next(row.secret_id for row in before if row.name == "BOT_ACCESS")
+        versions = self.store.list_secret_versions(secret_id=secret_id)
+
+        def respond(url: str, **kwargs: Any) -> Any:
+            self.assertEqual(kwargs["headers"]["Authorization"], "Bot " + token)
+            self.assertTrue(
+                any(
+                    event.event_type == "resolution_attempted"
+                    for event in self.store.list_secret_audit_events(secret_id=secret_id)
+                )
+            )
+            return self.provider_response(url, **kwargs)
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=respond
+        ) as provider:
+            report = await self.discord_identity()
+            self.assertEqual(report.status_code, 200, report.text)
+            result = report.json()["result"]
+            self.assertEqual(result["observation"]["application_id"], "456")
+            self.assertEqual(result["observation"]["bot_id"], "123")
+            self.assertTrue(result["observation"]["guild_enumeration_complete"])
+            self.assertEqual(result["qualification"], "not_evaluated")
+            self.assertNotIn(token, report.text)
+            self.assertTrue(provider.called)
+        self.assertEqual(self.store.list_secret_records(), before)
+        self.assertEqual(self.store.list_secret_versions(secret_id=secret_id), versions)
+        with patch("control_plane.discord_external_resources.request_public_http") as provider:
+            audit = await self.audit(external=True)
+        provider.assert_not_called()
+        self.assertEqual(audit.json()["external_resources"]["status"], "unavailable")
+
+    async def test_discord_identification_refuses_local_values_production_overlap_and_overrides(
+        self,
+    ) -> None:
+        token = self.historical_discord_fixture()
+        binding = next(
+            row for row in self.store.list_secret_bindings() if row.binding_key == "BOT_ACCESS"
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        version = self.store.read_secret_version(record.current_version_id)
+        for value, origin in (("local-fixture-password", None), (token, "generated")):
+            self.store.write_secret_version(
+                version.model_copy(
+                    update={
+                        "ciphertext": secrets._encrypt_secret_value(value)[0],
+                        "value_origin": origin,
+                    }
+                )
+            )
+            with patch("control_plane.discord_external_resources.request_public_http") as provider:
+                report = await self.discord_identity()
+            self.assertEqual(report.status_code, 200, report.text)
+            self.assertEqual(report.json()["result"]["status"], "unavailable")
+            provider.assert_not_called()
+        self.store.write_secret_version(version)
+        other = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload("another-site")
+        )
+        self.store.write_product_profile_record(other)
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": other.product,
+                "context": other.product,
+                "instance": "prod",
+                "secrets": [{"binding_key": "OTHER_BOT", "value": token}],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        with patch("control_plane.discord_external_resources.request_public_http") as provider:
+            report = await self.discord_identity()
+            override = await self.discord_identity("?token=unused")
+        self.assertEqual(report.json()["result"]["status"], "matches_production")
+        self.assertEqual(override.status_code, 400)
+        provider.assert_not_called()
+
+    async def test_discord_identification_discards_drift_and_refuses_missing_audit(self) -> None:
+        self.historical_discord_fixture()
+        with (
+            patch.object(self.store, "write_secret_audit_event", side_effect=OSError("private")),
+            patch("control_plane.discord_external_resources.request_public_http") as provider,
+        ):
+            report = await self.discord_identity()
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertEqual(report.json()["result"]["status"], "unavailable")
+        provider.assert_not_called()
+
+        def respond(url: str, **kwargs: Any) -> Any:
+            if url.endswith("/applications/@me"):
+                changed = self.profile.model_copy(deep=True)
+                changed.display_name = "changed during read"
+                self.store.write_product_profile_record(changed)
+            return self.provider_response(url, **kwargs)
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=respond
+        ):
+            report = await self.discord_identity()
+        self.assertEqual(report.json()["result"]["failure_code"], "inputs_changed")
+        self.assertIsNone(report.json()["result"]["observation"])
+
+    async def test_discord_identification_client_preserves_incomplete_evidence_and_exits_nonzero(
+        self,
+    ) -> None:
+        from unittest.mock import Mock
+
+        self.historical_discord_fixture()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.provider_response,
+        ):
+            report = (await self.discord_identity()).json()
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/prepare-testing-credentials.py")
+        )
+        helper = Path(self.directory.name) / "launchplane-write-action.py"
+        helper.touch()
+        reader = Mock(return_value=report)
+        transport = {
+            "resolve_settings": lambda _: {
+                "service_url": "https://fixture.example.invalid",
+                "token": "fixture",
+            },
+            "validate_service_url": lambda _: None,
+            "request_launchplane_read": reader,
+        }
+        for complete in (True, False):
+            if not complete:
+                report["result"]["observation"]["guild_status"] = "unavailable"
+                report["result"]["observation"]["guild_enumeration_complete"] = False
+            output = io.StringIO()
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch(
+                    "sys.argv",
+                    [
+                        "client",
+                        "audit",
+                        "--product",
+                        "example-site",
+                        "--discord-identity",
+                        "--operator-helper",
+                        str(helper),
+                    ],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(client["main"](), 0 if complete else 1)
+            self.assertEqual(
+                json.loads(output.getvalue())["result"]["observation"]["bot_id"], "123"
+            )
+            self.assertFalse(reader.call_args.kwargs["query"])
 
     async def test_external_reads_require_both_opt_in_and_explicit_stored_purpose(self) -> None:
         with patch("control_plane.discord_external_resources.request_public_http") as request:
@@ -1222,13 +1410,17 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("control_plane.discord_external_resources.request_public_http") as provider,
         ):
-            response = await _asgi_request(
-                app,
-                "GET",
+            for path in (
                 "/v1/testing-credentials?include_external_resources=true",
-                headers={"Authorization": "Bearer test-operator-token"},
-            )
-        self.assertEqual(response.status_code, 403, response.text)
+                "/v1/products/example-site/environments/testing/discord-identity",
+            ):
+                response = await _asgi_request(
+                    app,
+                    "GET",
+                    path,
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(response.status_code, 403, response.text)
         provider.assert_not_called()
 
     def test_onboarding_import_preserves_existing_lane_credentials(self) -> None:

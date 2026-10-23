@@ -46,6 +46,33 @@
     },
     "operations": [
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_testing_discord_identity",
+        "path": "/v1/products/{product}/environments/{environment}/discord-identity",
+        "purpose": "Identify an exact testing Discord credential through fixed provider reads without changing origin or qualifying isolation.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "68955214c07d49ae9d5d9db28a4fc7cb58b9cc875a49183c9fddb201b77f4f5a",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "original",
         "identity_dependencies": [
           "read_write_identity"
@@ -1079,8 +1106,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "e734e4eeb0036d9c49afd75295a4123fcafe4ad4"
+    "source_commit_sha": "dbb4d77119e9c054be509627a200279977a0adff"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "8d951938be1c258c6a7efcaa195e58baf4bbab5e6307c85cb0299c9f921fdc87"
+  "semantic_digest_sha256": "3ce9d1ae7c5fd71a1fc8ad45cd4a498f881926a5068ac3a32815b5c5c8c3e278"
 }

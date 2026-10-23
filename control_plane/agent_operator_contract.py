@@ -104,6 +104,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/discord-identity",
+        "Identify an exact testing Discord credential through fixed provider reads without changing origin or qualifying isolation.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
         "Inspect an exact generic-web original without mutation, including completed testing abandonment readback by its retained reference.",

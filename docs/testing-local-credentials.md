@@ -187,3 +187,57 @@ remain unchanged and require their own authoritative evidence.
 
 Provider contract: [Discord current-user guilds](https://docs.discord.com/developers/resources/user#get-current-user-guilds)
 and [current application](https://docs.discord.com/developers/resources/application#get-current-application).
+
+## Testing Discord identity diagnostic
+
+`GET /v1/products/{product}/environments/testing/discord-identity` identifies the
+existing exact testing credential, including historical versions with unknown
+origin, without changing that origin or making it eligible for the external audit.
+The product must have one testing lane and one applicable stored `discord_bot`
+requirement. Its delivered binding must be testing-classified and owned by that
+exact context-instance. Other environments and query overrides are refused.
+Existing product-profile and environment read access must cover every participating
+product and stable lane before any value is decrypted. No new permission is added.
+
+The service compares the captured value with every product's managed production
+runtime values using constant-time comparisons. A match returns
+`matches_production` and sends nothing to Discord. Incomplete comparison returns
+unavailable. Production credentials are never used for external requests.
+Service-generated origins are refused. Before external use, the service also
+requires a three-segment URL-safe bot-token shape whose first segment decodes to
+a valid bot ID; this rejects the service's local password formats. This structural
+check is not provider authentication. Only Discord's response establishes identity,
+and its bot ID must agree with the decoded segment.
+
+The diagnostic reuses the existing bounded Discord observer and its fixed HTTPS
+destinations, redirect refusal, pagination and response limits. It writes a
+redacted `resolution_attempted` event with the caller subject, trace and exact
+binding/version before any provider request. Internal overlap and shape checks
+decrypt only inside Launchplane before that external-use event. Audit persistence
+failure prevents external use. Authorized profiles, selected bindings, versions
+and the production comparison read set are checked before external use, before
+each provider request and after collection; drift discards the result.
+
+After compatible source deployment, use the existing caller:
+
+```sh
+uv run python scripts/prepare-testing-credentials.py audit --discord-identity \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product>
+```
+
+The response has `Cache-Control: no-store`. The caller prints only the exact
+binding/version, application/bot/guild IDs, collection times and fixed status
+codes. Credentials, token segments, fingerprints, provider bodies and exception
+text are never returned. Exit zero requires complete identity and guild
+observation. A failure or incomplete enumeration exits nonzero; retain its trace
+and evidence. Compare the returned IDs with the Director's authoritative testing
+records. A production match or unexpected identity is a stop, not permission to
+replace a token; the Director supplies credentials privately through the existing
+entry path.
+
+Every result retains `qualification: not_evaluated`. Identification does not
+establish historical origin, old-writer exclusion, direct-message/global reach,
+resource independence or permission to deploy. The existing external-audit origin
+guard, data reproducibility and testing activation/deployment guards remain
+unchanged. No token entry/reset, hold change, rebuild or provider mutation occurs.
