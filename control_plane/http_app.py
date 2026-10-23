@@ -13784,10 +13784,26 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
-        if existing_profile is not None and "odoo_business_hours" not in raw_payload:
-            profile = profile.model_copy(
-                update={"odoo_business_hours": existing_profile.odoo_business_hours}
-            )
+        if existing_profile is not None:
+            preserved_fields = {
+                field: getattr(existing_profile, field)
+                for field in ("odoo_business_hours", "production_use_authority")
+                if field not in raw_payload
+            }
+            try:
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    {**profile.model_dump(mode="json"), **preserved_fields}
+                )
+            except ValidationError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_conflict",
+                    message=(
+                        "Stored profile settings conflict with the requested change; "
+                        "review or clear them through their supported configuration operation."
+                    ),
+                ) from error
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None
         ):
@@ -13796,10 +13812,6 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="business_hours_bounded_apply_required",
                 message="Change calendar policy through the reviewed product-config operation.",
-            )
-        if existing_profile is not None and "production_use_authority" not in raw_payload:
-            profile = profile.model_copy(
-                update={"production_use_authority": existing_profile.production_use_authority}
             )
         if existing_profile is not None and (
             profile.production_use != existing_profile.production_use

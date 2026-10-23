@@ -837,6 +837,22 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
             self.profile.model_copy(update={"source": payload["source"]}),
         )
 
+    async def test_omitted_policy_cannot_follow_a_driver_change(self) -> None:
+        from tests.support.http import request
+
+        payload = self.profile.model_dump(mode="json")
+        payload.pop("odoo_business_hours", None)
+        payload["driver_id"] = "generic-web"
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
     async def test_generic_profile_write_cannot_overwrite_a_concurrent_policy_apply(self) -> None:
         from tests.support.http import request
         from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
