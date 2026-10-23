@@ -1,5 +1,3 @@
-"""Reviewed new application storage; no caller-selected volumes or existing mounts."""
-
 from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -54,9 +52,18 @@ def state_volume_target_key(context: str) -> str:
     return f"application-state-setup:{context}:testing"
 
 
-def require_no_held_state_volume(store: PostgresRecordStore, context: str) -> None:
+def require_no_held_state_volume(
+    store: PostgresRecordStore, context: str, *, original_scope: str = "", original_key: str = ""
+) -> None:
     if any(
         row.provider_target_key == state_volume_target_key(context)
+        and not (
+            original_scope
+            and original_key
+            and row.scope == original_scope
+            and row.route_path == ROUTE
+            and row.idempotency_key == original_key
+        )
         for row in store.list_held_provider_target_reservations()
     ):
         raise ValueError("Testing storage setup is unresolved; preserve its original key and plan.")
@@ -99,11 +106,36 @@ def validate_volume_request(request: "DokployTargetSetupEnvelope") -> None:
         raise ValueError("A new dry-run allocates its own storage plan.")
 
 
+def validate_ordinary_allocation_request(request: "DokployTargetSetupEnvelope") -> None:
+    if (
+        request.operation != "create-application"
+        or request.instance != "testing"
+        or request.state_volume_path
+    ):
+        raise ValueError("Allocation recovery requires an ordinary testing application request.")
+    if request.retain_allocation:
+        if request.mode != "apply" or not re.fullmatch(
+            r"[a-f0-9]{64}", request.expected_allocation_custody_sha256
+        ):
+            raise ValueError("Retention requires reviewed readback custody and apply mode.")
+    elif request.expected_allocation_custody_sha256:
+        raise ValueError("Custody comparison is only used for explicit allocation retention.")
+
+
+def application_allocation_names(plan_id: str, *, state_volume: bool) -> dict[str, str]:
+    names = state_volume_allocation_names(plan_id)
+    if not state_volume:
+        names.update(volume_name="", app_name="lp-testing-app-" + plan_id + "-empty")
+    return names
+
+
 def _normalized(request: "DokployTargetSetupEnvelope") -> dict[str, Any]:
     return request.model_dump(
         mode="json",
         exclude={
             "mode",
+            "retain_allocation",
+            "expected_allocation_custody_sha256",
             "confirmation",
             "reason",
             "state_volume_plan_id",
@@ -146,6 +178,7 @@ class ApplicationStateVolumeAdapter:
     product: str
     intent: dict[str, Any]
     operation_key: str = ""
+    first_testing_setup: bool = False
 
     @classmethod
     def completed_for_testing_lane(
@@ -253,7 +286,7 @@ class ApplicationStateVolumeAdapter:
                 runtime_port=profile.runtime_port,
                 application_id=data["application"],
             )
-            if not self._mount_matches(live):
+            if not self._configuration_matches(live):
                 raise ValueError("Application source, execution, storage or placement changed.")
         return request_fingerprint(
             {
@@ -273,9 +306,22 @@ class ApplicationStateVolumeAdapter:
         trace: str,
         product: str,
         operation_key: str = "",
+        *,
+        first_testing_setup: bool = False,
     ) -> "ApplicationStateVolumeAdapter":
         from control_plane.dokploy_target_setup_http import require_empty_testing_target_creation
 
+        if not request.state_volume_path:
+            return cls.prepare_ordinary(
+                root,
+                store,
+                request,
+                scope,
+                trace,
+                product,
+                operation_key,
+                first_testing_setup=first_testing_setup,
+            )
         validate_volume_request(request)
         if request.mode == "dry-run":
             require_empty_testing_target_creation(
@@ -322,6 +368,95 @@ class ApplicationStateVolumeAdapter:
                 raise ValueError("Storage plan differs from the reviewed request.")
         return cls(root, store, request, scope, trace, product, intent, operation_key)
 
+    @classmethod
+    def prepare_ordinary(
+        cls,
+        root: Path,
+        store: PostgresRecordStore,
+        request: "DokployTargetSetupEnvelope",
+        scope: str,
+        trace: str,
+        product: str,
+        operation_key: str,
+        *,
+        first_testing_setup: bool,
+    ) -> "ApplicationStateVolumeAdapter":
+        validate_ordinary_allocation_request(request)
+        if not operation_key:
+            raise ValueError("Allocation recovery requires the original operation key.")
+        plan_id = request_fingerprint({"scope": scope, "route": ROUTE, "key": operation_key})[:32]
+        plan = store.read_idempotency_record(
+            scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id
+        )
+        if plan is None:
+            if request.mode == "readback" or request.retain_allocation:
+                raise ValueError("Original allocation is unavailable to this caller.")
+            host, _token = source.read_dokploy_config(control_plane_root=root)
+            intent: dict[str, Any] = {
+                "request": _normalized(request),
+                "product": product,
+                "binding": _binding(store, request.context),
+                "provider_host": host,
+                "plan_id": plan_id,
+                "ordinary": True,
+                "first_testing_setup": first_testing_setup,
+                **application_allocation_names(plan_id, state_volume=False),
+            }
+            if request.project_id or request.environment_id:
+                intent["project_marker"] = request.project_name
+            if request.environment_id:
+                intent["environment_marker"] = request.environment_name
+            intent["plan_sha256"] = request_fingerprint(intent)
+            adapter = cls(
+                root,
+                store,
+                request,
+                scope,
+                trace,
+                product,
+                intent,
+                operation_key,
+                first_testing_setup,
+            )
+            adapter.checkpoint()
+            store.write_idempotency_record_once(
+                LaunchplaneIdempotencyRecord(
+                    record_id="application-allocation-plan-" + plan_id,
+                    scope=scope,
+                    route_path=PLAN_ROUTE,
+                    idempotency_key=plan_id,
+                    request_fingerprint=intent["plan_sha256"],
+                    response_status_code=202,
+                    response_trace_id=trace,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=intent,
+                )
+            )
+            plan = store.read_idempotency_record(
+                scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id
+            )
+        if plan is None or plan.response_payload.get("ordinary") is not True:
+            raise ValueError("Original allocation intent is unavailable.")
+        intent = plan.response_payload
+        if intent["request"] != _normalized(request):
+            raise ValueError("Preserve the original allocation request and operation key.")
+        if request.mode != "readback" and intent["product"] != product:
+            raise ValueError("Original allocation owner changed.")
+        return cls(
+            root,
+            store,
+            request,
+            scope,
+            trace,
+            str(intent["product"]),
+            intent,
+            operation_key,
+            first_testing_setup,
+        )
+
+    def _configuration_checkpoint(self) -> str:
+        return "mount_verified" if self.request.state_volume_path else "application_verified"
+
     def target_key(self) -> str:
         return state_volume_target_key(self.request.context)
 
@@ -329,7 +464,7 @@ class ApplicationStateVolumeAdapter:
         return str(self.intent["plan_sha256"])
 
     def plan_result(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "operation": "create-application",
             "context": self.request.context,
             "instance": "testing",
@@ -360,25 +495,55 @@ class ApplicationStateVolumeAdapter:
                 "mount_path": self.request.state_volume_path,
             },
         }
+        if not self.request.state_volume_path:
+            result.pop("state_volume")
+            result.pop("state_volume_plan_id")
+            result["allocation_id"] = self.intent["plan_id"]
+        return result
 
     def checkpoint(self, *, read_provider_source: bool = True) -> None:
         from control_plane.dokploy_target_setup_http import require_empty_testing_target_creation
         from control_plane.application_state_volume_retention import require_state_volume_owner
 
-        require_state_volume_owner(self.store, product=self.product, context=self.request.context)
-        require_empty_testing_target_creation(
-            self.store,
-            self.request,
-            product=self.product,
-            control_plane_root_path=self.root,
-            read_provider_source=read_provider_source,
-        )
+        if (
+            self.request.state_volume_path
+            or self.first_testing_setup
+            or self.intent.get("first_testing_setup")
+        ):
+            require_state_volume_owner(
+                self.store, product=self.product, context=self.request.context
+            )
+            require_empty_testing_target_creation(
+                self.store,
+                self.request,
+                product=self.product,
+                control_plane_root_path=self.root,
+                read_provider_source=read_provider_source,
+                allocation_scope=self.scope if not self.request.state_volume_path else "",
+                allocation_key=self.operation_key if not self.request.state_volume_path else "",
+            )
+        else:
+            from control_plane.dokploy_target_setup_http import (
+                ensure_dokploy_target_setup_context_is_not_historical,
+            )
+
+            ensure_dokploy_target_setup_context_is_not_historical(
+                record_store=self.store, context=self.request.context
+            )
+            require_no_held_state_volume(
+                self.store,
+                self.request.context,
+                original_scope=self.scope,
+                original_key=self.operation_key,
+            )
         host, _token = source.read_dokploy_config(control_plane_root=self.root)
         if (
             host != self.intent["provider_host"]
             or _binding(self.store, self.request.context) != self.intent["binding"]
         ):
-            raise ValueError("Reviewed testing target or provider changed; storage plan is stale.")
+            raise ValueError(
+                "Reviewed testing target or provider changed; allocation intent is stale."
+            )
 
     def authority_checkpoint(self) -> None:
         # The live source was checked immediately before entering the guard.
@@ -420,7 +585,20 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("New application identity or placement differs from the plan.")
         return live
 
-    def _mount_matches(self, live: api.JsonObject) -> bool:
+    def _configuration_matches(self, live: api.JsonObject) -> bool:
+        if not self.request.state_volume_path:
+            from control_plane.dokploy.target_source_setup import require_empty_target_source
+
+            try:
+                require_empty_target_source(live)
+            except ValueError:
+                return False
+            return (
+                live.get("mounts") == []
+                and live.get("deployments") == []
+                and not live.get("domains")
+                and live.get("applicationStatus") in {None, "idle"}
+            )
         mounts = live.get("mounts")
         if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
             return False
@@ -456,12 +634,14 @@ class ApplicationStateVolumeAdapter:
         )
 
         data = json.loads(phase)
-        if not configuration_verified and data.get("mount_verified") != "true":
-            raise ValueError("Original allocation has no durable verified-mount checkpoint.")
+        if not configuration_verified and data.get(self._configuration_checkpoint()) != "true":
+            raise ValueError(
+                "Original allocation has no durable verified-configuration checkpoint."
+            )
         application_id, environment_id = data["application"], data["environment"]
         if configuration_verified:
             live = self._live(application_id, environment_id, data["app_name"])
-            if not self._mount_matches(live):
+            if not self._configuration_matches(live):
                 raise ValueError(
                     "Original volume effect is incomplete or changed; never repeat creation."
                 )
@@ -540,26 +720,52 @@ class ApplicationStateVolumeAdapter:
 
         data: dict[str, str] = json.loads(phase) if phase else {}
         if not data:
-            return data
+            return {
+                key: value
+                for key, value in {
+                    "project": self.request.project_id,
+                    "environment": self.request.environment_id,
+                }.items()
+                if value
+            }
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         if host != self.intent["provider_host"]:
             raise ValueError("Provider binding changed.")
         inventory = read_dokploy_inventory(host=host, token=token, offset=0, limit=MAX_PROJECTS)
         if inventory.next_offset is not None or len(inventory.projects) != inventory.total_projects:
             raise ValueError("Original placement inventory is incomplete.")
-        projects = [p for p in inventory.projects if p.name == self.intent["project_marker"]]
+        if self.request.project_id:
+            projects = [p for p in inventory.projects if p.project_id == self.request.project_id]
+        elif self.request.environment_id:
+            projects = [
+                p
+                for p in inventory.projects
+                if any(e.environment_id == self.request.environment_id for e in p.environments)
+            ]
+        else:
+            projects = [p for p in inventory.projects if p.name == self.intent["project_marker"]]
         if len(projects) != 1 or (
             data.get("project") and data["project"] != projects[0].project_id
         ):
             raise ValueError("Original project is absent, changed or ambiguous; retain custody.")
         project = projects[0]
-        if not data.get("project") and data.get("pending") != PROJECT_CREATE_PATH:
+        if (
+            not data.get("project")
+            and not self.request.environment_id
+            and data.get("pending") != PROJECT_CREATE_PATH
+        ):
             raise ValueError("Unrequested project placement.")
         data["project"] = project.project_id
         if data.get("pending") == PROJECT_CREATE_PATH:
             data.pop("pending")
         environments = [
-            e for e in project.environments if e.name == self.intent["environment_marker"]
+            e
+            for e in project.environments
+            if (
+                e.environment_id == self.request.environment_id
+                if self.request.environment_id
+                else e.name == self.intent["environment_marker"]
+            )
         ]
         if not data.get("environment") and data.get("pending") is None:
             return data
@@ -601,12 +807,15 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("Original application name changed.")
         data["app_name"] = app_name
         live = self._live(data["application"], data["environment"], app_name)
-        if data.get("pending") == MOUNT_CREATE or data.get("mount_verified") == "true":
-            if not self._mount_matches(live):
+        if (
+            data.get("pending") == MOUNT_CREATE
+            or data.get(self._configuration_checkpoint()) == "true"
+        ):
+            if not self._configuration_matches(live):
                 raise ValueError("Original mount effect is uncertain or changed; retain custody.")
             # Positive recovery promotes the dispatched effect permanently.
             # Clearing pending must never make it eligible for another create.
-            data["mount_verified"] = "true"
+            data[self._configuration_checkpoint()] = "true"
         if data.get("pending") not in {None, APPLICATION_CREATE_PATH, MOUNT_CREATE}:
             raise ValueError("Unknown original provider phase.")
         data.pop("pending", None)
@@ -655,7 +864,7 @@ class ApplicationStateVolumeAdapter:
             data = json.loads(phase) if phase else {}
             if all(data.get(key) for key in ("application", "environment", "app_name")):
                 live = self._live(data["application"], data["environment"], data["app_name"])
-                evidence = "matches" if self._mount_matches(live) else "differs"
+                evidence = "matches" if self._configuration_matches(live) else "differs"
         except (
             click.ClickException,
             OSError,
@@ -713,7 +922,11 @@ class ApplicationStateVolumeAdapter:
             return retain_state_volume_allocation(
                 self.store,
                 reservation=row,
-                expected_custody_sha256=self.request.expected_state_volume_custody_sha256,
+                expected_custody_sha256=(
+                    self.request.expected_state_volume_custody_sha256
+                    if self.request.state_volume_path
+                    else self.request.expected_allocation_custody_sha256
+                ),
                 expected_original_intent=self.intent,
                 trace=self.trace,
                 checkpoint=checkpoint,
@@ -755,7 +968,7 @@ class ApplicationStateVolumeAdapter:
             )
         if not isinstance(lease, ProviderEvidenceLease):
             raise ProviderMutationRejectedError(
-                ValueError("Storage adoption requires its live evidence lease.")
+                ValueError("Application adoption requires its live evidence lease.")
             )
         started = False
         original = self.store.read_idempotency_record(
@@ -807,11 +1020,15 @@ class ApplicationStateVolumeAdapter:
                 created["app_name"] = app_name
                 self.checkpoint()
                 live = self._live(value, created["environment"], app_name)
-                if self._mount_matches(live):
-                    created["mount_verified"] = "true"
+                if self._configuration_matches(live):
+                    created[self._configuration_checkpoint()] = "true"
                     self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                     return response
-                if created.get("mount_verified") == "true":
+                if not self.request.state_volume_path:
+                    raise ValueError(
+                        "Original empty application configuration changed; retain custody."
+                    )
+                if created.get(self._configuration_checkpoint()) == "true":
                     raise ValueError("Original verified mount changed; never repeat creation.")
                 if (
                     live.get("mounts") != []
@@ -840,9 +1057,11 @@ class ApplicationStateVolumeAdapter:
                         "serviceId": value,
                     },
                 )
-                if not self._mount_matches(self._live(value, created["environment"], app_name)):
+                if not self._configuration_matches(
+                    self._live(value, created["environment"], app_name)
+                ):
                     raise ValueError("Independent state-volume readback differs.")
-                created["mount_verified"] = "true"
+                created[self._configuration_checkpoint()] = "true"
                 self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                 execution_check()
                 self.checkpoint()
@@ -909,7 +1128,9 @@ class ApplicationStateVolumeAdapter:
                             }
                         ),
                         lane_lock_held=True,
-                        required_context_owner=(self.product, self.request.context),
+                        required_context_owner=(self.product, self.request.context)
+                        if self.product
+                        else None,
                         application_mutate=mutate,
                     )
                 lease.assert_current()
@@ -927,8 +1148,8 @@ class ApplicationStateVolumeAdapter:
                     if isinstance(
                         error, StateVolumeRefusal | TestingTargetSourceEvidenceUnavailable
                     )
-                    else ValueError("Testing storage plan refused before effects.")
+                    else ValueError("Testing application allocation refused before effects.")
                 ) from error
             raise ProviderMutationUnknownError(
-                "Creation may have taken effect; retain the original key and storage plan for readback/recovery."
+                "Creation may have taken effect; preserve the original request, key and allocation receipt for readback/recovery."
             ) from error

@@ -230,6 +230,44 @@ setup should use the deployed service route or admin workflow instead. It
 still leaves runtime env, managed secrets, volumes, ports, and health behavior
 as explicit setup rather than inferred provider state.
 
+### Ordinary testing application allocation
+
+Ordinary non-storage `create-application` setup through
+`POST /v1/dokploy-targets/setup` preserves direct apply with its original request
+and `Idempotency-Key`. A dry run still creates no provider resource. Apply saves
+the allocation intent before dispatch and uses the same durable runner as
+state-volume setup. The service generates unique names for each newly created
+project, environment and application, returned in `allocation`; supplied labels
+are not recovery identities. Existing placement ids remain exact existing
+placement. Every acknowledged identity and each pending dispatch is recorded
+under the original caller scope and key before the next effect.
+
+For recovery, send the unchanged setup request with `mode: readback` and the
+original key. The response includes `allocation_id`, `operation_state`, the
+durable `provider_effect_phase`, `configuration_evidence` and `custody_sha256`.
+Readback does not adopt records or mutate the provider. Repeating apply with
+that same key can continue only from positively identified original resources
+in complete inventory. It preserves current source, ownership, hold, placement,
+usage and lease checks. An absent or ambiguous result for a dispatched create
+remains uncertain and is never blindly repeated. A fresh key cannot bypass
+unresolved allocation custody. Completed receipts from the earlier direct setup
+path continue to replay; they do not acquire retrospective phase evidence.
+
+If continuation cannot be proved, obtain original-key readback and review its
+custody digest. Send the same request and key in apply mode with
+`retain_allocation: true` and
+`expected_allocation_custody_sha256: <custody_sha256>`, plus the normal exact
+confirmation and reason. The existing retention operation requires an expired
+execution lease and current exclusive ownership. It retains all resource ids
+and pending effects, fences the old worker and returns
+`allocation_state: retained_uncertain`, `resources_retained: true` and
+`applied: false`. It performs no provider deletion or deployment. Original-key
+apply replays that retained receipt; a new allocation uses a new key and
+independent names. Already adopted allocations recover their original completion
+receipt instead of being retained. The shared custody refusal codes below still
+apply. This adds no grant or cross-caller transfer; preserve original receipts
+when the original caller is unavailable.
+
 ### Testing application state volume
 
 `POST /v1/dokploy-targets/setup`, `operation: create-application`, optionally

@@ -25,6 +25,7 @@ from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
+from tests import test_application_allocation as application_allocation_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
@@ -1608,6 +1609,30 @@ class RealPostgresApplicationTestingHoldTests(
     test_missing_physical_storage_proof_keeps_application_held = application_volume_tests.ApplicationStateVolumeTests.test_missing_physical_storage_proof_keeps_application_held
     test_late_cross_lane_idempotency_collision_retains_hold_and_original_receipt = application_volume_tests.ApplicationStateVolumeTests.test_late_cross_lane_idempotency_collision_retains_hold_and_original_receipt
     test_application_continuation_refuses_live_domain_drift = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_refuses_live_domain_drift
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresApplicationAllocationTests(
+    application_allocation_tests.ApplicationAllocationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    def setUp(self) -> None:
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                source="test:application-allocation",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
 
 
 class RealPostgresHistoricalEffectRepositoryFenceTests(

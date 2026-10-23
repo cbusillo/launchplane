@@ -27247,7 +27247,31 @@ def create_launchplane_fastapi_app(
                     code="idempotency_key_required",
                     message="Dokploy target setup apply requires an Idempotency-Key header.",
                 )
-        if setup_request.state_volume_path:
+        ordinary_allocation = (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode != "dry-run"
+            and not setup_request.state_volume_path
+        )
+        if ordinary_allocation and setup_request.mode == "apply":
+            prior = database_store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                idempotency_key=idempotency_key.strip(),
+            )
+            if prior is not None and not prior.reconciliation_key:
+                _, _, legacy_replay = await replay_apply_idempotency(
+                    request=request,
+                    record_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if legacy_replay is not None:
+                    return legacy_replay
+        if setup_request.state_volume_path or ordinary_allocation:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
             from control_plane.application_state_volume_errors import StateVolumeRefusal
 
@@ -27260,6 +27284,7 @@ def create_launchplane_fastapi_app(
                     trace_id,
                     lane_owner,
                     idempotency_key.strip(),
+                    first_testing_setup=first_testing_setup,
                 )
                 if setup_request.mode == "dry-run":
                     return accepted_evidence_response(
@@ -27272,7 +27297,7 @@ def create_launchplane_fastapi_app(
                         result=adapter.readback(idempotency_key.strip()),
                     )
 
-                if setup_request.retain_state_volume_allocation:
+                if setup_request.retain_state_volume_allocation or setup_request.retain_allocation:
                     return accepted_evidence_response(
                         trace_id=trace_id,
                         records={},
@@ -27297,8 +27322,12 @@ def create_launchplane_fastapi_app(
                     route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
                     trace_id=trace_id,
                     operation=volume_operation,
-                    in_progress_message="Application storage setup is running under its original key.",
-                    reconcile_message="Preserve the original key and storage plan; inspect readback before recovery.",
+                    in_progress_message="Application setup is running under its original key.",
+                    reconcile_message=(
+                        "Preserve the original setup request and key; inspect readback before recovery."
+                        if ordinary_allocation
+                        else "Preserve the original key and storage plan; inspect readback before recovery."
+                    ),
                 )
             except TestingTargetSourceEvidenceUnavailable as error:
                 raise _launchplane_http_error(
@@ -27309,11 +27338,15 @@ def create_launchplane_fastapi_app(
                 ) from error
             except (ValueError, FileNotFoundError) as error:
                 raise _launchplane_http_error(
-                    status_code=409,
+                    status_code=400
+                    if ordinary_allocation and not isinstance(error, StateVolumeRefusal)
+                    else 409,
                     trace_id=trace_id,
                     code=(
                         error.code
                         if isinstance(error, StateVolumeRefusal)
+                        else "invalid_dokploy_target_setup"
+                        if ordinary_allocation
                         else "application_state_volume_unqualified"
                     ),
                     message=str(error),

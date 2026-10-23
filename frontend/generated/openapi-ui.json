@@ -13834,6 +13834,11 @@
             "title": "Environment Name",
             "type": "string"
           },
+          "expected_allocation_custody_sha256": {
+            "default": "",
+            "title": "Expected Allocation Custody Sha256",
+            "type": "string"
+          },
           "expected_current_provider_target": {
             "anyOf": [
               {
@@ -13921,6 +13926,11 @@
             "default": "",
             "title": "Replaces Operation Id",
             "type": "string"
+          },
+          "retain_allocation": {
+            "default": false,
+            "title": "Retain Allocation",
+            "type": "boolean"
           },
           "retain_state_volume_allocation": {
             "default": false,
