@@ -370,9 +370,8 @@ class ShopifyComparisonTests(unittest.TestCase):
                 self.assertEqual(result["reason"], reason)
                 self.assertEqual(result["probe"], status)
                 self.assertEqual(result["separation"], "unknown")
-                if reason in {"settings_changed", "runtime_changed", "probe_failed"}:
-                    self.assertEqual(result["testing_domain_sha256"], "")
-                    self.assertEqual(result["testing_shop_id_sha256"], "")
+                self.assertEqual(result["testing_domain_sha256"], "")
+                self.assertEqual(result["testing_shop_id_sha256"], "")
 
     def test_verified_identity_rejects_malformed_hashes(self) -> None:
         for field in ("domain_sha256", "shop_id_sha256"):
