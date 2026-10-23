@@ -202,7 +202,9 @@ product and stable lane before any value is decrypted. No new permission is adde
 The service compares the captured value with every product's managed production
 runtime values using constant-time comparisons. A match returns
 `matches_production` and sends nothing to Discord. A matching decoded bot ID
-also refuses external use, even when the stored token strings differ.
+also refuses external use, even when the stored token strings differ. Only this
+production-side ID comparison trims surrounding whitespace; stored values,
+delivery and the strict testing input remain unchanged.
 Incomplete comparison returns unavailable. Production values stay inside the
 service. These comparisons do not identify an unrecorded production bot.
 Service-generated origins are refused. Before external use, the service also

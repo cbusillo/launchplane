@@ -250,7 +250,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             _generic_site_profile_payload("another-site")
         )
         self.store.write_product_profile_record(other)
-        for production_token in (token, token + "changed"):
+        for production_token in (token, token + "changed", " \n" + token + "changed\n"):
             apply_product_config_bundle(
                 record_store=self.store,
                 payload={

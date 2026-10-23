@@ -192,7 +192,7 @@ def read_discord_identity(
         expected_bot = token_bot_id(value)
         matches_production = any(
             hmac.compare_digest(value.encode(), production_value.encode())
-            or bool(expected_bot and expected_bot == token_bot_id(production_value))
+            or bool(expected_bot and expected_bot == token_bot_id(production_value.strip()))
             for production_value in production_values
         )
         check_current()
