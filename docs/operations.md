@@ -2029,7 +2029,9 @@ never rewrites runtime health or gates merge, deploy, promotion or acceptance.
 A later successful deployment of the lane's current desired candidate resolves
 its earlier delivery attention, including an exhausted candidate superseded by
 a newer verified build. An unrelated build, production success or passing
-old-build health cannot do so. A pre-plan source-read incident also resolves
+old-build health cannot do so. An older retained-database credential refusal
+does not prevent that recovery after a successful desired-candidate rebuild;
+it still creates no new delivery incident. A pre-plan source-read incident also resolves
 when a later successful reconciliation confirms the desired build is already
 deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
 incident to a lane that already has delivery attention. Product deactivation or
@@ -2156,7 +2158,11 @@ Incident detail also reads the exact opening observation independently of its
 bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
 is returned as absent. Deploy-fence observations expose only canonical opaque
 provider-operation references and opaque reservation record IDs, including IDs retained
-in legacy provider summaries. These are diagnostic links, not proof of settlement
+in legacy provider summaries. For historical service-started testing deploys whose
+summary retained a private key instead of a record ID, the service derives the ID
+with the canonical reservation builder. It accepts only the original summary
+format and an exact product/context/testing key prefix; it never returns the key.
+These are diagnostic links, not proof of settlement
 or authority to recover. Missing reservations and unmatched incarnations remain
 held until their corresponding supported recovery proves disposition.
 The outbox worker sends email and Discord as well as GitHub notifications for

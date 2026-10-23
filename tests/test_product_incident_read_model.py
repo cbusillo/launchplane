@@ -571,6 +571,77 @@ class ProductIncidentReadModelTests(unittest.TestCase):
         )
         self.assertIsNone(missing.opening_observation)
 
+    def test_legacy_testing_fence_exposes_only_derived_original_reservation_id(self) -> None:
+        from control_plane.contracts.idempotency_record import (
+            build_launchplane_mutation_reservation_id,
+        )
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+        from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        store = _Store()
+        lane = ProductLaneProfile(instance="testing", context="example-testing")
+        store.profile = store.profile.model_copy(update={"lanes": (lane,)})
+        incident = store.open_incident.model_copy(
+            update={
+                "context": lane.context,
+                "instance": lane.instance,
+                "check_kind": "provider",
+                "check_name": "launchplane-deploy-fence",
+            }
+        )
+        store.incidents = (incident,)
+        prefix = f"{RECONCILE_SOURCE}:{incident.product}:{lane.context}:{lane.instance}:"
+        key = prefix + "private-artifact:'quoted':started at:token"
+        reservation_id = build_launchplane_mutation_reservation_id(
+            scope=reconcile_reservation_scope(incident.product),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=key,
+        )
+        for candidate, expected in (
+            (repr(key), (reservation_id,)),
+            (repr(key.replace(lane.context, "foreign-context")), ()),
+            (repr(key.replace(":testing:", ":prod:")), ()),
+            ("__import__('os').getcwd()", ()),
+        ):
+            with self.subTest(candidate=candidate):
+                summary = (
+                    f"Deploy {candidate} started at {incident.opened_at} "
+                    "and holds this target (reconcile_required, last at post_deploy_fixture_signup, "
+                    f"since {incident.opened_at}). Every later deploy is refused until "
+                    "it is recovered with the generic-web deploy recovery dry-run."
+                )
+                opening = _observation(incident).model_copy(
+                    update={
+                        "record_id": incident.opened_observation_id,
+                        "failure_code": "deploy_fence_held",
+                        "material_fingerprint": None,
+                        "material_fingerprint_sha256": "",
+                        "targets": (
+                            PublicIngressTargetObservation(
+                                target="provider",
+                                url="provider://launchplane/launchplane-deploy-fence",
+                                status="fail",
+                                failure_code="deploy_fence_held",
+                                summary=summary,
+                            ),
+                        ),
+                    }
+                )
+                store.observations = (opening,)
+                detail = build_product_environment_incident_detail(
+                    record_store=store,
+                    product=incident.product,
+                    environment=lane.instance,
+                    incident_id=incident.incident_id,
+                )
+                assert detail.opening_observation is not None
+                self.assertEqual(detail.opening_observation.provider_reservation_ids, expected)
+                self.assertEqual(detail.opening_observation.provider_operation_references, ())
+                self.assertNotIn(key, detail.model_dump_json())
+                self.assertNotIn("private-artifact", detail.model_dump_json())
+
     def test_unreadable_opening_preserves_recent_incident_evidence(self) -> None:
         store = _Store()
         with patch.object(
