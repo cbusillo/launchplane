@@ -1,7 +1,7 @@
 from typing import Annotated, Literal, Protocol, cast
 
 from fastapi import Depends, Path, Query, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.provider_hold_attention import (
@@ -24,7 +24,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
-from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretScope, SecretValueOrigin
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -138,6 +138,9 @@ class SecretStatusReadModel(BaseModel):
     updated_by: str
     last_validated_at: str
     current_version_id: str
+    current_version_value_origin: SecretValueOrigin | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     version_count: int
     current_version_created_at: str
     binding: SecretStatusBinding | None = None
