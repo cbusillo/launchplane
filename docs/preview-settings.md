@@ -34,6 +34,13 @@ refuses services without revision support, changed input, concurrent profile
 edits, or evidence changing anything beyond the selected preview key. A save
 records intent; runtime delivery and login verification remain separate.
 
+Refusals include a fixed `reason` code without input values. For
+`profile_changed_since_review`, read the changed profile and create a new dry
+run. `conditional_save_unsupported` means the service update is not deployed.
+`private_file_permissions` requires owner-only file permissions. An
+`outcome_unknown` or `accepted_unverified` result requires readback with the
+original files and idempotency key; do not start another write.
+
 For Authentik, use `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64`: base64-encoded UTF-8
 JSON in the existing `OdooPostDeployPayload` format, with literal addon settings
 for `authentik_sso.client_id`, `base_url`, and `provider_name`. Keep the Odoo

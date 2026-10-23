@@ -16,7 +16,16 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
 )
-from control_plane.runtime_platform_credentials import refuse_platform_credentials
+from control_plane.runtime_platform_credentials import (
+    PlatformCredentialRefusedError,
+    refuse_platform_credentials,
+)
+
+
+class PreviewOverrideRefused(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _request(
@@ -49,11 +58,16 @@ def _request(
 
 
 def _private_file(path: Path, repository: Path) -> Path:
-    resolved = path.expanduser().resolve()
-    if path.is_symlink() or resolved.is_relative_to(repository):
-        raise ValueError("Use a private file outside the checkout")
+    expanded = path.expanduser()
+    resolved = expanded.resolve()
+    if (
+        expanded.is_symlink()
+        or resolved.is_relative_to(repository)
+        or any((parent / ".git").exists() for parent in resolved.parents)
+    ):
+        raise PreviewOverrideRefused("private_file_inside_checkout_or_symlink")
     if resolved.exists() and resolved.stat().st_mode & 0o077:
-        raise ValueError("Private files must be owner-only")
+        raise PreviewOverrideRefused("private_file_permissions")
     return resolved
 
 
@@ -76,6 +90,7 @@ def main() -> int:
     if args.mode == "apply" and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
         parser.error("Apply requires reviewed evidence and a stable idempotency key.")
     submitted = accepted = False
+    reason = "invalid_input_or_response"
     transport: dict[str, Any] = {}
     try:
         repository = Path(__file__).resolve().parents[1]
@@ -93,20 +108,22 @@ def main() -> int:
         }
         helper = args.operator_helper.expanduser().resolve(strict=True)
         if helper.name != "launchplane-write-action.py":
-            raise ValueError("Select the installed operator helper")
+            raise PreviewOverrideRefused("operator_helper_required")
         transport = runpy.run_path(str(helper), run_name="preview_override_transport")
         settings = transport["resolve_settings"](args)
         transport["validate_service_url"](settings["service_url"])
         if not settings["token"]:
-            raise ValueError("The existing operator credential is unavailable")
+            raise PreviewOverrideRefused("operator_credential_unavailable")
         path = f"/v1/product-profiles/{quote(args.product, safe='')}"
         response, revision = _request(transport, settings, "GET", path)
         current = response["profile"]
         profile = LaunchplaneProductProfileRecord.model_validate(current)
         if profile.product != args.product or not profile.preview.enabled:
-            raise ValueError("Select an existing preview-enabled product")
+            raise PreviewOverrideRefused("preview_enabled_product_required")
+        if profile.preview.historical_transport:
+            raise PreviewOverrideRefused("unsupported_preview_transport_history")
         if revision != f'"{product_profile_record_sha256(profile)}"':
-            raise ValueError("The deployed service lacks conditional profile-save support")
+            raise PreviewOverrideRefused("conditional_save_unsupported")
         if args.mode == "dry-run":
             after = copy.deepcopy(current)
             after.setdefault("preview", {}).setdefault("override_env", {})[args.key] = value
@@ -121,14 +138,14 @@ def main() -> int:
         else:
             saved = json.loads(evidence.read_text())
             if saved["request"] != identity:
-                raise ValueError("The reviewed preview intent changed")
+                raise PreviewOverrideRefused("reviewed_intent_changed")
             after = copy.deepcopy(saved["before"])
             after.setdefault("preview", {}).setdefault("override_env", {})[args.key] = value
             if after != saved["after"]:
-                raise ValueError("The review changes more than one preview key")
+                raise PreviewOverrideRefused("review_changes_other_fields")
             if args.mode == "apply" and current != after:
                 if current != saved["before"] or revision != saved["revision"]:
-                    raise ValueError("The profile changed since review")
+                    raise PreviewOverrideRefused("profile_changed_since_review")
                 submitted = True
                 receipt, _ = _request(
                     transport,
@@ -140,12 +157,12 @@ def main() -> int:
                     idempotency_key=args.idempotency_key,
                 )
                 if receipt.get("status") != "accepted":
-                    raise ValueError("Apply was not accepted")
+                    raise PreviewOverrideRefused("apply_not_accepted")
                 accepted = True
                 response, _ = _request(transport, settings, "GET", path)
                 current = response["profile"]
             if current["preview"]["override_env"].get(args.key) != value:
-                raise ValueError("Preview key readback differs")
+                raise PreviewOverrideRefused("readback_differs")
         print(
             json.dumps(
                 {
@@ -163,8 +180,15 @@ def main() -> int:
         transport["emit_http_error_payload"](
             operation="preview-override", request={"mode": args.mode}, exc=error
         )
-        if not accepted and (not submitted or error.code < 500):
+        if not accepted and (not submitted or error.code in {400, 403, 409, 412}):
             return 1
+        reason = "http_response_unverified"
+    except PreviewOverrideRefused as error:
+        reason = error.code
+    except PlatformCredentialRefusedError:
+        reason = "runtime_platform_credential_refused"
+    except FileExistsError:
+        reason = "evidence_file_already_exists"
     except (
         OSError,
         ValueError,
@@ -173,7 +197,7 @@ def main() -> int:
         urllib.error.URLError,
         http.client.HTTPException,
     ):
-        pass
+        reason = "invalid_input_or_response"
     print(
         json.dumps(
             {
@@ -183,6 +207,7 @@ def main() -> int:
                 if submitted
                 else "unverified",
                 "mode": args.mode,
+                "reason": reason,
             }
         )
     )
