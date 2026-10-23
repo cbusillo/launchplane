@@ -3839,14 +3839,9 @@ non-draft and currently mergeable. When the live required-check policy is
 strict, the exact PR head must also contain the current base SHA; missing or
 malformed strict-policy and draft evidence fails closed.
 
-Readiness uses the merge train's existing Client-review reader. It validates
-current PR notes and labels against product profiles, requires the configured
-Advisory App's current-head acceptance projection when review is required, and
-independently reads saved current-head decisions for the product's current
-Client. A saved Request changes blocks even after engineering-only notes replace
-the original notes or while a successful projection is stale. Missing profile
-or saved-decision storage cannot establish readiness. Engineering-only and
-Director-standing changes retain the same notes and veto rules as the train.
+Readiness uses the merge train's [Client-review contract](owner-acceptance.md#current-client-review),
+including its notes, current-head acceptance projection and saved veto rules.
+Missing profile or saved-decision storage cannot establish readiness.
 
 For `mutate=true`, Launchplane uses the existing repository/base controller
 lease only as a shared mutation and crash-reconciliation fence; it does not
