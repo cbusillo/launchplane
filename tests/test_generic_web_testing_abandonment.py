@@ -4,10 +4,16 @@ from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    format_launchplane_mutation_timestamp,
+    parse_launchplane_mutation_timestamp,
+)
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_testing_abandonment import inspect_testing_abandonment
 from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
@@ -19,6 +25,7 @@ from control_plane.provider_operations import (
     build_provider_operation_key,
     run_durable_provider_operation,
 )
+from control_plane.provider_target_holds import ProviderHoldLaneSnapshot
 from control_plane.workflows.generic_web_deploy import GenericWebPostDeployGuard
 from control_plane.workflows.generic_web_application_snapshot import recorded_application_lifecycle
 from control_plane.workflows.generic_web_execution import EXECUTION_EVIDENCE_KEY, execution_receipt
@@ -143,6 +150,631 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
             reason="Abandon the unqualified testing fixture without claiming its outcome.",
             expected_recovery_digest=digest,
         )
+
+    def record_legacy_fence(self) -> PublicIngressObservationRecord:
+        from dataclasses import replace
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.workflows.public_ingress_monitor import (
+            check_public_ingress_target,
+            discover_public_ingress_monitor_targets,
+            reconcile_public_ingress_incident,
+        )
+
+        checked_at = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(self.original.updated_at, field_name="updated_at")
+            + timedelta(hours=1)
+        )
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == "launchplane-deploy-fence"
+        )
+        observation = check_public_ingress_target(
+            target=replace(target, provider_hold_snapshot=None, deploy_fence=self.original),
+            checked_at=checked_at,
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        summary = (
+            f"Deploy {self.key!r} started at {self.original.created_at} "
+            f"and holds this target (reconcile_required, last at {self.original.provider_effect_phase}, "
+            f"since {self.original.updated_at}). Every later deploy is refused until "
+            "it is recovered with the generic-web deploy recovery dry-run."
+        )
+        observation = observation.model_copy(
+            update={"targets": (observation.targets[0].model_copy(update={"summary": summary}),)}
+        )
+        incident = reconcile_public_ingress_incident(record_store=self.store, record=observation)[0]
+        observation = observation.model_copy(
+            update={
+                "incident_id": incident.incident_id,
+                "incident_event_id": incident.latest_material_event_id,
+            }
+        )
+        self.store.write_public_ingress_observation_record(observation)
+        return observation
+
+    def test_legacy_opening_links_only_its_proved_completed_abandonment(self) -> None:
+        from control_plane.contracts.product_incident_read_model import (
+            build_product_environment_incident_detail,
+        )
+
+        observation = self.record_legacy_fence()
+        coordinates = resolve_event_deploy_recovery_coordinates(
+            store=self.store,
+            product=self.fixture.profile.product,
+            context=self.deployment.context,
+            fingerprint=idempotency_request_fingerprint,
+        )
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        detail = build_product_environment_incident_detail(
+            record_store=self.store,
+            product=observation.product,
+            environment="testing",
+            incident_id=observation.incident_id,
+        )
+        assert detail.opening_observation is not None
+        self.assertEqual(
+            detail.opening_observation.testing_recovery_reference, coordinates.reference
+        )
+        self.assertNotIn(self.key, detail.model_dump_json())
+
+    def test_legacy_fence_recovers_only_with_complete_retained_abandonment_history(self) -> None:
+        self.assert_legacy_fence_recovers(with_nonce=False)
+
+    def test_joined_legacy_witnesses_recover_only_with_complete_retained_history(self) -> None:
+        self.assert_legacy_fence_recovers(with_nonce=True)
+
+    def assert_legacy_fence_recovers(self, *, with_nonce: bool) -> None:
+        from dataclasses import replace
+        from control_plane.provider_target_holds import project_provider_target_hold
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_public_ingress_monitor_targets,
+            check_public_ingress_target,
+        )
+
+        observation = self.record_legacy_fence()
+        held_target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == observation.check_name
+        )
+        held_snapshot = held_target.provider_hold_snapshot
+        assert held_snapshot is not None
+
+        def render_unavailable(*, held: bool) -> tuple[Any, ...]:
+            snapshot = replace(
+                held_snapshot,
+                holds=(project_provider_target_hold(self.original, None),) if held else (),
+                unavailable_references=("provider-operation:unavailable",),
+            )
+            return check_public_ingress_target(
+                target=replace(held_target, provider_hold_snapshot=snapshot),
+                checked_at=observation.observed_at,
+                timeout_seconds=1,
+                http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+                tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+            ).targets
+
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.contracts.public_ingress_monitoring import (
+            public_ingress_material_fingerprint_sha256,
+        )
+        from control_plane.workflows.public_ingress_monitor import reconcile_public_ingress_incident
+        from control_plane.provider_target_holds import (
+            ProviderOperationAttentionReference,
+            ProviderOperationReference,
+        )
+
+        assert observation.material_fingerprint is not None
+        reference_values = {
+            *observation.material_fingerprint.route_authority.target_keys,
+            ProviderOperationAttentionReference(self.original.record_id).encode(),
+        }
+        if with_nonce:
+            original_origin = self.store.read_provider_target_origin(self.original)
+            assert original_origin is not None
+            reference_values.add(
+                ProviderOperationReference(
+                    self.original.record_id, original_origin.operation_nonce
+                ).encode()
+            )
+        attention_fingerprint = observation.material_fingerprint.model_copy(
+            update={
+                "route_authority": observation.material_fingerprint.route_authority.model_copy(
+                    update={
+                        "target_keys": tuple(sorted(reference_values)),
+                    }
+                ),
+            }
+        )
+        attention = observation.model_copy(
+            update={
+                "record_id": observation.record_id + "-attention",
+                "observed_at": format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        observation.observed_at, field_name="observed_at"
+                    )
+                    + timedelta(seconds=1)
+                ),
+                "material_fingerprint": attention_fingerprint,
+                "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
+                    attention_fingerprint
+                ),
+                "targets": render_unavailable(held=True),
+            }
+        )
+        changed = reconcile_public_ingress_incident(record_store=self.store, record=attention)[0]
+        self.store.write_public_ingress_observation_record(
+            attention.model_copy(update={"incident_event_id": changed.latest_material_event_id})
+        )
+        fingerprint = attention_fingerprint.model_copy(
+            update={
+                "route_authority": attention_fingerprint.route_authority.model_copy(
+                    update={
+                        "target_keys": tuple(
+                            sorted(
+                                {
+                                    *attention_fingerprint.route_authority.target_keys,
+                                    "provider-operation:unavailable",
+                                }
+                            )
+                        ),
+                    }
+                )
+            }
+        )
+        missing = observation.model_copy(
+            update={
+                "record_id": observation.record_id + "-missing",
+                "observed_at": format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        observation.observed_at, field_name="observed_at"
+                    )
+                    + timedelta(seconds=2)
+                ),
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
+                    fingerprint
+                ),
+                "targets": render_unavailable(held=False),
+            }
+        )
+        updated = reconcile_public_ingress_incident(record_store=self.store, record=missing)[0]
+        missing = missing.model_copy(update={"incident_event_id": updated.latest_material_event_id})
+        self.store.write_public_ingress_observation_record(missing)
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == observation.check_name
+        )
+        result = check_public_ingress_target(
+            target=target,
+            checked_at=observation.observed_at,
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        self.assertEqual(result.status, "pass")
+        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+
+        next_probe = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(observation.observed_at, field_name="observed_at")
+            + timedelta(minutes=1)
+        )
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.discover_public_ingress_monitor_targets",
+            return_value=(target,),
+        ):
+            published = run_public_ingress_monitor_once(
+                record_store=self.store, checked_at=next_probe, notify=False
+            )
+        self.assertEqual(published.resolved_incident_count, 1)
+        incident = self.store.read_public_ingress_incident_record(observation.incident_id)
+        self.assertEqual(incident.resolution_reason, "recovered")
+
+    def record_completed_later_fence(
+        self,
+    ) -> tuple[PublicIngressObservationRecord, LaunchplaneIdempotencyRecord]:
+        from dataclasses import replace
+        from control_plane.provider_target_holds import ProviderOperationAttentionReference
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.contracts.public_ingress_monitoring import (
+            public_ingress_material_fingerprint_sha256,
+        )
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_public_ingress_monitor_targets,
+            check_public_ingress_target,
+            reconcile_public_ingress_incident,
+        )
+
+        opening = self.record_legacy_fence()
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        capsule = self.store.read_provider_target_origin(self.original)
+        assert capsule is not None
+        attention = ProviderOperationAttentionReference(self.original.record_id).encode()
+        clock = parse_launchplane_mutation_timestamp(opening.observed_at, field_name="observed_at")
+        created = format_launchplane_mutation_timestamp(clock + timedelta(minutes=1))
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=created):
+            later = self.store.reserve_mutation(
+                scope="fixture-operation",
+                route_path="/fixture-operation",
+                idempotency_key="later-operation",
+                request_fingerprint="fixture-request",
+                lease_owner="fixture-worker",
+                lease_seconds=1,
+                reconciliation_key="fixture-intent",
+                provider_target_key=capsule.origin.target_key(),
+                provider_target_origin=capsule.origin,
+            ).record
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == opening.check_name
+        )
+        observed = format_launchplane_mutation_timestamp(clock + timedelta(minutes=2))
+        record = check_public_ingress_target(
+            target=target,
+            checked_at=observed,
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        assert record.material_fingerprint is not None
+        fingerprint = record.material_fingerprint.model_copy(
+            update={
+                "route_authority": record.material_fingerprint.route_authority.model_copy(
+                    update={
+                        "target_keys": tuple(
+                            sorted(
+                                {
+                                    *record.material_fingerprint.route_authority.target_keys,
+                                    "provider-operation:unavailable",
+                                    attention,
+                                }
+                            )
+                        )
+                    }
+                )
+            }
+        )
+        record = record.model_copy(
+            update={
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
+                    fingerprint
+                ),
+            }
+        )
+
+        def retain(observation: PublicIngressObservationRecord) -> PublicIngressObservationRecord:
+            incident = reconcile_public_ingress_incident(
+                record_store=self.store, record=observation
+            )[0]
+            observation = observation.model_copy(
+                update={
+                    "incident_id": incident.incident_id,
+                    "incident_event_id": incident.latest_material_event_id,
+                }
+            )
+            self.store.write_public_ingress_observation_record(observation)
+            return observation
+
+        record = retain(record)
+        self.assertTrue(self.read_captured_fence_snapshot(record).unavailable_references)
+        completed = later.model_copy(
+            update={
+                "state": "completed",
+                "response_status_code": 500,
+                "response_trace_id": "terminal-fixture-failure",
+                "recorded_at": format_launchplane_mutation_timestamp(clock + timedelta(minutes=3)),
+            }
+        )
+        self.store.write_idempotency_record(completed)
+        assert target.provider_hold_snapshot is not None
+        missing = (attention, "provider-operation:unavailable")
+        latest = check_public_ingress_target(
+            target=replace(
+                target,
+                provider_hold_snapshot=replace(
+                    target.provider_hold_snapshot,
+                    holds=(),
+                    references=missing,
+                    unavailable_references=missing,
+                ),
+            ),
+            checked_at=format_launchplane_mutation_timestamp(clock + timedelta(minutes=4)),
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        return retain(latest), completed
+
+    def read_captured_fence_snapshot(
+        self, record: PublicIngressObservationRecord, *, extra: tuple[str, ...] = ()
+    ) -> ProviderHoldLaneSnapshot:
+        fingerprint = record.material_fingerprint
+        assert fingerprint is not None
+        return self.store.read_provider_hold_snapshot(
+            product=record.product,
+            context=record.context,
+            instance="testing",
+            references=(
+                *(
+                    value
+                    for value in fingerprint.route_authority.target_keys
+                    if value.startswith("provider-operation:")
+                ),
+                *extra,
+            ),
+        )
+
+    def test_completed_exact_later_operation_settles_legacy_history_without_abandonment(
+        self,
+    ) -> None:
+        record, _completed = self.record_completed_later_fence()
+        snapshot = self.read_captured_fence_snapshot(record)
+        self.assertFalse(snapshot.unavailable_references)
+        self.assertFalse(snapshot.holds)
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_public_ingress_monitor_targets,
+            run_public_ingress_monitor_once,
+        )
+
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == record.check_name
+        )
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.discover_public_ingress_monitor_targets",
+            return_value=(target,),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store,
+                checked_at=format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        record.observed_at, field_name="observed_at"
+                    )
+                    + timedelta(minutes=1)
+                ),
+                notify=False,
+            )
+        self.assertEqual(result.resolved_incident_count, 1)
+
+    def test_terminal_history_requires_current_epoch_custody_and_captured_attention(self) -> None:
+        from copy import deepcopy
+        from uuid import uuid4
+        from sqlalchemy import select
+        from control_plane.contracts.idempotency_record import (
+            build_launchplane_mutation_reservation_id,
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.provider_target_holds import ProviderOperationAttentionReference
+        from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
+        from control_plane.storage.postgres import (
+            LaunchplaneIdempotencyRow,
+            ORIGINAL_MUTATION_INTENT_ROUTE,
+        )
+
+        record, completed = self.record_completed_later_fence()
+
+        def snapshot(*extra: str) -> ProviderHoldLaneSnapshot:
+            return self.read_captured_fence_snapshot(record, extra=extra)
+
+        unrecorded = ProviderOperationAttentionReference(
+            build_launchplane_mutation_reservation_id(
+                scope=completed.scope,
+                route_path=completed.route_path,
+                idempotency_key=completed.idempotency_key + ":not-captured",
+            )
+        ).encode()
+        self.assertIn(unrecorded, snapshot(unrecorded).unavailable_references)
+        shifted = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(completed.created_at, field_name="created_at")
+            + timedelta(seconds=1)
+        )
+        self.store.write_idempotency_record(
+            completed.model_copy(update={"created_at": shifted, "updated_at": shifted})
+        )
+        try:
+            self.assertTrue(snapshot().unavailable_references)
+        finally:
+            self.store.write_idempotency_record(completed)
+        partial_archives: tuple[dict[str, object], ...] = (
+            {"abandonment": {}},
+            {"testing_settlement": TESTING_ORIGINAL_ABANDONED},
+            {"recovery": {"recovery_action": "abandon_testing_original"}},
+        )
+        for partial_archive in partial_archives:
+            with self.subTest(partial_archive=tuple(partial_archive)):
+                self.store.write_idempotency_record(
+                    completed.model_copy(update={"response_payload": partial_archive})
+                )
+                try:
+                    self.assertTrue(snapshot().unavailable_references)
+                finally:
+                    self.store.write_idempotency_record(completed)
+        with self.store._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == completed.record_id,
+                )
+            )
+            assert row is not None
+            receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        for corruption in ("missing", "nonce", "scope"):
+            with self.subTest(corruption=corruption):
+                if corruption == "missing":
+                    with self.store._session_factory.begin() as session:
+                        session.delete(session.get(LaunchplaneIdempotencyRow, receipt.record_id))
+                else:
+                    payload = deepcopy(receipt.response_payload)
+                    capsule = payload["provider_target_origin"]
+                    if corruption == "nonce":
+                        capsule["operation_nonce"] = str(uuid4())
+                    else:
+                        capsule["origin"]["product"] = "different-fixture-product"
+                    self.store.write_idempotency_record(
+                        receipt.model_copy(update={"response_payload": payload})
+                    )
+                try:
+                    self.assertTrue(snapshot().unavailable_references)
+                finally:
+                    self.store.write_idempotency_record(receipt)
+        self.assertFalse(snapshot().unavailable_references)
+
+    def test_later_legacy_participant_without_archive_keeps_the_incident_open(self) -> None:
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        opening = self.record_legacy_fence()
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        later = opening.model_copy(
+            update={
+                "record_id": opening.record_id + "-later",
+                "observed_at": format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        opening.observed_at, field_name="observed_at"
+                    )
+                    + timedelta(seconds=1)
+                ),
+                "targets": (
+                    opening.targets[0].model_copy(
+                        update={
+                            "summary": opening.targets[0].summary.replace(
+                                repr(self.key), repr(self.key + ":another")
+                            )
+                        }
+                    ),
+                ),
+            }
+        )
+        self.store.write_public_ingress_observation_record(later)
+        incident = self.store.read_public_ingress_incident_record(opening.incident_id)
+        self.store.write_public_ingress_incident_record(
+            incident.model_copy(
+                update={
+                    "latest_observation_id": later.record_id,
+                    "latest_observed_at": later.observed_at,
+                }
+            )
+        )
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=opening.product,
+            context=opening.context,
+            instance="testing",
+            references=("provider-operation:unavailable",),
+        )
+        self.assertEqual(snapshot.unavailable_references, ("provider-operation:unavailable",))
+
+    def test_changed_abandonment_evidence_refuses_probe_publication(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_public_ingress_monitor_targets,
+            check_public_ingress_target,
+        )
+
+        opening = self.record_legacy_fence()
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == opening.check_name
+        )
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=opening.observed_at,
+            timeout_seconds=1,
+            http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+            tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+        )
+        self.assertEqual(observation.status, "pass")
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneIdempotencyRow, self.original.record_id)
+            assert row is not None
+            payload = dict(row.payload)
+            response = dict(payload["response_payload"])
+            response["abandonment"] = {
+                **response["abandonment"],
+                "original_outcome": "claimed-success",
+            }
+            row.payload = {**payload, "response_payload": response}
+        result = self.store.write_public_ingress_transition_with_outbox(
+            observation=observation,
+            incidents=(),
+            expected_provider_hold_snapshot=target.provider_hold_snapshot,
+        )
+        self.assertEqual(result.status, "provider_source_changed")
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(opening.incident_id).status, "open"
+        )
+
+    def test_another_completed_incarnation_cannot_settle_the_legacy_opening(self) -> None:
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.event_deploy_recovery_reference import EventDeployRecoveryCoordinates
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        opening = self.record_legacy_fence()
+        plan = self.inspect()
+        self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
+        saved = self.store.read_idempotency_record_by_id(self.original.record_id)
+        assert saved is not None
+        changed_time = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(self.original.created_at, field_name="created_at")
+            - timedelta(seconds=1)
+        )
+        original = self.original.model_copy(update={"created_at": changed_time})
+        archive = {
+            **saved.response_payload["abandonment"],
+            "original": original.model_dump(mode="json"),
+            "recovery_reference": EventDeployRecoveryCoordinates(
+                original,
+                GenericWebDeployEnvelope.model_validate(self.fixture.request),
+                opening.context,
+            ).reference,
+        }
+        changed = saved.model_copy(
+            update={
+                "created_at": changed_time,
+                "response_payload": {**saved.response_payload, "abandonment": archive},
+            }
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneIdempotencyRow, changed.record_id)
+            assert row is not None
+            self.store._sync_idempotency_row(row, changed)
+        self.assertEqual(self.store.read_testing_fence_recovery_reference(opening), "")
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=opening.product,
+            context=opening.context,
+            instance="testing",
+            references=("provider-operation:unavailable",),
+        )
+        self.assertEqual(snapshot.unavailable_references, ("provider-operation:unavailable",))
 
     def test_reviewed_abandonment_preserves_unknown_execution_and_lifecycle(self) -> None:
         plan = self.inspect()

@@ -26,6 +26,8 @@ from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
 )
 
+RETAINED_CAPABILITY_PROGRAM_NAME = "Launchplane retained application capabilities"
+
 
 def retained_application_capability_spec(
     store: PostgresRecordStore, root: Path, product: str, context: str
@@ -191,9 +193,9 @@ def runtime_capability_program_header() -> str:
     return (
         "import re\nfrom dataclasses import dataclass\nfrom urllib.parse import urlparse\n"
         "from typing import Literal, Any\nfrom collections.abc import Mapping\n"
-        + "PLATFORM_CREDENTIAL_KEYS="
-        + repr(credentials.PLATFORM_CREDENTIAL_KEYS)
-        + "\n"
+        + "PLATFORM_CREDENTIAL_KEYS=frozenset({"
+        + ", ".join(repr(key) for key in sorted(credentials.PLATFORM_CREDENTIAL_KEYS))
+        + "})\n"
         + "GITHUB_TOKEN_VALUE_PATTERN=re.compile("
         + repr(credentials.GITHUB_TOKEN_VALUE_PATTERN.pattern)
         + ")\n"
@@ -273,6 +275,28 @@ def retained_application_capability_program(spec: dict[str, object]) -> str:
     )
 
 
+def capability_program_matches(observed: object, expected: str) -> bool:
+    if not isinstance(observed, str) or len(observed) != len(expected):
+        return False
+    if observed == expected:
+        return True
+    anchor = "\nPLATFORM_CREDENTIAL_KEYS=frozenset({"
+    if expected.count(anchor) != 1:
+        return False
+    prefix, _, tail = expected.partition(anchor)
+    _, separator, suffix = tail.partition("})\n")
+    if not separator:
+        return False
+    prefix += anchor
+    suffix = separator + suffix
+    if not observed.startswith(prefix) or not observed.endswith(suffix):
+        return False
+    tokens = observed[len(prefix) : -len(suffix)].split(", ")
+    return len(tokens) == len(credentials.PLATFORM_CREDENTIAL_KEYS) and set(tokens) == {
+        repr(key) for key in credentials.PLATFORM_CREDENTIAL_KEYS
+    }
+
+
 def inspect_retained_application_capabilities(
     *,
     store: PostgresRecordStore,
@@ -289,10 +313,11 @@ def inspect_retained_application_capabilities(
         retained_target_id=str(spec["application_id"]),
         context=context,
         namespace=namespace,
-        name="Launchplane retained application capabilities",
+        name=RETAINED_CAPABILITY_PROGRAM_NAME,
         prepare_script=script,
         readback_script=script,
         before_effect=before_effect,
+        script_matches=capability_program_matches,
     )
     if result.get("testing_resources_ok") != "true" or result.get(
         "testing_resources_binding_sha256"

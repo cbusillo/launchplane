@@ -2029,7 +2029,9 @@ never rewrites runtime health or gates merge, deploy, promotion or acceptance.
 A later successful deployment of the lane's current desired candidate resolves
 its earlier delivery attention, including an exhausted candidate superseded by
 a newer verified build. An unrelated build, production success or passing
-old-build health cannot do so. A pre-plan source-read incident also resolves
+old-build health cannot do so. An older retained-database credential refusal
+does not prevent that recovery after a successful desired-candidate rebuild;
+it still creates no new delivery incident. A pre-plan source-read incident also resolves
 when a later successful reconciliation confirms the desired build is already
 deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
 incident to a lane that already has delivery attention. Product deactivation or
@@ -2152,6 +2154,41 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
+Incident detail also reads the exact opening observation independently of its
+bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
+is returned as absent. Deploy-fence observations expose only canonical opaque
+provider-operation references and opaque reservation record IDs, including IDs retained
+in legacy provider summaries. For historical service-started testing deploys whose
+summary retained a private key instead of a record ID, the service derives the ID
+with the canonical reservation builder. It accepts only the original summary
+format and an exact product/context/testing key prefix; it never returns the key.
+These are diagnostic links, not proof of settlement
+or authority to recover. Missing reservations and unmatched incarnations remain
+held until their corresponding supported recovery proves disposition.
+For a service-started testing original already completed by reviewed abandonment,
+the opening observation's `testing_recovery_reference` is populated only after
+the exact captured reservation and creation time match the retained archive,
+original request, lane, physical origin and receipt. The existing explicit-reference
+recovery dry-run then reports its completed disposition; the default held-only
+lookup can still return 404. An abandoned executor outcome remains unknown and
+possible fixture residue remains recorded.
+
+The natural monitor can reconcile the legacy unavailable-reference marker only
+when the complete retained incident observation history and material-event chain
+prove each legacy original completed through that same supported abandonment.
+Retained attention references and the unavailable marker remain attached until
+that history is proved. Later operations with a captured strong reference can
+instead use the existing completed-state proof with matching retained origin,
+nonce and captured creation time. Completion settles that operation without
+claiming successful deployment verification. Dated and nonce-backed witnesses
+for one operation are joined; conflicting epochs, nonces or custody remain held.
+Later observations without a new material event are included. Dated historical
+witnesses can bind an earlier legacy attention reference only when the exact
+incarnation predates that reference. Missing history, required archive, custody, incarnation
+or receipt evidence keeps the incident open. The monitor locks and rechecks the
+proof with the existing provider-source gate before publication. This changes no
+provider resource, replays no executor, invents no nonce and supplies no deployment
+verification; health, identity, TLS and freshness retain their separate gates.
 The outbox worker sends email and Discord as well as GitHub notifications for
 still-open incidents. Recovery does not manufacture another notification to
 resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
@@ -2649,6 +2686,13 @@ Each names object has its own `complete` flag, separate from task/container
 diagnostic coverage. An incomplete set cannot prove
 that a key is absent. A stopped or restarting process may leave no attributable
 running-container evidence, even when the service still lists the desired input.
+
+Each task's nullable `container_id_present` reports whether its captured status
+contains a well-formed Docker container ID, including for nonrunning tasks.
+False means that ID is missing or empty; malformed or unobserved metadata stays
+null. The ID itself is not added to the task output. This uses the existing task
+read and proves neither that a container still exists nor that its image is
+immutable. It changes no readiness, image, capability or settlement verdict.
 
 The read rechecks provider placement and the tracked lane binding before
 returning. `diagnostic_complete`, task coverage, observation time and

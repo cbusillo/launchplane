@@ -382,6 +382,7 @@ export function incidentForFixture(
     : `observation-${incident.incident_id}-latest`;
   return {
     incident,
+    opening_observation: null,
     material_evidence: {
       check_kind: incident.check_kind,
       failure_code: incident.failure_code,
@@ -406,6 +407,9 @@ export function incidentForFixture(
         incident_event_id: eventId,
         material_fingerprint_sha256: incident.material_fingerprint_sha256,
         notification_sent: !resolved,
+        provider_operation_references: [],
+        provider_reservation_ids: [],
+        testing_recovery_reference: "",
       },
       ...(!resolved
         ? [
@@ -419,6 +423,9 @@ export function incidentForFixture(
               incident_event_id: eventId,
               material_fingerprint_sha256: incident.material_fingerprint_sha256,
               notification_sent: true,
+              provider_operation_references: [],
+              provider_reservation_ids: [],
+              testing_recovery_reference: "",
             },
           ]
         : []),

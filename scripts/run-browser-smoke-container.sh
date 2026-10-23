@@ -3,6 +3,8 @@
 set -euo pipefail
 
 : "${BROWSER_SMOKE_IMAGE:?Set the reviewed browser image from the CI workflow}"
+# Evidence must land in the checkout mount; the container's own /tmp is lost.
+: "${BROWSER_SMOKE_ARTIFACT_DIR:?Set a checkout-relative artifact folder from the CI workflow}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 pnpm --dir "$repo_root/frontend" generate:openapi-types
 node_executable="$(realpath -- "$(command -v node)")"
@@ -37,6 +39,7 @@ container_id="$(docker create --init --shm-size=1g \
   --env CI=true --env HOME=/tmp/browser-home \
   --env COREPACK_ENABLE_NETWORK=0 \
   --env BROWSER_SMOKE_SHARD \
+  --env BROWSER_SMOKE_ARTIFACT_DIR \
   --env PATH=/usr/local/bin:/usr/bin:/bin \
   --env "BROWSER_SMOKE_HOST_NETNS=$host_network_namespace" \
   "$BROWSER_SMOKE_IMAGE" bash -euc '

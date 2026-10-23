@@ -776,6 +776,7 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.preview_override_authorization import director_preview_override_allowed
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     NotificationPolicyScopeConflict,
@@ -828,6 +829,7 @@ from control_plane.runtime_key_safety_http import (
     apply_runtime_key_safety_policy_route,
 )
 from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
@@ -13724,17 +13726,28 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
+        policy_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=profile.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        director_preview_write = not policy_profile_write and director_agent_identity(identity)
+        if not policy_profile_write and not director_preview_write:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
+            )
+        if director_preview_write and (
+            not request.headers.get("If-Match", "") or not idempotency_key.strip()
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="conditional_preview_review_required",
+                message="Preview settings require If-Match and an Idempotency-Key.",
             )
         if profile.preview.historical_transport:
             raise _launchplane_http_error(
@@ -13784,6 +13797,17 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        expected_revision = request.headers.get("If-Match", "")
+        if expected_revision and (
+            existing_profile is None
+            or expected_revision != f'"{product_profile_record_sha256(existing_profile)}"'
+        ):
+            raise _launchplane_http_error(
+                status_code=412,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message="Product profile changed since review; read and review it again.",
+            )
         if existing_profile is not None:
             preserved_fields = {
                 field: getattr(existing_profile, field)
@@ -13804,6 +13828,26 @@ def create_launchplane_fastapi_app(
                         "review or clear them through their supported configuration operation."
                     ),
                 ) from error
+        if director_preview_write:
+            try:
+                integration_key_markers = latest_active_runtime_key_safety_policy(
+                    cast(RuntimeKeySafetyPolicyReadStore, record_store)
+                ).integration_key_markers
+            except (AttributeError, ValueError):
+                integration_key_markers = ()
+            list_bindings = getattr(record_store, "list_secret_bindings", None)
+            if not callable(list_bindings) or not director_preview_override_allowed(
+                existing=existing_profile,
+                replacement=profile,
+                secret_bindings=tuple(list_bindings(limit=None)),
+                integration_key_markers=integration_key_markers,
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Director agents may conditionally set one non-secret preview override.",
+                )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None
         ):
@@ -18923,6 +18967,8 @@ def create_launchplane_fastapi_app(
                         code="idempotency_key_required",
                         message="Non-runtime onboarding apply requires Idempotency-Key.",
                     )
+        adopted_onboarding_target = None
+        adopted_onboarding_target_id = None
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -19005,7 +19051,36 @@ def create_launchplane_fastapi_app(
                     intent=onboarding_request.generic_web,
                     target_id=onboarding_request.resolved_target_id,
                 )
-            except ValueError as error:
+                try:
+                    adopted_onboarding_target = database_store.read_dokploy_target_record(
+                        context_name=onboarding_request.generic_web.testing_context,
+                        instance_name="testing",
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
+                        context_name=adopted_onboarding_target.context,
+                        instance_name="testing",
+                    )
+                    if (
+                        adopted_onboarding_target.target_type != "application"
+                        or adopted_onboarding_target_id.target_id
+                        != onboarding_request.resolved_target_id
+                    ):
+                        raise ValueError(
+                            "Generic-web onboarding must preserve the adopted application identity."
+                        )
+                    target = onboarding_manifest.provider_targets[0].model_copy(
+                        update={
+                            "target_name": adopted_onboarding_target.target_name,
+                            "project_name": adopted_onboarding_target.project_name,
+                        }
+                    )
+                    onboarding_manifest = onboarding_manifest.model_copy(
+                        update={"provider_targets": (target,)}
+                    )
+            except (ValueError, FileNotFoundError) as error:
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -19040,6 +19115,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_onboarding_manifest",
                 message=str(error),
             ) from error
+        if adopted_onboarding_target is not None:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "expected_dokploy_targets": (adopted_onboarding_target,),
+                    "expected_dokploy_target_ids": (adopted_onboarding_target_id,),
+                }
+            )
         if nonruntime_registration:
             resolved_owner = await run_in_threadpool(
                 resolve_profile_owner,
@@ -19135,7 +19217,11 @@ def create_launchplane_fastapi_app(
                     response=onboarding_response,
                 )
             )
-        except (RuntimeEnvironmentConflictError, ProductProfileConflictError) as error:
+        except (
+            RuntimeEnvironmentConflictError,
+            ProductProfileConflictError,
+            DokployTargetRecordChanged,
+        ) as error:
             replay_response = replay_stored_apply_idempotency(
                 record_store=database_store,
                 identity=identity,
@@ -19146,6 +19232,13 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
+            if isinstance(error, DokployTargetRecordChanged):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_target_changed",
+                    message=str(error),
+                ) from error
             if isinstance(error, ProductProfileConflictError):
                 raise _launchplane_http_error(
                     status_code=409,
@@ -27429,7 +27522,31 @@ def create_launchplane_fastapi_app(
                     code="idempotency_key_required",
                     message="Dokploy target setup apply requires an Idempotency-Key header.",
                 )
-        if setup_request.state_volume_path:
+        ordinary_allocation = (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode != "dry-run"
+            and not setup_request.state_volume_path
+        )
+        if ordinary_allocation and setup_request.mode == "apply":
+            prior = database_store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                idempotency_key=idempotency_key.strip(),
+            )
+            if prior is not None and not prior.reconciliation_key:
+                _, _, legacy_replay = await replay_apply_idempotency(
+                    request=request,
+                    record_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if legacy_replay is not None:
+                    return legacy_replay
+        if setup_request.state_volume_path or ordinary_allocation:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
             from control_plane.application_state_volume_errors import StateVolumeRefusal
 
@@ -27442,6 +27559,7 @@ def create_launchplane_fastapi_app(
                     trace_id,
                     lane_owner,
                     idempotency_key.strip(),
+                    first_testing_setup=first_testing_setup,
                 )
                 if setup_request.mode == "dry-run":
                     return accepted_evidence_response(
@@ -27454,7 +27572,7 @@ def create_launchplane_fastapi_app(
                         result=adapter.readback(idempotency_key.strip()),
                     )
 
-                if setup_request.retain_state_volume_allocation:
+                if setup_request.retain_state_volume_allocation or setup_request.retain_allocation:
                     return accepted_evidence_response(
                         trace_id=trace_id,
                         records={},
@@ -27479,8 +27597,12 @@ def create_launchplane_fastapi_app(
                     route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
                     trace_id=trace_id,
                     operation=volume_operation,
-                    in_progress_message="Application storage setup is running under its original key.",
-                    reconcile_message="Preserve the original key and storage plan; inspect readback before recovery.",
+                    in_progress_message="Application setup is running under its original key.",
+                    reconcile_message=(
+                        "Preserve the original setup request and key; inspect readback before recovery."
+                        if ordinary_allocation
+                        else "Preserve the original key and storage plan; inspect readback before recovery."
+                    ),
                 )
             except TestingTargetSourceEvidenceUnavailable as error:
                 raise _launchplane_http_error(
@@ -27489,13 +27611,17 @@ def create_launchplane_fastapi_app(
                     code="testing_target_source_evidence_unavailable",
                     message=str(error),
                 ) from error
-            except (ValueError, FileNotFoundError) as error:
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
                 raise _launchplane_http_error(
-                    status_code=409,
+                    status_code=400
+                    if ordinary_allocation and not isinstance(error, StateVolumeRefusal)
+                    else 409,
                     trace_id=trace_id,
                     code=(
                         error.code
                         if isinstance(error, StateVolumeRefusal)
+                        else "invalid_dokploy_target_setup"
+                        if ordinary_allocation
                         else "application_state_volume_unqualified"
                     ),
                     message=str(error),
@@ -27556,6 +27682,23 @@ def create_launchplane_fastapi_app(
                 separation_only=True,
             )
 
+        execution_request = setup_request
+        ordinary_preview: dict[str, str] = {}
+        if (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode == "dry-run"
+            and not setup_request.state_volume_path
+        ):
+            from control_plane.application_state_volume import (
+                ordinary_allocation_names,
+                named_application_request,
+            )
+
+            ordinary_preview = ordinary_allocation_names(
+                setup_request, idempotency_scope(identity), idempotency_key.strip()
+            )
+            execution_request = named_application_request(setup_request, ordinary_preview)
         try:
             rebuild_checkpoint()
             # Replacing a testing target holds the lock its event deploys run under.
@@ -27584,7 +27727,7 @@ def create_launchplane_fastapi_app(
                 result = execute_dokploy_target_setup(
                     control_plane_root_path=resolved_control_plane_root,
                     record_store=database_store,
-                    request=setup_request,
+                    request=execution_request,
                     director_source_completion=director_source_completion,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
@@ -27662,6 +27805,18 @@ def create_launchplane_fastapi_app(
                 code="invalid_dokploy_target_setup",
                 message=str(error),
             ) from error
+        if ordinary_preview:
+            setup_result = result["setup"]
+            assert isinstance(setup_result, dict)
+            setup_result["allocation"] = {
+                "project_name": ordinary_preview["project_marker"],
+                "environment_name": ordinary_preview["environment_marker"],
+                "target_name": ordinary_preview["target_marker"],
+                "app_name": ordinary_preview["app_name"],
+            }
+            setup_result["allocation_preview"] = (
+                "exact-for-key" if idempotency_key.strip() else "requires-original-key"
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},

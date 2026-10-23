@@ -3,13 +3,15 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+import click
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.idempotency_record import LaunchplaneMutationReservationState
 from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.dokploy import api, post_deploy, source
@@ -35,10 +37,17 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_program_evidence import (
+    MAX_PROGRAM_ROWS,
+    classify_program_inventory,
+    classify_program_history,
+    ProgramHistoryStatus,
+)
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 
 ROUTE = "/v1/products/{product}/testing-separation-resources"
+STORAGE_PROGRAM_NAME = "Launchplane independent testing storage"
 
 
 def application_resource_generation(binding: str, provider_operation_key: str) -> str:
@@ -54,7 +63,7 @@ class SeparationResourcesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     context: str = Field(min_length=1)
-    mode: Literal["dry-run", "apply", "receipt"] = "dry-run"
+    mode: Literal["dry-run", "apply", "receipt", "inspect"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     application: TestingApplicationSpecification | None = Field(
@@ -96,6 +105,65 @@ class SeparationResourcesResult(SeparationResourcesPlan):
     application: TestingApplicationSpecification | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+
+class SeparationResourcesStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    state: LaunchplaneMutationReservationState | Literal["not_found"]
+    plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    provider_effect_phase: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    created_at: str = ""
+    updated_at: str = ""
+    lease_expires_at: str = ""
+    provider_effect_started_at: str = ""
+
+
+class ProgramLogReadStatus(StrEnum):
+    NOT_ATTEMPTED = "not_attempted"
+    UNAVAILABLE = "unavailable"
+    AVAILABLE = "available"
+
+
+class SeparationProgramInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[
+        "retained_capability",
+        "retained_capability_readback",
+        "storage_preparation",
+        "storage_readback",
+    ]
+    status: Literal["observed", "missing", "ambiguous", "unavailable"]
+    schedule_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    script_matches: bool | None = None
+    disabled: bool | None = None
+    history_count: int | None = Field(default=None, ge=0, le=MAX_PROGRAM_ROWS)
+    history_status: ProgramHistoryStatus | Literal["not_read"] = "not_read"
+    deployment_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    deployment_status: str = Field(
+        default="unknown", pattern=r"^(?:done|error|running|queued|unknown)$"
+    )
+    log_read_status: ProgramLogReadStatus = ProgramLogReadStatus.NOT_ATTEMPTED
+    resources_ok: bool | None = None
+    result_binding_matches: bool | None = None
+
+
+class SeparationResourcesInspection(SeparationResourcesStatus):
+    programs: tuple[SeparationProgramInspection, ...]
+    inspected_at: AwareDatetime
+    inputs_match: bool | None = None
+    placement_target_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    qualification: Literal["not_evaluated"] = "not_evaluated"
+
+
+class PreparationProgramEvidence(TypedDict):
+    programs: list[SeparationProgramInspection]
+    inputs_match: bool | None
+    placement_target_id: str
 
 
 def preparation_binding(
@@ -218,6 +286,28 @@ class SeparationResourcesAdapter:
 
     def reconciliation_key(self) -> str:
         return self.request.reviewed_plan_sha256
+
+    def inspect_original(self, provider_operation_key: str) -> PreparationProgramEvidence:
+        from control_plane.testing_separation_inspection import inspect_preparation_programs
+
+        try:
+            resources = self.resources(self.request.reviewed_plan_sha256, provider_operation_key)
+        except (ValueError, FileNotFoundError):
+            return {"programs": [], "inputs_match": None, "placement_target_id": ""}
+        try:
+            inputs_match: bool | None = self.binding()[0] == self.request.reviewed_plan_sha256
+        except (ValueError, FileNotFoundError, click.ClickException):
+            inputs_match = None
+        return {
+            "programs": inspect_preparation_programs(
+                root=self.root,
+                resources=resources,
+                store=self.store,
+                application=self.request.application is not None,
+            ),
+            "inputs_match": inputs_match,
+            "placement_target_id": resources.target_id,
+        }
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
@@ -426,7 +516,7 @@ def run_preparation_schedule(
         compose_name=resources.context,
         target_payload=payload,
     )
-    name = "Launchplane independent testing storage"
+    name = STORAGE_PROGRAM_NAME
     original_name = name
 
     def find(schedule_name: str) -> api.JsonObject | None:
@@ -502,20 +592,12 @@ def _find_storage_schedule(
         path="/api/schedule.list",
         query={"id": lookup, "scheduleType": kind},
     )
-    if (
-        not isinstance(rows, list)
-        or len(rows) > 10000
-        or any(not isinstance(row, dict) for row in rows)
-    ):
+    observed = classify_program_inventory(rows, name=name, namespace=namespace)
+    if observed.status == "unavailable":
         raise ValueError("Complete schedule inventory is required.")
-    matches = [
-        row
-        for row in rows
-        if isinstance(row, dict) and row.get("name") == name and row.get("appName") == namespace
-    ]
-    if len(matches) > 1:
+    if observed.status == "ambiguous":
         raise ValueError("The service preparation schedule is ambiguous.")
-    return matches[0] if matches else None
+    return observed.program
 
 
 def _require_terminal_storage_history(
@@ -529,24 +611,8 @@ def _require_terminal_storage_history(
         path="/api/deployment.allByType",
         query={"id": schedule_id, "type": "schedule"},
     )
-    if not isinstance(rows, list) or not rows or len(rows) > 10000 or (original and len(rows) != 1):
+    if (
+        classify_program_history(rows, schedule_id=schedule_id, original=original).status
+        != "terminal"
+    ):
         raise ValueError("Complete original schedule history is required.")
-    identifiers = set()
-    for row in rows:
-        if not isinstance(row, dict) or row.get("scheduleId") != schedule_id:
-            raise ValueError("Schedule history is uncorrelated.")
-        identifier = api.deployment_key(row)
-        if (
-            not identifier
-            or identifier in identifiers
-            or api.deployment_status(row) not in {"done", "error"}
-        ):
-            raise ValueError("A remote preparation may still execute.")
-        identifiers.add(identifier)
-        started_at, finished_at = row.get("startedAt"), row.get("finishedAt")
-        if not isinstance(started_at, str) or not isinstance(finished_at, str):
-            raise ValueError("Schedule completion timestamps are unavailable.")
-        started = parse_launchplane_mutation_timestamp(started_at, field_name="startedAt")
-        finished = parse_launchplane_mutation_timestamp(finished_at, field_name="finishedAt")
-        if finished < started:
-            raise ValueError("Schedule completion provenance is invalid.")

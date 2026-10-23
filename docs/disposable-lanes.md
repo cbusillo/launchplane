@@ -927,19 +927,27 @@ SQLite remains a rehearsal backend and cannot publish these enabling facts.
 After actual provider readback, only the testing instance's volume settings are
 changed; other configuration and production records remain unchanged.
 
-Use the bounded client with the installed authenticated transport:
+Use the installed catalog helper containing
+[codex-skills#2592](https://github.com/cbusillo/codex-skills/pull/2592).
+Create a private JSON request outside the repository with `product`, `context`,
+`instance: "testing"`, the retained `operation_id` and `reason`. Optional
+`source_mode` is `ssh` (default) or `container-export`. Save a new private review:
 
 ```bash
-uv run python scripts/prepare-testing-replacement-resources.py dry-run \
-  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
-  --product <product> --context <testing-context> \
-  --operation-id <retained-operation> --reason '<reason>' \
-  --evidence-file <private-review-file>
+(
+  umask 077
+  set -C
+  uv run <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+    testing-replacement-resources-dry-run --payload-file <private-resource-request> \
+    > <private-resource-review>
+)
 ```
 
-Review the private receipt, then repeat with `apply`, `--reviewed-dry-run` and
-the original stable `--idempotency-key`. Use `readback` with the same product,
-context, operation and reason for a separate actual resource read. Readback
+Review the accepted receipt, then call `testing-replacement-resources-apply`
+with the unchanged `--payload-file`, `--dry-run-evidence-file <private-resource-review>`,
+`--expected-plan-digest <result.plan_sha256>`, `--reviewed-dry-run` and the
+original stable `--idempotency-key`. Use `testing-replacement-resources-readback`
+with the same private request for a separate actual resource read. Readback
 requires the current testing volume authority to agree with the allocation;
 drift cannot refresh positive evidence. A complete allocation with a lost final
 HTTP receipt can be adopted only after another actual readback. Target adoption
@@ -2790,20 +2798,24 @@ replacement operation or a historical supersession. Completed operations,
 journals, old storage, target, hostname and credentials stay intact. It never
 qualifies the current database as a fresh copy.
 
-Start with the resource client, omitting `--operation-id`:
+Use the same installed resource helper and private request format described
+above. Set `initial_generation: true`, omit `operation_id` or leave it empty,
+and select `source_mode` (`ssh` or `container-export`) in that request.
+Keep the original resource key in every mode, including planning and readback:
 
 ```bash
-uv run python scripts/prepare-testing-replacement-resources.py dry-run \
-  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
-  --product <product> --context <testing-context> --initial-generation \
-  --source-mode <ssh-or-container-export> \
-  --reason '<reason>' --idempotency-key <resource-key> \
-  --evidence-file <private-resource-review>
+(
+  umask 077
+  set -C
+  uv run <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+    testing-replacement-resources-dry-run --payload-file <private-resource-request> \
+    --idempotency-key <resource-key> > <private-resource-review>
+)
 ```
 
 The service derives the preparation ID from the exact product, context,
 authenticated principal and original stable key; the receipt returns it as
-`operation_id`. Preserve that ID and key. Repeating the same dry run returns the
+`result.operation_id`. Preserve that ID and key. Repeating the same dry run returns the
 same preparation while its recorded snapshot is unchanged; a changed intent or
 configuration requires a new key and new review. A refused, unactivated plan
 reserves neither an executor nor its original hostnames. Planning writes only
@@ -2830,8 +2842,11 @@ authorization denial remains `authorization_denied`. No private exception text
 or provider payload is exposed. Older service images return the grouped
 `testing_resources_refused`; an old trace cannot identify its failed checkpoint.
 
-Review the receipt, then repeat with `apply --reviewed-dry-run` and exactly the
-same arguments/key/evidence file. Separately run `readback` with the same key.
+Review the accepted receipt, then call `testing-replacement-resources-apply`
+with the unchanged `--payload-file`, `--idempotency-key <resource-key>`, the saved
+`--dry-run-evidence-file`, its `--expected-plan-digest <result.plan_sha256>` and
+`--reviewed-dry-run`. Separately call `testing-replacement-resources-readback`
+with the same private request and key.
 Only reviewed apply establishes the initial preparation's durable lane fence;
 competing synchronous and durable operations cannot start until its exact
 bootstrap queue transaction commits. Unknown or partial effects retain that
@@ -2839,14 +2854,17 @@ fence and all resources. Recover through the original key and actual provider
 readback; do not create a replacement key to escape an uncertain effect.
 If apply refuses before any dispatch, its lane checks now precede activation.
 For an interrupted no-effect attempt that already took the fence, run the same
-resource client with `release --reviewed-dry-run`, the original resource key,
-intent and private review file. The service excludes its executor, independently
+helper with `testing-replacement-resources-release`, the unchanged private
+`--payload-file`, `--idempotency-key <resource-key>`, `--reviewed-dry-run`,
+`--expected-plan-digest` and `--dry-run-evidence-file` from that same review.
+The service excludes its executor, independently
 reads that its named provider placement is absent, and atomically verifies no
 dispatch checkpoint, captured target, resource receipt or generation exists.
 It atomically records terminal release for both the lane fence and original
 provider reservation, without deleting custody or rewriting the original request.
-Repeated release is idempotent; that released intent can never apply. The client
-reports `released` explicitly if the original apply is replayed after release.
+Repeated release is idempotent; that released intent can never apply. The helper
+reports `released`, `result.resources_verified: false` and a nonzero exit if
+the original apply is replayed after release; it performs no allocation readback.
 The lane can continue normally, or a new initial intent can be reviewed with a
 new key. Any partial placement, recorded dispatch or unknown provider read keeps
 the original fence; use original-key reconciliation, never release to bypass it.

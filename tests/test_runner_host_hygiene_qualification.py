@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -11,7 +15,10 @@ import click
 from click.testing import CliRunner
 
 from control_plane.cli import main
-from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneAuditDeliveryEnvelope,
+    RunnerHostHygieneReport,
+)
 from control_plane.workflows.runner_host_hygiene_audit_spool import RunnerHostHygieneAuditSpool
 from control_plane.workflows.runner_host_hygiene_executor import (
     RemoteCommandResult,
@@ -33,6 +40,7 @@ from tests.test_runner_host_hygiene_executor import (
     _github_idle_evidence_reader,
     _request,
 )
+from tests.support.workflows import load_workflow
 
 
 class ReportRunner(_CommandRunner):
@@ -97,6 +105,102 @@ def report_for(runner: ReportRunner) -> RunnerHostHygieneReport:
 
 
 class HygieneQualificationTests(unittest.TestCase):
+    def test_workflow_fails_unqualified_reports_and_unfinished_maintenance(self) -> None:
+        workflow = load_workflow(
+            Path(__file__).parents[1] / ".github/workflows/runner-host-hygiene.yml"
+        )
+        step = next(
+            step
+            for step in workflow.steps("runner-host-hygiene")
+            if step.data.get("id") == "qualification"
+        )
+        for state in (
+            "healthy_report",
+            "blocked_report",
+            "completed",
+            "completed_old",
+            "planned",
+            "missing",
+        ):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
+                directory = Path(root)
+                artifact = directory / "runner-host-hygiene-audit-evidence-report.json"
+                spool = RunnerHostHygieneAuditSpool(
+                    root=directory / "spool", artifact_file=artifact
+                )
+                execute_runner_host_hygiene_executor(
+                    request=request_with_budgets(
+                        mutate=state in {"completed", "completed_old", "planned"}
+                    ),
+                    remote_runner=ReportRunner(
+                        runner_service_output=(
+                            "launchplane-runner@unexpected.service active running\n"
+                            if state == "blocked_report"
+                            else "launchplane-runner@ops-gate.service active running\n"
+                        )
+                    ),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_evidence_reader=_github_idle_evidence_reader,
+                    audit_delivery_sleeper=lambda _: None,
+                )
+                if state == "planned":
+                    envelope = json.loads(artifact.read_text())
+                    envelope.update(
+                        terminal_audit=None,
+                        terminal_idempotency_key="",
+                        terminal_delivery_state=None,
+                        execution_state="planned",
+                    )
+                    artifact.write_text(
+                        RunnerHostHygieneAuditDeliveryEnvelope.model_validate(
+                            envelope
+                        ).model_dump_json()
+                    )
+                if state == "missing":
+                    artifact.unlink()
+                if state == "completed_old":
+                    completed = RunnerHostHygieneAuditDeliveryEnvelope.model_validate_json(
+                        artifact.read_text()
+                    )
+                    assert completed.terminal_audit is not None
+                    assert completed.terminal_audit.post_apply_report is not None
+                    completed.terminal_audit.post_apply_report.observed_at = (
+                        datetime.now(timezone.utc) - timedelta(hours=2)
+                    ).isoformat()
+                    artifact.write_text(completed.model_dump_json())
+                (directory / "runner-host-hygiene-expected.txt").write_text("report\n")
+                binary = directory / "bin"
+                binary.mkdir()
+                uv = binary / "uv"
+                cli = shlex.join(
+                    [sys.executable, "-c", "from control_plane.cli import main; main()"]
+                )
+                uv.write_text(
+                    f'#!/bin/sh\nwhile [ "$1" != launchplane ]; do shift; done\nshift\nexec {cli} "$@"\n'
+                )
+                uv.chmod(0o700)
+                summary = directory / "summary.md"
+                response = subprocess.run(
+                    ["bash", "-c", step.run],
+                    cwd=Path(__file__).parents[1],
+                    env={
+                        **os.environ,
+                        "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
+                        "RUNNER_TEMP": root,
+                        "GITHUB_STEP_SUMMARY": str(summary),
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    response.returncode == 0,
+                    state in {"healthy_report", "completed", "completed_old"},
+                    response.stderr,
+                )
+                self.assertTrue(summary.read_text())
+
     def test_complete_fleet_and_measured_builder_zero_qualify(self) -> None:
         report = report_for(ReportRunner())
         self.assertEqual(report.status, "healthy")
