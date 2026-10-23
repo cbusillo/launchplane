@@ -1,4 +1,16 @@
-FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-build
+FROM mirror.gcr.io/library/python:3.14-slim AS python-base
+
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-node
+
+FROM python-base AS frontend-build
+
+COPY --from=frontend-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+    && pip install --no-cache-dir uv
 
 WORKDIR /app
 
@@ -9,6 +21,8 @@ COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml 
 WORKDIR /app/frontend
 RUN pnpm install --frozen-lockfile
 
+COPY pyproject.toml uv.lock README.md /app/
+COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
 
@@ -54,7 +68,7 @@ RUN go install -trimpath \
     && go version -m /go/bin/trivy | grep -F "github.com/aquasecurity/trivy" | grep -F "${TRIVY_VERSION}" \
     && /go/bin/trivy --version
 
-FROM mirror.gcr.io/library/python:3.14-slim AS runtime
+FROM python-base AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
 

@@ -18,6 +18,8 @@ __pycache__
 **/*.pyd
 node_modules
 frontend/node_modules
+frontend/generated/openapi-canonical.json
+frontend/generated/openapi-ui.json
 frontend/src/generated/openapi.ts
 frontend/src/generated/.openapi-*
 control_plane/ui_static

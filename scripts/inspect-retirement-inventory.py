@@ -20,14 +20,11 @@ from control_plane.contracts.authz_retirement_evidence import (
     AuthzWorkflowEvidenceCandidate,
 )
 from control_plane.http_routes.operational_records import RuntimeSettingsResponse
+from control_plane.openapi_export import canonical_openapi_document
 
 
 def operation_route(operation: str, method: str) -> str:
-    document = json.loads(
-        (
-            Path(__file__).resolve().parents[1] / "frontend/generated/openapi-canonical.json"
-        ).read_text()
-    )
+    document = canonical_openapi_document()
     matches = [
         path
         for path, methods in document["paths"].items()

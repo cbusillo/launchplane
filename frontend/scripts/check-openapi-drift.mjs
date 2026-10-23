@@ -4,9 +4,6 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
-const frontendRoot = path.resolve(new URL("..", import.meta.url).pathname);
-const checkedCanonicalPath = path.join(frontendRoot, "generated", "openapi-canonical.json");
-const checkedUiSchemaPath = path.join(frontendRoot, "generated", "openapi-ui.json");
 const checkedAgentContractPath = path.join(repoRoot, "contracts", "agent-operator-contract.json");
 
 function run(command, args, cwd) {
@@ -38,44 +35,14 @@ function run(command, args, cwd) {
 async function main() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "launchplane-openapi-drift-"));
   try {
-    const regeneratedCanonicalPath = path.join(tempDir, "openapi-canonical.json");
-    const regeneratedUiSchemaPath = path.join(tempDir, "openapi-ui.json");
     const regeneratedAgentContractPath = path.join(tempDir, "agent-operator-contract.json");
-
-    await run(
-      "uv",
-      ["run", "launchplane", "service", "export-openapi", "--output", regeneratedCanonicalPath],
-      repoRoot,
-    );
-    await run(
-      "node",
-      [
-        path.join(frontendRoot, "scripts", "build-openapi-ui-schema.mjs"),
-        "--input",
-        regeneratedCanonicalPath,
-        "--output",
-        regeneratedUiSchemaPath,
-      ],
-      frontendRoot,
-    );
     await run(
       "uv",
       ["run", "launchplane", "service", "export-agent-contract", "--output", regeneratedAgentContractPath],
       repoRoot,
     );
 
-    const [
-      checkedCanonical,
-      regeneratedCanonical,
-      checkedUiSchema,
-      regeneratedUiSchema,
-      checkedAgentContractText,
-      regeneratedAgentContractText,
-    ] = await Promise.all([
-      readFile(checkedCanonicalPath, "utf-8"),
-      readFile(regeneratedCanonicalPath, "utf-8"),
-      readFile(checkedUiSchemaPath, "utf-8"),
-      readFile(regeneratedUiSchemaPath, "utf-8"),
+    const [checkedAgentContractText, regeneratedAgentContractText] = await Promise.all([
       readFile(checkedAgentContractPath, "utf-8"),
       readFile(regeneratedAgentContractPath, "utf-8"),
     ]);
@@ -86,13 +53,9 @@ async function main() {
       checkedAgentContract.normalization_version !== regeneratedAgentContract.normalization_version ||
       checkedAgentContract.semantic_digest_sha256 !== regeneratedAgentContract.semantic_digest_sha256;
 
-    if (
-      checkedCanonical !== regeneratedCanonical ||
-      checkedUiSchema !== regeneratedUiSchema ||
-      agentContractDrifted
-    ) {
+    if (agentContractDrifted) {
       throw new Error(
-        "Generated contracts are out of date. Run `(cd frontend && pnpm generate:openapi)` and commit the results.",
+        "Agent contract is out of date. Run `(cd frontend && pnpm generate:agent-contract)` and commit the result.",
       );
     }
   } finally {

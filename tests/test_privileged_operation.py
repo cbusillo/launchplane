@@ -4,10 +4,12 @@ import base64
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+
 from tempfile import TemporaryDirectory
 from typing import get_args
 import unittest
 from unittest.mock import patch
+from tests.support.openapi import ui_openapi_document
 
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
@@ -328,9 +330,9 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         assert isinstance(legacy_request_payload, dict)
         self.assertNotIn("schema_migration", current_request_payload)
         self.assertNotIn("schema_migration", legacy_request_payload)
-        ui_schema = json.loads(
-            Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
-        )["components"]["schemas"]["ManagedAuthzPolicySetProposalInput-Output"]
+        ui_schema = ui_openapi_document()["components"]["schemas"][
+            "ManagedAuthzPolicySetProposalInput-Output"
+        ]
         self.assertTrue(set(ui_schema["required"]).issubset(json.loads(expected_request_json)))
 
         current_loaded = PrivilegedOperationRecord.model_validate(current_payload)

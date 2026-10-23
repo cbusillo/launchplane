@@ -1,16 +1,12 @@
-import json
-from pathlib import Path
+from control_plane.openapi_export import canonical_openapi_document
+from tests.support.openapi import ui_openapi_document
 from unittest import TestCase
 
 
 class DocsContractsTests(TestCase):
     def test_ui_openapi_matches_canonical_ui_operations(self) -> None:
-        canonical_openapi = json.loads(
-            Path("frontend/generated/openapi-canonical.json").read_text(encoding="utf-8")
-        )
-        ui_openapi = json.loads(
-            Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
-        )
+        canonical_openapi = canonical_openapi_document()
+        ui_openapi = ui_openapi_document()
 
         read_operations = canonical_openapi["x-launchplane-ui-read-operations"]
         write_operations = canonical_openapi["x-launchplane-ui-write-operations"]

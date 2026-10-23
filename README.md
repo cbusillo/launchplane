@@ -25,15 +25,17 @@ uv run launchplane service serve --help
 (cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the OpenAPI drift check, TypeScript, and the
-production Vite build. The TypeScript OpenAPI client is an ignored build artifact;
-development, type checks, browser checks, and production builds generate it from
-the checked UI schema. After a backend contract change, run
-`(cd frontend && pnpm generate:openapi)` and commit the schemas and agent contract.
-CI rejects drift in those checked artifacts. Existing branches that still commit
-the TypeScript client may need one final refresh to adopt its removal.
+Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
+and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
+client are ignored build artifacts generated from Python source before frontend
+tests, development, type checks and production builds, including Docker and CI.
+Python contract tests and inventory scripts also derive schemas from source.
+After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
+and commit only the agent contract. CI still rejects drift in that runtime contract.
 For IDE type resolution before the first build, run
 `(cd frontend && pnpm generate:openapi-types)` once.
+`bash scripts/qualify-openapi-checkout.sh` tests and builds an archive of tracked
+HEAD with both JSON snapshots excluded; CI frontend validation uses this check.
 `(cd frontend && pnpm test:browser)` runs the Playwright
 browser smoke. Use [`.github/github.json`](.github/github.json) for current gates
 and [testing style](docs/style/testing.md) for choosing proportionate tests:

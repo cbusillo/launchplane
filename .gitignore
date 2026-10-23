@@ -38,6 +38,8 @@ dist/
 # node_modules symlink would show up as untracked.
 node_modules
 control_plane/ui_static/
+frontend/generated/openapi-canonical.json
+frontend/generated/openapi-ui.json
 frontend/src/generated/openapi.ts/
 frontend/src/generated/.openapi-*/
 
