@@ -120,6 +120,51 @@ class ApplicationFlowTests(unittest.TestCase):
     adapter: ApplicationActivationAdapter
     planned: TestingActivationRecord
 
+    def test_resumed_external_conflict_after_route_switch_restores_original(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime(omit_identity_default=True)
+        self.prepare()
+        interrupted = False
+
+        def compare(record: TestingActivationRecord, check: Any) -> None:
+            nonlocal interrupted
+            check()
+            readiness = record.application_readiness
+            if (
+                readiness is not None
+                and readiness.public_health is not None
+                and readiness.public_health.verified
+                and readiness.public_health.status == "pass"
+            ):
+                if not interrupted:
+                    interrupted = True
+                    raise OSError("Fixture reply unavailable")
+                raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=compare):
+            self.assertEqual(self.activate().status, "reconcile_required")
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        assert (
+            record.application_readiness is not None
+            and record.application_readiness.route is not None
+        )
+        self.assertEqual(
+            observe_testing_route(
+                record.application_readiness.route,
+                routing.raw,
+                json.loads(routing.route_file.read_text()),
+            ),
+            record.application_readiness.route.old_backend,
+        )
+        self.assertEqual(self.activate().status, "replayed")
+
     def setUp(self) -> None:
         self.enterContext(
             patch.dict(
@@ -2819,6 +2864,71 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
         )
+
+    def test_lost_deployment_is_adopted_before_external_conflict_refusal(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        self.lost_image_reply = True
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required")
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=conflict):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(
+            record.state_recipient["application_deployment_id"],
+            api.deployment_key(self.deployments[record.target_id][0]),
+        )
+        self.assertIn(
+            api.deployment_status(self.deployments[record.target_id][0]),
+            api._DEPLOYMENT_SUCCESS_STATUSES,
+        )
+        self.assertEqual(
+            len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
+        )
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_external_conflict_before_configure_keeps_credentials_and_candidate_unused(
+        self,
+    ) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        original_password = self.canonical_password()
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with (
+            patch.object(self.adapter, "require_production_separation", side_effect=conflict),
+            patch.object(api, "update_dokploy_target_env") as env,
+            patch.object(api, "trigger_deployment") as deploy,
+        ):
+            result = self.activate()
+            env.assert_not_called()
+            deploy.assert_not_called()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(self.canonical_password(), original_password)
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
 
     def test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation(
         self,

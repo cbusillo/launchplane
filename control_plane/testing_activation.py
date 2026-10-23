@@ -1252,6 +1252,7 @@ class TestingActivationAdapter:
             image_reference=record.image_reference,
             host_ports=record.host_ports,
             qualified_at=record.qualified_at,
+            external_capabilities=record.external_capabilities,
         ).model_dump(mode="json")
 
     def publish(

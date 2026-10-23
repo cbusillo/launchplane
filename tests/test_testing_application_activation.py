@@ -1,6 +1,7 @@
 """Reviewed fresh application inputs and real managed runtime delivery."""
 
 import base64
+from contextlib import nullcontext
 from copy import deepcopy
 from io import StringIO
 import json
@@ -11,7 +12,7 @@ from typing import Any
 import time
 from uuid import uuid4
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import (
@@ -23,6 +24,7 @@ from control_plane.contracts.testing_application import (
     TestingApplicationState,
     TestingApplicationCredential,
 )
+from control_plane.contracts.testing_activation import TestingActivationRecord
 from control_plane.odoo_testing_resources import ApplicationTestingResources
 from control_plane.testing_application_credentials import (
     generation_bundle,
@@ -297,6 +299,489 @@ class ApplicationInputTests(unittest.TestCase):
 
 
 class ApplicationCredentialTests(unittest.TestCase):
+    record: TestingActivationRecord
+
+    def discord_intent(self) -> str:
+        profile = self.store.read_product_profile_record(self.record.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD",
+                context=self.record.context,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        self.record.request.application = TestingApplicationSpecification.model_validate(
+            {
+                **self.specification.model_dump(),
+                "local_credentials": [],
+                "external_credentials": [{"binding_key": "DB_PASSWORD", "guild_ids": ["10"]}],
+            }
+        )
+        token = base64.urlsafe_b64encode(b"123").decode().rstrip("=") + ".fixture.signature"
+        version = self.store.read_secret_version("testing-version")
+        ciphertext, key_id = secrets._encrypt_secret_value(token)
+        self.store.write_secret_version(
+            version.model_copy(
+                update={
+                    "ciphertext": ciphertext,
+                    "key_id": key_id,
+                    "value_origin": None,
+                }
+            )
+        )
+        return token
+
+    def discord_response(self, url: str, **kwargs: Any) -> Any:
+        from control_plane.outbound_http import PublicHttpResponse
+
+        payload: Any = []
+        if url.endswith("/users/@me"):
+            payload = {"id": "123", "bot": True}
+        elif url.endswith("/applications/@me"):
+            payload = {"id": "456", "bot": {"id": "123"}}
+        elif url.endswith("/gateway/bot"):
+            payload = {"session_start_limit": {"max_concurrency": 1}}
+        elif "/guilds?" in url and "after=" not in url:
+            payload = [{"id": "10"}]
+        return PublicHttpResponse(200, "", 0, (), json.dumps(payload).encode())
+
+    def test_native_discord_proof_allows_exact_carried_version_and_refuses_drift(self) -> None:
+        token = self.discord_intent()
+        from control_plane.testing_external_capabilities import observe_activation_discord
+        from control_plane.testing_application_credentials import runtime_activation_bundle
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.discord_response,
+        ):
+            proof = observe_activation_discord(
+                self.store,
+                self.record,
+                authorize=self.store.list_product_profile_records,
+                check_current=lambda: None,
+                actor="fixture",
+                trace_id="launchplane_req_fixture",
+            )
+        self.record.external_capabilities = (proof,)
+        self.assertEqual(proof.guild_ids, ("10",))
+        self.assertNotIn(token, proof.model_dump_json())
+        self.assertFalse(generation_bundle(self.store, self.record).secret_records)
+        self.assertFalse(runtime_activation_bundle(self.store, self.record).secret_records)
+        from control_plane.testing_external_capabilities import require_discord_capability
+        from control_plane.discord_identity import capture_identity_inputs
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
+
+        profile = self.store.read_product_profile_record(self.record.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"display_name": "Renamed fixture"})
+        )
+        require_discord_capability(self.store, self.record, proof)
+        with self.assertRaises(TestingActivationRefusal) as changed:
+            require_discord_capability(
+                self.store, self.record.model_copy(update={"plan_sha256": "f" * 64}), proof
+            )
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+        with self.assertRaises(TestingActivationRefusal) as changed:
+            require_discord_capability(
+                self.store, self.record, proof.model_copy(update={"guild_ids": ("20",)})
+            )
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+        from dataclasses import replace
+
+        captured = capture_identity_inputs(self.store, self.record.product)
+        compared = replace(
+            captured, production=((captured.binding, captured.record, captured.version),)
+        )
+        with patch(
+            "control_plane.testing_external_capabilities.capture_identity_inputs",
+            return_value=compared,
+        ):
+            require_discord_capability(self.store, self.record, proof)
+            require_discord_capability(
+                self.store, self.record.model_copy(update={"published": True}), proof
+            )
+        rotated = captured.version.model_copy(update={"version_id": "rotated-testing-fixture"})
+        self.store.write_secret_version(rotated)
+        self.store.write_secret_record(
+            captured.record.model_copy(update={"current_version_id": rotated.version_id})
+        )
+        with self.assertRaises(TestingActivationRefusal) as changed:
+            require_discord_capability(self.store, self.record, proof)
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+        self.store.write_secret_record(captured.record)
+        version = self.store.read_secret_version("testing-version")
+        self.store.write_secret_version(version.model_copy(update={"value_origin": "generated"}))
+        for consume in (generation_bundle, runtime_activation_bundle):
+            with self.assertRaises(ValueError):
+                consume(self.store, self.record)
+
+    def test_discord_admission_refuses_incomplete_or_foreign_guild_without_writes(self) -> None:
+        self.discord_intent()
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityReadRefusal,
+        )
+        from control_plane.outbound_http import PublicHttpResponse
+
+        for payload in (b'{"retry_after":120,"global":false}', b'[{"id":"20"}]'):
+
+            def respond(url: str, **kwargs: Any) -> Any:
+                if "/guilds?" in url:
+                    return PublicHttpResponse(
+                        429 if payload.startswith(b"{") else 200, "", 0, (), payload
+                    )
+                return self.discord_response(url, **kwargs)
+
+            records = self.store.list_secret_records()
+            with patch(
+                "control_plane.discord_external_resources.request_public_http", side_effect=respond
+            ):
+                with self.assertRaises(ExternalCapabilityReadRefusal) as refused:
+                    observe_activation_discord(
+                        self.store,
+                        self.record,
+                        authorize=self.store.list_product_profile_records,
+                        check_current=lambda: None,
+                        actor="fixture",
+                        trace_id="launchplane_req_fixture",
+                    )
+                assert refused.exception.result.observation is not None
+                if payload.startswith(b"{"):
+                    self.assertEqual(
+                        refused.exception.result.observation.rate_limits[0].retry_after, 120
+                    )
+            self.assertEqual(self.store.list_secret_records(), records)
+
+    def production_value(self, value: str, version_id: str) -> None:
+        from control_plane.discord_identity import capture_identity_inputs
+
+        captured = capture_identity_inputs(
+            self.store, self.record.product, compare_production=False
+        )
+        profile = self.store.read_product_profile_record(self.record.product)
+        if not any(lane.instance == "prod" for lane in profile.lanes):
+            profile.lanes = (
+                *profile.lanes,
+                profile.lanes[0].model_copy(update={"instance": "prod"}),
+            )
+            self.store.write_product_profile_record(profile)
+        ciphertext, key_id = secrets._encrypt_secret_value(value)
+        self.store.write_secret_record(
+            captured.record.model_copy(
+                update={
+                    "secret_id": "production-comparison",
+                    "name": "fixture-production",
+                    "instance": "prod",
+                    "current_version_id": version_id,
+                }
+            )
+        )
+        self.store.write_secret_version(
+            captured.version.model_copy(
+                update={
+                    "version_id": version_id,
+                    "secret_id": "production-comparison",
+                    "ciphertext": ciphertext,
+                    "key_id": key_id,
+                }
+            )
+        )
+        self.store.write_secret_binding(
+            captured.binding.model_copy(
+                update={
+                    "binding_id": "production-comparison",
+                    "secret_id": "production-comparison",
+                    "instance": "prod",
+                    "binding_key": "API_TOKEN",
+                    "declared_secret_class": "prod_only",
+                }
+            )
+        )
+
+    def test_forward_comparison_accepts_rotation_and_refuses_same_bot_without_discord(self) -> None:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityConflict,
+        )
+
+        token = self.discord_intent()
+        self.production_value("production-unrelated", "production-initial")
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.discord_response,
+        ):
+            proof = observe_activation_discord(
+                self.store,
+                self.record,
+                authorize=self.store.list_product_profile_records,
+                check_current=lambda: None,
+                actor="fixture",
+                trace_id="launchplane_req_fixture",
+            )
+        self.record.external_capabilities = (proof,)
+        adapter = ApplicationActivationAdapter(
+            self.fixture.adapter.root,
+            self.store,
+            self.record.product,
+            self.record.request,
+            "fixture",
+            self.record.scope,
+            "launchplane_req_fixture",
+            authorize_external=self.store.list_product_profile_records,
+        )
+        self.production_value("another-unrelated-value", "production-rotated")
+        with patch("control_plane.discord_external_resources.request_public_http") as provider:
+            adapter.require_production_separation(self.record, lambda: None)
+            self.assertFalse(generation_bundle(self.store, self.record).secret_records)
+            for index, production in enumerate(
+                (token, token.split(".")[0] + ".different.signature")
+            ):
+                self.production_value(production, f"production-match-{index}")
+                with self.assertRaises(ExternalCapabilityConflict):
+                    adapter.require_production_separation(self.record, lambda: None)
+            adapter.authorize_external = Mock(side_effect=PermissionError("Denied"))
+            with patch("control_plane.secrets._decrypt_secret_value") as decrypt:
+                with self.assertRaises(PermissionError):
+                    adapter.require_production_separation(self.record, lambda: None)
+                decrypt.assert_not_called()
+            provider.assert_not_called()
+
+    def test_structural_discord_plan_cannot_install_without_native_proof(self) -> None:
+        self.discord_intent()
+        from control_plane.testing_application_credentials import credential_binding_names
+
+        assert self.record.request.application is not None
+
+        self.assertFalse(
+            credential_binding_names(
+                self.store,
+                self.record.product,
+                self.record.context,
+                self.record.request.application,
+            )
+        )
+        with self.assertRaises(ValueError):
+            generation_bundle(self.store, self.record)
+
+    def test_runtime_resolution_rechecks_the_proved_external_version(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+        from control_plane.testing_external_capabilities import observe_activation_discord
+        from control_plane.discord_identity import capture_identity_inputs
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
+
+        self.discord_intent()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.discord_response,
+        ):
+            proof = observe_activation_discord(
+                self.store,
+                self.record,
+                authorize=self.store.list_product_profile_records,
+                check_current=lambda: None,
+                actor="fixture",
+                trace_id="launchplane_req_fixture",
+            )
+        self.record.external_capabilities = (proof,)
+        self.record = self.record.model_copy(
+            update={"application_readiness": SimpleNamespace(runtime_identity=object())}
+        )
+        captured = capture_identity_inputs(self.store, self.record.product)
+        adapter = ApplicationActivationAdapter(
+            self.fixture.adapter.root,
+            self.store,
+            self.record.product,
+            self.record.request,
+            "fixture",
+            self.record.scope,
+            "launchplane_req_fixture",
+        )
+
+        def rotate(**kwargs: Any) -> Any:
+            version = captured.version.model_copy(
+                update={"version_id": "rotated-during-resolution"}
+            )
+            self.store.write_secret_version(version)
+            self.store.write_secret_record(
+                captured.record.model_copy(update={"current_version_id": version.version_id})
+            )
+            return SimpleNamespace(
+                values={"DB_PASSWORD": "unproved-fixture"}, secret_keys={"DB_PASSWORD"}
+            )
+
+        with (
+            patch(
+                "control_plane.testing_application_credentials.staged_runtime_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_site_runtime_environment",
+                side_effect=rotate,
+            ),
+            patch(
+                "control_plane.testing_application_activation.runtime_identity_env", return_value={}
+            ),
+        ):
+            with self.assertRaises(TestingActivationRefusal) as refused:
+                adapter.application_values(self.record)
+        self.assertEqual(refused.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+
+    def test_discord_read_refusal_precedes_every_activation_effect(self) -> None:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+        from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
+        from control_plane.provider_operations import ProviderMutationRejectedError
+        from control_plane.outbound_http import PublicHttpResponse
+
+        self.discord_intent()
+        adapter = ApplicationActivationAdapter(
+            self.fixture.adapter.root,
+            self.store,
+            self.record.product,
+            self.record.request.model_copy(
+                update={"reviewed_plan_sha256": self.record.plan_sha256}
+            ),
+            "fixture",
+            self.record.scope,
+            "launchplane_req_fixture",
+            authorize_external=self.store.list_product_profile_records,
+        )
+        with (
+            patch.object(ApplicationActivationAdapter, "evidence", return_value=nullcontext()),
+            patch.object(ApplicationActivationAdapter, "current", return_value=self.record),
+            patch.object(ApplicationActivationAdapter, "require_unchanged"),
+            patch.object(ApplicationActivationAdapter, "refuse_after_failure", return_value=None),
+            patch.object(ApplicationActivationAdapter, "preflight_application_route") as route,
+            patch.object(ApplicationActivationAdapter, "create_placement") as create,
+            patch.object(ApplicationActivationAdapter, "save") as save,
+            patch.object(
+                self.store,
+                "testing_replacement_execution_lock",
+                return_value=nullcontext(lambda: None),
+            ),
+            patch(
+                "control_plane.testing_application_activation.require_retained_application_custody"
+            ),
+            patch(
+                "control_plane.testing_application_activation.completed_application_forward_exclusion",
+                return_value=False,
+            ),
+            patch(
+                "control_plane.testing_application_capabilities.inspect_retained_application_capabilities"
+            ) as inspect,
+            patch(
+                "control_plane.discord_external_resources.request_public_http",
+                return_value=PublicHttpResponse(
+                    429, "", 0, (), b'{"retry_after":120,"global":true}'
+                ),
+            ),
+        ):
+            lease = Mock(spec=["assert_current", "checkpoint_effect"])
+            with self.assertRaises(ProviderMutationRejectedError) as refused:
+                adapter.apply("original-operation", lease)
+            self.assertIsInstance(
+                refused.exception.cause,
+                ExternalCapabilityReadRefusal,
+                repr(refused.exception.__cause__),
+            )
+            cause = refused.exception.cause
+            assert isinstance(cause, ExternalCapabilityReadRefusal)
+            assert cause.result.observation is not None
+            self.assertTrue(cause.result.observation.rate_limits[0].global_limit)
+            self.assertEqual(cause.result.observation.rate_limits[0].retry_after, 120)
+            for effect in (route, create, save, inspect, lease.checkpoint_effect):
+                effect.assert_not_called()
+
+            from fastapi import HTTPException
+
+            denied = HTTPException(status_code=403, detail="Authorization denied")
+            adapter.authorize_external = Mock(side_effect=denied)
+            with self.assertRaises(ProviderMutationRejectedError) as unauthorized:
+                adapter.apply("original-operation", lease)
+            self.assertIs(unauthorized.exception.cause, denied)
+            for effect in (route, create, save, inspect, lease.checkpoint_effect):
+                effect.assert_not_called()
+
+    def test_discord_authorization_precedes_decryption(self) -> None:
+        from control_plane.testing_external_capabilities import observe_activation_discord
+
+        self.discord_intent()
+        with patch("control_plane.discord_identity.secrets._decrypt_secret_value") as decrypt:
+            with self.assertRaises(PermissionError):
+                observe_activation_discord(
+                    self.store,
+                    self.record,
+                    authorize=Mock(side_effect=PermissionError("Denied")),
+                    check_current=lambda: None,
+                    actor="fixture",
+                    trace_id="launchplane_req_fixture",
+                )
+            decrypt.assert_not_called()
+            from control_plane.discord_identity import read_discord_identity
+            from control_plane.contracts.testing_activation import (
+                TestingActivationRefusal,
+                TestingActivationRefusalCode,
+            )
+
+            refused = TestingActivationRefusal(
+                "Changed fixture", code=TestingActivationRefusalCode.AUTHORITY_CHANGED
+            )
+            with self.assertRaises(TestingActivationRefusal) as failure:
+                read_discord_identity(
+                    self.store,
+                    self.record.product,
+                    profiles=self.store.list_product_profile_records(),
+                    trace_id="launchplane_req_fixture",
+                    actor="fixture",
+                    purpose="activation_admission",
+                    before_read=Mock(side_effect=refused),
+                )
+            self.assertIs(failure.exception, refused)
+            decrypt.assert_not_called()
+
+    def test_backoff_survives_input_drift_after_provider_response(self) -> None:
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityReadRefusal,
+        )
+        from control_plane.outbound_http import PublicHttpResponse
+
+        self.discord_intent()
+        changed = False
+
+        def current() -> None:
+            if changed:
+                raise ValueError("Original lease changed")
+
+        def respond(*args: Any, **kwargs: Any) -> PublicHttpResponse:
+            nonlocal changed
+            changed = True
+            return PublicHttpResponse(429, "", 0, (), b'{"retry_after":120,"global":false}')
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=respond
+        ):
+            with self.assertRaises(ExternalCapabilityReadRefusal) as refused:
+                observe_activation_discord(
+                    self.store,
+                    self.record,
+                    authorize=self.store.list_product_profile_records,
+                    check_current=current,
+                    actor="fixture",
+                    trace_id="launchplane_req_fixture",
+                )
+        assert refused.exception.result.observation is not None
+        self.assertEqual(refused.exception.result.observation.rate_limits[0].retry_after, 120)
+
     def setUp(self) -> None:
         self.enterContext(
             patch.dict(

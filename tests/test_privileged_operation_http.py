@@ -426,8 +426,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             code: str,
             message: str,
             authz: dict[str, object] | None = None,
+            records: dict[str, str] | None = None,
         ) -> HTTPException:
-            _ = trace_id, authz
+            _ = trace_id, authz, records
             return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
         register_privileged_operation_routes(

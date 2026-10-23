@@ -15,7 +15,9 @@ from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationResult,
     TestingActivationRefusedResult,
+    TestingActivationRefusalCode,
 )
+from control_plane.discord_identity import DiscordIdentityResult
 from control_plane.testing_activation import ROUTE
 
 
@@ -34,6 +36,19 @@ def save(path: Path, payload: object) -> None:
         return
     with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w") as output:
         json.dump(payload, output)
+
+
+def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
+    try:
+        payload = json.loads(raw)
+        if (
+            payload.get("error", {}).get("code")
+            == TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        ):
+            return DiscordIdentityResult.model_validate_json(payload["records"]["discord_identity"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
 
 
 def main() -> int:
@@ -134,6 +149,20 @@ def main() -> int:
     except urllib.error.HTTPError as error:
         raw = error.read()
         error.close()
+        observed = external_refusal(raw)
+        if observed is not None:
+            payload = json.loads(raw)
+            print(
+                json.dumps(
+                    {
+                        "status": "rejected",
+                        "trace_id": transport["public_trace_id"](payload.get("trace_id", "")),
+                        "external_identity": observed.model_dump(mode="json"),
+                        "retain_original_key": submitted,
+                    }
+                )
+            )
+            return 1
         with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw)
         ) as replay:
