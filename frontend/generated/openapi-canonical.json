@@ -35885,6 +35885,11 @@
           "summary": {
             "title": "Summary",
             "type": "string"
+          },
+          "testing_recovery_reference": {
+            "default": "",
+            "title": "Testing Recovery Reference",
+            "type": "string"
           }
         },
         "required": [

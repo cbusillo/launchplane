@@ -409,6 +409,7 @@ export function incidentForFixture(
         notification_sent: !resolved,
         provider_operation_references: [],
         provider_reservation_ids: [],
+        testing_recovery_reference: "",
       },
       ...(!resolved
         ? [
@@ -424,6 +425,7 @@ export function incidentForFixture(
               notification_sent: true,
               provider_operation_references: [],
               provider_reservation_ids: [],
+              testing_recovery_reference: "",
             },
           ]
         : []),

@@ -2165,6 +2165,24 @@ format and an exact product/context/testing key prefix; it never returns the key
 These are diagnostic links, not proof of settlement
 or authority to recover. Missing reservations and unmatched incarnations remain
 held until their corresponding supported recovery proves disposition.
+For a service-started testing original already completed by reviewed abandonment,
+the opening observation's `testing_recovery_reference` is populated only after
+the exact captured reservation and creation time match the retained archive,
+original request, lane, physical origin and receipt. The existing explicit-reference
+recovery dry-run then reports its completed disposition; the default held-only
+lookup can still return 404. An abandoned executor outcome remains unknown and
+possible fixture residue remains recorded.
+
+The natural monitor can reconcile the legacy unavailable-reference marker only
+when the complete retained incident observation history and material-event chain
+prove every captured operation completed through that same supported abandonment.
+Later observations without a new material event are included. Dated historical
+witnesses can bind an earlier legacy attention reference only when the exact
+incarnation predates that reference. Missing history, archive, custody, incarnation
+or receipt evidence keeps the incident open. The monitor locks and rechecks the
+proof with the existing provider-source gate before publication. This changes no
+provider resource, replays no executor, invents no nonce and supplies no deployment
+verification; health, identity, TLS and freshness retain their separate gates.
 The outbox worker sends email and Discord as well as GitHub notifications for
 still-open incidents. Recovery does not manufacture another notification to
 resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;

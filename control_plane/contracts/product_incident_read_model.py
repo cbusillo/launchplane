@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from dataclasses import dataclass
 import re
 from typing import Literal, Protocol, cast
@@ -45,6 +44,7 @@ from control_plane.provider_target_holds import (
     ProviderOperationAttentionReference,
     ProviderOperationReference,
 )
+from control_plane.legacy_testing_fence import capture_testing_fences
 
 
 ProductIncidentStatusFilter = Literal["all", "open", "resolved"]
@@ -219,6 +219,7 @@ class ProductIncidentObservationSummary(BaseModel):
     notification_sent: bool = False
     provider_operation_references: tuple[str, ...] = ()
     provider_reservation_ids: tuple[str, ...] = ()
+    testing_recovery_reference: str = ""
 
 
 class ProductIncidentEventSummary(BaseModel):
@@ -498,7 +499,9 @@ def build_product_environment_incident_detail(
             incident=incident,
         ),
         material_evidence=_material_evidence(incident.material_fingerprint),
-        opening_observation=_observation_read_summary(opening) if opening else None,
+        opening_observation=_observation_read_summary(opening, record_store=record_store)
+        if opening
+        else None,
         observations=tuple(_observation_read_summary(record) for record in observations),
         events=tuple(
             ProductIncidentEventSummary(
@@ -739,43 +742,10 @@ def _event_summary(record: PublicIngressIncidentEventRecord) -> str:
     )
 
 
-def _legacy_testing_fence_reservation_id(
-    record: PublicIngressObservationRecord, summary: str
-) -> str | None:
-    if record.instance != "testing":
-        return None
-    match = re.fullmatch(
-        r"Deploy (.+) started at \S+ and holds this target "
-        r"\((?:running|reconcile_required), last at [^,]+, since [^)]+\)\. "
-        r"Every later deploy is refused until it is recovered with the generic-web deploy recovery dry-run\.",
-        summary,
-    )
-    if match is None:
-        return None
-    try:
-        key = ast.literal_eval(match[1])
-    except (ValueError, SyntaxError):
-        return None
-    from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
-    from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
-    from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
-    from control_plane.product_reconcile import reconcile_reservation_scope
-
-    if (
-        not isinstance(key, str)
-        or repr(key) != match[1]
-        or not key.startswith(f"{RECONCILE_SOURCE}:{record.product}:{record.context}:testing:")
-    ):
-        return None
-    return build_launchplane_mutation_reservation_id(
-        scope=reconcile_reservation_scope(record.product),
-        route_path=GENERIC_WEB_DEPLOY_ROUTE,
-        idempotency_key=key,
-    )
-
-
 def _observation_read_summary(
     record: PublicIngressObservationRecord,
+    *,
+    record_store: object | None = None,
 ) -> ProductIncidentObservationSummary:
     references: set[str] = set()
     reservation_ids: set[str] = set()
@@ -795,9 +765,9 @@ def _observation_read_summary(
                 reservation_ids.update(
                     re.findall(r"\bmutation-reservation-[0-9a-f]{64}\b", target.summary)
                 )
-                legacy_id = _legacy_testing_fence_reservation_id(record, target.summary)
-                if legacy_id is not None:
-                    reservation_ids.add(legacy_id)
+        reservation_ids.update(capture.record_id for capture in capture_testing_fences(record))
+    read_recovery = getattr(record_store, "read_testing_fence_recovery_reference", None)
+    recovery_reference = read_recovery(record) if callable(read_recovery) else ""
     return ProductIncidentObservationSummary(
         record_id=record.record_id,
         purpose=record.purpose,
@@ -810,6 +780,7 @@ def _observation_read_summary(
         notification_sent=record.notification_sent,
         provider_operation_references=tuple(sorted(references)),
         provider_reservation_ids=tuple(sorted(reservation_ids)),
+        testing_recovery_reference=recovery_reference,
     )
 
 
