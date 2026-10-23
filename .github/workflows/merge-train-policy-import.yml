@@ -242,7 +242,7 @@ jobs:
           print(f'repository_id = {app_values["GITHUB_REPOSITORY_ID"]}')
           print(f"private_key_context = {json.dumps(private_key_context)}")
           PY
-          uv run launchplane work-graph merge-train-policy \
+          uv run launchplane merge-train-policy \
             --policy-file "$policy_file" \
             --repository "$POLICY_REPOSITORY" \
             --base-branch "$POLICY_BASE_BRANCH" \

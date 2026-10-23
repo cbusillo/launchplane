@@ -332,6 +332,8 @@ def _product_for_repository(*, store: GitHubAppWebhookStore, repository_id: str)
         return "", "repository_not_mapped"
     if not stored_identity_matches_inventory(matches[0], current):
         return "", "repository_identity_mismatch"
+    if not matches[0].is_managed_runtime:
+        return "", "product_has_no_runtime"
     return matches[0].product, ""
 
 

@@ -538,7 +538,6 @@ def _invoke_cli(
         baseline_file.write_text(json.dumps(baseline_payload), encoding="utf-8")
 
         arguments = [
-            "work-graph",
             "runner-maintainer-plan",
             "--repository",
             "cbusillo/odoo-tenant-cm-website",

@@ -1,21 +1,10 @@
 import type {
   EveryCodeWorkRequestSummary,
-  GitHubIssueInboxReadModel,
   MergeTrainControllerRecordSummary,
   MergeTrainControllerStatusReadModel,
   MergeTrainPolicyTarget,
-  WorkGraphQueueItem,
 } from "./generated/openapi.ts";
 import type { Status } from "./types";
-
-export type WorkGraphStateFilter =
-  | "all"
-  | "ready"
-  | "blocked"
-  | "waiting";
-export type WorkGraphRecommendationFilter =
-  | "all"
-  | WorkGraphQueueItem["recommendation"];
 
 export interface MergeTrainTargetOption {
   key: string;
@@ -51,21 +40,6 @@ export function mergeTrainTargetSelection(search: string): MergeTrainTargetSelec
   return { invalid: false, key: `${repository}:${baseBranch}` };
 }
 
-export function workGraphRankScopeKey(
-  snapshotLoadedAt: string,
-  traceId: string,
-  generatedAt: string,
-  fixtureMode: string | null,
-): string {
-  return JSON.stringify([
-    "work-graph-rank",
-    snapshotLoadedAt,
-    traceId,
-    generatedAt,
-    fixtureMode ?? "",
-  ]);
-}
-
 export function mergeTrainStatusScopeKey(
   targetKey: string,
   policyLoadedAt: string,
@@ -79,63 +53,6 @@ export function mergeTrainStatusScopeKey(
     policySha256,
     fixtureMode ?? "",
   ]);
-}
-
-export function filterWorkGraphItems(
-  items: WorkGraphQueueItem[],
-  state: WorkGraphStateFilter,
-  recommendation: WorkGraphRecommendationFilter,
-): WorkGraphQueueItem[] {
-  return items.filter(
-    (item) =>
-      (state === "all" || item.state === state) &&
-      (recommendation === "all" || item.recommendation === recommendation),
-  );
-}
-
-export function workGraphStateStatus(
-  state: WorkGraphQueueItem["state"],
-): Status {
-  if (state === "ready") {
-    return "pending";
-  }
-  if (state === "blocked") {
-    return "blocked";
-  }
-  if (state === "waiting") {
-    return "unknown";
-  }
-  return "pass";
-}
-
-export function issueInboxCounts(inbox: GitHubIssueInboxReadModel) {
-  const issues = inbox.repositories.flatMap((repository) => repository.issues);
-  return {
-    present: issues.filter((issue) => issue.project_status === "present").length,
-    missing: issues.filter((issue) => issue.project_status === "missing").length,
-    stale: issues.filter(
-      (issue) =>
-        issue.project_status === "stale" || issue.project_status === "closed",
-    ).length,
-  };
-}
-
-export function issueProjectStatusTone(
-  status: GitHubIssueInboxReadModel["repositories"][number]["issues"][number]["project_status"],
-): Status {
-  if (status === "present") {
-    return "pass";
-  }
-  if (status === "missing") {
-    return "pending";
-  }
-  if (status === "closed") {
-    return "blocked";
-  }
-  if (status === "stale") {
-    return "unknown";
-  }
-  return "unknown";
 }
 
 export function everyCodeSummaryTone(
@@ -217,20 +134,4 @@ export function mergeTrainStaleAttentionRecords(
     (record) => record.policy_status === "stale" &&
       (record.historical !== true || activeIds.has(record.record_id)),
   );
-}
-
-export function scalarEvidence(
-  source: Record<string, unknown>,
-): Array<{ label: string; value: string }> {
-  return Object.entries(source)
-    .flatMap(([label, value]) => {
-      if (typeof value === "string" || typeof value === "number") {
-        return [{ label, value: String(value) }];
-      }
-      if (typeof value === "boolean") {
-        return [{ label, value: value ? "yes" : "no" }];
-      }
-      return [];
-    })
-    .sort((left, right) => left.label.localeCompare(right.label));
 }

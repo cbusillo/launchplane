@@ -53,6 +53,16 @@ def original_preview_intent(
     if not isinstance(store, PostgresRecordStore):
         raise ValueError("Preview original intent requires database storage.")
     intent = store.read_original_mutation_intent(reservation)
+    return validate_original_preview_intent(reservation, profile=profile, intent=intent)
+
+
+def validate_original_preview_intent(
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    intent: dict[str, object],
+) -> OriginalPreviewIntent:
+    """Validate already-read evidence without masking storage failures at the caller."""
     if reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE or not intent:
         raise ValueError("preview_original_intent_unavailable")
     issued = OdooPreviewApplyInputsResult.model_validate(intent.get("issued_plan"))

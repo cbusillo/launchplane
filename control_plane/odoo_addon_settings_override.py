@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
 from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooInstanceOverrideRecord,
@@ -39,8 +40,11 @@ from control_plane.odoo_instance_overrides import (
     _resolve_shopify_payload_settings,
     addon_setting_secret_env_key,
     odoo_instance_is_production,
+    production_shopify_store_keys,
+    require_shopify_store_separation,
     shopify_store_key_is_protected,
 )
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 ODOO_ADDON_SETTINGS_APPLY_ROUTE = "/v1/product-config/odoo-addon-settings/apply"
 ODOO_ADDON_SETTINGS_SOURCE_LABEL: Literal["service:odoo-addon-settings"] = (
@@ -68,7 +72,6 @@ _SHOPIFY_STORE_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{0,254}$")
 # Shopify credential prefixes. A value with one of these in a literal or binding field is
 # a pasted secret, so refuse it without echoing it back.
 _SHOPIFY_CREDENTIAL_PREFIXES = ("shpat_", "shpss_", "shpca_", "shppa_", "shpua_")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class OdooAddonSettingsRefusal(ValueError):
@@ -82,6 +85,8 @@ class OdooAddonSettingsStale(ValueError):
 
 
 class OdooAddonSettingsStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
@@ -201,7 +206,7 @@ class OdooAddonSettingsApplyRequest(BaseModel):
                 raise ValueError(f"Odoo addon settings request requires {field_name}.")
         if self.mode == "dry-run" and self.reviewed_plan_sha256:
             raise ValueError("Odoo addon settings dry-run rejects reviewed_plan_sha256.")
-        if self.mode == "apply" and not _SHA256_PATTERN.fullmatch(self.reviewed_plan_sha256):
+        if self.mode == "apply" and not SHA256_PATTERN.fullmatch(self.reviewed_plan_sha256):
             raise ValueError(
                 "Odoo addon settings apply requires the reviewed 64-character plan SHA-256."
             )
@@ -282,7 +287,7 @@ def _read_existing_record(
 
 
 def _protected_store_keys(
-    *, record_store: OdooAddonSettingsStore, context: str, instance: str
+    *, record_store: OdooAddonSettingsStore, product: str, context: str, instance: str
 ) -> tuple[str, ...]:
     try:
         target = record_store.read_dokploy_target_record(
@@ -294,14 +299,22 @@ def _protected_store_keys(
             "Odoo addon settings require the lane's tracked target record so its protected "
             "Shopify store keys can be checked.",
         ) from error
-    return target.policies.shopify.protected_store_keys
+    return (
+        *target.policies.shopify.protected_store_keys,
+        *production_shopify_store_keys(
+            record_store,
+            context=context,
+            instance=instance,
+            profile=record_store.read_product_profile_record(product),
+        ),
+    )
 
 
 def _validate_store_key(*, shop_url_key: str, protected_store_keys: tuple[str, ...]) -> None:
     if shopify_store_key_is_protected(shop_url_key, protected_store_keys):
         raise OdooAddonSettingsRefusal(
             "protected_store_key",
-            "Shopify shop_url_key is in this lane's protected store keys.",
+            "Shopify shop_url_key matches a protected or production store.",
         )
     for indicator in DEFAULT_SHOPIFY_PRODUCTION_INDICATORS:
         if indicator in shop_url_key:
@@ -529,7 +542,10 @@ def build_odoo_addon_settings_plan(
             "Shopify test_store cannot be set on a production lane.",
         )
     protected_store_keys = _protected_store_keys(
-        record_store=record_store, context=request.context, instance=request.instance
+        record_store=record_store,
+        product=request.product,
+        context=request.context,
+        instance=request.instance,
     )
     _validate_store_key(
         shop_url_key=request.shopify.shop_url_key, protected_store_keys=protected_store_keys
@@ -546,6 +562,10 @@ def build_odoo_addon_settings_plan(
         desired=desired,
         updated_at=existing.updated_at if existing is not None else _utc_now_timestamp(),
     )
+    try:
+        require_shopify_store_separation(replacement, protected_store_keys)
+    except click.ClickException as error:
+        raise OdooAddonSettingsRefusal("protected_store_key", error.message) from error
     # Prove the post-deploy renderer accepts the replacement and renders an apply action.
     try:
         rendered = _resolve_shopify_payload_settings(

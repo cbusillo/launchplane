@@ -21,20 +21,20 @@ From the repository root:
 uv sync --extra dev
 uv run launchplane --help
 uv run launchplane service serve --help
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend validate
+(cd frontend && pnpm install --frozen-lockfile)
+(cd frontend && pnpm validate)
 ```
 
 Frontend validation runs unit tests, the OpenAPI drift check, TypeScript, and the
 production Vite build. The TypeScript OpenAPI client is an ignored build artifact;
 development, type checks, browser checks, and production builds generate it from
 the checked UI schema. After a backend contract change, run
-`pnpm --dir frontend generate:openapi` and commit the schemas and agent contract.
+`(cd frontend && pnpm generate:openapi)` and commit the schemas and agent contract.
 CI rejects drift in those checked artifacts. Existing branches that still commit
 the TypeScript client may need one final refresh to adopt its removal.
 For IDE type resolution before the first build, run
-`pnpm --dir frontend generate:openapi-types` once.
-`pnpm --dir frontend test:browser` runs the Playwright
+`(cd frontend && pnpm generate:openapi-types)` once.
+`(cd frontend && pnpm test:browser)` runs the Playwright
 browser smoke. Use [`.github/github.json`](.github/github.json) for current gates
 and [testing style](docs/style/testing.md) for choosing proportionate tests:
 

@@ -431,7 +431,6 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tenant_read_model["agent_authoring_allowed"])
         self.assertEqual(tenant_read_model["evaluation"]["candidate"]["head_sha"], HEAD_SHA)
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
 
     async def test_agent_context_rejects_incomplete_exact_candidate(self) -> None:
         with TemporaryDirectory() as tmp_dir:
@@ -524,7 +523,6 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
             "tenant_admission_github_unavailable",
         )
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
 
     def test_openapi_includes_read_only_tenant_admission_evaluation(self) -> None:
         with TemporaryDirectory() as tmp_dir:

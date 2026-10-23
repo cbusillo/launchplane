@@ -120,22 +120,45 @@ export function publicObservationGap(topology: Topology): string | null {
       observed.days_remaining > 0)) ? null : "Public DNS/TLS observation incomplete";
 }
 
+function readable(value: string | null | undefined): string {
+  return (value ?? "").replaceAll("_", " ").trim();
+}
+
+// Every cause that makes a lane red, worded from its own evidence. The tone is
+// danger exactly when this is non-empty, so a red lane can always say why.
+export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+  if (!environment) return [];
+  environment = expireEnvironmentEvidence(environment, now);
+  const reasons = new Set<string>();
+  const incidents = environment.health_monitoring.open_incidents;
+  for (const incident of incidents) {
+    const severity = readable(incident.severity) || "Open";
+    reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
+  }
+  for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
+    if (check.status === "fail") {
+      reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
+    } else if (check.incident_status === "open" && !incidents.some(incident => incident.check_name === check.name)) {
+      reasons.add(`Health check ${check.name} has an open incident`);
+    }
+  }
+  const identity = environment.topology.observed.placement?.runtime_identity_status ?? "unchecked";
+  if (failedRuntimeIdentityStates.has(identity)) reasons.add(`Runtime identity ${identity}`);
+  healthWarnings(environment).filter(warning => warning.severity === "error")
+    .forEach(warning => reasons.add(warning.detail));
+  environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
+    .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
+  return [...reasons];
+}
+
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
   if (!environment) return "missing";
+  if (operationalAttentionReasons(environment, now).length) return "danger";
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
   const warnings = healthWarnings(environment);
   const otherWarnings = environment.warnings.filter(detail =>
     !environment.topology.warnings.some(warning => warning.detail === detail));
-  if (
-    environment.health_monitoring.open_incidents.length > 0 ||
-    checks.some(check => check.status === "fail" || check.incident_status === "open") ||
-    failedRuntimeIdentityStates.has(
-      environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
-    ) ||
-    warnings.some(warning => warning.severity === "error") ||
-    environment.topology.observed.tls_domains.some(domain => negativeTlsStates.has(domain.status))
-  ) return "danger";
   if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
   if (
     otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||

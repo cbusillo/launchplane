@@ -20,6 +20,7 @@ from control_plane.contracts.secret_record import SecretAuditEvent
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
+from control_plane.contracts.secret_record import SecretValueOrigin
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 
@@ -162,6 +163,78 @@ class _FakeSecretReadStore:
 
 
 class LaunchplaneSecretsTests(unittest.TestCase):
+    def test_reencryption_preserves_value_origin_including_unknown_history(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(temporary) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            keys = {"old": _test_fernet_key(0), "new": _test_fernet_key(32)}
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(
+                        {"active_key_id": "old", "keys": keys}
+                    )
+                },
+                clear=True,
+            ):
+                expected = {}
+                origins: tuple[SecretValueOrigin | None, ...] = (
+                    "supplied",
+                    "provider",
+                    "generated",
+                    None,
+                )
+                for index, origin in enumerate(origins):
+                    secret_id = f"synthetic-{index}"
+                    version_id = f"{secret_id}-version"
+                    ciphertext, key_id = control_plane_secrets._encrypt_secret_value(
+                        "synthetic-value"
+                    )
+                    store.write_secret_version(
+                        SecretVersion(
+                            version_id=version_id,
+                            secret_id=secret_id,
+                            created_at="2026-01-01T00:00:00Z",
+                            ciphertext=ciphertext,
+                            key_id=key_id,
+                            value_origin=origin,
+                        )
+                    )
+                    store.write_secret_record(
+                        SecretRecord(
+                            secret_id=secret_id,
+                            scope="global",
+                            integration="dokploy",
+                            name=secret_id,
+                            current_version_id=version_id,
+                            created_at="2026-01-01T00:00:00Z",
+                            updated_at="2026-01-01T00:00:00Z",
+                        )
+                    )
+                    expected[secret_id] = origin
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(
+                        {"active_key_id": "new", "keys": keys}
+                    )
+                },
+                clear=True,
+            ):
+                review = control_plane_secrets.reencrypt_secrets(record_store=store)
+                control_plane_secrets.reencrypt_secrets(
+                    record_store=store,
+                    apply=True,
+                    expected_plan_digest=cast(str, review["plan_digest"]),
+                    operation_token="synthetic-origin-rotation",
+                    reason="Rotate fixture key.",
+                )
+                for record in store.list_secret_records():
+                    version = store.read_secret_version(record.current_version_id)
+                    self.assertEqual(version.value_origin, expected[record.secret_id])
+                    self.assertEqual(version.key_id, "new")
+
     def test_secret_selection_excludes_versions_before_reading_or_decrypting(self) -> None:
         store = _FakeSecretReadStore()
         local = store.records[0].model_copy(
@@ -257,6 +330,23 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         )
         audit_events = cast("list[dict[str, object]]", status["recent_audit_events"])
         self.assertEqual(audit_events[0]["event_type"], "rotated")
+
+    def test_status_origin_comes_from_current_immutable_version_without_decryption(self) -> None:
+        store = _FakeSecretReadStore()
+        current = store.versions[-1].model_copy(update={"value_origin": "provider"})
+        store.records = (
+            store.records[0].model_copy(update={"current_version_id": current.version_id}),
+        )
+        store.versions = (store.versions[0], current)
+        with patch.object(control_plane_secrets, "_decrypt_secret_value") as decrypt:
+            status = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertEqual(status["current_version_value_origin"], current.value_origin)
+            self.assertEqual(status["current_version_created_at"], current.created_at)
+            store.versions = store.versions[:1]
+            missing = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertIsNone(missing["current_version_value_origin"])
+            self.assertFalse(missing["current_version_created_at"])
+            decrypt.assert_not_called()
 
     def test_read_dokploy_config_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -17,6 +17,7 @@ from control_plane.contracts.product_review import (
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
+from control_plane.release_review_shared import repository_key
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 
@@ -115,6 +116,35 @@ def viewer_is_product_owner(
         isinstance(identity, GitHubHumanIdentity)
         and profile.owner.is_set
         and profile.owner.github_id == str(identity.github_id)
+    )
+
+
+def applicable_product_review_decisions(
+    *,
+    decisions: tuple[ProductReviewDecisionRecord, ...],
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str | None = None,
+    base_branch: str | None = None,
+) -> tuple[ProductReviewDecisionRecord, ...]:
+    if not profile.owner.is_set:
+        return ()
+    return tuple(
+        decision
+        for decision in decisions
+        if decision.product == profile.product
+        and repository_key(decision.repository.strip())
+        == repository_key(profile.repository.strip())
+        and decision.pull_request_number == pull_request_number
+        and decision.owner_github_id == profile.owner.github_id
+        and (
+            head_sha is None or decision.head_sha.strip().casefold() == head_sha.strip().casefold()
+        )
+        and (
+            base_branch is None
+            or decision.carried_from is None
+            or decision.base_branch == base_branch.strip()
+        )
     )
 
 

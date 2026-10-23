@@ -16,8 +16,8 @@ from control_plane.contracts.preview_workflow_contract import (
 )
 
 
-def register_preview_workflow_commands(work_graph: click.Group) -> None:
-    work_graph.add_command(preview_workflow_decision, name="preview-workflow-decision")
+def register_preview_workflow_commands(main: click.Group) -> None:
+    main.add_command(preview_workflow_decision, name="preview-workflow-decision")
 
 
 @click.command("preview-workflow-decision")

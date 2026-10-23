@@ -1,4 +1,5 @@
 import type {
+  ApplyProductOnboardingData,
   ApplyTestingHoldData,
   SetupDokployTargetData,
   ReconcileRouteBindingData,
@@ -28,7 +29,6 @@ import type {
   EnqueueOdooProdPromotionData,
   EnqueueOdooProdRollbackData,
   EnqueueProductionBackupGateData,
-  RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PrepareAuthorizationCandidateData,
   WriteProductReviewDecisionData,
@@ -42,6 +42,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productOnboarding: "/v1/product-onboarding/apply" satisfies ApplyProductOnboardingData["url"],
   testingHoldApply: "/v1/product-config/testing-hold/apply" satisfies ApplyTestingHoldData["url"],
   domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],
   routeBindingRepair: "/v1/route-bindings/reconcile" satisfies ReconcileRouteBindingData["url"],
@@ -82,8 +83,6 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/odoo-prod-promotions" satisfies EnqueueOdooProdPromotionData["url"],
   odooProdRollbackEnqueue:
     "/v1/odoo-prod-rollbacks" satisfies EnqueueOdooProdRollbackData["url"],
-  workGraphRank:
-    "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
   productReviewFeedbackRetry:

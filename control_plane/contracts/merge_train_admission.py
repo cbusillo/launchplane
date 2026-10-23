@@ -11,6 +11,7 @@ from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+from control_plane.contracts.text_fields import require_text
 from control_plane.workflows.merge_train_controller import (
     MergeTrainControllerDecision,
 )
@@ -54,16 +55,16 @@ class MergeTrainAdmissionDecision(BaseModel):
 
     @model_validator(mode="after")
     def _validate_decision(self) -> "MergeTrainAdmissionDecision":
-        self.repository = _normalize_required_value(
+        self.repository = require_text(
             self.repository, "merge train admission decision requires repository"
         )
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train admission decision requires base_branch"
         )
-        self.requested_at = _normalize_required_value(
+        self.requested_at = require_text(
             self.requested_at, "merge train admission decision requires requested_at"
         )
-        self.next_allowed_at = _normalize_required_value(
+        self.next_allowed_at = require_text(
             self.next_allowed_at, "merge train admission decision requires next_allowed_at"
         )
         self.latest_run_id = self.latest_run_id.strip()
@@ -76,9 +77,7 @@ class MergeTrainAdmissionDecision(BaseModel):
         self.controller_stack_collapse_plan_record_id = (
             self.controller_stack_collapse_plan_record_id.strip()
         )
-        self.detail = _normalize_required_value(
-            self.detail, "merge train admission decision requires detail"
-        )
+        self.detail = require_text(self.detail, "merge train admission decision requires detail")
         return self
 
     @property
@@ -96,12 +95,8 @@ def evaluate_merge_train_admission(
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
 ) -> MergeTrainAdmissionDecision:
-    normalized_repository = _normalize_required_value(
-        repository, "merge train admission requires repository"
-    )
-    normalized_base_branch = _normalize_required_value(
-        base_branch, "merge train admission requires base_branch"
-    )
+    normalized_repository = require_text(repository, "merge train admission requires repository")
+    normalized_base_branch = require_text(base_branch, "merge train admission requires base_branch")
     requested_time = _parse_timestamp(requested_at)
     normalized_requested_at = _format_timestamp(requested_time)
     if poll_interval_seconds < 0:
@@ -286,7 +281,7 @@ def _validate_latest_run_scope(
 
 
 def _parse_timestamp(value: str) -> datetime:
-    normalized = _normalize_required_value(value, "merge train admission requires timestamp")
+    normalized = require_text(value, "merge train admission requires timestamp")
     if normalized.endswith("Z"):
         normalized = f"{normalized[:-1]}+00:00"
     parsed = datetime.fromisoformat(normalized)
@@ -297,10 +292,3 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _format_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _normalize_required_value(value: str, error_message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(error_message)
-    return normalized_value

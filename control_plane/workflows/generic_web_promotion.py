@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import click
 from control_plane.generic_web_source_qualification import (
+    GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     GenericWebPromotionSourceRefused,
     qualified_generic_web_source_inventory,
@@ -80,7 +81,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS = 60
 
 
-class GenericWebPromotionStore(GenericWebDeployStore, Protocol):
+class GenericWebPromotionStore(GenericWebDeployStore, GenericWebSourceQualificationStore, Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
@@ -258,6 +259,34 @@ def resolve_generic_web_promotion_inputs(
 
 
 def execute_generic_web_prod_promotion(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+) -> GenericWebProdPromotionResult:
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+    with serialize_generic_web_product_operation(
+        record_store=record_store, product=request.product
+    ):
+        return _execute_generic_web_prod_promotion_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deployment_record_id,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
+
+
+def _execute_generic_web_prod_promotion_unserialized(
     *,
     control_plane_root: Path,
     record_store: GenericWebPromotionStore,

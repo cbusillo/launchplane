@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import GIT_SHA_PATTERN, SHA256_PATTERN
 
 
 TRUSTED_MAINTENANCE_POLICY_READ_ACTION = "trusted_maintenance_policy.read"
@@ -14,9 +14,6 @@ TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION = "trusted_maintenance_policy.write"
 
 TrustedMaintenancePolicyStatus = Literal["active", "superseded"]
 TrustedMaintenanceActorType = Literal["Bot"]
-
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class TrustedMaintenanceAllowedEvent(BaseModel):
@@ -421,14 +418,14 @@ def _normalize_repository(value: str, label: str) -> str:
 
 def _normalize_git_sha(value: str, label: str) -> str:
     normalized = _required_token(value, label).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
+    if GIT_SHA_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"trusted-maintenance {label} must be an exact Git SHA")
     return normalized
 
 
 def _normalize_sha256(value: str, label: str) -> str:
     normalized = _required_token(value, label).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"trusted-maintenance {label} requires a lowercase SHA-256")
     return normalized
 

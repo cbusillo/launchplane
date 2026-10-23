@@ -3,10 +3,14 @@ from collections.abc import Callable
 from unittest.mock import patch
 
 import click
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from tests.support.disposable_lanes import preview_target_inventory
 
 from control_plane.workflows.preview_resource_destroy import (
     PreviewResourceDestroyResult,
     PreviewResourceType,
+    destroy_dokploy_resource,
     destroy_dokploy_preview_resource,
 )
 
@@ -37,7 +41,7 @@ def _run_destroy_with_fake_requests(
         return response
 
     with patch(PATCH_TARGET, side_effect=_fake_dokploy_request):
-        return destroy_dokploy_preview_resource(
+        return destroy_dokploy_resource(
             host="https://dokploy.example",
             token="token",
             resource_type=resource_type,
@@ -51,6 +55,40 @@ def _run_destroy_with_fake_requests(
 
 
 class PreviewResourceDestroyTests(unittest.TestCase):
+    def test_preview_refuses_shared_targets_and_missing_ownership_before_provider_calls(
+        self,
+    ) -> None:
+        target = DokployTargetIdRecord(
+            context="another-lane",
+            instance="prod",
+            target_id="shared",
+            updated_at="2026-10-22T12:00:00Z",
+        )
+        provider = ProviderTargetRecord(
+            **target.model_dump(), provider_id="dokploy", display_name="Shared target"
+        )
+        for store in (
+            None,
+            preview_target_inventory(targets=(target,)),
+            preview_target_inventory(provider_targets=(provider,)),
+        ):
+            for resource_type in ("application", "compose"):
+                with (
+                    self.subTest(store=store, resource_type=resource_type),
+                    patch(PATCH_TARGET) as request,
+                ):
+                    result = destroy_dokploy_preview_resource(
+                        record_store=store,
+                        context="preview",
+                        instance="pr-1",
+                        resource_id=" shared ",
+                        resource_type=resource_type,
+                        host="https://provider.example",
+                        token="fixture",
+                    )
+                    self.assertEqual(result.status, "fail")
+                    request.assert_not_called()
+
     def test_destroy_application_deletes_all_domains_and_application(self) -> None:
         requests: list[dict[str, object]] = []
 

@@ -87,8 +87,6 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
-  RankWorkGraphSnapshotData,
-  RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
@@ -98,9 +96,6 @@ import type {
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
-  WorkGraphIssueInboxResponse,
-  WorkGraphSnapshot,
-  WorkGraphSnapshotResponse,
   ProductReviewResponse,
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
@@ -499,17 +494,6 @@ export function readEveryCodeSummary(
   );
 }
 
-export function readWorkGraphSnapshot(
-  signal?: AbortSignal,
-): Promise<WorkGraphSnapshotResponse> {
-  return requestJson<WorkGraphSnapshotResponse>(
-    "/v1/work-graph/snapshot",
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readTenantAdmissionEvaluation(
   request: Pick<ReadTenantAdmissionEvaluationData, "query">,
   signal?: AbortSignal,
@@ -527,32 +511,6 @@ export function readTenantAdmissionEvaluation(
   });
   return requestJson<TenantAdmissionEvaluationReadResponse>(
     `/v1/work-graph/tenant-admission/evaluation?${params.toString()}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function rankWorkGraphSnapshot(
-  snapshot: WorkGraphSnapshot,
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<RankWorkGraphSnapshotResponse> {
-  const request: RankWorkGraphSnapshotData = {
-    url: BROWSER_WRITE_ROUTES.workGraphRank,
-    body: {
-      snapshot,
-      limit,
-    },
-  };
-  return requestGeneratedPost<RankWorkGraphSnapshotResponse>(request, signal);
-}
-
-export function readGitHubIssueInbox(
-  signal?: AbortSignal,
-): Promise<WorkGraphIssueInboxResponse> {
-  return requestJson<WorkGraphIssueInboxResponse>(
-    "/v1/work-graph/github/issues",
     "GET",
     undefined,
     signal,
@@ -1230,4 +1188,21 @@ export function decideBackupPolicyProposal(payload: { operationId: string; decis
   return requestJson(BROWSER_WRITE_ROUTES.backupPolicyDecision.replace("{operation_id}", encodeURIComponent(payload.operationId)), "POST", {
     decision: payload.decision, source_event_id: `ui:${payload.decision}:${payload.operationId}`,
   }, options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export const PROVIDER_HOLD_ATTENTION_ROUTE = "/v1/operations/provider-hold-attention";
+
+export function readProviderHoldAttention(
+  page: { limit?: number; cursor?: string | null } = {}, signal?: AbortSignal,
+): Promise<import("./generated/openapi.ts").ProviderHoldAttentionResponse> {
+  const query = new URLSearchParams();
+  if (page.limit !== undefined) query.set("limit", String(page.limit));
+  if (page.cursor) query.set("cursor", page.cursor);
+  return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
+}
+
+export function applyProductOnboarding(
+  payload: import("./generated/openapi.ts").ApplyProductOnboardingData["body"], options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productOnboarding, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
 }

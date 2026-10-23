@@ -370,7 +370,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       </p>
       <p>
         {!decision.head_sha ? "The reviewed version was not recorded." : <>
-          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Applies to preview version" : "Reviewed preview version"}{" "}
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Recorded carried version" : "Reviewed preview version"}{" "}
           {decision.head_sha.slice(0, 7)}
           {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
         </>}
@@ -378,8 +378,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       {decision.carried_from ? (
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
-            ? "later commits were marked as having no Client-visible changes. Your acceptance still applies."
-            : "the base was updated, and the change itself is identical."}
+            ? "later commits were marked as having no Client-visible changes."
+            : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}

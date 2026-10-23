@@ -336,6 +336,13 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value means origin is unknown or the current
+  version is missing; a missing version also has an empty current-version
+  timestamp. Neither mutable binding metadata nor another version certifies
+  origin. This diagnostic does not qualify external-resource isolation or change
+  observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not
@@ -923,6 +930,26 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+Each immutable managed value version records its service-computed `value_origin`:
+`supplied`, `provider`, `generated`, or unknown for historical values. Copies inherit
+the exact reviewed source version's origin; re-encryption preserves it. Caller
+metadata, binding names, relabels and onboarding updates cannot certify or change
+value origin. The binding's method remains `copy`, so a copy earns neither fresh
+local-generation credit nor the independently supplied key-safety exception.
+The external-resource observer accepts only known supplied/provider versions.
+Generated and unknown values, including copies, remain unavailable. A supported
+product-config value write creates a new version with origin computed by the
+service; historical origin is never inferred from mutable binding metadata.
+Any required secret entry stays in that private value-writing flow, never comments
+or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.

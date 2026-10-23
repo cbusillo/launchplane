@@ -20,6 +20,7 @@ from tests.test_authz_administration_read import (
     _browser_headers,
 )
 from tests.support.http import lifespan_client
+from tests.support.stored_profiles import persist_historical_preview_transport
 
 
 def admin() -> GitHubHumanIdentity:
@@ -185,6 +186,9 @@ class RuntimeRemovalTests(unittest.TestCase):
             retired_provider_keys=["OLD_PROVIDER_KEY"],
         )
         self.store.write_runtime_environment_record(record)
+        persist_historical_preview_transport(
+            self.store, "site", seed_command="", migration_command=""
+        )
         body = self.reviewed(product="site", scope="instance", context="cm", instance="testing")
         self.call(body, "last-with-intent")
         after = self.store.list_runtime_environment_records(

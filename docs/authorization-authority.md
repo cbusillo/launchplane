@@ -117,6 +117,17 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+The expected-config declaration path remains additive for the authenticated
+Director agent. It may add a positive external-provider purpose to an existing
+nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
+or retiring existing generation intent, or adding a provider declaration that
+shadows a local key requires the existing `product_profile.expected_config.apply`
+authority; a live product also retains its admin boundary. Inert planning retains
+its existing read/plan permission. Completed exact-key receipts replay before
+current-state retirement checks, while a new write compares the same captured
+profile that passed those checks. Odoo's driver-owned local passwords cannot
+be declared external through any profile input path. No grant is added here.
+
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
 permission. Terminal-agent credentials retain their read-only transport boundary.
@@ -127,6 +138,38 @@ that action on the exact testing lane. Mutation authentication and browser CSRF,
 reviewed digests, original-key replay, generation and custody fences, staff
 holds, active/unknown-operation refusal and the worker's safety checks remain
 in force. See [testing retry](testing-deploy-retry.md).
+
+The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
+also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
+Generic-web deploy recovery dry runs authorize the instance-scoped
+`generic_web_deploy_recovery.plan` action, with the existing execute grant as a
+compatibility alternative. The authenticated Director agent inherits this inert
+plan permission. Both the current lane and the stored original lane must pass
+authorization; exact request, reference, reservation and target checks remain.
+Apply retains `generic_web_deploy.execute` for production, foreign caller originals and
+other identities. The authenticated service-marked Director `local_operator`
+may instead recover its own exact native testing original on the current owned
+lane. The stored caller scope, original route, key, fingerprint, product,
+context and captured target must agree; a current target or caller ownership
+claim alone cannot establish ownership. This route-local alternative does not
+classify the mixed execute action as standing permission.
+The same service-marked Director `local_operator` may use an exact event reference
+to abandon an eligible reconcile-owned testing original and replay that completed
+abandonment. This path admits only `abandon_testing_original`, after read-only
+inspection and before any write branch. This inspection reads the same evidence
+as the already-permitted inert dry run. It does not grant retry, adoption,
+settlement, close-out or foreign-caller recovery authority. Existing testing-only,
+no-cutover, hold, protection, target/reference/digest, execution exclusion and
+journal-custody checks remain required; the original provider history stays unknown.
+Adoption, terminal settlement and completed replay retain their existing proof
+requirements without renewed disposable qualification. New forward retry work
+requires fresh disposable-lane facts and rechecks them at effect admission;
+person use, only-copy data, production sharing and missing evidence refuse with
+`testing_deploy_safety_unknown`. Collect the named factual prerequisites through
+the supported disposable-lane observations route rather than requesting access.
+An unknown provider outcome still holds the original fence; planning never
+settles, retries or releases it.
 
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
@@ -211,6 +254,24 @@ Existing DB grants are preserved for image rollback; an older image may still
 refuse a Director read without a matching rule. Report that as a tool defect.
 
 ## Disposable-lane engineering
+
+The native Odoo testing rebuild also accepts the authenticated Director's existing
+`local_operator` transport without a DB action grant. Only an active Odoo product's
+exclusively owned `testing` lane and `replace-and-cutover` lifecycle qualify.
+The general `odoo_target_replacement_apply.execute` action still requires its
+existing policy on ordinary replacement, production and other callers.
+The queue records `director_testing_rebuild` as source-owned provenance, with
+the original agent subject and token label, no credential value or policy
+rule. Other durable workers refuse that provenance. At each native worker
+checkpoint the configured agent must still exist and match the original
+caller, and the product/lane ownership must still qualify. A missing worker
+bootstrap identity fails closed. Current holds/use, retained-copy custody,
+independent resources, local credentials and health-before-cutover checks
+remain in the native lifecycle; standing authority supplies none of those facts.
+The original authenticated caller can resume its held request or cancel it before
+effects under the same standing scope. Existing held-effect cancellation fences
+remain authoritative. The operation's provenance audits these source-authorized
+admissions rather than a matching DB action-rule decision.
 
 The authenticated Director-agent marker also identifies ordinary disposable-lane
 work under the overall direction. `POST /v1/live-target-runtime/apply` retains
@@ -1075,6 +1136,14 @@ The set deliberately leaves out:
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
+  The existing profile POST separately admits authenticated Director agents
+  setting one nonsecret `preview.override_env` key on an existing enabled
+  Odoo preview. It requires a strong matching revision and idempotency key,
+  reconstructs the change from the stored profile, and preserves all other
+  profile authority with atomic CAS. It adds no policy grant. Deletions,
+  secret-bearing settings, Shopify payloads and broader edits remain outside
+  this bounded admission; see [preview settings](preview-settings.md).
+
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
   stays with Launchplane's own onboarding workflow.

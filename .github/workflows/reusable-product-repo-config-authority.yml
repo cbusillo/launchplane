@@ -120,8 +120,8 @@ jobs:
             git -C ../product-repo rev-list --first-parent "refs/remotes/origin/${default_branch}" > "$comparison_dir/base"
             git -C ../product-repo rev-list --first-parent "$HEAD_SHA" > "$comparison_dir/head"
             BASE_SHA="$(awk 'NR == FNR { base[$0] = 1; next } ($0 in base) && !found { print; found = 1 }' "$comparison_dir/base" "$comparison_dir/head")"
-            if [[ -z "$BASE_SHA" || "$BASE_SHA" = "$HEAD_SHA" ]]; then
-              echo "Train candidate has no distinct verified first-parent base." >&2
+            if [[ -z "$BASE_SHA" ]]; then
+              echo "Train candidate has no verified first-parent base." >&2
               exit 1
             fi
           fi

@@ -757,9 +757,13 @@ function PrivilegedOperationPlanCard({
         <div className="privileged-operation-warning" role="status">
           <ShieldAlert size={18} aria-hidden="true" />
           <span>
-            {review.blockers.state === "error"
-              ? "The persisted evidence reports an error state."
-              : "The persisted evidence reports blocker state."}
+            {review.blockers.codes?.includes("privileged_operation_plan_stale")
+              ? "This plan may be stale, or current policy evidence could not be verified. Approval is disabled. Refresh the review to check again. If the policy has changed, an administrator can cancel this plan and prepare a new one."
+              : review.blockers.codes?.includes("privileged_operation_planning_unavailable")
+                ? "Current policy planning is unavailable. Approval is disabled. Refresh the review to check again."
+                : review.blockers.state === "error"
+                  ? "The persisted evidence reports an error state."
+                  : "The persisted evidence reports blocker state."}
           </span>
         </div>
       ) : null}

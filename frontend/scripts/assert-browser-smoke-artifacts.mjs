@@ -1,10 +1,8 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { smokeArtifact } from "../browser-smoke-paths.mjs";
 
-const screenshotDir = fileURLToPath(
-  new URL("../../tmp/browser-smoke/screenshots/", import.meta.url),
-);
+const screenshotDir = smokeArtifact("screenshots");
 const projects = ["desktop", "narrow"];
 const journeys = [
   "anonymous-auth-prompt",

@@ -321,6 +321,11 @@ def inspect_promotion(
                     update={
                         "artifact_id": effective.artifact_identity.artifact_id,
                         "source_git_ref": effective.source_git_ref,
+                        "deploy_reference": (
+                            effective.runtime_identity.image_reference
+                            if target.resolved_target.target_type == "application"
+                            else target.ship_request.deploy_reference
+                        ),
                     }
                 )
             }
@@ -332,6 +337,7 @@ def inspect_promotion(
             observation=runtime,
             expected_artifact_reference=effective.artifact_identity.artifact_id,
             expected_deployment_record_id=effective.record_id,
+            expected_provider_reference=effective_target.ship_request.deploy_reference,
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(
@@ -551,6 +557,7 @@ def inspect_rollback_drill(
             request_source_git_ref=planned.source_git_ref,
             request_timeout_seconds=planned.timeout_seconds,
             request_no_cache=planned.no_cache,
+            request_deploy_reference=planned.deploy_reference,
             lane=lane,
         )
         if build_generic_web_provider_target_key(target) != reservation.provider_target_key:
@@ -614,6 +621,7 @@ def inspect_rollback_drill(
             observation=runtime,
             expected_artifact_reference=planned.artifact_id,
             expected_deployment_record_id=deployed.record_id,
+            expected_provider_reference=target.ship_request.deploy_reference,
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(

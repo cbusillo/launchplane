@@ -114,7 +114,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     "composeId": self.candidate.compose_id,
                     "name": self.candidate.namespace,
-                    "appName": self.candidate.namespace,
+                    "appName": self.fixture.fixture.provider_state["appName"],
                     "serverId": self.candidate.server_id,
                 },
             )

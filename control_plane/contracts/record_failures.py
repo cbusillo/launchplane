@@ -1,11 +1,15 @@
 """Fixed reasons for record failures; inputs never contain provider or exception text."""
 
 from control_plane.contracts.promotion_record import RecordFailure
-from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
+from control_plane.contracts.host_network_capacity import (
+    HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+    PREVIEW_MEMORY_FAILURE_MESSAGES,
+)
 
 RECORD_FAILURE_DESCRIPTIONS: dict[str, str] = {
     "authorization_denied": "The provider denied the read.",
     **HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+    **PREVIEW_MEMORY_FAILURE_MESSAGES,
     "bootstrap_failed": "The stable bootstrap did not complete.",
     "bootstrap_post_deploy_failed": "The post-deploy update after stable bootstrap failed.",
     "bootstrap_verification_failed": "The stable bootstrap readiness checks did not pass.",

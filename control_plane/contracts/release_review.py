@@ -185,6 +185,7 @@ ReleaseEvidenceReason = Literal[
     "source_control_access_unavailable",
     "production_identity_missing",
     "candidate_identity_missing",
+    "candidate_operation_unresolved",
     "release_record_missing",
     "github_read_failed",
 ]

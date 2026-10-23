@@ -45,6 +45,14 @@ Provider-filtered empty collections do not prove physical absence of hidden
 services. Application preview-deployment services outside these project target
 collections are excluded; this is not a running-container/replica census.
 
+The native unavailable-testing admission uses the same complete membership
+parser through `read_dokploy_target_placement`. It then reads only the owned
+target and its registered server, under the same provider-call deadline and
+value-free shape checks. This qualifies that target's project/environment and
+placement without hydrating every unrelated target at each worker checkpoint.
+Physical stopped/absent proof still comes from the separate complete managed-host
+inspection; neither read alone establishes both facts.
+
 The route bounds the snapshot to 2,000 projects, 10,000 environments and 20,000
 targets. Page size is 1–100 projects (default 25), with at most 500 detail targets.
 Each page has a 25-second provider-call budget (each call at most 10 seconds).

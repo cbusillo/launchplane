@@ -41,9 +41,6 @@ import type {
   RuntimeIdentity,
   TenantAdmissionEvaluationReadResponse,
   TenantAdmissionTechnicalChecks,
-  WorkGraphIssueInboxResponse,
-  WorkGraphQueue,
-  WorkGraphSnapshotResponse,
 } from "./generated/openapi.ts";
 
 type TrustState = ProductSiteOverview["trust_state"];
@@ -385,6 +382,7 @@ export function incidentForFixture(
     : `observation-${incident.incident_id}-latest`;
   return {
     incident,
+    opening_observation: null,
     material_evidence: {
       check_kind: incident.check_kind,
       failure_code: incident.failure_code,
@@ -409,6 +407,9 @@ export function incidentForFixture(
         incident_event_id: eventId,
         material_fingerprint_sha256: incident.material_fingerprint_sha256,
         notification_sent: !resolved,
+        provider_operation_references: [],
+        provider_reservation_ids: [],
+        testing_recovery_reference: "",
       },
       ...(!resolved
         ? [
@@ -422,6 +423,9 @@ export function incidentForFixture(
               incident_event_id: eventId,
               material_fingerprint_sha256: incident.material_fingerprint_sha256,
               notification_sent: true,
+              provider_operation_references: [],
+              provider_reservation_ids: [],
+              testing_recovery_reference: "",
             },
           ]
         : []),
@@ -1475,158 +1479,6 @@ export function activityForFixture(
   };
 }
 
-export function workGraphForFixture(fixture: DataFixtureMode): {
-  queue: WorkGraphQueue;
-  rankTraceId: string;
-  snapshotResponse: WorkGraphSnapshotResponse;
-} {
-  assertEngineeringFixtureAvailable(fixture);
-  const snapshotResponse = engineeringWorkGraphSnapshot();
-  if (fixture === "empty") {
-    snapshotResponse.snapshot.issues = [];
-    return {
-      snapshotResponse,
-      rankTraceId: "",
-      queue: {
-        generated_at: OBSERVED_AT,
-        hidden_count: 0,
-        items: [],
-        schema_version: 1,
-      },
-    };
-  }
-  const missingEvidence = fixture === "missing";
-  return {
-    snapshotResponse,
-    rankTraceId: "fixture-work-graph-rank",
-    queue: {
-      generated_at: OBSERVED_AT,
-      hidden_count: missingEvidence ? 1 : 0,
-      items: missingEvidence
-        ? [
-            engineeringWorkGraphItem({
-              evidenceState: "missing",
-              number: 308,
-              recommendation: "attention_needed",
-              safeToStart: false,
-              state: "blocked",
-              title: "Restore missing dependency evidence",
-            }),
-          ]
-        : [
-            engineeringWorkGraphItem({
-              evidenceState: "verified",
-              number: 308,
-              recommendation: "quick_win",
-              safeToStart: true,
-              state: "ready",
-              title: "Finish the admin evidence route",
-            }),
-            engineeringWorkGraphItem({
-              evidenceState: "recorded",
-              number: 311,
-              recommendation: "deep_work",
-              safeToStart: true,
-              state: "ready",
-              title: "Split controller orchestration boundaries",
-            }),
-            engineeringWorkGraphItem({
-              evidenceState: "stale",
-              number: 319,
-              recommendation: "watch",
-              safeToStart: false,
-              state: "waiting",
-              title: "Refresh external check evidence",
-            }),
-          ],
-      schema_version: 1,
-    },
-  };
-}
-
-export function issueInboxForFixture(
-  fixture: DataFixtureMode,
-): WorkGraphIssueInboxResponse {
-  assertEngineeringFixtureAvailable(fixture);
-  if (fixture === "empty") {
-    return {
-      configured: true,
-      inbox: {
-        generated_at: OBSERVED_AT,
-        issue_count: 0,
-        project_configured: true,
-        repositories: [
-          {
-            issue_count: 0,
-            issues: [],
-            missing_from_project_count: 0,
-            present_in_project_count: 0,
-            repository: "example/control-plane",
-          },
-        ],
-        repository_count: 1,
-        schema_version: 1,
-        stale_project_item_count: 0,
-      },
-      status: "ok",
-      trace_id: "fixture-issue-inbox-empty",
-    };
-  }
-  const projectConfigured = fixture !== "missing";
-  const issues = [
-    {
-      author: "platform-operator",
-      created_at: "2026-07-13T08:00:00Z",
-      key: "example/control-plane#308",
-      labels: ["plan:active", "frontend"],
-      number: 308,
-      present_in_project: projectConfigured ? true : null,
-      project_status: projectConfigured ? ("present" as const) : ("unconfigured" as const),
-      repository: "example/control-plane",
-      state: "open",
-      title: "Finish the admin evidence route",
-      updated_at: OBSERVED_AT,
-      url: "https://example.invalid/example/control-plane/issues/308",
-    },
-    {
-      author: "release-operator",
-      created_at: "2026-07-12T09:15:00Z",
-      key: "example/control-plane#319",
-      labels: ["plan:next"],
-      number: 319,
-      present_in_project: projectConfigured ? false : null,
-      project_status: projectConfigured ? ("missing" as const) : ("unconfigured" as const),
-      repository: "example/control-plane",
-      state: "open",
-      title: "Refresh external check evidence",
-      updated_at: "2026-07-14T10:10:00Z",
-      url: "https://example.invalid/example/control-plane/issues/319",
-    },
-  ];
-  return {
-    configured: true,
-    inbox: {
-      generated_at: OBSERVED_AT,
-      issue_count: issues.length,
-      project_configured: projectConfigured,
-      repositories: [
-        {
-          issue_count: issues.length,
-          issues,
-          missing_from_project_count: projectConfigured ? 1 : 0,
-          present_in_project_count: projectConfigured ? 1 : 0,
-          repository: "example/control-plane",
-        },
-      ],
-      repository_count: 1,
-      schema_version: 1,
-      stale_project_item_count: 0,
-    },
-    status: "ok",
-    trace_id: "fixture-issue-inbox",
-  };
-}
-
 export function everyCodeForFixture(
   fixture: DataFixtureMode,
 ): EveryCodeSummaryResponse {
@@ -2032,121 +1884,6 @@ export function tenantAdmissionForFixture(
     },
     status: "ok",
     trace_id: "fixture-tenant-admission",
-  };
-}
-
-function engineeringWorkGraphSnapshot(): WorkGraphSnapshotResponse {
-  return {
-    snapshot: {
-      generated_at: OBSERVED_AT,
-      issues: [
-        engineeringIssueSnapshot(308, "Finish the admin evidence route", "Now"),
-        engineeringIssueSnapshot(311, "Split controller orchestration boundaries", "Next"),
-        engineeringIssueSnapshot(319, "Refresh external check evidence", "Waiting"),
-      ],
-      repos: [
-        {
-          classification: "managed_runtime",
-          display_name: "Example Control Plane",
-          product: "example-control-plane",
-          repository: "example/control-plane",
-        },
-      ],
-      schema_version: 1,
-    },
-    source: {
-      every_code_requests: 2,
-      planning_facts: 3,
-      product_repositories: 1,
-      project_configured: true,
-    },
-    status: "ok",
-    trace_id: "fixture-work-graph-snapshot",
-  };
-}
-
-function engineeringIssueSnapshot(
-  number: number,
-  title: string,
-  focus: "Now" | "Next" | "Waiting",
-) {
-  return {
-    blocked_by: focus === "Waiting" ? 1 : 0,
-    blocking: 0,
-    check_state: focus === "Waiting" ? ("unknown" as const) : ("success" as const),
-    deploy_state: "unknown" as const,
-    finish_line: "The route has independent evidence, refresh, and failure states.",
-    focus,
-    is_pull_request: false,
-    labels: [`plan:${focus.toLowerCase()}`],
-    manager: "Code",
-    number,
-    repository: "example/control-plane",
-    state: "open" as const,
-    subissues_completed: 0,
-    subissues_total: 0,
-    title,
-    updated_at: OBSERVED_AT,
-    url: `https://example.invalid/example/control-plane/issues/${number}`,
-  };
-}
-
-function engineeringWorkGraphItem({
-  evidenceState,
-  number,
-  recommendation,
-  safeToStart,
-  state,
-  title,
-}: {
-  evidenceState: "verified" | "recorded" | "stale" | "missing";
-  number: number;
-  recommendation: "quick_win" | "deep_work" | "attention_needed" | "watch";
-  safeToStart: boolean;
-  state: "ready" | "waiting" | "blocked";
-  title: string;
-}) {
-  return {
-    blocked_by_count: state === "blocked" ? 1 : 0,
-    evidence: [
-      {
-        code: "project_status",
-        detail: "Launchplane engineering fixture evidence from compact planning facts.",
-        source_url: `https://example.invalid/example/control-plane/issues/${number}`,
-        state: evidenceState,
-      },
-    ],
-    finish_line: "The route has independent evidence, refresh, and failure states.",
-    focus: state === "waiting" ? ("Waiting" as const) : ("Now" as const),
-    handoff_url: `https://example.invalid/example/control-plane/issues/${number}`,
-    manager: "Code",
-    next_action: safeToStart
-      ? "Open the source issue and continue the scoped implementation."
-      : "Inspect the blocker and refresh source evidence.",
-    number,
-    product: "example-control-plane",
-    product_display_name: "Example Control Plane",
-    reasons: [
-      {
-        code: recommendation,
-        detail: safeToStart
-          ? "The issue is active and has no recorded blocker."
-          : "The issue needs fresh dependency or check evidence.",
-      },
-    ],
-    recommendation,
-    repo_classification: "managed_runtime" as const,
-    repository: "example/control-plane",
-    safe_to_start: safeToStart,
-    score: safeToStart ? 88 : 41,
-    source_of_truth_url: `https://example.invalid/example/control-plane/issues/${number}`,
-    state,
-    title,
-    updated_at: OBSERVED_AT,
-    url: `https://example.invalid/example/control-plane/issues/${number}`,
-    why_now: safeToStart
-      ? "This work is in the active lane and its compact evidence is current."
-      : "The item remains visible because stale or missing evidence needs attention.",
   };
 }
 
@@ -2877,10 +2614,12 @@ export function productReviewForFixture(
   assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "ready";
+  const carriedDecision = ["carried-decision", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
+  const invisibleCarry = scenario !== "carried-decision";
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
   const previewUrl =
-    ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
+    ["missing-preview", "pending-without-preview", "carried-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
     ? "No Client set for this product"
     : !viewerIsOwner
@@ -2915,16 +2654,19 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
-        : ["carried-decision", "carried-invisible-decision"].includes(scenario)
+        : carriedDecision
         ? {
-            ...productReviewDecisionForFixture("accepted", ""),
+            ...productReviewDecisionForFixture("accepted", "Keep the contact details visible."),
+            owner_github_id: scenario === "former-client-carried-decision" ? "9000" : "9001",
+            owner_github_login: scenario === "former-client-carried-decision" ? "former-client" : "example-owner",
+            head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "b".repeat(40) : "a".repeat(40),
             carried_from: {
               record_id: "fixture-original-acceptance",
-              head_sha: "b".repeat(40),
-              reason: scenario === "carried-invisible-decision" ? "client_impact_none" : "unchanged_patch_base_update",
-              commits: scenario === "carried-invisible-decision" ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
+              head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
+              reason: invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
+              commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: scenario === "carried-invisible-decision" ? "" : "c".repeat(40),
+              comparison_base_sha: invisibleCarry ? "" : "c".repeat(40),
             },
           }
         : scenario === "decided"

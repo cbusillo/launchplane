@@ -167,6 +167,32 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        addon_settings = [
+            {
+                "addon": "authentik_sso",
+                "setting": "client_id",
+                "value": {"source": "literal", "value": "preview-client-fixture"},
+            }
+        ]
+        self.profile = self.profile.model_copy(
+            update={
+                "preview": self.profile.preview.model_copy(
+                    update={
+                        "override_env": {
+                            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                                json.dumps(
+                                    {
+                                        "context": "cm",
+                                        "instance": "preview",
+                                        "addon_settings": addon_settings,
+                                    }
+                                ).encode()
+                            ).decode()
+                        }
+                    }
+                )
+            }
+        )
         before = self.store.list_secret_bindings(limit=None)
         result = _odoo_preview_service_environment(
             control_plane_root_path=self.root,
@@ -181,6 +207,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             base64.b64decode(result.values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
         )
         fields = {item["key"]: item["value"] for item in payload["config_parameters"]}
+        self.assertEqual(payload["addon_settings"], addon_settings)
         self.assertEqual(fields["fishbowl.host"]["value"], "source.example.test")
         self.assertEqual(fields["fishbowl.user"]["value"], "readonly")
         self.assertEqual(fields["fishbowl.db"]["value"], "inventory")

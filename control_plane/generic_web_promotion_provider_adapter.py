@@ -1,6 +1,8 @@
 """The shared durable generic-web promotion adapter for HTTP and Client releases."""
 
 import hashlib
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path as FilePath
@@ -132,6 +134,9 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 record_store=cast(GenericWebPromotionStore, self._record_store),
                 request=self._promotion_request.promotion,
             )
+            self._promotion_request = self._promotion_request.model_copy(
+                update={"promotion": promotion}
+            )
             if self._lane.generic_web_cutover is not None:
                 from control_plane.generic_web_cutover import (
                     WebCutoverAuthorityStore,
@@ -173,6 +178,17 @@ class GenericWebProdPromotionProviderMutationAdapter:
             product=self._profile.product,
         )
 
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        resolved = self.resolve_deploy_target()
+        return ProviderTargetOrigin(
+            product=self._profile.product,
+            context=resolved.ship_request.context,
+            instance=resolved.ship_request.instance,
+            provider_id=resolved.ship_request.provider_id,
+            target_type=resolved.resolved_target.target_type,
+            target_id=resolved.resolved_target.target_id,
+        )
+
     def target_key(self) -> str:
         return build_generic_web_provider_target_key(self.resolve_deploy_target())
 
@@ -193,21 +209,35 @@ class GenericWebProdPromotionProviderMutationAdapter:
     ) -> ProviderMutationOutcome:
         provider_effect_attempted = False
         automatic_rollback = False
+        promotion_request = self._promotion_request
+        effects_admitted = bool(
+            isinstance(lease, ProviderEvidenceLease)
+            and lease.evidence_reservation().provider_effect_started_at
+        )
 
         def validate_current_authority() -> None:
-            if self._validate_before_checkpoint is not None and not automatic_rollback:
-                self._validate_before_checkpoint()
+            if not automatic_rollback:
+                if self._validate_before_checkpoint is not None:
+                    self._validate_before_checkpoint()
+                if not effects_admitted:
+                    resolve_generic_web_promotion_inputs(
+                        record_store=cast(GenericWebPromotionStore, self._record_store),
+                        request=promotion_request.promotion,
+                    )
 
         def checkpoint_provider_effect(phase: str) -> None:
-            nonlocal provider_effect_attempted, automatic_rollback
+            nonlocal provider_effect_attempted, automatic_rollback, effects_admitted
             # Recovery must finish even if acceptance is withdrawn after deployment.
             automatic_rollback = phase.startswith("rollback_")
             validate_current_authority()
             lease.checkpoint_effect(phase)
             provider_effect_attempted = True
+            effects_admitted = True
 
         try:
-            self._validate_before_effect(self.resolve_deploy_target())
+            target = self.resolve_deploy_target()
+            promotion_request = self._promotion_request
+            self._validate_before_effect(target)
             evidence_guard: AbstractContextManager[None]
             if isinstance(self._record_store, PostgresRecordStore):
                 if not isinstance(lease, ProviderEvidenceLease):
@@ -222,7 +252,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 records, result = execute_generic_web_prod_promotion_result(
                     control_plane_root=self._control_plane_root,
                     record_store=self._record_store,
-                    request=self._promotion_request,
+                    request=promotion_request,
                     deploy_provider=self._deploy_provider,
                     resolved_deploy_target=self.resolve_deploy_target(),
                     provider_operation_title=provider_operation_title(provider_operation_key),

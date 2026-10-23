@@ -7,6 +7,7 @@ import json
 from typing import Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -194,6 +195,28 @@ def resolve_disposable_observation_binding(
     )
 
 
+def require_lane_target_ownership(
+    targets: tuple[DokployTargetIdRecord | ProviderTargetRecord, ...],
+    *,
+    context: str,
+    instance: str,
+    target_id: str = "",
+) -> None:
+    owned_targets = {
+        target.target_id
+        for target in targets
+        if (target.context, target.instance) == (context, instance)
+    }
+    if target_id:
+        owned_targets.add(target_id)
+    if any(
+        target.target_id in owned_targets
+        and (target.context, target.instance) != (context, instance)
+        for target in targets
+    ):
+        raise DisposableLaneSafetyUnknown("The target aliases another lane's target.")
+
+
 def require_disposable_lane(
     store: DisposableLaneStore,
     *,
@@ -203,7 +226,10 @@ def require_disposable_lane(
     retirement: bool = False,
     separation_only: bool = False,
     preview_refresh: bool = False,
-    preview_cleanup: bool = False,
+    same_artifact_restart: bool = False,
+    restart_running: bool = False,
+    recovery: bool = False,
+    runtime_stopped: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
@@ -250,13 +276,12 @@ def require_disposable_lane(
         )
     except FileNotFoundError:
         target_id = None
-    if target_id is not None and any(
-        (other.context, other.instance) != (context, instance)
-        and other.target_id == target_id.target_id
-        for other in store.list_dokploy_target_id_records()
-    ):
-        raise DisposableLaneSafetyUnknown(
-            "The testing or preview target aliases another lane's target."
+    if target_id is not None:
+        require_lane_target_ownership(
+            store.list_dokploy_target_id_records(),
+            context=context,
+            instance=instance,
+            target_id=target_id.target_id,
         )
     rehearsal_binding = ""
     if target is not None and target.policies.staff_testing_hold is not None:
@@ -285,14 +310,6 @@ def require_disposable_lane(
             }
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
-    if (
-        evidence is not None
-        and evidence.observer_kind == "director_agent_preview_cleanup"
-        and not (preview_cleanup or preview_refresh or retirement)
-    ):
-        raise DisposableLaneSafetyUnknown(
-            "Preview cleanup observations do not qualify other lane mutations."
-        )
     usage = evaluate_lane_usage(
         usage_store if usage_store is not None else store,
         profile=profile,
@@ -302,7 +319,23 @@ def require_disposable_lane(
         usage=evidence.usage if evidence else "unknown",
         require_unused=not (preview_refresh or retirement),
         now=now,
+        runtime_stopped=runtime_stopped,
     )
+    down_recovery = (
+        recovery and not (preview_refresh or retirement) and usage.reason == "verified_down"
+    )
+    if same_artifact_restart and (not restart_running or down_recovery):
+        if instance != "testing" or preview is not None:
+            raise DisposableLaneSafetyUnknown(
+                "Existing-container recovery requires an owned testing lane."
+            )
+        if usage.protected or (
+            evidence is not None and evidence.production_resources in {"shared", "separation_ready"}
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "Recovery is held by use, needed data or shared production resources."
+            )
+        return ""
     if preview_refresh:
         # Overall direction makes previews disposable unless there is an actual
         # protected use or needed copy. No source produces a universal positive
@@ -365,6 +398,8 @@ def require_disposable_lane(
             preview,
             disposable_lane_configuration(store, context, instance),
         )
+    if evidence is not None and evidence.observer_kind != "director_agent":
+        raise DisposableLaneSafetyUnknown("Historical observations cannot qualify lane mutations.")
     if evidence is None:
         raise DisposableLaneSafetyUnknown(
             "Disposable lane usage, only-copy and production-isolation evidence is unavailable."
@@ -385,13 +420,10 @@ def require_disposable_lane(
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         usage.protected
+        or evidence.data == "only_copy"
         or evidence.data != "reproducible"
-        # Cleanup removes the exact preview target, not credentials it reads.
-        # Target aliases are refused above; resource deletion owns its destroy set.
-        or (
-            not (preview_cleanup and owned_preview)
-            and evidence.production_resources not in allowed_resources
-        )
+        and not down_recovery
+        or evidence.production_resources not in allowed_resources
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data, shares production resources, or safety is unknown."

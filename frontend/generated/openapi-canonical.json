@@ -4409,157 +4409,6 @@
         "title": "BrowserRouteRepairRequest",
         "type": "object"
       },
-      "BusinessAssert": {
-        "additionalProperties": false,
-        "properties": {
-          "comparison": {
-            "default": "equals",
-            "enum": [
-              "equals",
-              "truthy"
-            ],
-            "title": "Comparison",
-            "type": "string"
-          },
-          "expected": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "field": {
-            "pattern": "^[a-z][a-z0-9_]{0,79}$",
-            "title": "Field",
-            "type": "string"
-          },
-          "key": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "Key",
-            "type": "string"
-          },
-          "op": {
-            "const": "assert",
-            "title": "Op",
-            "type": "string"
-          },
-          "record": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "Record",
-            "type": "string"
-          }
-        },
-        "required": [
-          "op",
-          "key",
-          "record",
-          "field",
-          "expected"
-        ],
-        "title": "BusinessAssert",
-        "type": "object"
-      },
-      "BusinessCall": {
-        "additionalProperties": false,
-        "properties": {
-          "key": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "Key",
-            "type": "string"
-          },
-          "method": {
-            "enum": [
-              "action_confirm",
-              "action_apply_inventory",
-              "action_assign",
-              "button_validate"
-            ],
-            "title": "Method",
-            "type": "string"
-          },
-          "op": {
-            "const": "call",
-            "title": "Op",
-            "type": "string"
-          },
-          "record": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "Record",
-            "type": "string"
-          }
-        },
-        "required": [
-          "op",
-          "key",
-          "record",
-          "method"
-        ],
-        "title": "BusinessCall",
-        "type": "object"
-      },
-      "BusinessCreate": {
-        "additionalProperties": false,
-        "properties": {
-          "key": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "Key",
-            "type": "string"
-          },
-          "model": {
-            "enum": [
-              "res.partner",
-              "product.product",
-              "product.template",
-              "sale.order",
-              "sale.order.line",
-              "stock.location",
-              "stock.quant",
-              "stock.picking",
-              "stock.move",
-              "stock.move.line"
-            ],
-            "title": "Model",
-            "type": "string"
-          },
-          "op": {
-            "const": "create",
-            "title": "Op",
-            "type": "string"
-          },
-          "values": {
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "$ref": "#/components/schemas/BusinessReference"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "maxProperties": 40,
-            "minProperties": 1,
-            "title": "Values",
-            "type": "object"
-          }
-        },
-        "required": [
-          "op",
-          "key",
-          "model",
-          "values"
-        ],
-        "title": "BusinessCreate",
-        "type": "object"
-      },
       "BusinessHoursWindow": {
         "additionalProperties": false,
         "properties": {
@@ -4585,70 +4434,6 @@
           }
         },
         "title": "BusinessHoursWindow",
-        "type": "object"
-      },
-      "BusinessReference": {
-        "additionalProperties": false,
-        "properties": {
-          "$ref": {
-            "pattern": "^[a-z][a-z0-9_]{0,39}$",
-            "title": "$Ref",
-            "type": "string"
-          }
-        },
-        "required": [
-          "$ref"
-        ],
-        "title": "BusinessReference",
-        "type": "object"
-      },
-      "BusinessValidation": {
-        "additionalProperties": false,
-        "properties": {
-          "database": {
-            "pattern": "^lp_rehearsal_[a-f0-9]{32}_final_upgrade$",
-            "title": "Database",
-            "type": "string"
-          },
-          "source_commit": {
-            "pattern": "^[a-f0-9]{40}$",
-            "title": "Source Commit",
-            "type": "string"
-          },
-          "steps": {
-            "items": {
-              "discriminator": {
-                "mapping": {
-                  "assert": "#/components/schemas/BusinessAssert",
-                  "call": "#/components/schemas/BusinessCall",
-                  "create": "#/components/schemas/BusinessCreate"
-                },
-                "propertyName": "op"
-              },
-              "oneOf": [
-                {
-                  "$ref": "#/components/schemas/BusinessCreate"
-                },
-                {
-                  "$ref": "#/components/schemas/BusinessCall"
-                },
-                {
-                  "$ref": "#/components/schemas/BusinessAssert"
-                }
-              ]
-            },
-            "maxItems": 64,
-            "minItems": 1,
-            "title": "Steps",
-            "type": "array"
-          }
-        },
-        "required": [
-          "database",
-          "source_commit",
-          "steps"
-        ],
-        "title": "BusinessValidation",
         "type": "object"
       },
       "ChangeImpactCoverage": {
@@ -6161,6 +5946,294 @@
         "title": "DetachedApplicationRetirementRequest",
         "type": "object"
       },
+      "DiscordBotResourceObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "default": "",
+            "title": "Application Id",
+            "type": "string"
+          },
+          "bot_id": {
+            "default": "",
+            "title": "Bot Id",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "guild_enumeration_complete": {
+            "default": false,
+            "title": "Guild Enumeration Complete",
+            "type": "boolean"
+          },
+          "guild_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Guild Ids",
+            "type": "array"
+          },
+          "guild_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Guild Status",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "identity_status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable"
+            ],
+            "title": "Identity Status",
+            "type": "string"
+          },
+          "provider": {
+            "const": "discord_bot",
+            "default": "discord_bot",
+            "title": "Provider",
+            "type": "string"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "rate_limits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DiscordRateLimitEvidence"
+            },
+            "maxItems": 2,
+            "title": "Rate Limits",
+            "type": "array"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at"
+        ],
+        "title": "DiscordBotResourceObservation",
+        "type": "object"
+      },
+      "DiscordIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/DiscordIdentityResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "DiscordIdentityResponse",
+        "type": "object"
+      },
+      "DiscordIdentityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "default": "",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "configuration_unavailable",
+                  "inputs_changed",
+                  "credential_ineligible"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiscordBotResourceObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "default": "unavailable",
+            "enum": [
+              "observed",
+              "unavailable",
+              "matches_production"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version_id": {
+            "default": "",
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "title": "DiscordIdentityResult",
+        "type": "object"
+      },
+      "DiscordRateLimitEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cloudflare_error_page": {
+            "default": false,
+            "title": "Cloudflare Error Page",
+            "type": "boolean"
+          },
+          "global_limit": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Limit"
+          },
+          "header_global": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Global"
+          },
+          "header_retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Retry After"
+          },
+          "non_json_body": {
+            "default": false,
+            "title": "Non Json Body",
+            "type": "boolean"
+          },
+          "phase": {
+            "enum": [
+              "identity",
+              "application",
+              "gateway",
+              "guilds"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "global",
+                  "shared"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "title": "DiscordRateLimitEvidence",
+        "type": "object"
+      },
       "DiscussionTopicInput": {
         "additionalProperties": false,
         "properties": {
@@ -6331,6 +6404,11 @@
             "default": "",
             "title": "Expected Observation Sha256",
             "type": "string"
+          },
+          "include_application_resources": {
+            "default": false,
+            "title": "Include Application Resources",
+            "type": "boolean"
           },
           "instance": {
             "minLength": 1,
@@ -6918,6 +6996,11 @@
             "title": "Environment Name",
             "type": "string"
           },
+          "expected_allocation_custody_sha256": {
+            "default": "",
+            "title": "Expected Allocation Custody Sha256",
+            "type": "string"
+          },
           "expected_current_provider_target": {
             "anyOf": [
               {
@@ -7005,6 +7088,11 @@
             "default": "",
             "title": "Replaces Operation Id",
             "type": "string"
+          },
+          "retain_allocation": {
+            "default": false,
+            "title": "Retain Allocation",
+            "type": "boolean"
           },
           "retain_state_volume_allocation": {
             "default": false,
@@ -11021,6 +11109,8 @@
               "adopt_observed",
               "retry_original_operation",
               "close_out_observed",
+              "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Recovery Action",
@@ -11147,6 +11237,8 @@
               "adopt_observed",
               "retry_original_operation",
               "close_out_observed",
+              "settle_testing_failure",
+              "abandon_testing_original",
               "hold_unknown"
             ],
             "title": "Proposed Action",
@@ -13583,346 +13675,6 @@
         "title": "GitHubHumanPolicyRule",
         "type": "object"
       },
-      "GitHubIssueInboxIssue": {
-        "additionalProperties": false,
-        "properties": {
-          "author": {
-            "default": "",
-            "title": "Author",
-            "type": "string"
-          },
-          "created_at": {
-            "default": "",
-            "title": "Created At",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "present_in_project": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Present In Project"
-          },
-          "project_status": {
-            "default": "unconfigured",
-            "enum": [
-              "present",
-              "missing",
-              "stale",
-              "closed",
-              "unconfigured"
-            ],
-            "title": "Project Status",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "repository",
-          "number"
-        ],
-        "title": "GitHubIssueInboxIssue",
-        "type": "object"
-      },
-      "GitHubIssueInboxReadModel": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "project_configured": {
-            "default": false,
-            "title": "Project Configured",
-            "type": "boolean"
-          },
-          "repositories": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxRepositoryGroup"
-            },
-            "title": "Repositories",
-            "type": "array"
-          },
-          "repository_count": {
-            "minimum": 0.0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "stale_project_item_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Stale Project Item Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "repository_count",
-          "issue_count"
-        ],
-        "title": "GitHubIssueInboxReadModel",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileItem": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "enum": [
-              "would_add",
-              "added",
-              "already_present",
-              "failed",
-              "skipped"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "detail": {
-            "default": "",
-            "title": "Detail",
-            "type": "string"
-          },
-          "error_code": {
-            "default": "",
-            "title": "Error Code",
-            "type": "string"
-          },
-          "error_correlation_id": {
-            "default": "",
-            "title": "Error Correlation Id",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "repository",
-          "number",
-          "action"
-        ],
-        "title": "GitHubIssueInboxReconcileItem",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "default": "dry_run",
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "title": "GitHubIssueInboxReconcileRequest",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileResult": {
-        "additionalProperties": false,
-        "properties": {
-          "added_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Added Count",
-            "type": "integer"
-          },
-          "already_present_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Already Present Count",
-            "type": "integer"
-          },
-          "failed_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Failed Count",
-            "type": "integer"
-          },
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "items": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxReconcileItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "mode": {
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "repository_count": {
-            "minimum": 0.0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "skipped_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Skipped Count",
-            "type": "integer"
-          },
-          "would_add_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Would Add Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "mode",
-          "repository_count",
-          "issue_count"
-        ],
-        "title": "GitHubIssueInboxReconcileResult",
-        "type": "object"
-      },
-      "GitHubIssueInboxRepositoryGroup": {
-        "additionalProperties": false,
-        "properties": {
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "issues": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxIssue"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "missing_from_project_count": {
-            "minimum": 0.0,
-            "title": "Missing From Project Count",
-            "type": "integer"
-          },
-          "present_in_project_count": {
-            "minimum": 0.0,
-            "title": "Present In Project Count",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "issue_count",
-          "present_in_project_count",
-          "missing_from_project_count"
-        ],
-        "title": "GitHubIssueInboxRepositoryGroup",
-        "type": "object"
-      },
       "GovernanceAdvisoryObservation": {
         "additionalProperties": false,
         "properties": {
@@ -14920,6 +14672,255 @@
           "historical_completion_preflight"
         ],
         "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
+      "HistoryIdentity": {
+        "additionalProperties": false,
+        "description": "Artifact/deployment references, without image locations or provider details.",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "image_digest": {
+            "title": "Image Digest",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deployment_record_id",
+          "artifact_id",
+          "source_git_ref",
+          "image_digest"
+        ],
+        "title": "HistoryIdentity",
+        "type": "object"
+      },
+      "HistoryObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "check_kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider",
+              "tls"
+            ],
+            "title": "Check Kind",
+            "type": "string"
+          },
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "expected_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
+                  "production_delivery_failed",
+                  "testing_delivery_failed",
+                  "connection_timeout",
+                  "deploy_fence_held",
+                  "dns_failure",
+                  "health_status_error",
+                  "http_error",
+                  "invalid_url",
+                  "private_endpoint_disabled",
+                  "private_endpoint_mismatch",
+                  "private_endpoint_not_found",
+                  "private_url",
+                  "monitoring_intent_changed",
+                  "monitor_run_missed",
+                  "provider_check_unavailable",
+                  "redirect_loop",
+                  "self_redirect",
+                  "tls_chain_failure",
+                  "tls_expired",
+                  "tls_expiring",
+                  "tls_failure",
+                  "tls_hostname_mismatch",
+                  "tls_self_signed",
+                  "tls_unsupported",
+                  "wrong_runtime_identity",
+                  "unknown_error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "incident_id": {
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "probe",
+              "reconciliation"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryTarget"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "record_id",
+          "check_name",
+          "check_kind",
+          "purpose",
+          "observed_at",
+          "status",
+          "failure_code",
+          "expected_runtime_identity",
+          "targets",
+          "incident_id"
+        ],
+        "title": "HistoryObservation",
+        "type": "object"
+      },
+      "HistoryTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
+                  "production_delivery_failed",
+                  "testing_delivery_failed",
+                  "connection_timeout",
+                  "deploy_fence_held",
+                  "dns_failure",
+                  "health_status_error",
+                  "http_error",
+                  "invalid_url",
+                  "private_endpoint_disabled",
+                  "private_endpoint_mismatch",
+                  "private_endpoint_not_found",
+                  "private_url",
+                  "monitoring_intent_changed",
+                  "monitor_run_missed",
+                  "provider_check_unavailable",
+                  "redirect_loop",
+                  "self_redirect",
+                  "tls_chain_failure",
+                  "tls_expired",
+                  "tls_expiring",
+                  "tls_failure",
+                  "tls_hostname_mismatch",
+                  "tls_self_signed",
+                  "tls_unsupported",
+                  "wrong_runtime_identity",
+                  "unknown_error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "observed_runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_identity_status": {
+            "enum": [
+              "unchecked",
+              "match",
+              "mismatch",
+              "missing",
+              "malformed",
+              "unverifiable"
+            ],
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "enum": [
+              "base_url",
+              "health_url",
+              "private_health_url",
+              "monitoring_intent",
+              "provider",
+              "tls_domain"
+            ],
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "status",
+          "failure_code",
+          "runtime_identity_status",
+          "observed_runtime_identity"
+        ],
+        "title": "HistoryTarget",
         "type": "object"
       },
       "HostNetworkCapacityObservation": {
@@ -15932,6 +15933,91 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LaneHealthHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cursor"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "since",
+          "until",
+          "cursor",
+          "next_cursor",
+          "observations"
+        ],
+        "title": "LaneHealthHistory",
+        "type": "object"
+      },
+      "LaneHealthHistoryResponse": {
+        "properties": {
+          "history": {
+            "$ref": "#/components/schemas/LaneHealthHistory"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "history"
+        ],
+        "title": "LaneHealthHistoryResponse",
+        "type": "object"
+      },
       "LaneServiceRestartPlan": {
         "additionalProperties": false,
         "properties": {
@@ -16622,6 +16708,18 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification": {
+            "default": "managed_runtime",
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Classification",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "default_branch": {
             "default": "main",
             "title": "Default Branch",
@@ -16632,6 +16730,7 @@
             "type": "string"
           },
           "driver_id": {
+            "default": "",
             "title": "Driver Id",
             "type": "string"
           },
@@ -16735,7 +16834,8 @@
               "director_standing"
             ],
             "title": "Release On Acceptance",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "repository": {
             "title": "Repository",
@@ -16777,8 +16877,6 @@
           "product",
           "display_name",
           "repository",
-          "driver_id",
-          "image",
           "updated_at",
           "source"
         ],
@@ -22375,6 +22473,13 @@
       "MergeTrainStallObservation": {
         "additionalProperties": false,
         "properties": {
+          "blocked_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Blocked Since",
+            "type": "object"
+          },
           "progress_key": {
             "default": "",
             "title": "Progress Key",
@@ -23181,6 +23286,145 @@
         "title": "OdooAddonSettingOverride",
         "type": "object"
       },
+      "OdooBusinessHoursConfigResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "apply_eligible": {
+            "default": false,
+            "title": "Apply Eligible",
+            "type": "boolean"
+          },
+          "authority_digest": {
+            "default": "",
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "calendar_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "companies": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OdooCalendarCompanyReference"
+            },
+            "title": "Companies",
+            "type": "array"
+          },
+          "company_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Id"
+          },
+          "company_scope": {
+            "const": "permitted_company_ids",
+            "default": "permitted_company_ids",
+            "title": "Company Scope",
+            "type": "string"
+          },
+          "effective_when": {
+            "const": "live",
+            "default": "live",
+            "title": "Effective When",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "inspect",
+              "set",
+              "clear"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "permitted_company_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Permitted Company Ids",
+            "type": "array"
+          },
+          "plan_digest": {
+            "default": "",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_before": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "default": "",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BusinessHoursWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "changed"
+        ],
+        "title": "OdooBusinessHoursConfigResult",
+        "type": "object"
+      },
       "OdooBusinessHoursPolicy": {
         "additionalProperties": false,
         "description": "Select the company calendar in Odoo; never copy its hours into Launchplane.",
@@ -23200,6 +23444,43 @@
           "company_id"
         ],
         "title": "OdooBusinessHoursPolicy",
+        "type": "object"
+      },
+      "OdooCalendarCompanyReference": {
+        "additionalProperties": false,
+        "properties": {
+          "calendar_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar Id"
+          },
+          "company_id": {
+            "minimum": 1.0,
+            "title": "Company Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "label_omitted": {
+            "default": false,
+            "title": "Label Omitted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "company_id"
+        ],
+        "title": "OdooCalendarCompanyReference",
         "type": "object"
       },
       "OdooConfigParameterOverride": {
@@ -25545,20 +25826,12 @@
               "validate-business",
               "verify",
               "retire",
-              "retire-incomplete"
+              "retire-incomplete",
+              "abandon-validation",
+              "rebuild-final"
             ],
             "title": "Action",
             "type": "string"
-          },
-          "business_validation": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BusinessValidation"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "mode": {
             "default": "dry-run",
@@ -27268,6 +27541,70 @@
           "truncated"
         ],
         "title": "OriginalReviewHistoryResponse",
+        "type": "object"
+      },
+      "OutboxInspection": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Deliveries",
+            "type": "array"
+          },
+          "notification_policies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Notification Policies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "complete",
+          "counts",
+          "deliveries",
+          "notification_policies"
+        ],
+        "title": "OutboxInspection",
+        "type": "object"
+      },
+      "OutboxInspectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/OutboxInspection"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "inspection"
+        ],
+        "title": "OutboxInspectionResponse",
         "type": "object"
       },
       "OutgoingEmailQuery": {
@@ -30392,6 +30729,12 @@
             "title": "Preview Label",
             "type": "string"
           },
+          "reconciliation_receipt_id": {
+            "default": "",
+            "title": "Reconciliation Receipt Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -32105,6 +32448,8 @@
                 "instances_not_singleton",
                 "instance_not_exact",
                 "secret_unreadable",
+                "privileged_operation_plan_stale",
+                "privileged_operation_planning_unavailable",
                 "operation_past_expiry",
                 "operation_expired",
                 "execution_failed",
@@ -32877,6 +33222,17 @@
             "title": "Next Actions",
             "type": "array"
           },
+          "odoo_business_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursConfigResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "product": {
             "title": "Product",
             "type": "string"
@@ -33539,7 +33895,8 @@
             "enum": [
               "created",
               "rotated",
-              "unchanged"
+              "unchanged",
+              "disabled"
             ],
             "title": "Action",
             "type": "string"
@@ -34629,6 +34986,17 @@
             "title": "Summary",
             "type": "string"
           },
+          "sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "trust_state": {
             "default": "missing",
             "enum": [
@@ -35053,6 +35421,16 @@
             "title": "Observations",
             "type": "array"
           },
+          "opening_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductIncidentObservationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "outbox_deliveries": {
             "default": [],
             "items": {
@@ -35467,6 +35845,22 @@
             "title": "Observed At",
             "type": "string"
           },
+          "provider_operation_references": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Operation References",
+            "type": "array"
+          },
+          "provider_reservation_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Reservation Ids",
+            "type": "array"
+          },
           "purpose": {
             "enum": [
               "probe",
@@ -35490,6 +35884,11 @@
           },
           "summary": {
             "title": "Summary",
+            "type": "string"
+          },
+          "testing_recovery_reference": {
+            "default": "",
+            "title": "Testing Recovery Reference",
             "type": "string"
           }
         },
@@ -40126,6 +40525,19 @@
             "title": "Context",
             "type": "string"
           },
+          "external_provider": {
+            "anyOf": [
+              {
+                "const": "discord_bot",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Provider",
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "default": "",
             "title": "Instance",
@@ -42346,6 +42758,188 @@
         "title": "ProviderDeliveryProtectionExpectationV1",
         "type": "object"
       },
+      "ProviderHoldAttentionItem": {
+        "additionalProperties": false,
+        "properties": {
+          "attribution": {
+            "enum": [
+              "retained",
+              "legacy",
+              "unavailable",
+              "corrupt"
+            ],
+            "title": "Attribution",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "effect_started_at": {
+            "title": "Effect Started At",
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "title": "Lease Expires At",
+            "type": "string"
+          },
+          "operation_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Reference"
+          },
+          "original_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderHoldScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phase": {
+            "enum": [
+              "not_recorded",
+              "effect_recorded"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "reconcile_required"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_reference",
+          "original_scope",
+          "attribution",
+          "state",
+          "phase",
+          "created_at",
+          "updated_at",
+          "lease_expires_at",
+          "effect_started_at"
+        ],
+        "title": "ProviderHoldAttentionItem",
+        "type": "object"
+      },
+      "ProviderHoldAttentionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "enum": [
+              "single_page",
+              "partial"
+            ],
+            "title": "Completeness",
+            "type": "string"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHoldAttentionItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "stale_after": {
+            "title": "Stale After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more",
+          "completeness",
+          "observed_at",
+          "stale_after"
+        ],
+        "title": "ProviderHoldAttentionPage",
+        "type": "object"
+      },
+      "ProviderHoldAttentionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/ProviderHoldAttentionPage"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "attention"
+        ],
+        "title": "ProviderHoldAttentionResponse",
+        "type": "object"
+      },
+      "ProviderHoldScope": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance"
+        ],
+        "title": "ProviderHoldScope",
+        "type": "object"
+      },
       "ProviderPullRequestExpectationV1": {
         "additionalProperties": false,
         "properties": {
@@ -44513,6 +45107,7 @@
                   "source_control_access_unavailable",
                   "production_identity_missing",
                   "candidate_identity_missing",
+                  "candidate_operation_unresolved",
                   "release_record_missing",
                   "github_read_failed"
                 ],
@@ -44680,6 +45275,15 @@
       "RepoProductMapping": {
         "additionalProperties": false,
         "properties": {
+          "ambiguous_repositories": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous Repositories",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "generated_at": {
             "title": "Generated At",
             "type": "string"
@@ -44734,7 +45338,8 @@
           "driver_id": {
             "default": "",
             "title": "Driver Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "environments": {
             "default": [],
@@ -49798,6 +50403,23 @@
             "title": "Current Version Id",
             "type": "string"
           },
+          "current_version_value_origin": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "provider",
+                  "generated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Value Origin",
+            "x-launchplane-optional-response": true
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -49908,6 +50530,16 @@
       "SeparationResourcesRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -49918,7 +50550,8 @@
             "enum": [
               "dry-run",
               "apply",
-              "receipt"
+              "receipt",
+              "inspect"
             ],
             "title": "Mode",
             "type": "string"
@@ -50243,6 +50876,135 @@
         "title": "SharedSourceReview",
         "type": "object"
       },
+      "ShopifyIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ShopifyIdentityResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ShopifyIdentityResponse",
+        "type": "object"
+      },
+      "ShopifyIdentityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": false,
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "probe": {
+            "default": "unavailable",
+            "enum": [
+              "verified",
+              "token_rejected",
+              "unavailable"
+            ],
+            "title": "Probe",
+            "type": "string"
+          },
+          "production_domain_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Production Domain Sha256",
+            "type": "string"
+          },
+          "production_shop_id_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Production Shop Id Sha256",
+            "type": "string"
+          },
+          "reason": {
+            "default": "diagnostics_unavailable",
+            "enum": [
+              "",
+              "authority_unavailable",
+              "authority_changed",
+              "runtime_unavailable",
+              "runtime_changed",
+              "credential_unavailable",
+              "probe_unavailable",
+              "probe_failed",
+              "configuration_unavailable",
+              "database_identity_unavailable",
+              "database_driver_unavailable",
+              "database_unavailable",
+              "settings_unavailable",
+              "settings_changed",
+              "request_invalid",
+              "request_failed",
+              "response_invalid",
+              "token_rejected",
+              "domain_mismatch",
+              "diagnostics_unavailable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "separation": {
+            "default": "unknown",
+            "enum": [
+              "separate",
+              "same",
+              "unknown"
+            ],
+            "title": "Separation",
+            "type": "string"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "authority",
+              "production_runtime",
+              "testing_credential",
+              "testing_probe",
+              "production_probe",
+              "evidence",
+              "complete",
+              "unknown"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "testing_domain_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Domain Sha256",
+            "type": "string"
+          },
+          "testing_shop_id_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Shop Id Sha256",
+            "type": "string"
+          },
+          "values_redacted": {
+            "const": true,
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "title": "ShopifyIdentityResult",
+        "type": "object"
+      },
       "SoloAdministrationConfirmationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -50499,6 +51261,148 @@
           }
         },
         "title": "StructuredHealthEvidence",
+        "type": "object"
+      },
+      "SyncCycleHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_finished_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Finished At"
+          },
+          "cycle_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Id"
+          },
+          "cycle_started_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Started At"
+          },
+          "freshness_status": {
+            "enum": [
+              "unknown",
+              "unavailable",
+              "fresh",
+              "stale",
+              "overdue",
+              "failed"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "last_heartbeat": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "full",
+                  "incremental"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "next_cycle_overdue": {
+            "title": "Next Cycle Overdue",
+            "type": "boolean"
+          },
+          "stale_threshold_seconds": {
+            "minimum": 0.0,
+            "title": "Stale Threshold Seconds",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "idle",
+              "running",
+              "success",
+              "failed",
+              "unknown",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "is_stale",
+          "next_cycle_overdue",
+          "freshness_status",
+          "stale_threshold_seconds"
+        ],
+        "title": "SyncCycleHealth",
+        "type": "object"
+      },
+      "SyncCycleHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "malformed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SyncCycleHealthEvidence",
         "type": "object"
       },
       "TenantAdmissionControllerRunOnceEnvelope": {
@@ -51948,6 +52852,16 @@
       "TestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -52021,6 +52935,127 @@
           "reason"
         ],
         "title": "TestingActivationRequest",
+        "type": "object"
+      },
+      "TestingApplicationCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "encoding": {
+            "enum": [
+              "urlsafe",
+              "base64",
+              "hex"
+            ],
+            "title": "Encoding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "encoding"
+        ],
+        "title": "TestingApplicationCredential",
+        "type": "object"
+      },
+      "TestingApplicationExternalCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "guild_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4000,
+            "title": "Guild Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "binding_key",
+          "guild_ids"
+        ],
+        "title": "TestingApplicationExternalCredential",
+        "type": "object"
+      },
+      "TestingApplicationSpecification": {
+        "additionalProperties": false,
+        "properties": {
+          "external_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationExternalCredential"
+            },
+            "maxItems": 1,
+            "title": "External Credentials",
+            "type": "array"
+          },
+          "health_path": {
+            "pattern": "^/[^\\s?#]*$",
+            "title": "Health Path",
+            "type": "string"
+          },
+          "local_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationCredential"
+            },
+            "title": "Local Credentials",
+            "type": "array"
+          },
+          "network_name": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "Network Name",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TestingApplicationState"
+          }
+        },
+        "required": [
+          "runtime_port",
+          "health_path",
+          "network_name",
+          "state"
+        ],
+        "title": "TestingApplicationSpecification",
+        "type": "object"
+      },
+      "TestingApplicationState": {
+        "additionalProperties": false,
+        "properties": {
+          "container_path": {
+            "default": "",
+            "title": "Container Path",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "none",
+              "volume"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TestingApplicationState",
         "type": "object"
       },
       "TestingCredentialAudit": {
@@ -52113,6 +53148,17 @@
       "TestingCredentialAuditResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52146,6 +53192,17 @@
       "TestingCredentialInventoryResponse": {
         "additionalProperties": false,
         "properties": {
+          "external_resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingExternalResourceAudit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "lanes": {
             "items": {
               "$ref": "#/components/schemas/TestingCredentialAudit"
@@ -52231,6 +53288,102 @@
           }
         },
         "title": "TestingExclusionFacet",
+        "type": "object"
+      },
+      "TestingExternalResourceAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingExternalResourceEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provider_unavailable",
+                  "provider_http_refused",
+                  "response_invalid",
+                  "response_too_large",
+                  "collection_budget_exhausted",
+                  "guild_partition_changed",
+                  "inputs_changed",
+                  "configuration_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "qualification": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Qualification",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "unavailable",
+              "not_configured"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "TestingExternalResourceAudit",
+        "type": "object"
+      },
+      "TestingExternalResourceEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "enum": [
+              "testing",
+              "prod"
+            ],
+            "title": "Instance",
+            "type": "string"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/DiscordBotResourceObservation"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "binding_key",
+          "version_id",
+          "observation"
+        ],
+        "title": "TestingExternalResourceEntry",
         "type": "object"
       },
       "TestingGenerationRetirementRequest": {
@@ -54350,620 +55503,6 @@
           "retained_previous_assets"
         ],
         "title": "WebSlotReadiness",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxReconcileResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponseResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "result"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxReconcileResponseResult": {
-        "additionalProperties": false,
-        "properties": {
-          "reconcile": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReconcileResult"
-          }
-        },
-        "required": [
-          "reconcile"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponseResult",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "configured": {
-            "title": "Configured",
-            "type": "boolean"
-          },
-          "inbox": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReadModel"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "configured",
-          "inbox"
-        ],
-        "title": "WorkGraphIssueInboxResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocked By",
-            "type": "integer"
-          },
-          "blocking": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocking",
-            "type": "integer"
-          },
-          "check_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Check State",
-            "type": "string"
-          },
-          "deploy_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Deploy State",
-            "type": "string"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "default": "Unknown",
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "is_pull_request": {
-            "default": false,
-            "title": "Is Pull Request",
-            "type": "boolean"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "enum": [
-              "open",
-              "closed"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "subissues_completed": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Subissues Completed",
-            "type": "integer"
-          },
-          "subissues_total": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Subissues Total",
-            "type": "integer"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "number",
-          "title",
-          "url"
-        ],
-        "title": "WorkGraphIssueSnapshot",
-        "type": "object"
-      },
-      "WorkGraphQueue": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "hidden_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Hidden Count",
-            "type": "integer"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "items"
-        ],
-        "title": "WorkGraphQueue",
-        "type": "object"
-      },
-      "WorkGraphQueueEvidence": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          },
-          "source_url": {
-            "default": "",
-            "title": "Source Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "verified",
-              "recorded",
-              "stale",
-              "missing",
-              "unsupported"
-            ],
-            "title": "State",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "state",
-          "detail"
-        ],
-        "title": "WorkGraphQueueEvidence",
-        "type": "object"
-      },
-      "WorkGraphQueueItem": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocked By Count",
-            "type": "integer"
-          },
-          "evidence": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueEvidence"
-            },
-            "title": "Evidence",
-            "type": "array"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "handoff_url": {
-            "default": "",
-            "title": "Handoff Url",
-            "type": "string"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "next_action": {
-            "title": "Next Action",
-            "type": "string"
-          },
-          "number": {
-            "title": "Number",
-            "type": "integer"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "product_display_name": {
-            "default": "",
-            "title": "Product Display Name",
-            "type": "string"
-          },
-          "reasons": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRecommendationReason"
-            },
-            "title": "Reasons",
-            "type": "array"
-          },
-          "recommendation": {
-            "enum": [
-              "quick_win",
-              "deep_work",
-              "switch_projects",
-              "blocked_cleanup",
-              "attention_needed",
-              "watch"
-            ],
-            "title": "Recommendation",
-            "type": "string"
-          },
-          "repo_classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Repo Classification",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "safe_to_start": {
-            "title": "Safe To Start",
-            "type": "boolean"
-          },
-          "score": {
-            "title": "Score",
-            "type": "integer"
-          },
-          "source_of_truth_url": {
-            "title": "Source Of Truth Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "ready",
-              "waiting",
-              "blocked",
-              "done",
-              "hidden"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          },
-          "why_now": {
-            "title": "Why Now",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "repo_classification",
-          "number",
-          "title",
-          "url",
-          "focus",
-          "state",
-          "recommendation",
-          "score",
-          "safe_to_start",
-          "next_action",
-          "why_now",
-          "source_of_truth_url",
-          "reasons"
-        ],
-        "title": "WorkGraphQueueItem",
-        "type": "object"
-      },
-      "WorkGraphRankEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "limit": {
-            "default": 25,
-            "maximum": 100.0,
-            "minimum": 1.0,
-            "title": "Limit",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          }
-        },
-        "required": [
-          "snapshot"
-        ],
-        "title": "WorkGraphRankEnvelope",
-        "type": "object"
-      },
-      "WorkGraphRankResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphRankResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "result"
-        ],
-        "title": "WorkGraphRankResponse",
-        "type": "object"
-      },
-      "WorkGraphRankResult": {
-        "additionalProperties": false,
-        "properties": {
-          "queue": {
-            "$ref": "#/components/schemas/WorkGraphQueue"
-          }
-        },
-        "required": [
-          "queue"
-        ],
-        "title": "WorkGraphRankResult",
-        "type": "object"
-      },
-      "WorkGraphRecommendationReason": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "detail"
-        ],
-        "title": "WorkGraphRecommendationReason",
-        "type": "object"
-      },
-      "WorkGraphRepoSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Classification",
-            "type": "string"
-          },
-          "display_name": {
-            "default": "",
-            "title": "Display Name",
-            "type": "string"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "classification"
-        ],
-        "title": "WorkGraphRepoSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issues": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphIssueSnapshot"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "repos": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRepoSnapshot"
-            },
-            "title": "Repos",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "issues"
-        ],
-        "title": "WorkGraphSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshotResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          },
-          "source": {
-            "additionalProperties": true,
-            "title": "Source",
-            "type": "object"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "snapshot",
-          "source"
-        ],
-        "title": "WorkGraphSnapshotResponse",
         "type": "object"
       },
       "WorkflowRuleRetirementRequest": {
@@ -78020,6 +78559,20 @@
                     "title": "Schema Version",
                     "type": "integer"
                   },
+                  "selected_keys": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Selected Keys"
+                  },
                   "separation_only": {
                     "default": false,
                     "title": "Separation Only",
@@ -79779,6 +80332,217 @@
         "summary": "Cancel Rollback Operation"
       }
     },
+    "/v1/operations/provider-hold-attention": {
+      "get": {
+        "operationId": "read_provider_hold_attention",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderHoldAttentionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a bounded page of retained service operation attention"
+      }
+    },
+    "/v1/outbox/inspection": {
+      "get": {
+        "operationId": "read_outbox_inspection",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboxInspectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect pending outbox delivery kinds and destination references without sending"
+      }
+    },
     "/v1/owner-secret-inputs": {
       "get": {
         "operationId": "read_owner_secret_inputs",
@@ -80128,7 +80892,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Inspect or reconcile one provider-absent legacy generic-web preview"
+        "summary": "Inspect or reconcile one provider-absent legacy preview"
       }
     },
     "/v1/previews/lifecycle-cleanup": {
@@ -82795,6 +83559,55 @@
             "application/json": {
               "schema": {
                 "$defs": {
+                  "OdooBusinessHoursConfigRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "company_id": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Company Id"
+                      },
+                      "expected_calendar_id": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Expected Calendar Id"
+                      },
+                      "operation": {
+                        "enum": [
+                          "inspect",
+                          "set",
+                          "clear"
+                        ],
+                        "title": "Operation",
+                        "type": "string"
+                      },
+                      "private_endpoint_key": {
+                        "default": "",
+                        "maxLength": 256,
+                        "title": "Private Endpoint Key",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ],
+                    "title": "OdooBusinessHoursConfigRequest",
+                    "type": "object"
+                  },
                   "ProductConfigRuntimeInput": {
                     "additionalProperties": true,
                     "properties": {
@@ -82886,6 +83699,27 @@
                       }
                     },
                     "title": "ProductConfigRuntimeInput",
+                    "type": "object"
+                  },
+                  "ProductConfigSecretBindingDisableInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "binding_key": {
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+                        "title": "Binding Key",
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "minLength": 1,
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "binding_key",
+                      "version_id"
+                    ],
+                    "title": "ProductConfigSecretBindingDisableInput",
                     "type": "object"
                   },
                   "ProductConfigSecretInput": {
@@ -83119,6 +83953,13 @@
                     "title": "Context",
                     "type": "string"
                   },
+                  "disable_secret_bindings": {
+                    "items": {
+                      "$ref": "#/$defs/ProductConfigSecretBindingDisableInput"
+                    },
+                    "title": "Disable Secret Bindings",
+                    "type": "array"
+                  },
                   "instance": {
                     "default": "",
                     "title": "Instance",
@@ -83131,6 +83972,16 @@
                     ],
                     "title": "Mode",
                     "type": "string"
+                  },
+                  "odoo_business_hours": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/OdooBusinessHoursConfigRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "product": {
                     "title": "Product",
@@ -83153,6 +84004,11 @@
                   "reason": {
                     "default": "",
                     "title": "Reason",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
                     "type": "string"
                   },
                   "runtime_env": {
@@ -84445,6 +85301,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -84865,6 +85731,17 @@
                   "ProductOnboardingManifest": {
                     "additionalProperties": false,
                     "properties": {
+                      "classification": {
+                        "default": "managed_runtime",
+                        "enum": [
+                          "managed_runtime",
+                          "active_awareness",
+                          "support_dependency",
+                          "out_of_scope"
+                        ],
+                        "title": "Classification",
+                        "type": "string"
+                      },
                       "default_branch": {
                         "default": "main",
                         "title": "Default Branch",
@@ -84901,11 +85778,15 @@
                         "type": "string"
                       },
                       "lanes": {
+                        "default": [],
                         "items": {
                           "$ref": "#/$defs/ProductOnboardingLaneManifest"
                         },
                         "title": "Lanes",
                         "type": "array"
+                      },
+                      "owner": {
+                        "$ref": "#/$defs/ProductOwnerProfile"
                       },
                       "preview": {
                         "$ref": "#/$defs/ProductOnboardingPreviewManifest"
@@ -84924,6 +85805,17 @@
                         },
                         "title": "Provider Targets",
                         "type": "array"
+                      },
+                      "release_on_acceptance": {
+                        "default": "held",
+                        "enum": [
+                          "held",
+                          "promote",
+                          "promote_with_rollback_drill",
+                          "director_standing"
+                        ],
+                        "title": "Release On Acceptance",
+                        "type": "string"
                       },
                       "repository": {
                         "title": "Repository",
@@ -84982,8 +85874,7 @@
                     "required": [
                       "product",
                       "display_name",
-                      "repository",
-                      "lanes"
+                      "repository"
                     ],
                     "title": "ProductOnboardingManifest",
                     "type": "object"
@@ -85337,6 +86228,29 @@
                     "title": "ProductOnboardingTargetManifest",
                     "type": "object"
                   },
+                  "ProductOwnerProfile": {
+                    "additionalProperties": false,
+                    "description": "The person who accepts or rejects what customers see for this product.\n\nAn Owner can veto a change but never merge or deploy one. The numeric GitHub id\nis the identity; the login is for mentions and display and may be renamed.",
+                    "properties": {
+                      "github_id": {
+                        "default": "",
+                        "title": "Github Id",
+                        "type": "string"
+                      },
+                      "github_login": {
+                        "default": "",
+                        "title": "Github Login",
+                        "type": "string"
+                      },
+                      "review_label": {
+                        "default": "owner-review",
+                        "title": "Review Label",
+                        "type": "string"
+                      }
+                    },
+                    "title": "ProductOwnerProfile",
+                    "type": "object"
+                  },
                   "ProductOwnerSecretInput": {
                     "additionalProperties": false,
                     "properties": {
@@ -85451,6 +86365,19 @@
                         "default": "",
                         "title": "Context",
                         "type": "string"
+                      },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
                       },
                       "instance": {
                         "default": "",
@@ -85977,6 +86904,19 @@
                         "default": "",
                         "title": "Context",
                         "type": "string"
+                      },
+                      "external_provider": {
+                        "anyOf": [
+                          {
+                            "const": "discord_bot",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "External Provider",
+                        "x-launchplane-optional-response": true
                       },
                       "instance": {
                         "default": "",
@@ -91926,6 +92866,295 @@
         "summary": "Plan or apply product environment config"
       }
     },
+    "/v1/products/{product}/environments/{environment}/discord-identity": {
+      "get": {
+        "operationId": "read_testing_discord_identity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscordIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Identify the stored testing Discord bot without credential output or qualification"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/health-history": {
+      "get": {
+        "operationId": "read_product_environment_health_history",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Since",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Until",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaneHealthHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read retained lane health and runtime identity observations"
+      }
+    },
     "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics": {
       "get": {
         "operationId": "read_odoo_import_diagnostics",
@@ -93645,6 +94874,134 @@
           }
         },
         "summary": "Read one public ingress incident with linked evidence"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/shopify-identity": {
+      "get": {
+        "operationId": "read_odoo_shopify_identity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShopifyIdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Compare held testing Shopify identity with current production store authority read-only"
       }
     },
     "/v1/products/{product}/environments/{environment}/website-bootstrap": {
@@ -95661,6 +97018,16 @@
             "schema": {
               "title": "Product",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
             }
           },
           {
@@ -100991,6 +102358,16 @@
         "operationId": "audit_testing_credentials",
         "parameters": [
           {
+            "in": "query",
+            "name": "include_external_resources",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include External Resources",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -101064,176 +102441,6 @@
           }
         },
         "summary": "Audit all products' testing lanes without credential values"
-      }
-    },
-    "/v1/work-graph/github/issues": {
-      "get": {
-        "operationId": "read_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane GitHub issue inbox"
-      }
-    },
-    "/v1/work-graph/github/issues/reconcile": {
-      "post": {
-        "operationId": "reconcile_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GitHubIssueInboxReconcileRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Reconcile Launchplane GitHub issue inbox"
       }
     },
     "/v1/work-graph/merge-train/admission": {
@@ -102736,186 +103943,6 @@
         "summary": "Run one merge train stack collapse worker pass"
       }
     },
-    "/v1/work-graph/rank": {
-      "post": {
-        "operationId": "rank_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WorkGraphRankEnvelope"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphRankResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Rank Launchplane work graph snapshot"
-      }
-    },
-    "/v1/work-graph/snapshot": {
-      "get": {
-        "operationId": "read_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphSnapshotResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane work graph snapshot"
-      }
-    },
     "/v1/work-graph/tenant-admission/controller/run-once": {
       "post": {
         "operationId": "run_tenant_admission_controller_once",
@@ -103565,6 +104592,7 @@
     "/v1/governance/projection": "read_governance_projection",
     "/v1/odoo-prod-promotions/operations/{operation_id}": "read_odoo_prod_promotion_operation",
     "/v1/odoo-prod-rollbacks/operations/{operation_id}": "read_odoo_prod_rollback_operation",
+    "/v1/operations/provider-hold-attention": "read_provider_hold_attention",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/previews/{preview_id}/history": "read_preview_history",
@@ -103599,10 +104627,8 @@
     "/v1/release-review": "read_release_review",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
-    "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
-    "/v1/work-graph/snapshot": "read_work_graph_snapshot",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
@@ -103617,6 +104643,7 @@
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
+    "/v1/product-onboarding/apply": "apply_product_onboarding",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",
@@ -103644,7 +104671,6 @@
     "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
-    "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
-    "/v1/work-graph/rank": "rank_work_graph_snapshot"
+    "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens"
   }
 }

@@ -1037,7 +1037,9 @@ def run_odoo_stable_operation_worker_loop(
                 last_sweep_at = monotonic()
                 try:
                     request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                        cast(ProductReconcileStore, record_store),
+                        _utc_now_timestamp(),
+                        control_plane_root=control_plane_root_path,
                     )
                 except Exception:
                     logging.exception("Product reconcile sweep failed.")
@@ -2257,6 +2259,11 @@ def _execute_target_replacement_with_checkpoint(
     heartbeat_seconds: int,
     execution_checkpoint: Callable[[str], None] | None = None,
 ) -> bool:
+    from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.testing_rebuild_authorization import (
+        director_testing_rebuild_authorization_allows,
+    )
+
     stop_event = Event()
     heartbeat_lost_event = Event()
     heartbeat_thread = _start_target_replacement_heartbeat(
@@ -2279,6 +2286,14 @@ def _execute_target_replacement_with_checkpoint(
                 context=operation.context,
                 instances=(operation.instance,),
                 record_store=record_store,
+            )
+        ),
+        director_testing_rebuild_allows=lambda authorization: (
+            director_testing_rebuild_authorization_allows(
+                authorization=authorization,
+                operation=operation,
+                store=record_store,
+                config=_bearer_identity_config_from_env(),
             )
         ),
     )
@@ -2390,20 +2405,20 @@ def _execute_target_replacement_with_checkpoint(
             error,
         )
         finished_at = _utc_now_timestamp()
-        held_native_effects = (
+        held_native_rebuild = (
             operation.is_native_testing_rebuild
             and isinstance(record_store, PostgresRecordStore)
-            and native_rebuild_effects_started(record_store, operation)
+            and record_store.native_testing_rebuild_requires_reconciliation(operation)
         )
         terminal_operation = operation.model_copy(
             update={
-                "status": "reconciliation_required" if held_native_effects else "fail",
-                "phase": operation.phase if held_native_effects else "failed",
+                "status": "reconciliation_required" if held_native_rebuild else "fail",
+                "phase": operation.phase if held_native_rebuild else "failed",
                 "updated_at": finished_at,
-                "finished_at": "" if held_native_effects else finished_at,
-                "lease_owner": "" if held_native_effects else lease_owner,
-                "lease_expires_at": "" if held_native_effects else operation.lease_expires_at,
-                "heartbeat_at": "" if held_native_effects else operation.heartbeat_at,
+                "finished_at": "" if held_native_rebuild else finished_at,
+                "lease_owner": "" if held_native_rebuild else lease_owner,
+                "lease_expires_at": "" if held_native_rebuild else operation.lease_expires_at,
+                "heartbeat_at": "" if held_native_rebuild else operation.heartbeat_at,
                 "error_code": error.code,
                 "error_message": str(error),
             }
@@ -2419,6 +2434,12 @@ def _execute_target_replacement_with_checkpoint(
                 isinstance(record_store, PostgresRecordStore)
                 and native_rebuild_effects_started(record_store, operation)
             )
+        )
+        rebuild_held = (
+            not rebuild_pending
+            and operation.is_native_testing_rebuild
+            and isinstance(record_store, PostgresRecordStore)
+            and record_store.native_testing_rebuild_requires_reconciliation(operation)
         )
         rebuild_message = (
             str(error)
@@ -2455,11 +2476,13 @@ def _execute_target_replacement_with_checkpoint(
             if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable"
             else operation.model_copy(
                 update={
-                    "status": "fail",
-                    "phase": "failed",
+                    "status": "reconciliation_required" if rebuild_held else "fail",
+                    "phase": operation.phase if rebuild_held else "failed",
                     "updated_at": _utc_now_timestamp(),
-                    "finished_at": _utc_now_timestamp(),
-                    "lease_owner": lease_owner,
+                    "finished_at": "" if rebuild_held else _utc_now_timestamp(),
+                    "lease_owner": "" if rebuild_held else lease_owner,
+                    "lease_expires_at": "" if rebuild_held else operation.lease_expires_at,
+                    "heartbeat_at": "" if rebuild_held else operation.heartbeat_at,
                     "error_code": _unexpected_error_code(error),
                     "error_message": str(error),
                     "error_detail_keys": (

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN, SHA256_PATTERN
 
 
 EngineeringReviewRunState = Literal[
@@ -32,8 +33,6 @@ ENGINEERING_REVIEW_RUN_MAX_LEASE_SECONDS = 7200
 NONTERMINAL_REVIEW_STATES: frozenset[str] = frozenset({"pending", "claimed", "running"})
 TERMINAL_REVIEW_STATES: frozenset[str] = frozenset({"completed", "failed", "expired", "cancelled"})
 
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
-_BINARY_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _MODEL_FAMILY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -123,7 +122,7 @@ class EngineeringReviewAuthorityRecord(BaseModel):
         executable = Path(self.executable_path)
         if self.executable_path.strip() != self.executable_path or not executable.is_absolute():
             raise ValueError("Engineering review executable_path must be a canonical absolute path")
-        if not _BINARY_SHA256_PATTERN.fullmatch(self.binary_sha256):
+        if not SHA256_PATTERN.fullmatch(self.binary_sha256):
             raise ValueError("Engineering review binary_sha256 must be 64 lowercase hex characters")
         _parse_timestamp(self.recorded_at, "recorded_at")
         if self.source.strip() != self.source or not self.source:
@@ -262,11 +261,11 @@ class EngineeringReviewRunRecord(BaseModel):
             or not Path(self.executable_path).is_absolute()
         ):
             raise ValueError("Engineering review run requires canonical absolute executable_path")
-        if not _BINARY_SHA256_PATTERN.fullmatch(self.binary_sha256):
+        if not SHA256_PATTERN.fullmatch(self.binary_sha256):
             raise ValueError("Engineering review run requires canonical binary_sha256")
         _parse_timestamp(self.created_at, "created_at")
         _parse_timestamp(self.updated_at, "updated_at")
-        if not self.credential_hash or not _BINARY_SHA256_PATTERN.fullmatch(self.credential_hash):
+        if not self.credential_hash or not SHA256_PATTERN.fullmatch(self.credential_hash):
             raise ValueError("Engineering review run requires credential_hash")
         if not self.credential_ciphertext.strip() or not self.credential_key_id.strip():
             raise ValueError("Engineering review run requires encrypted credential material")
@@ -717,12 +716,12 @@ def _validate_repository(repository: str) -> None:
 
 
 def _validate_git_sha(value: str, field_name: str) -> None:
-    if not _GIT_SHA_PATTERN.fullmatch(value):
+    if not GIT_SHA1_PATTERN.fullmatch(value):
         raise ValueError(f"Engineering review {field_name} must be 40 lowercase hex characters")
 
 
 def _validate_sha256(value: str, field_name: str) -> None:
-    if not _BINARY_SHA256_PATTERN.fullmatch(value):
+    if not SHA256_PATTERN.fullmatch(value):
         raise ValueError(f"Engineering review {field_name} must be 64 lowercase hex characters")
 
 

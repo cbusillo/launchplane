@@ -2,7 +2,7 @@ import { expect, test, type Page } from "./state";
 
 const operationId = "privileged-operation-abcdef0123456789abcdef0123456789";
 
-async function openReview(page: Page, state = "available", readOnly = false) {
+async function openReview(page: Page, state = "available", readOnly = false, scheduler = false) {
   await page.goto("/ui/?fixture=products");
   const identity = await page.evaluate(async () => (await import("/ui/src/dev-fixtures.ts")).fixtureIdentity);
   if (readOnly) identity.role = "read_only";
@@ -16,13 +16,13 @@ async function openReview(page: Page, state = "available", readOnly = false) {
       await route.fulfill({ json: { status: "ok", products: [] } });
     } else if (path === `/v1/privileged-operations/plans/${operationId}/review`) {
       await route.fulfill({ json: { status: "ok", trace_id: "fixture-review", review: {
-        operation_id: operationId, descriptor_id: "managed-authz-policy-set", operation_class: "managed_authz_policy_set",
-        title: "Managed authorization policy review", requested_by_kind: "github_human",
+        operation_id: operationId, descriptor_id: scheduler ? "managed-merge-train-policy-import" : "managed-authz-policy-set", operation_class: scheduler ? "managed_merge_train_policy_import" : "managed_authz_policy_set",
+        title: scheduler ? "Managed merge-train policy review" : "Managed authorization policy review", requested_by_kind: "github_human",
         lifecycle: { status: "planned", created_at: "2026-10-19T20:00:00Z", updated_at: "2026-10-19T20:00:00Z", approval_recorded: false, execution_recorded: false },
-        blockers: { state: "clear" }, change: { summary: "Remove rules from the reviewed access policy.", metrics: [] },
+        blockers: state === "available" ? { state: "clear" } : state === "stale" ? { state: "blocked", codes: ["privileged_operation_plan_stale"] } : { state: "error", codes: ["privileged_operation_planning_unavailable"] }, change: { summary: "Remove rules from the reviewed access policy.", metrics: [] },
         blast_radius: { summary: "The reviewed rules only." }, rollback: { summary: "Separate reviewed change." },
-        evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [], can_approve: true, can_revoke: false,
-        access_policy: { state, rules: [
+        evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [], can_approve: state === "available", can_revoke: false,
+        access_policy: scheduler ? undefined : { state: state === "stale" ? "unavailable" : state, rules: [
           { managed_rule_id: "only-role", change: "removed", principal: "GitHub login fixture-alex", roles: ["read_only"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: fixture-testing. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-alex", before: "read_only", after: null, state: "lost" }] },
           { managed_rule_id: "covered-role", change: "removed", principal: "GitHub login fixture-blair", roles: ["admin"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: all. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-blair", before: "admin", after: "admin", state: "retained" }] },
           { managed_rule_id: "local-rule", change: "added", principal: "Local operator agent:fixture", roles: [], permissions: ["authz_policy_operation.read"], scope_summary: "Products: launchplane. Contexts: launchplane. Targets: context/global only.", role_effects: [] },
@@ -62,6 +62,10 @@ test("missing current policy evidence is visibly unknown", async ({ page }) => {
   const review = page.getByRole("region", { name: "People and access changes" });
   await expect(review.locator('[data-access-review-state="unavailable"]')).toBeVisible();
   await expect(review).not.toContainText("fixture-alex");
+  await expect(page.locator(".privileged-operation-warning")).toContainText(/unavailable/i);
+  await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toBeDisabled();
 });
 
 test("read-only browser does not render principal display", async ({ page }) => {
@@ -71,3 +75,18 @@ test("read-only browser does not render principal display", async ({ page }) => 
   await expect(page.locator("body")).not.toContainText("fixture-alex");
   await expect(page.locator("body")).not.toContainText("secret-value-must-not-render");
 });
+
+for (const { scheduler, readOnly } of [
+  { scheduler: false, readOnly: true },
+  { scheduler: true, readOnly: false },
+]) {
+  test(`stale ${scheduler ? "scheduler" : "authorization"} policy explains uncertainty to ${readOnly ? "readers" : "administrators"}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
+    await openReview(page, "stale", readOnly, scheduler);
+    const warning = page.locator(".privileged-operation-warning");
+    await expect(warning).toContainText(/stale/i);
+    await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(readOnly ? 0 : 1);
+    await page.screenshot({ path: testInfo.outputPath("stale-policy-review.png"), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+}

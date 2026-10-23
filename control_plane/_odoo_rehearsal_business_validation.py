@@ -1,119 +1,139 @@
-"""Fixed ORM program. Product input is JSON data, never Python or a shell command."""
+"""Fixed image entrypoint and value-free receipt checks for the isolated runner."""
 
-BUSINESS_VALIDATION_LIBRARY = r"""
-def run_business_validation(env, plan):
-    records = {}
-    evidence = []
-    committed = False
-    commit_started = False
-    reread_index = None
+BUSINESS_VALIDATION_ENTRYPOINT = "/opt/project/addons/launchplane_business_validation.py"
+BUSINESS_VALIDATION_RECEIPT_MAX_BYTES = 8192
+BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS = 900
+BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS = 30
+BUSINESS_ENTRYPOINT_WAIT_MARGIN_SECONDS = 30
+BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS = (
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+    + BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS
+    + BUSINESS_ENTRYPOINT_WAIT_MARGIN_SECONDS
+)
+BUSINESS_VALIDATION_OUTPUT_MAX_BYTES = 2 * BUSINESS_VALIDATION_RECEIPT_MAX_BYTES + 1024
 
-    def resolve(value):
-        if isinstance(value, dict):
-            if '$ref' in value:
-                return records[value['$ref']].id
-        return value
-
-    def finish(passed):
-        steps = evidence or [{'key': plan['steps'][0]['key'], 'record_ids': [], 'passed': False}]
-        if not committed:
-            steps = [{**step, 'record_ids': []} for step in steps]
-        return {'passed': passed, 'committed': committed, 'steps': steps}
-
-    try:
-        if env.cr.dbname != plan['database']:
-            raise ValueError('Copy identity differs')
-        for step in plan['steps']:
-            passed = True
-            if step['op'] == 'create':
-                model = env[step['model']]
-                for name, value in step['values'].items():
-                    field = model._fields[name]
-                    if field.type in {'one2many', 'many2many'}:
-                        raise ValueError('Relational commands are unavailable')
-                    if isinstance(value, dict):
-                        referenced = records[value['$ref']]
-                        if field.type != 'many2one' or field.comodel_name != referenced._name:
-                            raise ValueError('Synthetic reference model differs')
-                    elif field.type == 'many2one' and value is not None and value is not False:
-                        raise ValueError('Relations require an earlier synthetic record')
-                record = model.with_context(
-                    tracking_disable=True, mail_create_nosubscribe=True,
-                    mail_notify_force_send=False).create({key: resolve(value) for key, value in step['values'].items()})
-                records[step['key']] = record
-            else:
-                record = records[step['record']]
-                if step['op'] == 'call':
-                    getattr(record, step['method'])()
-                else:
-                    value = record[step['field']]
-                    if hasattr(value, 'ids'):
-                        value = value.ids
-                    if step['comparison'] == 'truthy':
-                        value = bool(value)
-                    passed = value == step['expected']
-            evidence.append({'key': step['key'], 'record_ids': record.ids, 'passed': passed})
-            if not passed:
-                env.cr.rollback()
-                return finish(False)
-        env.flush_all()
-        commit_started = True
-        env.cr.commit()
-        committed = True
-        env.invalidate_all()
-        for index, step in enumerate(plan['steps']):
-            if step['op'] == 'assert':
-                reread_index = index
-                value = records[step['record']][step['field']]
-                if hasattr(value, 'ids'):
-                    value = value.ids
-                if step['comparison'] == 'truthy':
-                    value = bool(value)
-                if value != step['expected']:
-                    evidence[index]['passed'] = False
-                    return finish(False)
-                reread_index = None
-        return finish(True)
-    except Exception:
-        if committed and reread_index is not None:
-            evidence[reread_index]['passed'] = False
-        env.cr.rollback()
-        if commit_started and not committed:
-            raise RuntimeError('Validation commit outcome unavailable') from None
-        # The caller retains only a closed failure, never exception text or
-        # business values from the copied Client database.
-        return finish(False)
+# The remote host has only the standard library. Keep this parser identical to
+# the local validator rather than maintaining a second interpretation.
+BUSINESS_VALIDATION_RECEIPT_LIBRARY = r"""
+def checked_business_receipt(value, expected=None):
+    if (not isinstance(value,dict)
+            or set(value)!={'product','rehearsal_id','artifact_id','source_commit','database',
+                'attempt_sha256','passed','committed','checks'}
+            or len(json.dumps(value,separators=(',',':'),ensure_ascii=True).encode())>BUSINESS_VALIDATION_RECEIPT_MAX_BYTES):
+        raise ValueError('Invalid product validation receipt')
+    if expected is not None and any(value[key]!=item for key,item in expected.items()):
+        raise ValueError('Product validation identity differs')
+    if (type(value['passed']) is not bool or type(value['committed']) is not bool
+            or not isinstance(value['checks'],list) or not 0<len(value['checks'])<=64):
+        raise ValueError('Invalid product validation outcome')
+    keys=set()
+    for check in value['checks']:
+        if (not isinstance(check,dict) or set(check)!={'key','passed','records'}
+                or not isinstance(check['key'],str) or not re.fullmatch('[a-z][a-z0-9_]{0,39}',check['key'])
+                or check['key'] in keys or type(check['passed']) is not bool
+                or not isinstance(check['records'],list)):
+            raise ValueError('Invalid product validation check')
+        keys.add(check['key'])
+        for record in check['records']:
+            if (not isinstance(record,dict) or set(record)!={'model','id'}
+                    or not isinstance(record['model'],str)
+                    or not re.fullmatch(r'[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+',record['model'])
+                    or type(record['id']) is not int or record['id']<1):
+                raise ValueError('Invalid product validation record')
+        if (value['passed'] and (not check['passed'] or not check['records'])
+                or not value['committed'] and check['records']):
+            raise ValueError('Product validation records differ from commit outcome')
+    if value['passed'] and not value['committed']:
+        raise ValueError('Passing validation requires committed writes')
+    return value
 """
 
 
-def business_validation_runner(plan: dict[str, object]) -> str:
-    """The image's existing runner supplies native Odoo shell configuration."""
+def checked_business_receipt(value: object) -> object:
+    import json
+    import re
+
+    namespace = {
+        "json": json,
+        "re": re,
+        "BUSINESS_VALIDATION_RECEIPT_MAX_BYTES": BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+    }
+    exec(BUSINESS_VALIDATION_RECEIPT_LIBRARY, namespace)
+    return namespace["checked_business_receipt"](value)  # type: ignore[operator]
+
+
+BUSINESS_ENTRYPOINT_CHECK_LIBRARY = r"""
+import json
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+
+
+def check_business_entrypoint(spec):
+    status='provider_unavailable'
+    deadline=time.monotonic()+__COMMAND_TIMEOUT__
+    def run(arguments):
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            raise subprocess.TimeoutExpired('candidate capability check',__COMMAND_TIMEOUT__)
+        return subprocess.run(arguments,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            timeout=remaining,check=False).returncode
+    try:
+        if run(['docker','image','inspect',spec['image']]) and run(['docker','pull',spec['image']]):
+            return {**spec['binding'],'status':status}
+        with tempfile.TemporaryDirectory(prefix='lp-entrypoint-') as temporary:
+            cid=Path(temporary)/'container-id'
+            finished=False
+            try:
+                code=run(['docker','run','--rm','--pull','never',
+                    '--cidfile',str(cid),'--network','none','--read-only',
+                    '--tmpfs','/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777','--cap-drop','ALL',
+                    '--security-opt','no-new-privileges','--entrypoint','python3',spec['image'],
+                    spec['entrypoint'],'--check'])
+                finished=True
+                status='available' if code==0 else 'provider_unavailable' if code==125 else 'entrypoint_unavailable'
+            finally:
+                if cid.exists():
+                    identifier=cid.read_text().strip()
+                    if not re.fullmatch('[a-f0-9]{64}',identifier):
+                        status='provider_unavailable'
+                    elif not finished:
+                        subprocess.run(['docker','rm','-f',identifier],stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,timeout=__CLEANUP_TIMEOUT__,check=False)
+                else:
+                    status='provider_unavailable'
+    except (OSError,ValueError,subprocess.TimeoutExpired):
+        status='provider_unavailable'
+    return {**spec['binding'],'status':status}
+""".replace("__COMMAND_TIMEOUT__", str(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS)).replace(
+    "__CLEANUP_TIMEOUT__", str(BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS)
+)
+
+
+def business_entrypoint_schedule(rehearsal_id: str) -> tuple[str, str]:
+    return "Launchplane rehearsal entrypoint check", rehearsal_id + "-entrypoint-check"
+
+
+def business_entrypoint_check_script(image: str, binding: dict[str, str]) -> str:
     import json
 
-    shell = (
-        "import json\n"
-        + BUSINESS_VALIDATION_LIBRARY
-        + "\nplan=json.loads("
-        + repr(json.dumps(plan))
-        + ")\n"
-        + "result=run_business_validation(env,plan)\n"
-        + "print('business_validation_result='+json.dumps(result).encode().hex(),flush=True)\n"
-    )
+    spec = {
+        "image": image,
+        "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT,
+        "binding": binding,
+    }
     return (
-        "import sys,subprocess\nsys.path.insert(0,'/volumes/scripts')\n"
-        "from run_odoo_data_workflows import LocalServerSettings,OdooDataWorkflowRunner\n"
-        "settings=LocalServerSettings()\n"
-        "if settings.host!='database' or settings.platform_instance!='rehearsal' "
-        "or settings.db_name!=" + repr(plan["database"]) + ":\n"
-        " raise RuntimeError('Independent rehearsal settings required')\n"
-        "runner=OdooDataWorkflowRunner(settings,None,None)\n"
-        "runner.acquire_data_workflow_lock()\n"
-        "try:\n"
-        " runner._ensure_odoo_shell_preflight()\n"
-        " result=subprocess.run(runner._odoo_shell_command(),input=" + repr(shell) + ".encode(),"
-        "env=runner.os_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)\n"
-        " markers=[line for line in result.stdout.splitlines() if line.startswith(b'business_validation_result=')]\n"
-        " if result.returncode or len(markers)!=1: raise RuntimeError('Validation result unavailable')\n"
-        " print(markers[0].decode(),flush=True)\n"
-        "finally:\n runner.release_data_workflow_lock()\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_ENTRYPOINT_CHECK'\n"
+        + BUSINESS_ENTRYPOINT_CHECK_LIBRARY
+        + "\nspec=json.loads("
+        + repr(json.dumps(spec))
+        + ")\n"
+        + "print('rehearsal_result='+json.dumps(check_business_entrypoint(spec)).encode().hex(),flush=True)\n"
+        + "LP_ENTRYPOINT_CHECK\n"
     )
+
+
+def final_business_database(rehearsal_id: str) -> str:
+    return rehearsal_id.replace("-", "_") + "_final_upgrade"

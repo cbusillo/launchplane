@@ -46,16 +46,19 @@ not describe runtime authority until it is implemented, deployed, and activated.
   without the product repository calling Launchplane.
 - [testing-deploy-retry.md](testing-deploy-retry.md) — reviewed exact-artifact
   recovery of an exhausted Odoo testing retry budget with retained data.
+- [preview-memory-admission.md](preview-memory-admission.md) — service-owned host
+  memory floors and read-only preview-start admission.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
   including owned previews, disposable-lane eligibility, and resumable execution.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
+- [odoo-shopify-identity.md](odoo-shopify-identity.md) — hash-only held-testing Shopify identity and applied-production comparison.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
-  reconciliation of provider-absent generic-web preview history.
+  reconciliation of provider-absent generic-web and Odoo preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new
@@ -67,8 +70,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.
-- [work-graph-read-model.md](work-graph-read-model.md) — record-backed work graph,
-  ranking, and the removed Project/inbox source boundary.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
@@ -124,7 +125,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   allocation consumption, retained custody and supported hold/rebuild continuation.
 - [stored-record-preflight.md](stored-record-preflight.md) — scrubbed service export,
   isolated candidate rehearsal and ordered self-deploy gate activation.
-- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo lane
+- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo or generic-web lane
   service on its current artifact through Product Ops or the bounded helper.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
@@ -133,10 +134,12 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
+- [preview-settings.md](preview-settings.md) — reviewed private-file saves of one preview runtime override.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
-- [testing-local-credentials.md](testing-local-credentials.md) — Service-generated
-  testing passwords, creation/rebuild integration and names-only overlap audit.
+- [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider
+  observations, service-generated testing passwords, creation/rebuild integration
+  and names-only overlap audit.
 - [testing-local-consumer.md](testing-local-consumer.md) — Recipient-encrypted
   delivery of one testing bridge credential to a local client.
 - [private-testing-transport.md](private-testing-transport.md) — private testing
@@ -147,6 +150,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   pull-request dependency comparisons and absolute health evidence.
 - [runtime-dependency-health.md](runtime-dependency-health.md) — derived lane
   dependencies, public health results, shared web helper and individual adoption.
+- [sync-cycle-health.md](sync-cycle-health.md) — typed sync facts retained by
+  existing health probes, their readback and qualification limits.
 - [advisory-governance-checks.md](advisory-governance-checks.md) — dedicated
   GitHub App identity, stable advisory engineering/Client check runs, replay,
   drift, and authority self-exclusion.
