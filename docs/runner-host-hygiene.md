@@ -691,8 +691,11 @@ dry-run planning only.
 
 ## Qualify an existing configuration after drift
 
-Weekday green means a report's planned audit was delivered. It does not mean
-retention is working. The workflow summary now separates report delivery,
+The workflow requires qualified audit artifacts before passing. A blocked or
+unqualified report, missing evidence, or requested maintenance without accepted
+terminal completion fails the job; a healthy report-only plan and a recognized
+not-needed action can pass without claiming maintenance ran. The workflow
+summary separates report delivery,
 report status, retention qualification and accepted terminal maintenance. The
 qualifier uses the audit envelope's single `maintenance_completed` rule.
 The latest existing audit record supplies the report and blockers; terminal
@@ -772,6 +775,8 @@ or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`
 only bounded action/audit identifiers, snapshot time and contract codes are
 rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
 current-time freshness after a long Sunday batch. The explicit qualification
+step allows snapshots up to the job's three-hour execution limit so earlier
+Sunday actions do not expire during the same batch. The qualification CLI
 mode exits nonzero for stale/missing evidence, report
 findings, unresolved execution/recovery, pending delivery or action blockers other
 than recognized existing not-needed outcomes and the expected
