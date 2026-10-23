@@ -53863,10 +53863,7 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback",
-              "route-repair-dry-run",
-              "route-repair-apply",
-              "route-repair-readback"
+              "readback"
             ],
             "title": "Mode",
             "type": "string"
