@@ -1863,6 +1863,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ambiguous_repository_reads_fail_without_selecting_a_product(self) -> None:
         with (
+            patch(
+                "control_plane.http_routes.products.utc_now_timestamp",
+                side_effect=["2026-10-23T12:02:39Z", "2026-10-23T12:02:40Z"],
+            ),
             TemporaryDirectory() as directory,
             closing(
                 PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
@@ -1907,7 +1911,10 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(context.status_code, 200, context.text)
             section = context.json()["context"]["sections"]["repo_product_mapping"]
             self.assertEqual(section["status"], "available")
-            self.assertEqual(section["payload"]["mapping"], mapping.json()["mapping"])
+            for field in ("repositories", "ambiguous_repositories"):
+                self.assertEqual(
+                    section["payload"]["mapping"][field], mapping.json()["mapping"][field]
+                )
 
     async def test_standing_metadata_preserves_signed_admin_and_current_profile_guards(
         self,
