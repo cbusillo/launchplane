@@ -1136,6 +1136,14 @@ The set deliberately leaves out:
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
+  The existing profile POST separately admits authenticated Director agents
+  setting one nonsecret `preview.override_env` key on an existing enabled
+  Odoo preview. It requires a strong matching revision and idempotency key,
+  reconstructs the change from the stored profile, and preserves all other
+  profile authority with atomic CAS. It adds no policy grant. Deletions,
+  secret-bearing settings, Shopify payloads and broader edits remain outside
+  this bounded admission; see [preview settings](preview-settings.md).
+
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
   stays with Launchplane's own onboarding workflow.
