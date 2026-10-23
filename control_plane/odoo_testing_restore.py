@@ -1255,13 +1255,13 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 
 
 def _testing_generation_hold_blocks_read(
-    target: DokployTargetRecord, *, task_account_cleanup: bool, isolation_staging_read: bool
+    target: DokployTargetRecord, *, task_account_cleanup: bool, resource_qualification: bool
 ) -> bool:
     hold = target.policies.staff_testing_hold
     return (
         hold is not None
         and not task_account_cleanup
-        and not (isolation_staging_read and hold.purpose == "isolation_staging")
+        and not (resource_qualification and hold.purpose == "isolation_staging")
     )
 
 
@@ -1273,7 +1273,7 @@ def read_current_testing_generation(
     instance: str,
     bootstrap_preparation: bool = False,
     task_account_cleanup: bool = False,
-    isolation_staging_read: bool = False,
+    resource_qualification: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -1288,10 +1288,10 @@ def read_current_testing_generation(
             if _testing_generation_hold_blocks_read(
                 target,
                 task_account_cleanup=task_account_cleanup,
-                isolation_staging_read=isolation_staging_read,
+                resource_qualification=resource_qualification,
             ):
                 raise ValueError("The adopted testing copy has a staff testing hold.")
-            if isolation_staging_read:
+            if resource_qualification:
                 require_distinct_testing_credentials(
                     store, store.read_product_profile_record(product), context
                 )
@@ -1336,7 +1336,7 @@ def read_current_testing_generation(
         _testing_generation_hold_blocks_read(
             target,
             task_account_cleanup=task_account_cleanup,
-            isolation_staging_read=isolation_staging_read,
+            resource_qualification=resource_qualification,
         )
     ) or target.pending_public_host_effects:
         raise ValueError("Fresh testing generation has a use or route hold.")

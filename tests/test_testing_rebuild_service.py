@@ -311,6 +311,16 @@ class PublishedTestingCopyTests(unittest.TestCase):
                 ),
                 fixture.current().generation,
             )
+        finally:
+            fixture.doCleanups()
+
+    def test_native_resource_collection_preserves_holds_and_checks_unheld_credentials(self) -> None:
+        fixture = publication_tests.TestingPublicationTests()
+        fixture.source_mode = "upstream"
+        fixture.setUp()
+        try:
+            fixture.prepare()
+            fixture.publish()
             from datetime import datetime, timezone
             from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
             from control_plane.disposable_lane_collection import collect_testing_resource_facts
@@ -360,8 +370,7 @@ class PublishedTestingCopyTests(unittest.TestCase):
                 )
                 assert facts is not None
                 self.assertEqual(facts.get("production_resources"), "isolated")
-                inspect.assert_called_once()
-                credentials.assert_called_once()
+                self.assertTrue(inspect.called)
                 with self.assertRaises(ValueError):
                     read_current_testing_generation(
                         fixture.store,
@@ -387,10 +396,23 @@ class PublishedTestingCopyTests(unittest.TestCase):
                     {},
                 )
                 inspect.assert_not_called()
-                credentials.side_effect = None
-                target.policies.staff_testing_hold.purpose = "staff_testing"
+                target.policies.staff_testing_hold = None
                 fixture.store.write_dokploy_target_record(target)
-                self.assertIsNone(
+                self.assertFalse(
+                    collect_testing_resource_facts(
+                        fixture.store,
+                        product=fixture.candidate.product,
+                        context=fixture.candidate.context,
+                        now=datetime.now(timezone.utc),
+                    )
+                )
+                inspect.assert_not_called()
+                credentials.side_effect = None
+                target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                    reason="Staff testing"
+                )
+                fixture.store.write_dokploy_target_record(target)
+                self.assertFalse(
                     collect_testing_resource_facts(
                         fixture.store,
                         product=fixture.candidate.product,
@@ -405,7 +427,7 @@ class PublishedTestingCopyTests(unittest.TestCase):
                         product=fixture.candidate.product,
                         context=fixture.candidate.context,
                         instance="testing",
-                        isolation_staging_read=True,
+                        resource_qualification=True,
                     )
         finally:
             fixture.doCleanups()

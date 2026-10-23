@@ -71,8 +71,9 @@ deployment has no service dry-run mode; preparation is not execution proof.
 
 The Odoo generation collector can qualify current resources and copy custody
 while an `isolation_staging` hold remains set. It uses the same generation
-authority checks, testing-local credential comparison and physical receiver
-inspection. A staff-testing hold still blocks collection, and missing or failed
+authority checks and physical receiver inspection. Every resource collection,
+including an unheld native-published copy, compares testing-local credentials
+against the managed production credentials. A staff-testing hold still blocks collection, and missing or failed
 qualification supplies no positive fact. This read path does not lift a hold or
 change ordinary deployment admission; later hold continuation must independently
 bind and recheck its required evidence.

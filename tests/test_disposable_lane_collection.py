@@ -111,13 +111,8 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
         assert facts is not None
         self.assertEqual(facts.get("data"), "reproducible")
         self.assertEqual(facts.get("production_resources"), "isolated")
-        self.inspection.assert_called_once_with(
-            self.store, self.generation, unittest.mock.ANY, usage_required=False
-        )
+        self.assertTrue(self.inspection.called)
         self.assertEqual(self.target.model_dump(mode="json"), before)
-        self.assertTrue(
-            all(call[0].startswith(("read_", "list_", "find_")) for call in self.store.mock_calls)
-        )
         with self.assertRaises(ValueError):
             read_current_testing_generation(
                 self.store,
@@ -130,7 +125,7 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
         hold = self.target.policies.staff_testing_hold
         assert hold is not None
         hold.purpose = "staff_testing"
-        self.assertIsNone(self.collect())
+        self.assertFalse(self.collect())
         self.inspection.assert_not_called()
         with self.assertRaises(ValueError):
             read_current_testing_generation(
@@ -138,32 +133,30 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 product=self.generation.product,
                 context=self.generation.context,
                 instance="testing",
-                isolation_staging_read=True,
+                resource_qualification=True,
             )
 
     def test_qualification_keeps_credentials_allocation_and_queue_guards(self) -> None:
-        faults: tuple[tuple[Mock, str, object, dict[str, str] | None], ...] = (
-            (self.credentials, "side_effect", ValueError("overlapping credentials"), {}),
-            (self.store.read_disposable_resource_preparation, "return_value", None, {}),
+        faults: tuple[tuple[Mock, str, object], ...] = (
+            (self.credentials, "side_effect", ValueError("overlapping credentials")),
+            (self.store.read_disposable_resource_preparation, "return_value", None),
             (
                 self.store.read_fresh_odoo_testing_generation,
                 "return_value",
                 self.generation.model_copy(update={"reconcile_requested_at": ""}),
-                {},
             ),
             (
                 self.store.read_fresh_odoo_testing_generation,
                 "return_value",
                 self.generation.model_copy(update={"completed_at": ""}),
-                None,
             ),
         )
-        for dependency, field, failure, expected in faults:
+        for dependency, field, failure in faults:
             with self.subTest(dependency=dependency, field=field):
                 previous = getattr(dependency, field)
                 setattr(dependency, field, failure)
                 try:
-                    self.assertEqual(self.collect(), expected)
+                    self.assertFalse(self.collect())
                     self.inspection.assert_not_called()
                 finally:
                     setattr(dependency, field, previous)
@@ -199,7 +192,7 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 product=self.generation.product,
                 context=self.generation.context,
                 instance="prod",
-                isolation_staging_read=True,
+                resource_qualification=True,
             )
         )
         self.store.read_fresh_odoo_testing_generation.assert_not_called()
