@@ -426,10 +426,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             lease_owner="native-worker-fixture",
         )
 
-    def admit_unavailable(self, availability: str, *, redirect: bool = False) -> None:
+    def admit_unavailable(
+        self, availability: str, *, redirect: bool = False, partial: bool = False
+    ) -> None:
         self.retained.update(
             availability=availability,
-            stopped=True,
+            stopped=not partial,
             web_stopped=True,
             observation_sha256="c" * 64,
             inventory_sha256="d" * 64,
@@ -484,6 +486,74 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, ["switch-new"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertTrue(self.retained["stopped"])
+
+    def test_web_down_rebuild_stops_remaining_dependencies_after_healthy_cutover(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertTrue(self.retained["stopped"])
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_stopped_web_rebuild_qualifies_historical_usage_at_admission_and_checkpoint(
+        self,
+    ) -> None:
+        from tests.support.down_lanes import record_lane_health
+        from tests.support.disposable_lanes import record_safety
+
+        self.admit_unavailable("stopped")
+        record_lane_health(
+            self.store,
+            self.operation.product,
+            self.operation.context,
+            datetime.now(UTC),
+            status=404,
+        )
+        self.intent = self.intent.model_copy(
+            update={"profile": self.store.read_product_profile_record(self.operation.product)}
+        )
+        self.capture.return_value = self.intent
+        record_safety(
+            self.store, self.operation.product, self.operation.context, "testing", usage="in_use"
+        )
+        with patch.object(
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage(reason_code="serving_container_stopped"),
+        ):
+            service.check_testing_rebuild_protection(
+                self.root, self.store, self.operation, self.intent
+            )
+            adapter = service.NativeTestingRebuildAdapter(
+                root=self.root,
+                store=self.store,
+                operation=self.operation,
+                intent=self.intent,
+                authorize=self.authorize,
+            )
+            executor = service.NativeTestingRebuildExecution(
+                adapter, Mock(spec=["assert_current"]), Mock()
+            )
+            executor.host, executor.token = "fixture-host", "fixture-token"
+            executor.transport = DokployTestingRouteTransport(
+                host=executor.host,
+                token=executor.token,
+                server_id=self.intent.server_id,
+                old_project=self.intent.project,
+                product=self.operation.product,
+                context=self.operation.context,
+                public_host=self.fixture.route.host,
+                entrypoints=self.intent.public_entrypoints,
+                old_runtime_identity=None,
+                unavailable_predecessor={
+                    "project": self.intent.project,
+                    "availability": "stopped",
+                    "inventory_sha256": self.intent.retained["inventory_sha256"],
+                },
+            )
+            executor.guard()
+        self.assertEqual(self.effects, [])
 
     def start_original(self) -> None:
         self.retained.update(availability="available", stopped=False, web_stopped=False)

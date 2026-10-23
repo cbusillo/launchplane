@@ -559,6 +559,8 @@ def check_testing_rebuild_protection(
         instance="testing",
         usage=reported_usage,
         require_unused=reported_usage != "unknown",
+        runtime_stopped=usage.reason_code == "serving_container_stopped"
+        or isinstance(intent.old, UnavailableTestingPredecessor),
     )
     if decision.protected:
         raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
@@ -1082,6 +1084,8 @@ class NativeTestingRebuildExecution:
                 instance="testing",
                 usage=reported_usage,
                 require_unused=reported_usage != "unknown",
+                runtime_stopped=usage.reason_code == "serving_container_stopped"
+                or isinstance(self.intent.old, UnavailableTestingPredecessor),
             )
             if decision.protected:
                 raise NativeTestingRebuildPending("The retained testing copy is in use.")
@@ -1932,7 +1936,7 @@ class NativeTestingRebuildExecution:
             disable_auto_deploy,
             recovery=True,
         )
-        if isinstance(plan.old, UnavailableTestingPredecessor):
+        if isinstance(plan.old, UnavailableTestingPredecessor) and self.intent.retained["stopped"]:
             self.require_unavailable_retirement()
             self.run_effect(
                 "retire-old",

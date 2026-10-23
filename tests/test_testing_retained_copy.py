@@ -92,6 +92,22 @@ class RetainedTestingCopyTests(unittest.TestCase):
             qualify_retained_copy(self.containers, original)
         self.assertEqual(raised.exception.predicate, ReadbackPredicate.CUSTODY)
 
+    def test_unavailable_web_does_not_need_its_database_to_stop_before_rebuild(self) -> None:
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
+    def test_removed_web_preserves_database_custody_without_an_original_runtime(self) -> None:
+        self.containers.pop(0)
+        frame, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.assertEqual(frame["type"], "complete")
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertIsNone(frame.get("identity"))
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
     ) -> None:

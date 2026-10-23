@@ -85,7 +85,12 @@ class LaneUsageTests(unittest.TestCase):
 
     def require(self) -> str:
         return require_disposable_lane(
-            self.store, product=self.product, context=self.context, instance="testing", now=self.now
+            self.store,
+            product=self.product,
+            context=self.context,
+            instance="testing",
+            now=self.now,
+            recovery=True,
         )
 
     def test_down_without_hold_allows_unknown_and_historical_automated_use_across_drivers(
@@ -122,6 +127,28 @@ class LaneUsageTests(unittest.TestCase):
         )
         for usage in ("unknown", "in_use"):
             self.assertTrue(self.decision(usage).protected)
+
+    def test_verified_down_repair_does_not_need_a_running_copy_safety_observation(self) -> None:
+        self.health()
+        self.assertTrue(self.require())
+        for facts in (
+            {"usage": "unknown", "data": "unknown", "production_resources": "unknown"},
+            {"data": "unknown"},
+            {
+                "observed_at": self.now - timedelta(minutes=10),
+                "expires_at": self.now - timedelta(minutes=9),
+            },
+        ):
+            with self.subTest(facts=facts):
+                record_safety(self.store, self.product, self.context, "testing", **facts)
+                before = self.store.read_disposable_lane_safety(
+                    self.product, self.context, "testing"
+                )
+                self.assertTrue(self.require())
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety(self.product, self.context, "testing"),
+                    before,
+                )
 
     def test_unknown_occupancy_does_not_require_downtime_or_a_non_use_declaration(self) -> None:
         for status in (None, 200, 403):
@@ -406,7 +433,6 @@ class LaneUsageTests(unittest.TestCase):
         self.assertTrue(self.require())
         for facts in (
             {"data": "only_copy"},
-            {"data": "unknown"},
             {"production_resources": "shared"},
         ):
             with self.subTest(facts=facts):

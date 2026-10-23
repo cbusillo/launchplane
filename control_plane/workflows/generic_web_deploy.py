@@ -922,6 +922,7 @@ def _execute_generic_web_deploy_unserialized(
                     cast(DisposableLaneStore, record_store),
                     product=resolved_profile.product,
                     context=resolved_lane.context,
+                    recovery=True,
                     instance=resolved_lane.instance,
                 )
             except (ValueError, AttributeError) as error:

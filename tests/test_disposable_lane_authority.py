@@ -18,6 +18,7 @@ from tests.http_app_test_support import _local_operator_bearer_config, _Rejectin
 from tests.support.auth import scoped_agent_transport
 from tests.support.application_resources import ApplicationResourceFixture
 from tests.support.disposable_lanes import record_safety
+from tests.support.down_lanes import record_lane_health
 from control_plane.disposable_lanes import disposable_lane_observation_sha256
 from tests.support.http import request
 from tests.support.profiles import _generic_site_profile_payload
@@ -112,6 +113,29 @@ class _DisposableRuntimeAuthorityFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
+    async def test_down_lane_runtime_recovery_rechecks_without_running_copy_safety(self) -> None:
+        record_lane_health(self.store, "example-site", self.context, datetime.now(timezone.utc))
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            usage="unknown",
+            data="unknown",
+            production_resources="unknown",
+        )
+
+        def apply(**arguments: Any) -> dict[str, object]:
+            arguments["before_provider_mutation"]()
+            return {}
+
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            side_effect=apply,
+        ) as driver:
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
+
     def testing_application(self) -> ProviderTargetRecord:
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"

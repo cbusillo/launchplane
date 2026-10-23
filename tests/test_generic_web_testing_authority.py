@@ -39,6 +39,7 @@ from control_plane.generic_web_deploy_provider_adapter import (
 )
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.disposable_lanes import record_safety
+from tests.support.down_lanes import record_lane_health
 from tests.support.auth import local_operator_policy, scoped_agent_transport
 from tests.support.profiles import _product_profile_payload_with_prod
 from tests.support.stores import _seed_generic_web_deploy_target_records, _sqlite_database_url
@@ -286,6 +287,30 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             yield provider, schedules, writes
 
     def test_authenticated_director_can_deploy_qualified_testing_without_a_grant(self) -> None:
+        with patch(
+            "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+            return_value=_generic_web_deploy_result(),
+        ) as executor:
+            status, payload = self.deploy()
+        self.assertEqual(status, 202, payload)
+        executor.assert_called_once()
+
+    def test_verified_down_testing_deploy_does_not_require_running_copy_safety(self) -> None:
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.lane.context,
+            datetime.now(timezone.utc),
+        )
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.lane.context,
+            self.lane.instance,
+            usage="unknown",
+            data="unknown",
+            production_resources="unknown",
+        )
         with patch(
             "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
             return_value=_generic_web_deploy_result(),

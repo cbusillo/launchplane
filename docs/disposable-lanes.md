@@ -17,8 +17,9 @@ mixed production/testing action's policy or other callers' permissions. Explicit
 authorized administrators retain their existing manual-deployment authority,
 including deliberate deployments during a testing hold.
 
-New standing deployments consume the existing bound, unexpired disposable-lane
-qualification for data custody and production isolation. The existing usage
+Serving or unverified lanes consume the existing bound, unexpired disposable-lane
+qualification for data custody and production isolation. Verified-down recovery
+uses the shared repair rule below instead of requiring facts from the failed runtime. The existing usage
 rule protects actual use and staff holds; unknown occupancy alone does not
 require an assertion that nobody uses the lane. The service rechecks the current
 profile, lane and safety facts at the first durable provider-effect checkpoint.
@@ -147,7 +148,7 @@ outcome cannot be replaced with an assertion that the old metadata still wins.
 The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
 
-A predecessor verified stopped or absent uses an explicit unavailable record.
+A predecessor whose web service is verified stopped or absent uses an explicit unavailable record.
 It needs the existing lane's address ownership, provider target and registered
 server placement. Complete container IDs, ownership fields, states and mount
 inventory must agree; an incomplete inspection never proves absence. Stopped
@@ -155,6 +156,13 @@ copies keep their actual storage/configuration witness without requiring an old
 runtime identity or starting a process. Fully absent containers leave any old
 storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
 production isolation and unresolved provider effects keep their existing gates.
+The database and other owned dependencies may still be running. Their custody is
+retained, and the ordinary fenced stop runs after the candidate passes public
+health and metadata publication. Only an original with every service already
+stopped skips that stop. A missing web or database does not invent its old data;
+every remaining mounted volume is still inspected for independent backing and
+foreign consumers. Both retained-copy and route observations use the same
+web-availability classifier.
 
 An unavailable predecessor has no invented private endpoint, runtime identity or
 healthy public observation. The candidate route comes from the original recorded
@@ -316,6 +324,21 @@ is never treated more strictly than UNKNOWN or turned into a requirement for
 negative evidence.
 Production admission and release gates are unchanged.
 
+The common disposable guard combines this decision with the existing stopped-container
+restart exception. Runtime recovery, generic-web testing deploy/retry/reset and
+same-artifact restart opt into that shared branch. Verified downtime removes the
+requirement for an absent, stale or UNKNOWN running-copy custody/isolation observation;
+it does not rewrite the observation or assert positive safety facts. An expired
+protective only-copy or production-sharing report still blocks destructive or
+configuration-changing recovery. Restarting the exact stopped container preserves
+its needed data and retains its narrower existing exception. Serving/unverified
+lanes still require their current qualification. Retained-data deletion, retirement,
+source setup and other independent resource operations retain their own gates.
+Each caller still checks exact ownership, key safety, physical candidate isolation,
+original-operation fences and configuration binding. Running health, identity,
+sanitation and credential checks run on the recovered candidate before it counts
+as healthy or can be published. Down admission is never healthy evidence.
+
 Verified down means every effective application HTTP check has failed in each
 of the same two consecutive monitor scheduler slots inside the preceding two
 cadences, with each latest result less than one cadence old. The scheduler's
@@ -331,16 +354,19 @@ unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
 
-For positive-use qualification during initial Odoo generation preparation and its resource/bootstrap rechecks,
-HTTP 404 also qualifies when the same call's fixed host probe independently
-verifies the exact testing web container is stopped. Complete container
-inventories before and after must agree on identity, running state, start time,
-configuration, mounts and networks, and the provider placement must remain
-unchanged. Ambiguous services, an unavailable database, custom web commands or
-changed snapshots do not qualify. The normal two-slot, every-URL monitor rule
-still applies. A 404 alone, HTTP 401/403, a running web container, production or
-a staff hold never gains this exception. This proves present unavailability
-for repair; login/session usage remains UNKNOWN and no custody fact is supplied.
+HTTP404 qualifies only with independent host evidence that Odoo's testing web
+cannot serve. Initial generation and its resource/bootstrap rechecks use the
+existing stopped-web usage probe, with matching complete before/after snapshots
+of container identity, state, start time, configuration, mounts and networks.
+That usage probe still requires the database and supported web command.
+Native rebuild instead uses its retained-copy inspection at admission and fresh
+forward checkpoints, including stopped dependencies or a removed web. Restart
+uses the currently inspected exact web container, stopped or Docker-unhealthy.
+Ambiguous ownership, changed physical custody and unresolved lifecycle states
+remain protected. The normal two-slot, every-URL monitor rule still applies.
+A 404 alone, HTTP401/403, a healthy serving web, production or a staff hold never
+gains this exception. Login/session usage remains UNKNOWN; no positive custody
+or isolation fact is supplied.
 
 These observations describe Launchplane's monitor vantage. A network, DNS or
 TLS fault in that vantage can look like a lane outage even if a person can reach
