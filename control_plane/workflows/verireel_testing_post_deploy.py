@@ -452,7 +452,10 @@ class _TestingPageExchanges:
                 self.finish_request(request)
 
     def close(self) -> None:
-        self.page.close()
+        try:
+            self.page.close()
+        except Exception as error:
+            raise _unknown_testing_effect("close", "browser_lost") from error
         self.failed.update(
             request
             for request in self.requests
@@ -525,6 +528,9 @@ def verify_verireel_testing_product(
                         _finish_action(signup.value, exchanges)
                         page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
                         exchanges.finish()
+                        expect(
+                            page.get_by_role("heading", level=1, name=re.compile("billing", re.I))
+                        ).to_be_visible(timeout=30_000)
                         assert_verireel_testing_identity(base_url, context)
                         # Exercise creator denial before turning this fixture into an admin.
                         for path in ("/site-config", "/site-config/billing"):

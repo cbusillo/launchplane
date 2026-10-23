@@ -107,6 +107,10 @@ class _Page:
         return self.closed or self.browser.failure == "disconnected"
 
     def close(self) -> None:
+        if self.browser.failure == "close":
+            raise OSError("Browser connection lost while closing the page")
+        if self.browser.failure == "read-at-close":
+            self.emit("GET", "/billing?_rsc=fixture")
         self.closed = True
 
     def event(self, event: str, value: Any) -> None:
@@ -124,6 +128,8 @@ class _Page:
     def expect_request_finished(
         self, *, predicate: Callable[[Any], bool], timeout: int
     ) -> Iterator[None]:
+        if self.is_closed():
+            raise OSError("Page closed before request settlement")
         yield
         self.finish_pending_request(predicate, timeout)
 
@@ -217,7 +223,8 @@ class _Page:
     def require_drained_requests(self) -> None:
         for request in self.browser.requests:
             if (
-                "?_rsc=" in request.url
+                request._response.page is self
+                and "?_rsc=" in request.url
                 and request not in self.browser.finished
                 and request not in self.browser.failed
             ):
@@ -345,7 +352,12 @@ class ProductExecutionTests(unittest.TestCase):
 
         def expect(locator: _Locator) -> Any:
             def visible(**_kwargs: Any) -> None:
-                if failure == "assertion" and locator.role == "heading":
+                if locator.role == "heading" and (
+                    failure == "assertion"
+                    and "/site-config" in locator.page.url
+                    or failure == "billing-assertion"
+                    and urlparse(locator.page.url).path == "/billing"
+                ):
                     raise AssertionError("answered page has unexpected presentation")
                 if failure == "public-refresh" and locator.role == "link":
                     locator.page.emit("GET", "/v/fixture?_rsc=fixture")
@@ -389,6 +401,7 @@ class ProductExecutionTests(unittest.TestCase):
             "billing-aborted",
             "billing-aborted-in-wait",
             "late-read",
+            "read-at-close",
             "signup-refresh",
             "qr-refresh",
             "navigation-refresh",
@@ -416,6 +429,7 @@ class ProductExecutionTests(unittest.TestCase):
             "billing-action-aborted",
             "qr-aborted",
             "public-aborted",
+            "close",
         ):
             with self.subTest(failure=failure):
                 with self.assertRaises(ProviderMutationUnknownError):
@@ -471,7 +485,7 @@ class ProductExecutionTests(unittest.TestCase):
             guard.require_completed_exchanges()
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
-        for failure in ("fill", "assertion", "signup-click", "qr-click"):
+        for failure in ("fill", "assertion", "billing-assertion", "signup-click", "qr-click"):
             with self.subTest(failure=failure):
                 with self.assertRaises(click.ClickException):
                     self.verify(failure)

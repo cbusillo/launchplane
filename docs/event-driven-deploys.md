@@ -258,9 +258,11 @@ reservation. The webhook request never waits on a deploy.
     wait still requires the matching finished request and a successful response.
     Aborted GET/HEAD requests without an action header settle only for the
     verifier's known read routes. Signup, server actions and public verification
-    (which records a scan) still require response completion; a read with no
-    terminal event remains unknown. Pages close before fixture deletion so late
-    prefetches cannot race cleanup or leave unfinished read receipts.
+    (which records a scan) still require response completion; a read that never
+    settles during verification remains unknown. After the final drain, closing
+    each page settles late read arrivals before fixture deletion. A failed page
+    close remains unknown, with cleanup skipped. The billing page must render
+    its main heading after signup; an aborted read is not presentation proof.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.
