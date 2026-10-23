@@ -1200,6 +1200,10 @@ def _merge_preview_addon_settings(
         if len(pairs) != len(set(pairs)):
             raise ValueError("Conflicting preview addon settings")
         if any(item.addon == "shopify" for item in preview.addon_settings):
+            if control_plane_odoo_instance_overrides.odoo_instance_is_production(
+                profile.preview.template_instance
+            ):
+                raise ValueError("Preview Shopify settings require a non-production template")
             protected = _protected_store_keys(
                 record_store=cast(OdooAddonSettingsStore, record_store),
                 product=profile.product,
@@ -1214,7 +1218,8 @@ def _merge_preview_addon_settings(
                     if item.value.source != "literal" or not isinstance(item.value.value, str):
                         raise ValueError("Shopify store selection requires a literal")
                     _validate_store_key(
-                        shop_url_key=item.value.value, protected_store_keys=protected
+                        shop_url_key=item.value.value.strip().lower(),
+                        protected_store_keys=protected,
                     )
         for item in preview.addon_settings:
             if (

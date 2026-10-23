@@ -9,6 +9,7 @@ import click
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_instance_overrides import build_preview_website_bootstrap_environment
 from control_plane.odoo_preview_apply_http import _merge_preview_addon_settings
@@ -140,7 +141,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "api_version": "fixture-version",
                 }.items()
             ]
-            for handle in ("fixture-shop", "protected-fixture-shop")
+            for handle in ("fixture-shop", "protected-fixture-shop", "LiveShop")
         ] + [
             [
                 {
@@ -149,7 +150,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     "value": {
                         "source": "secret_binding",
                         "secret_binding_id": "fixture-binding",
-                        "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
+                        "environment_variable": addon_setting_secret_env_key(
+                            addon_name="openai", setting_name="api_key"
+                        ),
                     },
                 }
             ],
@@ -217,6 +220,15 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             ],
             allowed,
         )
+        production_template = profile.model_copy(
+            update={"preview": profile.preview.model_copy(update={"template_instance": "prod"})}
+        )
+        with self.assertRaises(click.ClickException):
+            _merge_preview_addon_settings(
+                {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated},
+                profile=production_template,
+                record_store=store,
+            )
 
     def test_preview_addon_settings_reject_malformed_payload_without_echoing_values(self) -> None:
         duplicate = {
