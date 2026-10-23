@@ -1196,7 +1196,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.client.read()
         self.assertEqual(self.effect_count, 0)
 
-    def declared_two_listener_route(self) -> None:
+    def declared_two_listener_route(self, *, repeat_labels: bool = False) -> None:
         self.unavailable_route()
         self.raw["middlewares"]["redirect-to-https@file"] = {
             "status": "enabled",
@@ -1208,6 +1208,10 @@ class TestingRouteTransportTests(unittest.TestCase):
             domain_certificate_type="none",
             isolated_testing=True,
         )
+        if repeat_labels:
+            declaration = yaml.safe_load(configured)
+            declaration["services"]["web"]["labels"] *= 2
+            configured = yaml.safe_dump(declaration)
         frame = self.client.read()
         self.plan = compile_unavailable_testing_route(
             product=self.plan.product,
@@ -1235,6 +1239,37 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.publish(self.plan.new_backend, None)
         self.publish(None, self.plan.new_backend)
         self.assertFalse(self.route_file.exists())
+
+    def test_identical_repeated_labels_preserve_unavailable_route_and_its_inverse(self) -> None:
+        self.declared_two_listener_route(repeat_labels=True)
+        self.publish(self.plan.new_backend, None)
+        self.publish(None, self.plan.new_backend)
+        self.assertFalse(self.route_file.exists())
+
+    def test_contradictory_repeated_label_refuses_unavailable_route(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        labels = [
+            "traefik.enable=true",
+            "traefik.docker.network=dokploy-network",
+            f"traefik.http.routers.testing.rule=Host(`{self.plan.host}`)",
+            "traefik.http.routers.testing.entrypoints=websecure",
+            "traefik.http.routers.testing.tls=true",
+            "traefik.http.routers.testing.tls=false",
+        ]
+        with self.assertRaises(ValueError):
+            compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+            )
+        self.assertEqual(self.effect_count, 0)
 
     def test_recorded_unavailable_template_needs_its_current_tls_resolver(self) -> None:
         for router in self.plan.template["http"]["routers"].values():
