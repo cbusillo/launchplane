@@ -4,7 +4,6 @@ import base64
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-import re
 
 from control_plane.copy_readback_diagnostics import readback_marker_is_safe
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
@@ -12,6 +11,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
     TestingCandidateApplication,
     TestingCandidatePrepared,
+    candidate_compose_project_matches,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeProgramFailed
@@ -142,11 +142,12 @@ def require_candidate_configuration(
         allocation.namespace,
     ):
         raise ValueError("Candidate placement changed.")
-    if not re.fullmatch(
-        re.escape(allocation.namespace) + r"(?:-[a-z0-9]{6})?",
-        str(payload.get("appName") or ""),
-    ):
+    project = str(payload.get("appName") or "")
+    if not candidate_compose_project_matches(allocation.namespace, project):
         raise ValueError("Candidate Compose project changed.")
+    prepared = allocation.application.prepared if allocation.application is not None else None
+    if prepared is not None and prepared.compose_project and project != prepared.compose_project:
+        raise CandidateObservationUnavailable("The original prepared Compose project changed.")
     if (
         payload.get("autoDeploy") is not False
         or payload.get("sourceType") != "raw"
@@ -246,9 +247,8 @@ def observe_candidate_configuration(
                 (payload.get("serverId"), payload.get("environmentId"))
                 != (record.server_id, record.environment_id)
                 or payload.get("name") != record.namespace
-                or not re.fullmatch(
-                    re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?",
-                    str(payload.get("appName") or ""),
+                or not candidate_compose_project_matches(
+                    record.namespace, str(payload.get("appName") or "")
                 )
                 or payload.get("env") not in (None, "")
             ):

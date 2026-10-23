@@ -377,13 +377,6 @@ class NativeTestingWorkerTests(unittest.TestCase):
         writer_attempt: Any = None,
         desired_compose_project: str | None = None,
     ) -> str:
-        if backend == plan.new_backend:
-            application = self.fixture.candidate.application
-            assert application is not None and application.prepared is not None
-            self.assertEqual(desired_compose_project, application.prepared.compose_project or None)
-        else:
-            self.assertIsNone(desired_compose_project)
-
         def publish() -> None:
             if backend == plan.new_backend:
                 self.assertEqual(self.current().target_id, self.fixture.before.target_id)
@@ -1436,7 +1429,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.admit_unavailable("absent")
         preimage = deepcopy(self.raw)
         self.fail_public = True
-        result = self.execute()
+
+        def publish(plan: Any, backend: str | None, **kwargs: Any) -> str:
+            self.assertEqual(
+                kwargs["desired_compose_project"],
+                self.prepared.compose_project if backend == plan.new_backend else None,
+            )
+            return self.switch(plan, backend, **kwargs)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=publish):
+            result = self.execute()
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertEqual(self.raw, preimage)
@@ -1473,6 +1475,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         switch = self.switch
 
         def lost(*args: Any, **kwargs: Any) -> str:
+            self.assertEqual(kwargs["desired_compose_project"], self.prepared.compose_project)
             switch(*args, **kwargs)
             raise NativeSourceUnavailable("fixture lost original route reply")
 
@@ -3449,6 +3452,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 runtime_identity=inputs.plan.runtime_identity,
                 private_endpoint=self.fixture.route.new_backend,
                 deployment_id="candidate-deployment",
+                compose_project=namespace + "-abc123",
                 source_witness="empty:" + inputs.plan.digest,
                 integration_isolation_verified=True,
                 credentials_verified=True,
@@ -4363,7 +4367,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             (
                 "new",
                 shell.plan.new_backend,
-                str(urlsplit(shell.plan.new_backend).hostname),
+                self.prepared.compose_project,
                 shell.new_identity,
             ),
         ):

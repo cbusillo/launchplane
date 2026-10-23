@@ -195,6 +195,26 @@ class CandidateApplicationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     TestingCandidateApplication.model_validate(legacy)
 
+    def test_prepared_project_cannot_be_replaced_by_a_fresh_readiness_probe(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        self.provider_state["appName"] = allocation.namespace + "-def456"
+        with patch.object(application, "_read_remote") as remote:
+            remote.side_effect = lambda **kwargs: kwargs["receive"](
+                {"type": "complete", "private_readiness_verified": True}
+            )
+            with self.assertRaises(application.CandidateObservationUnavailable):
+                real_readiness(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    allocation=allocation,
+                    inputs=self.inputs(allocation),
+                    deployment_id=allocation.application.deployment_id,
+                )
+            remote.assert_not_called()
+
     def test_private_probe_distinguishes_returned_failure_from_transport_or_denial(self) -> None:
         from control_plane.dokploy.native_copy_stream import (
             NativeProgramFailed,
@@ -287,7 +307,7 @@ class CandidateApplicationTests(unittest.TestCase):
             "composeFile": "",
             "env": "",
             "autoDeploy": False,
-            "appName": self.allocation.namespace,
+            "appName": self.allocation.namespace + "-abc123",
         }
         self.deployments: list[dict[str, Any]] = []
         self.restore_deployments: list[dict[str, Any]] = []

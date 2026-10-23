@@ -15,6 +15,10 @@ from control_plane.contracts.odoo_testing_source import NativeOdooSourceAuthorit
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 
 
+def candidate_compose_project_matches(namespace: str, project: str) -> bool:
+    return re.fullmatch(re.escape(namespace) + r"(?:-[a-z0-9]{6})?", project) is not None
+
+
 class TestingCandidateApplicationPlan(FrozenRecord):
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
@@ -218,8 +222,8 @@ class TestingCandidateApplication(FrozenRecord):
         if (
             self.prepared is not None
             and self.prepared.compose_project
-            and not re.fullmatch(
-                re.escape(self.plan.namespace) + r"(?:-[a-z0-9]{6})?", self.prepared.compose_project
+            and not candidate_compose_project_matches(
+                self.plan.namespace, self.prepared.compose_project
             )
         ):
             raise ValueError("Prepared project differs from the original candidate namespace.")
