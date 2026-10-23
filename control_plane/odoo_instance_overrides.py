@@ -12,6 +12,7 @@ from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAME
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooAddonSettingOverride,
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
 )
@@ -565,10 +566,17 @@ def build_preview_website_bootstrap_environment(
 
 
 def merge_preview_addon_settings(
-    environment: dict[str, str], *, preview_override_environment: dict[str, str]
+    environment: dict[str, str],
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    preview_slug: str,
+    record_store: object,
 ) -> None:
-    encoded_preview = preview_override_environment.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, "")
-    if not encoded_preview.strip():
+    encoded_preview = profile.preview.override_env.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, "")
+    if (
+        not encoded_preview.strip()
+        or environment.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY) == encoded_preview
+    ):
         return
     preview_payload = _decode_preview_override_payload(encoded_preview)
     if not preview_payload.addon_settings:
@@ -576,12 +584,30 @@ def merge_preview_addon_settings(
     generated_payload = _decode_preview_override_payload(
         environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
     )
-    settings = {
-        (item.addon, item.setting): item
-        for item in (*generated_payload.addon_settings, *preview_payload.addon_settings)
-    }
+    record = OdooInstanceOverrideRecord(
+        context=profile.preview.context,
+        instance=preview_slug,
+        updated_at=profile.updated_at,
+        addon_settings=tuple(
+            OdooAddonSettingOverride(
+                addon=item.addon,
+                setting=item.setting,
+                value=OdooOverrideValue.model_validate(
+                    item.value.model_dump(exclude={"environment_variable"})
+                ),
+            )
+            for item in preview_payload.addon_settings
+        ),
+    )
+    rendered = render_post_deploy_payload(
+        record, record_store=record_store, clear_undeclared_shopify=False
+    )
+    if any(
+        not environment.get(key, "").strip() for key in rendered.required_container_environment_keys
+    ):
+        raise click.ClickException("Preview addon settings require delivered runtime bindings.")
     merged_payload = generated_payload.model_copy(
-        update={"addon_settings": tuple(settings.values())}
+        update={"addon_settings": rendered.addon_settings}
     )
     environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = _encode_post_deploy_payload(
         merged_payload

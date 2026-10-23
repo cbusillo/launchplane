@@ -13,7 +13,9 @@ from control_plane.contracts.idempotency_record import build_launchplane_mutatio
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooAddonSettingOverride,
     OdooInstanceOverrideRecord,
+    OdooOverrideValue,
     OdooWebsiteBootstrapPayload,
 )
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
@@ -385,6 +387,15 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                     OdooInstanceOverrideRecord(
                         context="cm",
                         instance="testing",
+                        addon_settings=(
+                            OdooAddonSettingOverride(
+                                addon="authentik_sso",
+                                setting="client_id",
+                                value=OdooOverrideValue(
+                                    source="literal", value="template-fixture-client"
+                                ),
+                            ),
+                        ),
                         website_bootstrap=OdooWebsiteBootstrapPayload(
                             tenant="cm",
                             name="Preview fixture",
