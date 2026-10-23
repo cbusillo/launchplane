@@ -408,14 +408,12 @@ class _TestingPageExchanges:
                 response=self.responses.get(request),
             )
         if request not in self.completed:
-            # Response.finished() has no timeout and can remain pending after
-            # requestfailed. The built-in event wait is bounded even in that case.
             try:
-                self.page.wait_for_event(
-                    "requestfinished",
+                with self.page.expect_request_finished(
                     predicate=lambda finished: finished == request,
                     timeout=30_000,
-                )
+                ):
+                    pass
             except Exception:
                 _unknown_testing_effect(
                     "finish_request",

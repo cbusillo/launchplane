@@ -104,12 +104,26 @@ class _Page:
             callback(value)
 
     def wait_for_event(self, event: str, *, predicate: Callable[[Any], bool], timeout: int) -> None:
+        self.finish_pending_request(predicate, timeout)
+        if self.browser.failure == "signup-buffered":
+            raise TimeoutError("Completion arrived before the asynchronous waiter registered")
+
+    @contextmanager
+    def expect_request_finished(
+        self, *, predicate: Callable[[Any], bool], timeout: int
+    ) -> Iterator[None]:
+        yield
+        self.finish_pending_request(predicate, timeout)
+
+    def finish_pending_request(self, predicate: Callable[[Any], bool], timeout: int) -> None:
         if timeout <= 0:
             raise AssertionError("Request completion needs a bounded built-in wait.")
         self.browser.events.append("bounded-body-wait")
         for request in self.browser.requests:
             if (
-                self.browser.failure == "billing-pending"
+                self.browser.failure == "signup-buffered"
+                and request.url.endswith("/api/auth/sign-up/email")
+                or self.browser.failure == "billing-pending"
                 and request.url.endswith("/billing")
                 or ("?_rsc=" in request.url and self.browser.failure != "refresh-unknown")
             ) and predicate(request):
@@ -127,6 +141,7 @@ class _Page:
         if path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
             "signup",
             "body_pending",
+            "signup-buffered",
         }:
             if self.browser.failure == "signup":
                 self.event("requestfailed", request)
@@ -322,6 +337,7 @@ class ProductExecutionTests(unittest.TestCase):
     def test_real_verifier_finishes_dynamic_refresh_and_action_responses(self) -> None:
         for failure in (
             "",
+            "signup-buffered",
             "billing-pending",
             "signup-refresh",
             "qr-refresh",
@@ -388,7 +404,7 @@ class ProductExecutionTests(unittest.TestCase):
         response = Mock(request=request, status=200)
         exchanges.started(request)
         exchanges.responded(response)
-        page.wait_for_event.side_effect = TimeoutError("private-transport-detail")
+        page.expect_request_finished.side_effect = TimeoutError("private-transport-detail")
         with (
             self.assertLogs(verification.__name__, level="WARNING") as logs,
             self.assertRaises(TimeoutError),
