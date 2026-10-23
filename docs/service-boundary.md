@@ -1974,6 +1974,11 @@ transport or its managed authority.
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
 records; product repos do not carry repo-local Launchplane lifecycle manifests.
+Profile GET responses include a strong `ETag`. A full-profile POST may supply
+that exact revision as `If-Match`; stale revisions return HTTP 412 before any
+save. Existing idempotent replay precedes this check. The reviewed
+[preview override helper](preview-settings.md) uses this condition to preserve
+unrelated profile updates while changing one preview setting.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
