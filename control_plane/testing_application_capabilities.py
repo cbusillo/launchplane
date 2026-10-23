@@ -276,6 +276,22 @@ def retained_application_capability_program(spec: dict[str, object]) -> str:
 
 
 def capability_program_matches(observed: object, expected: str) -> bool:
+    historical = expected
+    for fragment in (
+        PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+        PREPARED_CONTAINER_LOOKUP,
+        PREPARED_CONTAINER_READBACK,
+    ):
+        if historical.count(fragment) != 1:
+            break
+        historical = historical.replace(fragment, "", 1)
+    else:
+        if _capability_program_matches(observed, historical):
+            return True
+    return _capability_program_matches(observed, expected)
+
+
+def _capability_program_matches(observed: object, expected: str) -> bool:
     if not isinstance(observed, str) or len(observed) != len(expected):
         return False
     if observed == expected:
@@ -326,7 +342,65 @@ def inspect_retained_application_capabilities(
     return canonical_json_sha256(spec)
 
 
-RETAINED_APPLICATION_CAPABILITY_PROGRAM = r"""
+PREPARED_CONTAINER_CAPABILITY_PROGRAM = r"""
+prepared = {}
+
+def prepared_container_id(task, identifiers, service, nodes, values):
+    candidates = []
+    for identifier in identifiers:
+        found = json.loads(docker("inspect", identifier))
+        if not isinstance(found, list) or len(found) != 1 or found[0].get("Id") != identifier:
+            raise ValueError("container inventory incomplete")
+        container = found[0]
+        if (container.get("Config", {}).get("Labels") or {}).get("com.docker.swarm.task.id") == task["ID"]:
+            candidates.append(container)
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("prepared task container is ambiguous")
+    container = candidates[0]
+    labels = container.get("Config", {}).get("Labels") or {}
+    slot = task.get("Slot")
+    if (task.get("Status", {}).get("State") != "ready" or type(slot) is not int or slot < 1
+        or task.get("NodeID") != nodes[0]["ID"]
+        or labels.get("com.docker.swarm.service.id") != service["ID"]
+        or labels.get("com.docker.swarm.service.name") != service["Spec"]["Name"]
+        or labels.get("com.docker.swarm.node.id") != task["NodeID"]
+        or container.get("Name") != "/" + service["Spec"]["Name"] + "." + str(slot) + "." + task["ID"]
+        or container.get("State", {}).get("Status") != "created"
+        or container.get("State", {}).get("Running") is not False
+        or container.get("Config", {}).get("Image") != task["Spec"]["ContainerSpec"].get("Image")
+        or json.loads(docker("inspect", container["Name"])) != [container]):
+        raise ValueError("prepared task container ownership unavailable")
+    image_id = container.get("Image")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
+        raise ValueError("prepared task image unavailable")
+    image = json.loads(docker("image", "inspect", image_id))
+    if not isinstance(image, list) or len(image) != 1 or image[0].get("Id") != image_id:
+        raise ValueError("prepared task image unavailable")
+    merged = capability({"Env": image[0].get("Config", {}).get("Env") or []})
+    merged.update(values)
+    if capability(container.get("Config")) != merged:
+        raise ValueError("prepared task container inputs changed")
+    prepared[task["ID"]] = (task, container)
+    return container["Id"]
+"""
+
+PREPARED_CONTAINER_LOOKUP = r"""
+            if not container_id:
+                container_id = prepared_container_id(task[0], container_ids, service[0], local_nodes, values)
+"""
+
+PREPARED_CONTAINER_READBACK = r"""
+    for task, container in prepared.values():
+        if (json.loads(docker("inspect", "--type", "task", task["ID"])) != [task]
+            or json.loads(docker("inspect", container["Id"])) != [container]):
+            raise ValueError("prepared task container changed")
+"""
+
+
+RETAINED_APPLICATION_CAPABILITY_PROGRAM = (
+    r"""
 def docker(*arguments):
     result = subprocess.run(["docker", *arguments], check=False, capture_output=True, text=True, timeout=60)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
@@ -374,7 +448,9 @@ def image_matches(reference, artifact, provider):
     if "@" in reference:
         return repository(reference) == repository(artifact) and docker_image_digest(reference) == docker_image_digest(artifact)
     return reference == provider
-
+"""
+    + PREPARED_CONTAINER_CAPABILITY_PROGRAM
+    + r"""
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     service = json.loads(docker("service", "inspect", spec["application"]))
@@ -407,7 +483,9 @@ try:
                 or not docker_image_digest(artifact) or not image_matches(configuration.get("Image", ""), artifact, provider)):
                 raise ValueError("retained immutable image unavailable")
             container_id = task[0].get("Status", {}).get("ContainerStatus", {}).get("ContainerID")
-            if container_id and container_id in container_ids:
+"""
+    + PREPARED_CONTAINER_LOOKUP
+    + r"""            if container_id and container_id in container_ids:
                 container = json.loads(docker("inspect", container_id))[0]
                 image_id = container.get("Image")
                 if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
@@ -435,7 +513,9 @@ try:
             continue
         capability(configuration)
         mounts(container[0].get("Mounts"))
-    if (not attributable or rows("service", "ps", "--no-trunc", "-q", spec["application"]) != task_ids
+"""
+    + PREPARED_CONTAINER_READBACK
+    + r"""    if (not attributable or rows("service", "ps", "--no-trunc", "-q", spec["application"]) != task_ids
         or rows("ps", "-aq", "--no-trunc", "--filter", container_filter) != container_ids
         or json.loads(docker("service", "inspect", spec["application"])) != service
         or single_local_swarm_node(docker) != local_nodes):
@@ -446,3 +526,4 @@ except Exception:
     print("testing_resources_ok=false")
     sys.exit(1)
 """
+)

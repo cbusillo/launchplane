@@ -98,6 +98,39 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             with self.subTest(observed=type(observed).__name__):
                 self.assertFalse(capability_program_matches(observed, current))
 
+    def test_previous_stricter_program_is_recognized_without_partial_proof_edits(self) -> None:
+        from control_plane.testing_application_capabilities import (
+            capability_program_matches,
+            retained_application_capability_program,
+            PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+            PREPARED_CONTAINER_LOOKUP,
+            PREPARED_CONTAINER_READBACK,
+        )
+
+        current = retained_application_capability_program(self.spec)
+        historical = current
+        for fragment in (
+            PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+            PREPARED_CONTAINER_LOOKUP,
+            PREPARED_CONTAINER_READBACK,
+        ):
+            historical = historical.replace(fragment, "", 1)
+            self.assertEqual(
+                capability_program_matches(historical, current),
+                fragment == PREPARED_CONTAINER_READBACK,
+            )
+        changed = deepcopy(self.spec)
+        changed["application_id"] = "foreign-target"
+        self.assertFalse(
+            capability_program_matches(historical, retained_application_capability_program(changed))
+        )
+        self.assertFalse(
+            capability_program_matches(
+                historical.replace("retained image digest unavailable", "removed image check"),
+                current,
+            )
+        )
+
     def test_historical_host_program_keeps_terminal_and_provenance_guards(self) -> None:
         from pathlib import Path
 
@@ -292,11 +325,20 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                     {
                         "Id": values[2],
                         "RepoDigests": [self.identity["artifact_id"]],
+                        "Config": {"Env": getattr(self, "image_environment", [])},
                     }
                 ]
             )
         elif values[:3] == ["inspect", "--type", "task"]:
             result = json.dumps([self.tasks[values[3]]])
+        elif len(values) == 2 and values[0] == "inspect" and values[1].startswith("/"):
+            result = json.dumps(
+                [
+                    container
+                    for container in self.containers.values()
+                    if container.get("Name") == values[1]
+                ]
+            )
         elif len(values) == 2 and values[0] == "inspect" and values[1] in self.containers:
             result = json.dumps([self.containers[values[1]]])
         else:
@@ -341,6 +383,103 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
         self.spec["deployments"] = {
             "different-original-deployment": self.spec["deployments"]["original-deployment"]
         }
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def prepare_container_without_status_id(self) -> None:
+        self.task["Slot"] = 1
+        self.task["Status"] = {"State": "ready"}
+        self.task["Spec"]["ContainerSpec"]["Image"] = self.spec["deployments"][
+            "original-deployment"
+        ]["provider_reference"]
+        container = self.containers["original-container"]
+        container["Name"] = "/retained-app.1.original-task"
+        container["State"] = {"Status": "created", "Running": False}
+        container["Config"]["Labels"].update(
+            {
+                "com.docker.swarm.service.id": self.service["ID"],
+                "com.docker.swarm.task.id": self.task["ID"],
+                "com.docker.swarm.node.id": self.nodes[0]["ID"],
+            }
+        )
+
+    def test_prepared_container_proves_image_before_task_status_publishes_id(self) -> None:
+        self.prepare_container_without_status_id()
+        self.assertIn("testing_resources_ok=true", self.observe())
+
+    def test_prepared_container_requires_actual_digest_and_merged_image_inputs(self) -> None:
+        self.prepare_container_without_status_id()
+        self.image_environment = ["IMAGE_DEFAULT=present"]
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.containers["original-container"]["Config"]["Env"].extend(self.image_environment)
+        self.assertIn("testing_resources_ok=true", self.observe())
+        self.identity["artifact_id"] = "example/app@sha256:" + "c" * 64
+        with self.assertRaises(SystemExit):
+            self.observe()
+
+    def test_prepared_container_or_task_change_during_proof_refuses(self) -> None:
+        for changed_record in ("container", "task"):
+            self.setUp()
+            self.prepare_container_without_status_id()
+            docker = self.docker
+
+            def changed(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                result = docker(arguments, **kwargs)
+                if arguments[1:3] == ["image", "inspect"]:
+                    if changed_record == "container":
+                        self.containers["original-container"]["State"] = {
+                            "Status": "running",
+                            "Running": True,
+                        }
+                    else:
+                        self.task["Status"] = {"State": "starting"}
+                return result
+
+            with (
+                self.subTest(changed_record=changed_record),
+                patch.object(self, "docker", side_effect=changed),
+                self.assertRaises(SystemExit),
+            ):
+                self.observe()
+
+    def test_unproven_prepared_container_never_supplies_tag_image_proof(self) -> None:
+        self.prepare_container_without_status_id()
+        original = deepcopy(self.containers)
+        for mutation in (
+            {"Name": "/foreign.1.original-task"},
+            {"State": {"Status": "running", "Running": True}},
+            {"Image": "not-an-image-id"},
+        ):
+            with self.subTest(mutation=mutation):
+                self.containers = deepcopy(original)
+                self.containers["original-container"].update(mutation)
+                with self.assertRaises(SystemExit):
+                    self.observe()
+        for key in ("service.id", "service.name", "task.id", "node.id"):
+            with self.subTest(label=key):
+                self.containers = deepcopy(original)
+                self.containers["original-container"]["Config"]["Labels"][
+                    "com.docker.swarm." + key
+                ] = "foreign"
+                with self.assertRaises(SystemExit):
+                    self.observe()
+        self.containers = deepcopy(original)
+        duplicate = deepcopy(self.containers["original-container"])
+        duplicate["Id"] = "duplicate"
+        self.containers["duplicate"] = duplicate
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.containers = deepcopy(original)
+        self.containers["original-container"]["Config"]["Env"].append("FOREIGN_INPUT=changed")
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.containers = deepcopy(original)
+        self.containers["original-container"]["Config"]["Image"] = "example/foreign:changed"
+        with self.assertRaises(SystemExit):
+            self.observe()
+        self.containers = deepcopy(original)
+        self.task["Status"]["ContainerStatus"] = {"ContainerID": "different-container"}
         with self.assertRaises(SystemExit):
             self.observe()
 
