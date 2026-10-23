@@ -2152,6 +2152,13 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
+Incident detail also reads the exact opening observation independently of its
+bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
+is returned as absent. Deploy-fence observations expose only canonical opaque
+provider-operation references and opaque reservation record IDs, including IDs retained
+in legacy provider summaries. These are diagnostic links, not proof of settlement
+or authority to recover. Missing reservations and unmatched incarnations remain
+held until their corresponding supported recovery proves disposition.
 The outbox worker sends email and Discord as well as GitHub notifications for
 still-open incidents. Recovery does not manufacture another notification to
 resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;

@@ -35411,6 +35411,16 @@
             "title": "Observations",
             "type": "array"
           },
+          "opening_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductIncidentObservationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "outbox_deliveries": {
             "default": [],
             "items": {
@@ -35824,6 +35834,22 @@
           "observed_at": {
             "title": "Observed At",
             "type": "string"
+          },
+          "provider_operation_references": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Operation References",
+            "type": "array"
+          },
+          "provider_reservation_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Reservation Ids",
+            "type": "array"
           },
           "purpose": {
             "enum": [
