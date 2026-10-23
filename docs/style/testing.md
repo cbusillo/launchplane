@@ -459,19 +459,19 @@ duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
-Screenshots, traces, and failure evidence go to a per-checkout folder under
-the OS temp directory, outside the checkout, so a finished worktree holds no
-smoke output. `pnpm test:browser` prints the folder when it ends.
+Screenshots, traces, and failure evidence go to a per-checkout folder under the
+OS temp directory, outside the checkout, so a finished worktree holds no smoke
+output. `pnpm test:browser` prints the folder when it ends.
 `BROWSER_SMOKE_ARTIFACT_DIR` overrides it; a relative value resolves against
-the checkout. Each run clears the folder first, so it refuses a folder holding
-files a smoke run did not create; point the override at a new or empty
-folder. CI sets it to a workspace folder in
-the top-level workflow env and uploads that folder from the dedicated browser
-job. Vite's per-server optimizer caches and the isolation test's scratch
-folders also live under the OS temp directory. Every run clears prior evidence
-first and verifies the complete desktop and narrow screenshot set before
-passing. These screenshots are review evidence
-rather than pixel-diff baselines, so intentional visual changes do not require
+the checkout. A smoke run owns the folder it creates and replaces everything in
+it on the next run, so do not keep other files there. It refuses to clear a
+folder it did not create; point the override at a new or empty folder. CI sets
+it to a workspace folder in the top-level workflow env and uploads that folder
+from the dedicated browser job. Vite's per-server optimizer caches and the
+isolation test's scratch folders also live under the OS temp directory. Every
+run clears prior evidence first and verifies the complete desktop and narrow
+screenshot set before passing. These screenshots are review evidence rather
+than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 
 The browser job runs Vite and Chromium together inside a per-job Docker container

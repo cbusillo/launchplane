@@ -3,6 +3,8 @@
 set -euo pipefail
 
 : "${BROWSER_SMOKE_IMAGE:?Set the reviewed browser image from the CI workflow}"
+# Evidence must land in the checkout mount; the container's own /tmp is lost.
+: "${BROWSER_SMOKE_ARTIFACT_DIR:?Set a checkout-relative artifact folder from the CI workflow}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 node_executable="$(realpath -- "$(command -v node)")"
 host_network_namespace="$(readlink /proc/self/ns/net)"
