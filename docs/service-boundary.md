@@ -4581,6 +4581,22 @@ are not activated by adding the route.
 
 ## Reviewed stored-setting and workflow-rule retirement
 
+An exact testing lane can disable an existing runtime-secret binding through
+`POST /v1/product-config/apply` with `disable_secret_bindings`, a list of
+`binding_key` and current `version_id` pairs. Read version IDs through the
+names-only product secret-binding surface. Use the existing product-config
+dry-run/apply helpers, with a matching reviewed request and stable idempotency
+key. This metadata-only operation cannot be combined with other config writes.
+
+Retire the keys through product config and sync them out of provider configuration
+first. The service independently checks existing retirement intent, fresh provider
+key absence, unique lane bindings and current versions. Commit-time read sets
+protect retirement intent and secret metadata. Only the selected testing bindings
+become disabled; encrypted versions, secret records and other lanes stay intact.
+The response contains actions and names only. Provider persistence does not prove
+running-container adoption: complete the normal testing deployment and verify
+its runtime behavior before claiming isolation or a green lane.
+
 See [reviewed retirement](reviewed-retirement.md) for the exact request, saved
 review, administrator apply, private rollback custody and readback contracts of
 `POST /v1/admin/runtime-settings/removal`, and the read-only
