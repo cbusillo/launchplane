@@ -1,4 +1,3 @@
-import { rmSync } from "node:fs";
-import { browserSmokeArtifactDir } from "../browser-smoke-paths.mjs";
+import { browserSmokeArtifactDir, resetBrowserSmokeArtifactDir } from "../browser-smoke-paths.mjs";
 
-rmSync(browserSmokeArtifactDir, { force: true, recursive: true });
+resetBrowserSmokeArtifactDir(browserSmokeArtifactDir);

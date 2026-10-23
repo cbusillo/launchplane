@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { test } from "node:test";
-import { resolveBrowserSmokeArtifactDir } from "../browser-smoke-paths.mjs";
+import { resetBrowserSmokeArtifactDir, resolveBrowserSmokeArtifactDir } from "../browser-smoke-paths.mjs";
 
 const tempRoot = "/scratch/os-temp";
 
@@ -27,10 +30,25 @@ test("the override resolves relative paths against the checkout", () => {
     "/evidence");
 });
 
-test("the override never names the checkout or a folder holding it", () => {
-  for (const value of [".", "/work/one", "/work", "/", "frontend/../"]) {
-    assert.throws(() => resolveBrowserSmokeArtifactDir({
-      repoRoot: "/work/one", env: { BROWSER_SMOKE_ARTIFACT_DIR: value }, tempRoot,
-    }), /must not be the checkout/, value);
+test("reset clears only a folder a smoke run created", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "launchplane-smoke-reset-"));
+  try {
+    const fresh = join(scratch, "fresh");
+    resetBrowserSmokeArtifactDir(fresh);
+    await writeFile(join(fresh, "old.png"), "old evidence");
+    resetBrowserSmokeArtifactDir(fresh);
+    assert.ok(!existsSync(join(fresh, "old.png")));
+
+    const empty = join(scratch, "empty");
+    await mkdir(empty);
+    resetBrowserSmokeArtifactDir(empty);
+
+    const shared = join(scratch, "shared");
+    await mkdir(shared);
+    await writeFile(join(shared, "notes.md"), "someone else's file");
+    assert.throws(() => resetBrowserSmokeArtifactDir(shared));
+    assert.deepEqual(await readdir(shared), ["notes.md"]);
+  } finally {
+    await rm(scratch, { force: true, recursive: true });
   }
 });
