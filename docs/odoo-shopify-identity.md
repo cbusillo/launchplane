@@ -84,7 +84,7 @@ the two verified testing hashes only after checking testing authority and
 production runtime selection again. All other production failures, a testing-domain
 mismatch or detected authority/runtime drift discard them. The response still reports
 `separation=unknown` and exits nonzero. These partial hashes are testing identity,
-not a successful comparison with the managed production lane. An operator with
+not a successful comparison with the managed production lane. An agent with
 an independently verified business-store identity can compare the same forms:
 SHA-256 of the exact lowercase canonical `myshopify.com` domain and the full
 `gid://shopify/Shop/<id>` string, with no trailing newline. A numeric ID hash
