@@ -1867,30 +1867,12 @@ A deployment continuing a fresh generation must carry that generation's
 certificate setting into every provider route write, including failed deploys.
 Changing it silently breaks original-bootstrap readback before the copy finishes.
 
-For an existing certificate mismatch, the same endpoint and repository client
-support `route-repair-dry-run`, `route-repair-apply`, and `route-repair-readback`.
-Supply the exact original bootstrap inputs, including certificate/source settings
-and reason. Keep its original key and evidence untouched. Save the repair plan in
-a **new** private evidence file, review it, then apply using that repair evidence,
-`--reviewed-dry-run`, and a **separate repair idempotency key**. Reusing a bootstrap
-key conflicts with its original request; it never repurposes that receipt.
-
-The repair binds the complete current generation and live provider domain row.
-It requires the original unfinished generation, valid allocation/queue receipts,
-current source/resource/credential qualification, unprotected testing use and
-executor/authority locks. Held uncertain provider effects refuse. Only one
-existing route with all other reviewed fields intact qualifies. The service
-updates that existing row's certificate setting only, then verifies the full
-original bootstrap again. It never creates a route, restarts or deploys, changes
-a generation, rewrites credentials, restores a copy, queues work, resets an
-attempt budget or releases historical uncertainty. Lost replies stay unknown
-unless original-key read-only reconciliation proves the same route and stable
-generation identity. Later copy completion or protected use does not authorize
-a write and does not erase an already-dispatched effect. A reservation with no
-effect checkpoint may retry only through the durable runner's no-effect-timestamp
-check; checkpointed uncertainty is never blindly repeated. `runtime_verified` remains false. After repair,
-use original-bootstrap readback and obtain a **new** supported exact-artifact retry
-review separately. Repair alone does not establish copy completion or testing readiness.
+Fix a bad testing certificate by rebuilding the disposable lane through the
+[signed-in testing rebuild and native preflight](#signed-in-testing-rebuild-and-native-preflight).
+Original-bootstrap route verification is not a
+prerequisite for a reviewed deployment retry. The retry's own eligibility,
+resource, credential, use and custody checks still apply; a rebuild never
+releases an operation with unknown provider effects.
 
 New fresh-generation recovery journals bind override intent independently of
 apply status, time, detail, `updated_at` and `source_label`. Website-setting
