@@ -77,6 +77,21 @@ def retained_web_process(containers: list[dict[str, Any]], spec: dict[str, Any])
     }
 
 
+def matches_unavailable_web_process(original: object, current: object) -> bool:
+    return (
+        isinstance(original, dict)
+        and isinstance(current, dict)
+        and original.get("health") == "unhealthy"
+        and original.get("status") == current.get("status") == "running"
+        and all(
+            isinstance(original.get(key), str)
+            and bool(original[key])
+            and original[key] == current.get(key)
+            for key in ("id", "started_at")
+        )
+    )
+
+
 def retained_copy_availability(containers: list[dict[str, Any]], spec: dict[str, Any]) -> str:
     members = [
         item
@@ -144,7 +159,12 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         if item["Config"]["Labels"].get("com.docker.compose.service") == "database"
     ]
     availability = retained_copy_availability(containers, spec)
-    unavailable = spec.get("allow_unavailable") is True and availability == "stopped"
+    unavailable = spec.get("allow_unavailable") is True and (
+        availability == "stopped"
+        or matches_unavailable_web_process(
+            spec.get("unavailable_web_process"), retained_web_process(containers, spec)
+        )
+    )
     if not unavailable and (len(web_members) != 1 or len(database_members) != 1):
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
     web = web_members[0] if web_members else None
@@ -258,6 +278,7 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(retained_inventory_sha256)
         + inspect.getsource(retained_copy_availability)
         + inspect.getsource(retained_web_process)
+        + inspect.getsource(matches_unavailable_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)

@@ -65,7 +65,10 @@ from control_plane.dokploy.native_copy_stream import (
     native_failure_diagnostic,
     NativeSourceAuthorizationDenied,
 )
-from control_plane.dokploy.testing_retained_copy import retained_copy_operation
+from control_plane.dokploy.testing_retained_copy import (
+    retained_copy_operation,
+    matches_unavailable_web_process,
+)
 from control_plane.dokploy_inventory import read_dokploy_target_placement, InventoryUnavailable
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -1212,6 +1215,7 @@ class NativeTestingRebuildExecution:
                 "project": self.intent.project,
                 "context": self.operation.context,
                 "allow_unavailable": True,
+                "unavailable_web_process": self.intent.retained.get("web_process"),
             }
         return {
             "mode": mode,
@@ -2001,13 +2005,7 @@ class NativeTestingRebuildExecution:
             original = self.intent.retained.get("web_process")
             current = frame.get("old_web_process")
             if (
-                isinstance(original, dict)
-                and isinstance(current, dict)
-                and original.get("health") == "unhealthy"
-                and original.get("status") == current.get("status") == "running"
-                and original.get("id")
-                and original.get("started_at")
-                and all(original.get(key) == current.get(key) for key in ("id", "started_at"))
+                matches_unavailable_web_process(original, current)
                 and frame.get("old_inventory_sha256") == self.intent.retained["inventory_sha256"]
             ):
                 proof = retained_copy_operation(
@@ -2016,13 +2014,10 @@ class NativeTestingRebuildExecution:
                     server_id=self.intent.server_id,
                     payload=self.retained_payload("read"),
                 )
-                if (
-                    all(
-                        proof.get(key) == self.intent.retained.get(key)
-                        for key in ("resource_binding", "physical_binding", "identity")
-                    )
-                    and proof.get("web_process") == current
-                ):
+                if all(
+                    proof.get(key) == self.intent.retained.get(key)
+                    for key in ("resource_binding", "physical_binding", "identity")
+                ) and matches_unavailable_web_process(original, proof.get("web_process")):
                     return
             raise NativeTestingRebuildAdmissionChanged(
                 "The unavailable predecessor changed before retirement completed."

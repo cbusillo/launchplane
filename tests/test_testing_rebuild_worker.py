@@ -576,6 +576,45 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
+    def test_original_health_may_flap_between_route_and_custody_reads(self) -> None:
+        self.admit_unhealthy_running()
+        physical = self.physical
+
+        def flapping(**kwargs: Any) -> dict[str, Any]:
+            proof = physical(**kwargs)
+            if proof.get("availability") == "available":
+                proof["web_process"] = {**proof["web_process"], "health": "unhealthy"}
+            return proof
+
+        with (
+            patch.object(service, "retained_copy_operation", side_effect=flapping),
+            patch.object(
+                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_original_health_recovery_requires_proof_side_storage_custody(self) -> None:
+        self.admit_unhealthy_running()
+        physical = self.physical
+
+        def changed(**kwargs: Any) -> dict[str, Any]:
+            proof = physical(**kwargs)
+            if proof.get("availability") == "available":
+                proof["physical_binding"] = "different-physical-backing"
+            return proof
+
+        with (
+            patch.object(service, "retained_copy_operation", side_effect=changed),
+            patch.object(
+                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
+            ),
+        ):
+            self.assert_failed_checkpoint(self.execute())
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+
     def test_recovered_original_requires_admitted_process_and_custody(self) -> None:
         self.doCleanups()
         for change in ("started_at", "id", "inventory", "missing", "unrecorded"):

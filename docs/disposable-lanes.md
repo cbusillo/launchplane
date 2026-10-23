@@ -166,7 +166,7 @@ That durable effect resumes observation on replay. Admission-time state cannot
 skip a dependency that started later. After the candidate route is selected,
 an admitted running-unhealthy web may recover health on the same container and
 start time, with unchanged inventory, configuration and storage custody.
-Missing process evidence, a replacement process or a reappeared Docker router
+Missing process evidence, a healthy replacement process or a reappeared Docker router
 still refuses continuation. The pre-write unavailable admission remains strict.
 A missing web or database does not invent its old data;
 every remaining mounted volume is still inspected for independent backing and

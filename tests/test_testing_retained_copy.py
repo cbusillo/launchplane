@@ -125,6 +125,37 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertFalse(frame["stopped"])
         self.assertTrue(frame["physical_binding"])
 
+    def test_admitted_unhealthy_process_can_recover_without_inventing_old_identity(self) -> None:
+        self.containers[0]["State"].update(
+            StartedAt="fixture-original-start", Health={"Status": "unhealthy"}
+        )
+        self.containers[0]["Config"]["Env"] = [
+            item
+            for item in self.containers[0]["Config"]["Env"]
+            if not item.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+        ]
+        admitted, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.containers[0]["State"]["Health"]["Status"] = "healthy"
+        current, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(current["type"], "complete")
+        self.assertIsNone(current["identity"])
+        self.assertEqual(current["physical_binding"], admitted["physical_binding"])
+        self.containers[0]["State"]["StartedAt"] = "replacement-start"
+        refused, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(refused["type"], "failed")
+
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
     ) -> None:
