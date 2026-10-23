@@ -9,6 +9,11 @@ title: Secrets
 
 ## Client credential input
 
+The same form also accepts the Director's service-owned artifact scan credential
+at the [artifact credential path](artifact-security.md#verified-artifact-scanning).
+That fixed service request writes the managed-secret bindings directly; the
+product-requested Client flow below remains a submission for admin application.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
