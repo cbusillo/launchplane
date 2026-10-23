@@ -355,9 +355,15 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                 or self.administrator_quorum_change is not None
                 or any(rules for _, rules in _authz_policy_rule_collections(self.desired_policy))
                 or self.desired_policy.administrator_quorum is not None
+                or any(
+                    selection.managed_set_id is not None or selection.managed_rule_id is not None
+                    for selection in self.workflow_rule_retirement.selection
+                )
             ):
                 raise ValueError(
-                    "Selected workflow retirement cannot change any other policy field."
+                    "Selected workflow retirement only removes unmanaged rules. "
+                    "Contract managed rules through their own reviewed managed set; "
+                    "do not combine retirement with any other policy change."
                 )
         elif _MANAGED_AUTHZ_SET_PATTERN.fullmatch(self.managed_set_id) is None:
             raise ValueError(

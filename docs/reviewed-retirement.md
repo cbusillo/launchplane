@@ -118,14 +118,18 @@ with `mode: plan`. For this contraction, `managed_set_id` is empty and
 `desired_policy` is an empty schema-v2 or schema-v3 fragment. No managed set is
 reconciled. Schema migration, adoption, quorum changes and nonempty desired rules
 are rejected. The active schema, settings and every unselected rule remain exact.
+Only unmanaged selections are accepted. Contract a managed rule through its own
+reviewed managed set so its independent source cannot silently restore it.
 
-Prepare this proposal with the repository's `scripts/propose-workflow-rule-retirement.py`,
-using `uv run python`, `--operator-helper` pointing to the installed Launchplane
-write-action helper, a private `--selection-file`, stable `--source-event-id`,
-`--reason` and optional `--related-issue`. The script uses the helper's existing
-private operator transport, proposal response validation and full review URL.
-It never approves or applies. Keep the identical source event and input after an
-uncertain submission; inspect or replay that proposal rather than creating another.
+Prepare a private `managed-authz-policy-set` envelope with that request, a stable
+`source_event_id`, `reason` and optional `related_issue`. Submit it through the
+installed Launchplane helper's `privileged-policy-propose --payload-file` command.
+The helper keeps its existing private operator transport, response validation and
+full review URL. It never approves or applies. Keep the identical envelope and
+source event after an uncertain submission; inspect or replay that proposal
+rather than creating another. Older installed clients need the companion
+[helper update](https://github.com/cbusillo/codex-skills/issues/2633) before
+they accept this optional request field.
 
 The existing proposer grant and signed-in Director approval govern the request;
 no new grant or operation descriptor is installed. The Director's review shows

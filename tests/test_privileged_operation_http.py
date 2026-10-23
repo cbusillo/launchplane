@@ -1961,12 +1961,12 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             current_policy=policy, identity=identity, intent="add"
         )
         assert grant is not None
-        from tests.test_workflow_rule_retirement_plan import mixed_policy
+        from tests.test_reviewed_workflow_rule_retirement import retirement_policy
 
         policy = policy.model_copy(
             update={
                 "local_operators": grant.desired_policy.local_operators,
-                "github_actions": mixed_policy().github_actions,
+                "github_actions": retirement_policy().github_actions,
             }
         )
         for descriptor, payload_builder in (

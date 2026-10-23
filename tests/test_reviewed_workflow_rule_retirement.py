@@ -23,6 +23,14 @@ from tests.test_workflow_rule_retirement_plan import mixed_policy, request
 from tests.test_authz_administration_read import _record
 
 
+def retirement_policy() -> LaunchplaneAuthzPolicy:
+    policy = mixed_policy()
+    rule = policy.github_actions[0].model_copy(
+        update={"managed_set_id": None, "managed_rule_id": None}
+    )
+    return policy.model_copy(update={"github_actions": (rule, *policy.github_actions[1:])})
+
+
 def retirement_proposal(policy: LaunchplaneAuthzPolicy) -> ManagedAuthzPolicySetProposalInput:
     return ManagedAuthzPolicySetProposalInput.model_validate(
         {
@@ -36,7 +44,7 @@ def retirement_proposal(policy: LaunchplaneAuthzPolicy) -> ManagedAuthzPolicySet
 
 class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
     def test_stale_selection_and_schema_three_are_checked_without_writes(self) -> None:
-        policy = mixed_policy().model_copy(update={"schema_version": 3})
+        policy = retirement_policy().model_copy(update={"schema_version": 3})
         active = _record(policy=policy)
         store = Mock()
         store.list_authz_policy_records.return_value = [active]
@@ -59,11 +67,8 @@ class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
         store.compare_and_write_authz_policy_record.assert_not_called()
 
     def test_proposal_plans_exact_contraction_and_displays_unmanaged_scope(self) -> None:
-        policy = mixed_policy()
-        rule = policy.github_actions[0].model_copy(
-            update={"managed_set_id": None, "managed_rule_id": None}
-        )
-        policy = policy.model_copy(update={"github_actions": (rule, *policy.github_actions[1:])})
+        policy = retirement_policy()
+        rule = policy.github_actions[0]
         active = _record(policy=policy)
         store = Mock()
         store.list_authz_policy_records.return_value = [active]
@@ -93,7 +98,7 @@ class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
         store.compare_and_write_authz_policy_record.assert_not_called()
 
     def test_retirement_cannot_mix_with_grants_or_managed_set_changes(self) -> None:
-        policy = mixed_policy()
+        policy = retirement_policy()
         payload = {
             "managed_set_id": "",
             "desired_policy": {"schema_version": policy.schema_version},
@@ -105,6 +110,7 @@ class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
             {"desired_policy": policy.model_dump(mode="json")},
             {"administrator_quorum_change": 1},
             {"schema_migration": "migrate_v2_to_v3"},
+            {"workflow_rule_retirement": request(mixed_policy()).model_dump(mode="json")},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 ManagedAuthzPolicySetProposalInput.model_validate({**payload, **change})
@@ -118,7 +124,7 @@ class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
             store.ensure_schema()
             approval_policy = _policy_admin_record()
             policy = approval_policy.policy.model_copy(
-                update={"github_actions": mixed_policy().github_actions}
+                update={"github_actions": retirement_policy().github_actions}
             )
             active = approval_policy.model_copy(update={"policy": policy, "policy_sha256": ""})
             active = LaunchplaneAuthzPolicyRecord.model_validate(active.model_dump())

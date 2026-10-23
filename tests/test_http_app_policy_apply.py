@@ -124,15 +124,19 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
             },
             raw_body=b"not-json",
         )
-        from tests.test_reviewed_workflow_rule_retirement import retirement_proposal
-        from tests.test_workflow_rule_retirement_plan import mixed_policy
+        from tests.test_reviewed_workflow_rule_retirement import (
+            retirement_policy,
+            retirement_proposal,
+        )
 
         retirement_response = await _asgi_request(
             github_app,
             "POST",
             "/v1/authz-policies/managed-rule-sets/reconcile",
             headers={"Authorization": "Bearer valid-token"},
-            payload=retirement_proposal(mixed_policy()).reconcile_request().model_dump(mode="json"),
+            payload=retirement_proposal(retirement_policy())
+            .reconcile_request()
+            .model_dump(mode="json"),
         )
 
         terminal_policy = LaunchplaneAuthzPolicy.model_validate(
