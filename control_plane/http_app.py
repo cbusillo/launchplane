@@ -18871,11 +18871,7 @@ def create_launchplane_fastapi_app(
                 record_store=database_store,
                 manifest=onboarding_manifest,
             )
-        except (
-            ProductRepositoryOwnershipError,
-            ProductClassificationChangeError,
-            control_plane_product_repository_identity.ProductRepositoryIdentityRefusal,
-        ):
+        except (ProductRepositoryOwnershipError, ProductClassificationChangeError):
             raise
         except ProductProfileConflictError as error:
             replay_response = replay_committed_onboarding()
@@ -31541,16 +31537,12 @@ def create_launchplane_fastapi_app(
             _launchplane_http_error(
                 status_code=409,
                 trace_id=next_trace_id(),
-                code=getattr(error, "code", ProductRepositoryOwnershipError.code),
+                code=ProductRepositoryOwnershipError.code,
                 message=str(error),
             ),
         )
 
     app.add_exception_handler(ProductRepositoryOwnershipError, product_repository_ownership_handler)
-    app.add_exception_handler(
-        control_plane_product_repository_identity.ProductRepositoryIdentityRefusal,
-        product_repository_ownership_handler,
-    )
 
     async def product_classification_change_handler(
         request: Request, error: Exception

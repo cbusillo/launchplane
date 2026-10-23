@@ -41,7 +41,7 @@ class ProductClassificationChangeError(ValueError):
 
 class NonruntimeClientUnsupportedError(ValueError):
     code = "nonruntime_client_unsupported"
-    message = "Active non-runtime products require a recorded Director Client and director_standing acceptance; other Clients are unsupported."
+    message = "Active non-runtime products require a recorded Client and authorized-admin attestation of Director standing through director_standing acceptance; other-Client review is unsupported here."
 
     def __init__(self) -> None:
         super().__init__(self.message)

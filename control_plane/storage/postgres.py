@@ -6778,12 +6778,7 @@ class PostgresRecordStore(HumanSessionStore):
                         self._read_product_profile_payload(row.payload)
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
-                    inventory_records=(
-                        self._read_payload(
-                            model_type=RepositoryInventoryRecord, payload=row.payload
-                        )
-                        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
-                    ),
+                    inventory_records=self._iter_repository_inventory_records(session),
                     absent_product_ids=bundle.absent_product_ids,
                 )
             if guard_provider is not None:
@@ -21748,6 +21743,12 @@ class PostgresRecordStore(HumanSessionStore):
         assert insert_error is not None
         raise insert_error
 
+    def _iter_repository_inventory_records(
+        self, session: Any
+    ) -> Iterator[RepositoryInventoryRecord]:
+        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)):
+            yield self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
+
     def list_repository_inventory_records(
         self,
         *,
@@ -28755,10 +28756,7 @@ class PostgresRecordStore(HumanSessionStore):
                     self._read_product_profile_payload(row.payload)
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 ),
-                inventory_records=(
-                    self._read_payload(model_type=RepositoryInventoryRecord, payload=item.payload)
-                    for item in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
-                ),
+                inventory_records=self._iter_repository_inventory_records(session),
             )
             session.merge(self._product_profile_row(record))
             session.commit()
@@ -29096,10 +29094,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._read_product_profile_payload(item.payload)
                 for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
             ),
-            inventory_records=(
-                self._read_payload(model_type=RepositoryInventoryRecord, payload=item.payload)
-                for item in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
-            ),
+            inventory_records=self._iter_repository_inventory_records(session),
         )
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository

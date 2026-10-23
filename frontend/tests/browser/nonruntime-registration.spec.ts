@@ -1,24 +1,33 @@
 import { expect, test, type Page } from "./state";
 
-for (const outcome of ["saved", "lost-reply", "storage-failure", "readback-failure", "readback-absent", "definitive-conflict"]) {
+for (const outcome of ["saved", "lost-reply", "persistent-refusal", "storage-failure", "readback-failure", "readback-absent", "definitive-conflict"]) {
   const lostReply = outcome === "lost-reply";
-  test(`Director product registration ${outcome} @responsive`, async ({ page }, testInfo) => {
+  const persistentRefusal = outcome === "persistent-refusal";
+  test(`Director product registration ${outcome} @responsive`, async ({ page, context }, testInfo) => {
     await page.goto("/ui/products?fixture=products");
     const identity = await page.evaluate(async () => (await import("/ui/src/dev-fixtures.ts")).fixtureIdentity);
     let profile: Record<string, unknown> | null = null;
+    let separateProfile: Record<string, unknown> | null = null;
     let readStatus = outcome.startsWith("readback-") ? 503 : 200;
     let reads = 0;
     let plans = 0;
     const applies: Array<{ key: string; body: unknown }> = [];
     const accessRefusal = "Caller cannot apply product onboarding.";
     const conflictRefusal = "Non-runtime onboarding requires a new product.";
-    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity } }));
-    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: [] } }));
-    await page.route("**/v1/product-profiles/desktop-tool*", route => {
-      reads += 1;
-      return route.fulfill({ status: readStatus, json: readStatus === 200 ? { status: "ok", trace_id: "profile", profile } : { error: { code: "read_failed", message: "Profile unavailable" } } });
+    const sessionCookies: string[] = [];
+    const sessionCookie = { name: "registration-session-fixture", value: "same-admin-session", url: new URL(page.url()).origin };
+    if (persistentRefusal) await context.addCookies([sessionCookie]);
+    await context.route("**/v1/auth/session", route => {
+      sessionCookies.push(route.request().headers().cookie ?? "");
+      return route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity } });
     });
-    await page.route("**/v1/product-onboarding/apply", async route => {
+    await context.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: [] } }));
+    await context.route("**/v1/product-profiles/desktop-tool*", route => {
+      reads += 1;
+      const saved = route.request().url().endsWith("/desktop-tool-separate") ? separateProfile : profile;
+      return route.fulfill({ status: readStatus, json: readStatus === 200 ? { status: "ok", trace_id: "profile", profile: saved } : { error: { code: "read_failed", message: "Profile unavailable" } } });
+    });
+    await context.route("**/v1/product-onboarding/apply", async route => {
       const body = route.request().postDataJSON();
       const planned = { ...body.manifest, owner: { ...body.manifest.owner, github_login: "director" }, lifecycle_state: "active", lanes: [], updated_at: "2026-10-22T12:00:00Z", source: "fixture" };
       if (body.mode === "apply") {
@@ -27,7 +36,16 @@ for (const outcome of ["saved", "lost-reply", "storage-failure", "readback-failu
           await route.fulfill({ status: 403, json: { error: { code: "authorization_denied", message: accessRefusal } } });
           return;
         }
-        profile = planned;
+        if (persistentRefusal && body.manifest.product === "desktop-tool") {
+          if (applies.length === 1) {
+            profile = { ...planned, display_name: "Independent registration" };
+            await route.abort("failed"); return;
+          }
+          await route.fulfill({ status: 400, json: { error: { code: "invalid_product_onboarding_manifest", message: conflictRefusal } } });
+          return;
+        }
+        if (body.manifest.product === "desktop-tool-separate") separateProfile = planned;
+        else profile = planned;
         if (lostReply && applies.length === 1) { await route.abort("failed"); return; }
         if (outcome === "definitive-conflict" && applies.length === 1) {
           profile = { ...planned, repository: "example/different" };
@@ -77,6 +95,56 @@ for (const outcome of ["saved", "lost-reply", "storage-failure", "readback-failu
       await expect(panel.getByLabel("Product key", { exact: true })).toBeDisabled();
       await expect(panel.getByRole("button", { name: "Review registration again", exact: true })).toHaveCount(0);
       await page.getByRole("button", { name: "Retry same registration" }).click();
+    }
+    if (persistentRefusal) {
+      const retry = panel.getByRole("button", { name: "Retry same registration", exact: true });
+      await expect(retry).toBeEnabled();
+      await retry.click();
+      await expect(panel.getByRole("status")).toContainText(conflictRefusal);
+      expect(applies[1]).toEqual(applies[0]);
+      const originalLogin = await panel.getByLabel("Client GitHub login", { exact: true }).inputValue();
+      await expect(panel.getByRole("link", { name: "Open separate registration", exact: true })).toBeVisible();
+      const separatePage = context.waitForEvent("page");
+      await panel.getByRole("link", { name: "Open separate registration", exact: true }).click();
+      const fresh = await separatePage;
+      await fresh.waitForURL("**/ui/products");
+      expect(await fresh.evaluate(() => window.opener === null)).toBe(true);
+      expect(applies).toHaveLength(2);
+      await fresh.getByText("Register a Director product", { exact: true }).click();
+      await expect(fresh.getByLabel("Product key", { exact: true })).toBeEnabled();
+      await expect(fresh.getByLabel("Product key", { exact: true })).toHaveValue("");
+      await fillRegistration(fresh);
+      await fresh.getByLabel("Product key", { exact: true }).fill("desktop-tool-separate");
+      await fresh.getByLabel("Repository", { exact: true }).fill("example/desktop-tool-separate");
+      await expect(fresh.getByRole("button", { name: "Register product", exact: true })).toBeDisabled();
+      const priorPlans = plans;
+      await fresh.getByRole("button", { name: "Review registration", exact: true }).click();
+      await expect(fresh.getByRole("button", { name: "Register product", exact: true })).toBeEnabled();
+      expect(plans).toBe(priorPlans + 1);
+      expect(applies).toHaveLength(2);
+      await fresh.getByRole("button", { name: "Register product", exact: true }).click();
+      await expect(fresh.getByRole("button", { name: "Register another product", exact: true })).toBeVisible();
+      expect(applies[2].key).not.toBe(applies[0].key);
+      expect(applies[2].body).toMatchObject({ manifest: { product: "desktop-tool-separate" } });
+      expect(sessionCookies.length).toBeGreaterThanOrEqual(2);
+      expect(sessionCookies.every(cookie => cookie.includes(`${sessionCookie.name}=${sessionCookie.value}`))).toBe(true);
+      await expect(panel.getByLabel("Product key", { exact: true })).toBeDisabled();
+      await expect(panel.getByLabel("Client GitHub login", { exact: true })).toHaveValue(originalLogin);
+      await fresh.close();
+      await page.reload();
+      await page.getByText("Register a Director product", { exact: true }).click();
+      await expect(panel.getByLabel("Product key", { exact: true })).toBeDisabled();
+      await expect(panel.getByLabel("Client GitHub login", { exact: true })).toHaveValue(originalLogin);
+      await expect(panel.getByRole("button", { name: "Review registration again", exact: true })).toHaveCount(0);
+      await retry.click();
+      await expect(panel.getByRole("status")).toContainText(conflictRefusal);
+      expect(applies).toHaveLength(4);
+      expect(applies[3]).toEqual(applies[0]);
+      await expect(retry).toBeEnabled();
+      await expect(panel.getByLabel("Product key", { exact: true })).toBeDisabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath("registration-original-still-unknown.png"), fullPage: true });
+      return;
     }
     if (outcome === "definitive-conflict") {
       await expect(panel.getByRole("status")).toContainText(conflictRefusal);

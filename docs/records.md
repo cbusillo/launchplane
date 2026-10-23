@@ -936,10 +936,12 @@ the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
 
-A product that Launchplane does not deploy can record its repository, the Director
-as its Client, standing acceptance and lifecycle metadata. Active non-runtime
-products with another Client or without standing acceptance are refused; they
-need a preview-independent Client review flow before registration is supported.
+A product that Launchplane does not deploy can record its repository, Client,
+standing acceptance and lifecycle metadata when an authorized signed-in admin
+explicitly attests that its Client is the Director. The service verifies the
+Client's GitHub identity and records that attestation through `director_standing`;
+it does not independently determine who the Director is. Other-Client review is
+unsupported here and requires a preview-independent flow before registration.
 Its explicit `classification` is
 `active_awareness`, `support_dependency` or `out_of_scope`, from the existing
 repository-mapping vocabulary. Omitted classification means `managed_runtime`
@@ -967,10 +969,23 @@ that the Client is the Director. **Review registration** writes nothing;
 back. Editing the draft invalidates its review. An interrupted apply preserves
 the original draft and operation key for an explicit same-request retry after
 reload. The service verifies the Client login and numeric ID on both planning
-and apply; admin access alone never identifies the Director.
+and apply. That verifies the GitHub identity, not whether that person is the
+Director; the signed-in admin's explicit attestation supplies Director standing,
+as on the existing runtime production-use setting.
 If the apply's outcome is known but readback fails, **Review registration again**
-clears only the tab's saved review and keeps its draft for a fresh dry run. An
-uncertain apply still requires the original same-request retry.
+clears only the tab's saved review and keeps its draft for a fresh dry run. If
+that key is already registered, another registration needs a new product key and
+an unclaimed repository; this action does not edit the saved product. Matching
+readback proves the current product matches the reviewed registration, not which
+request created it.
+An uncertain apply retains its original same-request retry even after a later
+refusal. **Open separate registration** opens a fresh tab for another product
+without copying or clearing the original tab's reviewed request or key. Keep the
+original tab open for its same-request retry: closing it or clearing its storage
+loses local recovery information and does not cancel or settle the service
+request. The separate tab uses the existing signed-in session and requires its
+own valid input, fresh review and explicit apply. Its result does not prove the
+earlier registration's outcome.
 
 The existing `POST /v1/product-onboarding/apply` surface uses
 `product_onboarding.plan` for planning (existing apply callers may also plan)
@@ -988,8 +1003,8 @@ or copied repository identity. Hold acceptance through the existing reviewed
 production-use setting before changing repository fields, then have a signed-in
 admin attest standing again for the new identity. For a non-runtime product,
 retire it first; restore standing before reactivating it. The same retired
-continuation permits changing the recorded Director identity. Other-Client
-non-runtime products cannot be activated.
+continuation permits changing the recorded Client identity. Reactivation requires
+the same recorded Director-standing attestation.
 
 The ordinary full-profile write cannot create a non-runtime product. Neither
 onboarding nor another profile writer can change an existing profile's
@@ -1011,24 +1026,25 @@ they are not inherited. An attempted classification change on the old key return
 to an inert profile, which cannot own runtime configuration. Retiring runtime
 resources still requires the existing resource-retirement service.
 
-Repository collisions include equal normalized names, equal nonempty copied
-repository IDs, and the current inventory identity of each active profile.
-Writes involving an inert record recheck these facts under the profile-write
-lock, including when a retired record is reactivated. A stale profile name can
-still conflict through its copied ID and the current inventory stream, even
-when the incoming profile omits copied IDs. The highest inventory revision,
-including a retired revision, supplies negative collision evidence; it does not
-authorize runtime activation. Missing or ambiguous evidence cannot prove distinct
-repositories and returns an explicit identity refusal. Review the repository
-inventory and product profile through their existing administration surfaces,
-then retry. Inactive predecessors do not retain active repository ownership.
+Active mixed/runtime and non-runtime profile writes always refuse equal normalized
+repository names or equal nonempty copied repository IDs. Creating or activating
+an active profile, or changing its repository name or copied IDs, also compares
+known immutable IDs from the highest revision of each inventory stream. This
+includes possible matches from tied revisions and retired inventory as negative
+collision evidence. A stale profile name with a copied ID can therefore still
+conflict with a canonical incoming name whose copied IDs are omitted. Retired
+profiles do not retain active repository ownership.
 
-Repository inventory remains the runtime identity authority. Registration uses
-the current canonical repository name and does not repair stale runtime names or
-change copied IDs, Client acceptance, credentials or enrollment. Mapping still
-suppresses known profile-name/copied-ID conflicts without choosing a winner.
-The current comparison snapshot does not serialize PostgreSQL inventory changes
-with profile writes or establish ownership against future inventory changes.
+Missing or ambiguous inventory does not prove distinctness or complete alias
+coverage; only known intersections refuse the acquisition. An unrelated profile's
+stale inventory cannot block ordinary settings writes or add a new inventory
+prerequisite to runtime onboarding. Canonical inventory/profile administration
+remains the supported way to correct stale identity metadata. Inventory evidence
+does not authorize runtime activation or repair names, copied IDs, Client
+acceptance, credentials or enrollment. Mapping still suppresses known
+profile-name/copied-ID conflicts without choosing a winner. The comparison
+snapshot does not serialize PostgreSQL inventory changes with profile writes or
+establish ownership against future inventory changes.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and

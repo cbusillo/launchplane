@@ -29,7 +29,6 @@ from control_plane.contracts.repo_product_mapping_read_model import (
 )
 from control_plane.github_app_webhook import _product_for_repository
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_repository_identity import ProductRepositoryIdentityRefusal
 from control_plane.product_reconcile import (
     ProductReconcileError,
     reconcile_product_request,
@@ -507,7 +506,7 @@ class NonruntimeProductTests(unittest.TestCase):
                                 )
                         self.assertEqual(store.list_product_profile_records(), before)
 
-    def test_repository_comparison_requires_unambiguous_current_inventory(self) -> None:
+    def test_repository_comparison_refuses_only_known_latest_inventory_collisions(self) -> None:
         runtime = LaunchplaneProductProfileRecord.model_validate(
             {
                 **product_profile_payload("private-runtime"),
@@ -522,18 +521,33 @@ class NonruntimeProductTests(unittest.TestCase):
             (own,),
             (own, other, _inventory(repository_id=44, repository=runtime.repository)),
         ):
-            with (
-                self.subTest(inventory=inventory),
-                self.assertRaises(ProductRepositoryIdentityRefusal) as refused,
-            ):
+            with self.subTest(inventory=inventory):
                 require_product_profile_writes((inert,), (runtime,), inventory_records=inventory)
-            self.assertNotIn(runtime.product, str(refused.exception))
-            self.assertNotIn(runtime.repository, str(refused.exception))
+        copied_runtime = LaunchplaneProductProfileRecord.model_validate(
+            {**runtime.model_dump(mode="json"), "repository_id": "43", "repository_owner_id": "7"}
+        )
+        with self.assertRaises(ProductRepositoryOwnershipError):
+            require_product_profile_writes(
+                (inert,),
+                (copied_runtime,),
+                inventory_records=(own, _inventory(repository_id=43, repository=inert.repository)),
+            )
         for state in ("tracked", "retired"):
             current = _inventory(
                 repository_id=43, repository=runtime.repository, inventory_state=state
             )
             require_product_profile_writes((inert,), (runtime,), inventory_records=(own, current))
+        unchanged_ownership = LaunchplaneProductProfileRecord.model_validate(
+            {**runtime.model_dump(mode="json"), "display_name": "Unrelated settings change"}
+        )
+        require_product_profile_writes(
+            (unchanged_ownership,),
+            (runtime, inert),
+            inventory_records=iter(
+                Mock(side_effect=AssertionError("Unrelated settings must not consume inventory")),
+                None,
+            ),
+        )
         renamed = LaunchplaneProductProfileRecord.model_validate(
             {
                 **runtime.model_dump(mode="json"),
@@ -549,6 +563,52 @@ class NonruntimeProductTests(unittest.TestCase):
         )
         with self.assertRaises(ProductRepositoryOwnershipError):
             require_product_profile_writes((inert,), (renamed,), inventory_records=(own, latest))
+        renamed_inventory = _inventory(
+            repository_id=42, repository="example/no-longer-tool", inventory_revision=2
+        )
+        require_product_profile_writes(
+            (inert,), (renamed,), inventory_records=(own, renamed_inventory)
+        )
+
+    def test_runtime_onboarding_does_not_require_unrelated_inventory(self) -> None:
+        for with_inert in (False, True):
+            with (
+                self.subTest(with_inert=with_inert),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                if with_inert:
+                    inert = inert_profile()
+                    store.write_repository_inventory_record(
+                        _inventory(repository_id=43, repository=inert.repository)
+                    )
+                    store.write_product_profile_record(inert)
+                manifest = ProductOnboardingManifest.model_validate(
+                    {
+                        "product": "new-runtime",
+                        "display_name": "New Runtime",
+                        "repository": "example/new-runtime",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/example/new-runtime",
+                        "runtime_port": 3000,
+                        "health_path": "/health",
+                        "lanes": [{"instance": "testing", "context": "new-runtime-testing"}],
+                    }
+                )
+                inventory_before = store.list_repository_inventory_records()
+                result, bundle = plan_product_onboarding_authority_bundle(
+                    record_store=store, manifest=manifest
+                )
+                store.write_product_authority_bundle(bundle)
+                self.assertEqual(
+                    store.read_product_profile_record(manifest.product), result.product_profile
+                )
+                self.assertEqual(store.list_repository_inventory_records(), inventory_before)
 
     def test_sqlite_registration_transactions_compete_without_overwrite(self) -> None:
         with (
@@ -931,7 +991,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(store.read_product_profile_record(current.product), current)
                 self.assertTrue(store.read_product_profile_record(runtime.product).is_active)
 
-    async def test_unknown_ownership_inventory_returns_bounded_identity_refusal(self) -> None:
+    async def test_stale_inert_inventory_does_not_block_runtime_settings(self) -> None:
         with (
             TemporaryDirectory() as directory,
             closing(
@@ -939,33 +999,78 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             ) as store,
         ):
             store.ensure_schema()
-            hidden = LaunchplaneProductProfileRecord.model_validate(
+            runtime = LaunchplaneProductProfileRecord.model_validate(
                 {
-                    **product_profile_payload("private-runtime"),
-                    "repository": "example/private-repository",
+                    **product_profile_payload("example-site"),
+                    "repository": "example/runtime",
                     "preview": {},
                 }
             )
-            store.write_product_profile_record(hidden)
-            app, sessions, session = self._registration_app(store)
-            response = await _asgi_request(
-                app,
-                "POST",
-                ROUTE,
-                headers=_browser_mutation_headers(sessions, session),
-                payload={
-                    "product": "launchplane",
-                    "mode": "dry_run",
-                    "manifest": {
-                        **inert_manifest(),
-                        "owner": {"github_login": "example-operator", "github_id": "123"},
-                    },
-                },
+            inert = inert_profile()
+            store.write_repository_inventory_record(
+                _inventory(repository_id=42, repository=runtime.repository)
             )
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertNotIn(hidden.repository, response.text)
-            self.assertNotIn(hidden.product, response.text)
-            self.assertEqual(store.list_product_profile_records(), (hidden,))
+            store.write_repository_inventory_record(
+                _inventory(repository_id=43, repository=inert.repository)
+            )
+            store.write_product_profile_record(runtime)
+            store.write_product_profile_record(inert)
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = sessions.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_product_config_policy(
+                    actions=("product_profile.write", "product_profile.read"),
+                    product=runtime.product,
+                    context="launchplane",
+                ),
+                human_session_manager=sessions,
+                record_store_factory=lambda: store,
+            )
+            for renamed in (False, True):
+                if renamed:
+                    store.write_repository_inventory_record(
+                        _inventory(
+                            repository_id=43,
+                            repository="example/renamed-inert",
+                            inventory_revision=2,
+                        )
+                    )
+                payload: dict[str, object] = {
+                    "display_name": "After rename" if renamed else "Before rename",
+                    "reason": "Update the runtime label",
+                }
+                route = f"/v1/product-profiles/{runtime.product}/display-name"
+                planned = await _asgi_request(
+                    app,
+                    "POST",
+                    route,
+                    headers=_browser_mutation_headers(sessions, session),
+                    payload=payload,
+                )
+                self.assertEqual(planned.status_code, 202, planned.text)
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    route,
+                    headers={
+                        **_browser_mutation_headers(sessions, session),
+                        "Idempotency-Key": str(renamed),
+                    },
+                    payload={
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                    },
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    store.read_product_profile_record(runtime.product).display_name,
+                    payload["display_name"],
+                )
+                self.assertEqual(store.read_product_profile_record(inert.product), inert)
 
     async def test_unsupported_client_registration_explains_the_domain_refusal(self) -> None:
         manifest = {**inert_manifest(), "release_on_acceptance": "held"}

@@ -5,6 +5,7 @@ import { recoverBrowserOperationState, type BrowserOperationOptions } from "./br
 import { isOperationBusy, InlineFormError, OperationNotice } from "./ProductConfigForms";
 import { productConfigFailureCertainty, productConfigOperationFailure, ProductConfigRecoveryStorageUnavailable } from "./product-config-operation";
 import { normalizeOwnerLoginInput } from "./product-owner-operation";
+import { AppLink } from "./router";
 import { useBrowserOperationController } from "./use-browser-operation";
 import type { AcceptedEvidenceResponse, ApplyProductOnboardingData } from "./generated/openapi.ts";
 
@@ -133,7 +134,11 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
       {error && readbackOnly ? <button className="button" type="button" disabled={busy} onClick={reviewAgain}>Review registration again</button> : null}
       <OperationNotice label="Registration preview" state={plan.state} />
       {!verified ? <OperationNotice label="Registration" state={apply.state} /> : null}
-      {verified ? <div role="status"><p>Registered and read back.</p><button className="button" onClick={onRefresh}>Refresh products</button><button className="button" onClick={startAnother}>Register another product</button></div> :
+      {apply.state.requiresIdempotencyContinuity && !busy ? <div>
+        <p>This registration's outcome is still unknown. Keep this original tab open to retain its reviewed request and operation key. A separate registration does not cancel or settle it.</p>
+        <AppLink className="button" to="/ui/products" target="_blank" rel="noopener noreferrer">Open separate registration</AppLink>
+      </div> : null}
+      {verified ? <div role="status"><p>Product record matches this registration review.</p><button className="button" onClick={onRefresh}>Refresh products</button><button className="button" onClick={startAnother}>Register another product</button></div> :
         <button className="button button-primary" type="button" disabled={busy || !matches || !confirmed} onClick={() => void register()}>
           {apply.state.requiresIdempotencyContinuity ? "Retry same registration" : readbackOnly ? "Read registration" : "Register product"}
         </button>}

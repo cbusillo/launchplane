@@ -401,9 +401,7 @@ class FilesystemRecordStore:
             require_product_profile_writes(
                 (model,),
                 self._list_product_profile_records_locked(),
-                inventory_records=self._list_models_locked(
-                    RepositoryInventoryRecord, "launchplane_repository_inventory_records"
-                ),
+                inventory_records=self._iter_repository_inventory_records_locked(),
             )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,9 +550,7 @@ class FilesystemRecordStore:
             require_product_profile_writes(
                 bundle.product_profiles,
                 profiles,
-                inventory_records=self._list_models_locked(
-                    RepositoryInventoryRecord, "launchplane_repository_inventory_records"
-                ),
+                inventory_records=self._iter_repository_inventory_records_locked(),
                 absent_product_ids=bundle.absent_product_ids,
             )
             require_bundle_context_owner(bundle, profiles)
@@ -1232,6 +1228,11 @@ class FilesystemRecordStore:
                 return "replayed"
             self._write_model_locked(record_type, record.record_id, record)
             return "written"
+
+    def _iter_repository_inventory_records_locked(self) -> Iterator[RepositoryInventoryRecord]:
+        yield from self._list_models_locked(
+            RepositoryInventoryRecord, "launchplane_repository_inventory_records"
+        )
 
     def list_repository_inventory_records(
         self,
