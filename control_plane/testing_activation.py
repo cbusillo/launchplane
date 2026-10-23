@@ -76,7 +76,8 @@ from control_plane.testing_activation_compose import (
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_separation_resources import (
     ROUTE as PREPARATION_ROUTE,
-    SeparationResourcesResult,
+    SeparationResourcesRefusal,
+    parse_preparation_receipt,
     preparation_binding,
 )
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -266,7 +267,9 @@ def preparation_resources(
     )
     if row is None or row.state != "completed":
         raise TestingActivationRefusal("Use the original caller's completed allocation key.")
-    receipt = SeparationResourcesResult.model_validate(row.response_payload.get("result"))
+    receipt = parse_preparation_receipt(row.response_payload.get("result"))
+    if isinstance(receipt, SeparationResourcesRefusal):
+        raise TestingActivationRefusal("The original preparation refused allocation.")
     if (receipt.product, receipt.context) != (product, request.context):
         raise TestingActivationRefusal("Allocation belongs to another testing lane.")
     old_id = store.read_dokploy_target_id_record(

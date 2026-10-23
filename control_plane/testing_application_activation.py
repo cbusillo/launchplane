@@ -57,9 +57,10 @@ from control_plane.testing_activation import (
     verified_product_image,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.testing_separation_resources import preparation_binding
-
-APPLICATION_CAPABILITY_PHASE = "application_capability_inspection"
+from control_plane.testing_separation_resources import (
+    preparation_binding,
+    APPLICATION_CAPABILITY_PHASE,
+)
 
 
 class ApplicationRouteAdmissionContradiction(TestingActivationRefusal):

@@ -17,7 +17,7 @@ from control_plane.testing_separation_resources import (
     ROUTE,
     SeparationResourcesRequest,
     SeparationResourcesPlan,
-    SeparationResourcesResult,
+    parse_preparation_receipt,
     SeparationResourcesStatus,
     SeparationResourcesInspection,
 )
@@ -245,7 +245,7 @@ def main() -> int:
                 )
                 return 0
             result = (
-                SeparationResourcesResult.model_validate(result)
+                parse_preparation_receipt(result)
                 if applying or resource_read
                 else SeparationResourcesPlan.model_validate(result)
             ).model_dump(mode="json")
@@ -272,9 +272,19 @@ def main() -> int:
         print(
             json.dumps(
                 {
-                    "status": "accepted",
+                    "status": "refused"
+                    if resources and result.get("resources_verified") is False
+                    else "accepted",
                     "mode": args.mode,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    **(
+                        {
+                            "resources_verified": False,
+                            "failure": result["failure"],
+                        }
+                        if resources and result.get("resources_verified") is False
+                        else {}
+                    ),
                     **(
                         {
                             "reconcile_requested": result["reconcile_requested"],
@@ -286,7 +296,7 @@ def main() -> int:
                 }
             )
         )
-        return 0
+        return int(resources and result.get("resources_verified") is False)
     except urllib.error.HTTPError as error:
         raw_error = error.read()
         error.close()

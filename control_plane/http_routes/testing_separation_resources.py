@@ -28,7 +28,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesAdapter,
     SeparationResourcesRefused,
     SeparationResourcesRequest,
-    SeparationResourcesResult,
+    parse_preparation_receipt,
     SeparationResourcesStatus,
     SeparationResourcesInspection,
 )
@@ -127,9 +127,7 @@ def register_testing_separation_resource_routes(
                         records={},
                         result=observed.model_dump(mode="json"),
                     )
-                result = SeparationResourcesResult.model_validate(
-                    row.response_payload.get("result")
-                )
+                result = parse_preparation_receipt(row.response_payload.get("result"))
                 if (result.product, result.context) != (product, body.context):
                     raise ValueError("The original preparation belongs to another lane.")
                 return accepted_evidence_response(
