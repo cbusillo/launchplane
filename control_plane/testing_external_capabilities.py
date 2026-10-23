@@ -25,6 +25,14 @@ class ExternalCapabilityReadRefusal(TestingActivationRefusal):
         self.result = result
 
 
+class ExternalCapabilityConflict(TestingActivationRefusal):
+    def __init__(self) -> None:
+        super().__init__(
+            "The proved external testing capability is no longer isolated.",
+            code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+        )
+
+
 def require_discord_capability(
     store: PostgresRecordStore,
     record: TestingActivationRecord,

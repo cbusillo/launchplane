@@ -24,6 +24,7 @@ from control_plane.contracts.testing_application import (
     TestingApplicationState,
     TestingApplicationCredential,
 )
+from control_plane.contracts.testing_activation import TestingActivationRecord
 from control_plane.odoo_testing_resources import ApplicationTestingResources
 from control_plane.testing_application_credentials import (
     generation_bundle,
@@ -298,6 +299,8 @@ class ApplicationInputTests(unittest.TestCase):
 
 
 class ApplicationCredentialTests(unittest.TestCase):
+    record: TestingActivationRecord
+
     def discord_intent(self) -> str:
         profile = self.store.read_product_profile_record(self.record.product)
         profile.expected_config.managed_secret_bindings = (
@@ -368,20 +371,26 @@ class ApplicationCredentialTests(unittest.TestCase):
         self.assertFalse(runtime_activation_bundle(self.store, self.record).secret_records)
         from control_plane.testing_external_capabilities import require_discord_capability
         from control_plane.discord_identity import capture_identity_inputs
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
 
         profile = self.store.read_product_profile_record(self.record.product)
         self.store.write_product_profile_record(
             profile.model_copy(update={"display_name": "Renamed fixture"})
         )
         require_discord_capability(self.store, self.record, proof)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TestingActivationRefusal) as changed:
             require_discord_capability(
                 self.store, self.record.model_copy(update={"plan_sha256": "f" * 64}), proof
             )
-        with self.assertRaises(ValueError):
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+        with self.assertRaises(TestingActivationRefusal) as changed:
             require_discord_capability(
                 self.store, self.record, proof.model_copy(update={"guild_ids": ("20",)})
             )
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
         from dataclasses import replace
 
         captured = capture_identity_inputs(self.store, self.record.product)
@@ -401,8 +410,9 @@ class ApplicationCredentialTests(unittest.TestCase):
         self.store.write_secret_record(
             captured.record.model_copy(update={"current_version_id": rotated.version_id})
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TestingActivationRefusal) as changed:
             require_discord_capability(self.store, self.record, proof)
+        self.assertEqual(changed.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
         self.store.write_secret_record(captured.record)
         version = self.store.read_secret_version("testing-version")
         self.store.write_secret_version(version.model_copy(update={"value_origin": "generated"}))
@@ -495,8 +505,10 @@ class ApplicationCredentialTests(unittest.TestCase):
 
     def test_forward_comparison_accepts_rotation_and_refuses_same_bot_without_discord(self) -> None:
         from control_plane.testing_application_activation import ApplicationActivationAdapter
-        from control_plane.testing_external_capabilities import observe_activation_discord
-        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.testing_external_capabilities import (
+            observe_activation_discord,
+            ExternalCapabilityConflict,
+        )
 
         token = self.discord_intent()
         self.production_value("production-unrelated", "production-initial")
@@ -531,7 +543,7 @@ class ApplicationCredentialTests(unittest.TestCase):
                 (token, token.split(".")[0] + ".different.signature")
             ):
                 self.production_value(production, f"production-match-{index}")
-                with self.assertRaises(TestingActivationRefusal):
+                with self.assertRaises(ExternalCapabilityConflict):
                     adapter.require_production_separation(self.record, lambda: None)
             adapter.authorize_external = Mock(side_effect=PermissionError("Denied"))
             with patch("control_plane.secrets._decrypt_secret_value") as decrypt:
@@ -556,6 +568,73 @@ class ApplicationCredentialTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             generation_bundle(self.store, self.record)
+
+    def test_runtime_resolution_rechecks_the_proved_external_version(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+        from control_plane.testing_external_capabilities import observe_activation_discord
+        from control_plane.discord_identity import capture_identity_inputs
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
+
+        self.discord_intent()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.discord_response,
+        ):
+            proof = observe_activation_discord(
+                self.store,
+                self.record,
+                authorize=self.store.list_product_profile_records,
+                check_current=lambda: None,
+                actor="fixture",
+                trace_id="launchplane_req_fixture",
+            )
+        self.record.external_capabilities = (proof,)
+        self.record = self.record.model_copy(
+            update={"application_readiness": SimpleNamespace(runtime_identity=object())}
+        )
+        captured = capture_identity_inputs(self.store, self.record.product)
+        adapter = ApplicationActivationAdapter(
+            self.fixture.adapter.root,
+            self.store,
+            self.record.product,
+            self.record.request,
+            "fixture",
+            self.record.scope,
+            "launchplane_req_fixture",
+        )
+
+        def rotate(**kwargs: Any) -> Any:
+            version = captured.version.model_copy(
+                update={"version_id": "rotated-during-resolution"}
+            )
+            self.store.write_secret_version(version)
+            self.store.write_secret_record(
+                captured.record.model_copy(update={"current_version_id": version.version_id})
+            )
+            return SimpleNamespace(
+                values={"DB_PASSWORD": "unproved-fixture"}, secret_keys={"DB_PASSWORD"}
+            )
+
+        with (
+            patch(
+                "control_plane.testing_application_credentials.staged_runtime_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_site_runtime_environment",
+                side_effect=rotate,
+            ),
+            patch(
+                "control_plane.testing_application_activation.runtime_identity_env", return_value={}
+            ),
+        ):
+            with self.assertRaises(TestingActivationRefusal) as refused:
+                adapter.application_values(self.record)
+        self.assertEqual(refused.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
 
     def test_discord_read_refusal_precedes_every_activation_effect(self) -> None:
         from control_plane.testing_application_activation import ApplicationActivationAdapter
@@ -672,6 +751,27 @@ class ApplicationCredentialTests(unittest.TestCase):
                     actor="fixture",
                     trace_id="launchplane_req_fixture",
                 )
+            decrypt.assert_not_called()
+            from control_plane.discord_identity import read_discord_identity
+            from control_plane.contracts.testing_activation import (
+                TestingActivationRefusal,
+                TestingActivationRefusalCode,
+            )
+
+            refused = TestingActivationRefusal(
+                "Changed fixture", code=TestingActivationRefusalCode.AUTHORITY_CHANGED
+            )
+            with self.assertRaises(TestingActivationRefusal) as failure:
+                read_discord_identity(
+                    self.store,
+                    self.record.product,
+                    profiles=self.store.list_product_profile_records(),
+                    trace_id="launchplane_req_fixture",
+                    actor="fixture",
+                    purpose="activation_admission",
+                    before_read=Mock(side_effect=refused),
+                )
+            self.assertIs(failure.exception, refused)
             decrypt.assert_not_called()
 
     def test_backoff_survives_input_drift_after_provider_response(self) -> None:

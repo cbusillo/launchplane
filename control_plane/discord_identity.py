@@ -258,6 +258,8 @@ def read_discord_identity(
     except ExternalResourceInputsChanged:
         return DiscordIdentityResult(failure_code="inputs_changed", observation=observation)
     except Exception:
+        if purpose == "activation_admission" and observation is None:
+            raise
         _logger.warning(
             "Discord identity unavailable: trace=%s code=configuration_unavailable", trace_id
         )

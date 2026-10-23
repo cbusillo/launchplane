@@ -120,6 +120,51 @@ class ApplicationFlowTests(unittest.TestCase):
     adapter: ApplicationActivationAdapter
     planned: TestingActivationRecord
 
+    def test_resumed_external_conflict_after_route_switch_restores_original(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime(omit_identity_default=True)
+        self.prepare()
+        interrupted = False
+
+        def compare(record: TestingActivationRecord, check: Any) -> None:
+            nonlocal interrupted
+            check()
+            readiness = record.application_readiness
+            if (
+                readiness is not None
+                and readiness.public_health is not None
+                and readiness.public_health.verified
+                and readiness.public_health.status == "pass"
+            ):
+                if not interrupted:
+                    interrupted = True
+                    raise OSError("Fixture reply unavailable")
+                raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=compare):
+            self.assertEqual(self.activate().status, "reconcile_required")
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        assert (
+            record.application_readiness is not None
+            and record.application_readiness.route is not None
+        )
+        self.assertEqual(
+            observe_testing_route(
+                record.application_readiness.route,
+                routing.raw,
+                json.loads(routing.route_file.read_text()),
+            ),
+            record.application_readiness.route.old_backend,
+        )
+        self.assertEqual(self.activate().status, "replayed")
+
     def setUp(self) -> None:
         self.enterContext(
             patch.dict(

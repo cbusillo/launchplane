@@ -322,7 +322,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             discord_token_matches_production,
             token_bot_id,
         )
-        from control_plane.testing_external_capabilities import require_discord_capability
+        from control_plane.testing_external_capabilities import (
+            require_discord_capability,
+            ExternalCapabilityConflict,
+        )
 
         profiles = self.authorize_external()
         captured = capture_identity_inputs(self.store, record.product)
@@ -336,12 +339,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal("External comparison inputs changed.")
         value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
         if token_bot_id(value) != proof.bot_id:
-            raise TestingActivationRefusal(
-                "The proved testing identity changed.",
-                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
-            )
+            raise ExternalCapabilityConflict()
         if discord_token_matches_production(value, captured):
-            raise TestingActivationRefusal("Current testing Discord identity matches production.")
+            raise ExternalCapabilityConflict()
         check()
         if capture_identity_inputs(self.store, record.product) != captured:
             raise TestingActivationRefusal("External comparison inputs changed.")
@@ -807,6 +807,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             secret_binding_keys=frozenset(set(bindings) - set(staged)),
         )
         values = {**environment.values, **staged}
+        if record.external_capabilities:
+            from control_plane.testing_external_capabilities import require_discord_capability
+
+            for proof in record.external_capabilities:
+                require_discord_capability(self.store, record, proof)
         from control_plane.runtime_platform_credentials import looks_like_credential
 
         if any(
@@ -2186,6 +2191,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             generic_web_provider_target_key,
         )
         from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
         from control_plane.testing_application_capabilities import (
             inspect_retained_application_capabilities,
         )
@@ -2245,7 +2251,25 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
                     def checkpoint(phase: str) -> None:
                         nonlocal started
-                        self.require_production_separation(record, require_current)
+                        try:
+                            self.require_production_separation(record, require_current)
+                        except ExternalCapabilityConflict:
+                            if (
+                                started
+                                or isinstance(lease, ProviderEvidenceLease)
+                                and lease.evidence_reservation().provider_effect_started_at
+                            ):
+                                require_current()
+                                latest = self.current()
+                                self.require_unchanged(latest)
+                                self.save(
+                                    latest,
+                                    phase="restoring_application_route"
+                                    if latest.application_readiness is not None
+                                    and latest.application_readiness.route is not None
+                                    else "refusing_private_candidate",
+                                )
+                            raise
                         require_current()
                         lease.checkpoint_effect(phase)
                         started = True

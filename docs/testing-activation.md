@@ -73,6 +73,11 @@ Generation and runtime publication both revalidate that proof. Before each
 forward effect checkpoint, the service authorizes and repeats the local managed
 credential comparison against current production values and decoded bot identity.
 Unrelated rotations can continue; actual credential/account matches refuse.
+After effects start, a positively observed capability conflict records the
+existing private-refusal or route-restoration phase under the original lease,
+so continuation restores the retained route without rechecking production.
+Runtime value resolution revalidates the proved testing version before the
+environment can be written.
 No production comparison set is pinned permanently. Readback and recovery keep
 the testing identity checks and perform no production decryption or Discord read.
 The supported result exposes the safe proof and any backoff evidence.
