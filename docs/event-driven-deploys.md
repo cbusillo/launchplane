@@ -253,6 +253,9 @@ reservation. The webhook request never waits on a deploy.
     exception text are never logged. The verifier logs the deployment record ID
     separately for correlation. These diagnostics leave qualification unknown and
     do not release the reservation or permit cleanup or replay.
+    Request-body completion expectations register synchronously before browser
+    events resume, so a queued completion cannot pass the listener. The bounded
+    wait still requires the matching finished request and a successful response.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.
