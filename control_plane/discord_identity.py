@@ -166,6 +166,19 @@ def token_bot_id(value: str) -> str:
         return ""
 
 
+def discord_token_matches_production(value: str, captured: DiscordIdentityInputs) -> bool:
+    expected_bot = token_bot_id(value)
+    production_values = tuple(
+        secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+        for _, _, version in captured.production
+    )
+    return any(
+        hmac.compare_digest(value.encode(), production_value.encode())
+        or bool(expected_bot and expected_bot == token_bot_id(production_value.strip()))
+        for production_value in production_values
+    )
+
+
 def read_discord_identity(
     store: TestingCredentialStore,
     product: str,
@@ -196,16 +209,8 @@ def read_discord_identity(
 
         check_current()
         value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
-        production_values = tuple(
-            secrets._decrypt_secret_value(version.ciphertext, version.key_id)
-            for _, _, version in captured.production
-        )
         expected_bot = token_bot_id(value)
-        matches_production = any(
-            hmac.compare_digest(value.encode(), production_value.encode())
-            or bool(expected_bot and expected_bot == token_bot_id(production_value.strip()))
-            for production_value in production_values
-        )
+        matches_production = discord_token_matches_production(value, captured)
         check_current()
         if matches_production:
             return DiscordIdentityResult(status="matches_production")

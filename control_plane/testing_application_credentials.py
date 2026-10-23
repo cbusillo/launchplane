@@ -58,7 +58,7 @@ def credential_binding_names(
     if external_keys:
         from control_plane.discord_identity import capture_identity_inputs
 
-        captured = capture_identity_inputs(store, product)
+        captured = capture_identity_inputs(store, product, compare_production=False)
         if external_keys != {captured.binding.binding_key} or captured.binding.context != context:
             raise ValueError("Reviewed external bindings must match the testing Discord purpose.")
         if activation is not None:

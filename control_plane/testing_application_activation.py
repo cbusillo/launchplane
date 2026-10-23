@@ -308,6 +308,44 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
     def bindings(self) -> tuple[Any, Any, Any, Any]:
         return bind_testing_recipient(self.store, self.product, self.request.context, "testing")
 
+    def require_production_separation(
+        self, record: TestingActivationRecord, check: Callable[[], None]
+    ) -> None:
+        specification = record.request.application
+        if specification is None or not specification.external_credentials:
+            return
+        if self.authorize_external is None or len(record.external_capabilities) != 1:
+            raise TestingActivationRefusal("Current authorized external comparison is required.")
+        from control_plane import secrets
+        from control_plane.discord_identity import (
+            capture_identity_inputs,
+            discord_token_matches_production,
+            token_bot_id,
+        )
+        from control_plane.testing_external_capabilities import require_discord_capability
+
+        profiles = self.authorize_external()
+        captured = capture_identity_inputs(self.store, record.product)
+        proof = record.external_capabilities[0]
+        require_discord_capability(self.store, record, proof)
+        check()
+        if (
+            captured.profiles != tuple(sorted(profiles, key=lambda item: item.product))
+            or captured.version.version_id != proof.version_id
+        ):
+            raise TestingActivationRefusal("External comparison inputs changed.")
+        value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
+        if token_bot_id(value) != proof.bot_id:
+            raise TestingActivationRefusal(
+                "The proved testing identity changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
+        if discord_token_matches_production(value, captured):
+            raise TestingActivationRefusal("Current testing Discord identity matches production.")
+        check()
+        if capture_identity_inputs(self.store, record.product) != captured:
+            raise TestingActivationRefusal("External comparison inputs changed.")
+
     def current(self) -> TestingActivationRecord:
         existing = activation_record(
             self.store,
@@ -2200,11 +2238,15 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     if old_check is None:
                         raise TestingActivationRefusal("The retained original executor is active.")
 
-                    def checkpoint(phase: str) -> None:
-                        nonlocal started
+                    def require_current() -> None:
                         old_check()
                         lease.assert_current()
                         self.require_unchanged(record)
+
+                    def checkpoint(phase: str) -> None:
+                        nonlocal started
+                        self.require_production_separation(record, require_current)
+                        require_current()
                         lease.checkpoint_effect(phase)
                         started = True
 
@@ -2219,12 +2261,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             check=old_check,
                         )
 
-                        def admission_current() -> None:
-                            old_check()
-                            lease.assert_current()
-                            self.require_unchanged(record)
-
-                        record = self.admit_external_capabilities(record, admission_current)
+                        record = self.admit_external_capabilities(record, require_current)
                         if record.phase in {
                             "create_project",
                             "create_environment",

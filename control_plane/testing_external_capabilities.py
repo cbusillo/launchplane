@@ -1,6 +1,5 @@
 from collections.abc import Callable
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.testing_activation import (
     TestingActivationRecord,
@@ -9,7 +8,6 @@ from control_plane.contracts.testing_activation import (
 )
 from control_plane.contracts.testing_external_resources import TestingExternalCapabilityProof
 from control_plane.discord_identity import (
-    DiscordIdentityInputs,
     DiscordIdentityResult,
     capture_identity_inputs,
     observation_complete,
@@ -27,22 +25,6 @@ class ExternalCapabilityReadRefusal(TestingActivationRefusal):
         self.result = result
 
 
-def discord_inputs_digest(captured: DiscordIdentityInputs) -> str:
-    return canonical_json_sha256(
-        {
-            "testing": (
-                captured.binding.binding_id,
-                captured.record.secret_id,
-                captured.version.version_id,
-            ),
-            "production": sorted(
-                (binding.binding_id, secret.secret_id, version.version_id)
-                for binding, secret, version in captured.production
-            ),
-        }
-    )
-
-
 def require_discord_capability(
     store: PostgresRecordStore,
     record: TestingActivationRecord,
@@ -50,11 +32,18 @@ def require_discord_capability(
 ) -> None:
     specification = record.request.application
     if specification is None or len(specification.external_credentials) != 1:
-        raise ValueError("A reviewed external credential is required.")
+        raise TestingActivationRefusal(
+            "A reviewed external credential is required.",
+            code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+        )
     reviewed = specification.external_credentials[0]
-    captured = capture_identity_inputs(
-        store, record.product, compare_production=not record.published
-    )
+    try:
+        captured = capture_identity_inputs(store, record.product, compare_production=False)
+    except (ValueError, KeyError, FileNotFoundError, StopIteration):
+        raise TestingActivationRefusal(
+            "The proved testing credential is unavailable.",
+            code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+        ) from None
     if (
         captured.binding.context != record.context
         or proof.activation_plan_sha256 != record.plan_sha256
@@ -67,9 +56,11 @@ def require_discord_capability(
         )
         or captured.binding.binding_key != reviewed.binding_key
         or not set(proof.guild_ids).issubset(reviewed.guild_ids)
-        or (not record.published and proof.inputs_sha256 != discord_inputs_digest(captured))
     ):
-        raise ValueError("The original external credential proof changed.")
+        raise TestingActivationRefusal(
+            "The original external credential proof changed.",
+            code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+        )
 
 
 def observe_activation_discord(
@@ -134,6 +125,5 @@ def observe_activation_discord(
         guild_ids=observation.guild_ids,
         observed_at=observation.finished_at,
         trace_id=trace_id,
-        inputs_sha256=discord_inputs_digest(captured),
         rate_limits=observation.rate_limits,
     )

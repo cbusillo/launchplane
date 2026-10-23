@@ -392,8 +392,7 @@ class ApplicationCredentialTests(unittest.TestCase):
             "control_plane.testing_external_capabilities.capture_identity_inputs",
             return_value=compared,
         ):
-            with self.assertRaises(ValueError):
-                require_discord_capability(self.store, self.record, proof)
+            require_discord_capability(self.store, self.record, proof)
             require_discord_capability(
                 self.store, self.record.model_copy(update={"published": True}), proof
             )
@@ -447,7 +446,99 @@ class ApplicationCredentialTests(unittest.TestCase):
                         refused.exception.result.observation.rate_limits[0].retry_after, 120
                     )
             self.assertEqual(self.store.list_secret_records(), records)
-            self.assertFalse(self.record.external_capabilities)
+
+    def production_value(self, value: str, version_id: str) -> None:
+        from control_plane.discord_identity import capture_identity_inputs
+
+        captured = capture_identity_inputs(
+            self.store, self.record.product, compare_production=False
+        )
+        profile = self.store.read_product_profile_record(self.record.product)
+        if not any(lane.instance == "prod" for lane in profile.lanes):
+            profile.lanes = (
+                *profile.lanes,
+                profile.lanes[0].model_copy(update={"instance": "prod"}),
+            )
+            self.store.write_product_profile_record(profile)
+        ciphertext, key_id = secrets._encrypt_secret_value(value)
+        self.store.write_secret_record(
+            captured.record.model_copy(
+                update={
+                    "secret_id": "production-comparison",
+                    "name": "fixture-production",
+                    "instance": "prod",
+                    "current_version_id": version_id,
+                }
+            )
+        )
+        self.store.write_secret_version(
+            captured.version.model_copy(
+                update={
+                    "version_id": version_id,
+                    "secret_id": "production-comparison",
+                    "ciphertext": ciphertext,
+                    "key_id": key_id,
+                }
+            )
+        )
+        self.store.write_secret_binding(
+            captured.binding.model_copy(
+                update={
+                    "binding_id": "production-comparison",
+                    "secret_id": "production-comparison",
+                    "instance": "prod",
+                    "binding_key": "API_TOKEN",
+                    "declared_secret_class": "prod_only",
+                }
+            )
+        )
+
+    def test_forward_comparison_accepts_rotation_and_refuses_same_bot_without_discord(self) -> None:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+        from control_plane.testing_external_capabilities import observe_activation_discord
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        token = self.discord_intent()
+        self.production_value("production-unrelated", "production-initial")
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=self.discord_response,
+        ):
+            proof = observe_activation_discord(
+                self.store,
+                self.record,
+                authorize=self.store.list_product_profile_records,
+                check_current=lambda: None,
+                actor="fixture",
+                trace_id="launchplane_req_fixture",
+            )
+        self.record.external_capabilities = (proof,)
+        adapter = ApplicationActivationAdapter(
+            self.fixture.adapter.root,
+            self.store,
+            self.record.product,
+            self.record.request,
+            "fixture",
+            self.record.scope,
+            "launchplane_req_fixture",
+            authorize_external=self.store.list_product_profile_records,
+        )
+        self.production_value("another-unrelated-value", "production-rotated")
+        with patch("control_plane.discord_external_resources.request_public_http") as provider:
+            adapter.require_production_separation(self.record, lambda: None)
+            self.assertFalse(generation_bundle(self.store, self.record).secret_records)
+            for index, production in enumerate(
+                (token, token.split(".")[0] + ".different.signature")
+            ):
+                self.production_value(production, f"production-match-{index}")
+                with self.assertRaises(TestingActivationRefusal):
+                    adapter.require_production_separation(self.record, lambda: None)
+            adapter.authorize_external = Mock(side_effect=PermissionError("Denied"))
+            with patch("control_plane.secrets._decrypt_secret_value") as decrypt:
+                with self.assertRaises(PermissionError):
+                    adapter.require_production_separation(self.record, lambda: None)
+                decrypt.assert_not_called()
+            provider.assert_not_called()
 
     def test_structural_discord_plan_cannot_install_without_native_proof(self) -> None:
         self.discord_intent()
@@ -472,7 +563,7 @@ class ApplicationCredentialTests(unittest.TestCase):
         from control_plane.provider_operations import ProviderMutationRejectedError
         from control_plane.outbound_http import PublicHttpResponse
 
-        self.discord_intent()
+        token = self.discord_intent()
         adapter = ApplicationActivationAdapter(
             self.fixture.adapter.root,
             self.store,
@@ -530,6 +621,7 @@ class ApplicationCredentialTests(unittest.TestCase):
             self.assertEqual(cause.result.observation.rate_limits[0].retry_after, 120)
             for effect in (route, create, save, inspect, lease.checkpoint_effect):
                 effect.assert_not_called()
+
             from fastapi import HTTPException
 
             denied = HTTPException(status_code=403, detail="Authorization denied")
@@ -538,6 +630,32 @@ class ApplicationCredentialTests(unittest.TestCase):
                 adapter.apply("original-operation", lease)
             self.assertIs(unauthorized.exception.cause, denied)
             for effect in (route, create, save, inspect, lease.checkpoint_effect):
+                effect.assert_not_called()
+
+            from control_plane.testing_external_capabilities import observe_activation_discord
+            from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+            adapter.authorize_external = self.store.list_product_profile_records
+            with patch(
+                "control_plane.discord_external_resources.request_public_http",
+                side_effect=self.discord_response,
+            ):
+                proof = observe_activation_discord(
+                    self.store,
+                    self.record,
+                    authorize=self.store.list_product_profile_records,
+                    check_current=lambda: None,
+                    actor="fixture",
+                    trace_id="launchplane_req_fixture",
+                )
+            self.record.external_capabilities = (proof,)
+            self.production_value(token, "production-new-match")
+            route.return_value = None
+            inspect.side_effect = lambda **kwargs: kwargs["before_effect"]("fixture-effect")
+            with self.assertRaises(ProviderMutationRejectedError) as shared:
+                adapter.apply("original-operation", lease)
+            self.assertIsInstance(shared.exception.cause, TestingActivationRefusal)
+            for effect in (create, save, lease.checkpoint_effect):
                 effect.assert_not_called()
 
     def test_discord_authorization_precedes_decryption(self) -> None:
