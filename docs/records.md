@@ -641,10 +641,13 @@ an ORM column/table or remains only in the evidence payload.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
 - Human session: the DB-backed payload includes the GitHub identity snapshot,
-  creation/expiry timestamps, and CSRF generation. Hosted authorization
-  revalidates roles against the current DB policy on every request and rejects
-  OAuth-derived organization/team claims after 24 hours, forcing a fresh GitHub
-  sign-in before those mutable claims can authorize another hosted request.
+  creation/expiry timestamps, CSRF generation and provider-verification time.
+  When retained, admin/read-only OAuth credentials include provider expiry
+  metadata inside the authenticated ciphertext, bound to the session and GitHub
+  identity; Client sessions hold none.
+  The [human auth/session contract](service-boundary.md#service-route-checklist)
+  owns verification and renewal; [credential retirement](service-boundary.md#human-oauth-credential-retirement)
+  distinguishes local removal from provider validity and historical backups.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed

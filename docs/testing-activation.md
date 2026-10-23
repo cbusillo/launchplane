@@ -62,6 +62,15 @@ so a service process change preserves program identity. Inspection and admitted
 host readback also recognize an older serialization only when it permutes the
 identical credential-key tokens in that one literal and every remaining byte
 matches. Different keys, quoting, inputs or code still refuse provenance.
+The immediately preceding stricter capability program is also recognized only
+with its complete unchanged body and identical inputs; new readbacks execute the
+current program. Partial edits to its physical proof do not match.
+A READY replicated task may have a created container before Swarm publishes its
+ContainerID. The capability reader can correlate exactly one such container by
+service, task and local-node labels, its canonical Swarm name and name readback,
+created state, captured image reference, merged image/task environment and actual
+immutable image digest. Task and container readback must remain unchanged. A
+missing or ambiguous witness still refuses a tag-only task.
 Storage programs retain exact comparison. Disabled-program, terminal-history,
 binding and all physical capability checks remain required; this compatibility
 does not authorize retry, allocation, settlement or hold lifting.

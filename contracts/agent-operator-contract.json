@@ -536,14 +536,11 @@
         "modes": [
           "dry-run",
           "apply",
-          "readback",
-          "route-repair-dry-run",
-          "route-repair-apply",
-          "route-repair-readback"
+          "readback"
         ],
         "operation_id": "prepare_fresh_testing_bootstrap",
         "path": "/v1/products/{product}/testing-replacement-bootstrap",
-        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
+        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
         "response_statuses": [
           "202",
           "400",
@@ -556,7 +553,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "99f6733db65900e96c77e95c0754bb37dc678c7d0908dfcbb1a019d70a6a29c2",
+        "schema_fingerprint_sha256": "c511c140ac67b2921121dc599c8a086983925b6e7edf23daf9c041b437521c6d",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1107,8 +1104,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "15ffd167feab8d7304192af2a7e96c5ab51aacca"
+    "source_commit_sha": "7b9845be913c694282f0d097392a075bb932af12"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "4d4051219b4dccabbafb0878298e6d0339f71b770affa68b1e1b07706d68460a"
+  "semantic_digest_sha256": "40247269e34f4056475a988d6367c4d543ffc8207715f8203e5f4f9bfd266c65"
 }
