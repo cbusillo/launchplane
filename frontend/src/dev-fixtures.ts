@@ -54,7 +54,7 @@ const promotionDeliveries = new Map<string, number>();
 export function ownerSecretInputsForFixture(fixture: DataFixtureMode, product: string, environment: string, received = false): OwnerSecretInputResponse {
   assertFixtureAvailable(fixture);
   return {
-    status: "ok", trace_id: "fixture-owner-secret", product, display_name: "Example Site", environment, can_submit: true,
+    status: "ok", trace_id: "fixture-owner-secret", product, display_name: "Example Site", environment, can_submit: true, application_required: true,
     fields: fixture === "empty" ? [] : [{
       integration: "runtime_environment", binding_key: "MAIL_PASSWORD", label: "Mail app credential", instructions: "Enter the app credential for the website’s sending account.", environments: ["testing", "prod"], request_revision: "a".repeat(64),
       submitted_at: received ? OBSERVED_AT : "", submission_version_id: received ? "fixture-submission-version" : "",
