@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
-from itertools import chain, repeat
+from itertools import chain, count, repeat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import DEFAULT, Mock, patch
 
 import click
+from fastapi import FastAPI
+from httpx2 import Response
 from pydantic import ValidationError
 
 from control_plane.artifact_retention import product_retention_dry_run
@@ -27,6 +29,7 @@ from control_plane.contracts.repo_product_mapping_read_model import (
 )
 from control_plane.github_app_webhook import _product_for_repository
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_repository_identity import ProductRepositoryIdentityRefusal
 from control_plane.product_reconcile import (
     ProductReconcileError,
     reconcile_product_request,
@@ -39,6 +42,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProductRepositoryOwnershipError,
+    require_product_profile_writes,
 )
 from control_plane.testing_activation import read_product_compose
 from control_plane.workflows.generic_web_deploy import (
@@ -63,7 +67,11 @@ from tests.http_app_test_support import (
     _RejectingVerifier,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from control_plane.service_human_auth import (
+    HumanSessionManager,
+    InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
+)
 from tests.support.auth import StubVerifier, identity
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
@@ -111,6 +119,9 @@ def assert_registration_race(case: unittest.TestCase, store: PostgresRecordStore
                     "display_name": "Competing registration",
                 }
             )
+            store.write_repository_inventory_record(
+                _inventory(repository_id=100 if same_product else 101, repository=first.repository)
+            )
             barrier = threading.Barrier(2)
 
             def register(profile: LaunchplaneProductProfileRecord) -> str:
@@ -134,6 +145,57 @@ def assert_registration_race(case: unittest.TestCase, store: PostgresRecordStore
             )
             case.assertEqual(len(rows), 1)
             case.assertIn(rows[0], (first, second))
+
+    runtime = LaunchplaneProductProfileRecord.model_validate(
+        {
+            **product_profile_payload("alias-runtime"),
+            "repository": "example/old-alias",
+            "repository_id": "202",
+            "repository_owner_id": "7",
+            "preview": {},
+            "lifecycle_state": "retired",
+        }
+    )
+    inert = LaunchplaneProductProfileRecord.model_validate(
+        {
+            **inert_profile("alias-inert").model_dump(mode="json"),
+            "repository": "example/current-alias",
+            "lifecycle_state": "retired",
+        }
+    )
+    store.write_repository_inventory_record(
+        _inventory(repository_id=202, repository=runtime.repository)
+    )
+    store.write_repository_inventory_record(
+        _inventory(repository_id=202, repository=inert.repository, inventory_revision=2)
+    )
+    store.write_product_profile_record(runtime)
+    store.write_product_profile_record(inert)
+    barrier = threading.Barrier(2)
+
+    def activate(profile: LaunchplaneProductProfileRecord) -> str:
+        barrier.wait(timeout=10)
+        active = LaunchplaneProductProfileRecord.model_validate(
+            {**profile.model_dump(mode="json"), "lifecycle_state": "active"}
+        )
+        try:
+            store.compare_and_write_product_profile_record(
+                expected_record=profile, replacement_record=active
+            )
+        except ProductRepositoryOwnershipError:
+            return "conflict"
+        return "activated"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(activate, (runtime, inert)))
+    case.assertCountEqual(outcomes, ("activated", "conflict"))
+    case.assertEqual(
+        sum(
+            store.read_product_profile_record(profile.product).is_active
+            for profile in (runtime, inert)
+        ),
+        1,
+    )
 
 
 class NonruntimeProductTests(unittest.TestCase):
@@ -364,6 +426,12 @@ class NonruntimeProductTests(unittest.TestCase):
                     other = profile.model_copy(
                         update={"product": "other", "repository": "example/other"}
                     )
+                    store.write_repository_inventory_record(
+                        _inventory(repository_id=42, repository=profile.repository)
+                    )
+                    store.write_repository_inventory_record(
+                        _inventory(repository_id=43, repository=other.repository)
+                    )
                     store.write_product_profile_record(other)
                     with self.assertRaises(ProductRepositoryOwnershipError):
                         store.compare_and_write_product_profile_record(
@@ -373,6 +441,114 @@ class NonruntimeProductTests(unittest.TestCase):
                             ),
                         )
                     self.assertEqual(store.read_product_profile_record(other.product), other)
+
+    def test_renamed_repository_collision_rechecks_each_profile_writer(self) -> None:
+        runtime = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **product_profile_payload("runtime"),
+                "repository": "example/old-name",
+                "repository_id": "42",
+                "repository_owner_id": "7",
+                "preview": {},
+            }
+        )
+        inert = LaunchplaneProductProfileRecord.model_validate(
+            {**inert_profile().model_dump(mode="json"), "repository": "example/current-name"}
+        )
+        for filesystem in (False, True):
+            for incoming_runtime in (False, True):
+                for writer in ("direct", "bundle", "compare"):
+                    with (
+                        self.subTest(
+                            filesystem=filesystem, incoming_runtime=incoming_runtime, writer=writer
+                        ),
+                        TemporaryDirectory() as directory,
+                        nullcontext(FilesystemRecordStore(Path(directory) / "files"))
+                        if filesystem
+                        else closing(
+                            PostgresRecordStore(
+                                database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                            )
+                        ) as store,
+                    ):
+                        if isinstance(store, PostgresRecordStore):
+                            store.ensure_schema()
+                        store.write_repository_inventory_record(
+                            _inventory(repository_id=42, repository=runtime.repository)
+                        )
+                        store.write_repository_inventory_record(
+                            _inventory(
+                                repository_id=42, repository=inert.repository, inventory_revision=2
+                            )
+                        )
+                        incoming, existing = (
+                            (runtime, inert) if incoming_runtime else (inert, runtime)
+                        )
+                        store.write_product_profile_record(existing)
+                        retired = LaunchplaneProductProfileRecord.model_validate(
+                            {**incoming.model_dump(mode="json"), "lifecycle_state": "retired"}
+                        )
+                        if writer == "compare":
+                            store.write_product_profile_record(retired)
+                        before = store.list_product_profile_records()
+                        with self.assertRaises(ProductRepositoryOwnershipError):
+                            if writer == "direct":
+                                store.write_product_profile_record(incoming)
+                            elif writer == "bundle":
+                                store.write_product_authority_bundle(
+                                    ProductAuthorityBundle(
+                                        product_profiles=(incoming,),
+                                        absent_product_ids=(incoming.product,),
+                                    )
+                                )
+                            else:
+                                store.compare_and_write_product_profile_record(
+                                    expected_record=retired, replacement_record=incoming
+                                )
+                        self.assertEqual(store.list_product_profile_records(), before)
+
+    def test_repository_comparison_requires_unambiguous_current_inventory(self) -> None:
+        runtime = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **product_profile_payload("private-runtime"),
+                "repository": "example/private-runtime",
+                "preview": {},
+            }
+        )
+        inert = inert_profile()
+        own = _inventory(repository_id=42, repository=inert.repository)
+        other = _inventory(repository_id=43, repository=runtime.repository)
+        for inventory in (
+            (own,),
+            (own, other, _inventory(repository_id=44, repository=runtime.repository)),
+        ):
+            with (
+                self.subTest(inventory=inventory),
+                self.assertRaises(ProductRepositoryIdentityRefusal) as refused,
+            ):
+                require_product_profile_writes((inert,), (runtime,), inventory_records=inventory)
+            self.assertNotIn(runtime.product, str(refused.exception))
+            self.assertNotIn(runtime.repository, str(refused.exception))
+        for state in ("tracked", "retired"):
+            current = _inventory(
+                repository_id=43, repository=runtime.repository, inventory_state=state
+            )
+            require_product_profile_writes((inert,), (runtime,), inventory_records=(own, current))
+        renamed = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **runtime.model_dump(mode="json"),
+                "repository_id": own.repository_id,
+                "repository_owner_id": own.repository_owner_id,
+            }
+        )
+        latest = _inventory(
+            repository_id=42,
+            repository=inert.repository,
+            inventory_state="retired",
+            inventory_revision=2,
+        )
+        with self.assertRaises(ProductRepositoryOwnershipError):
+            require_product_profile_writes((inert,), (renamed,), inventory_records=(own, latest))
 
     def test_sqlite_registration_transactions_compete_without_overwrite(self) -> None:
         with (
@@ -482,6 +658,314 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             patcher = patch(f"control_plane.http_app.{name}", return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def _registration_app(
+        self, store: PostgresRecordStore
+    ) -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+        sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        session = sessions.issue(_github_human_identity())
+        rule = _github_human_product_config_policy(
+            actions=(
+                "product_onboarding.apply",
+                "product_profile.read",
+                "product_environment.read",
+                "product_profile.write",
+            ),
+            product="launchplane",
+            context="launchplane",
+        ).model_dump(mode="json")["github_humans"][0]
+        machine = _product_config_policy(
+            action="product_profile.write", product="launchplane", context="launchplane"
+        ).model_dump(mode="json")["github_actions"][0]
+        products = ["launchplane", "desktop-tool", "runtime"]
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [{**rule, "products": products}],
+                    "github_actions": [{**machine, "products": products}],
+                }
+            ),
+            record_store_factory=lambda: store,
+            human_session_manager=sessions,
+        )
+        return app, sessions, session
+
+    async def test_registration_qualifies_current_inventory_before_plan_and_commit(self) -> None:
+        for state, supplied_ids, distinct, late_reactivation in (
+            ("active", False, False, False),
+            ("active", True, False, False),
+            ("retired", False, False, False),
+            ("retired", False, False, True),
+            ("active", False, True, False),
+        ):
+            with (
+                self.subTest(state=state, supplied_ids=supplied_ids, distinct=distinct),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                runtime = LaunchplaneProductProfileRecord.model_validate(
+                    {
+                        **product_profile_payload("runtime"),
+                        "repository": "example/old-name",
+                        "repository_id": "42",
+                        "repository_owner_id": "7",
+                        "preview": {},
+                        "lifecycle_state": state,
+                    }
+                )
+                store.write_product_profile_record(runtime)
+                store.write_repository_inventory_record(
+                    _inventory(repository_id=42, repository=runtime.repository)
+                )
+                store.write_repository_inventory_record(
+                    _inventory(
+                        repository_id=42, repository="example/current-name", inventory_revision=2
+                    )
+                )
+                repository = "example/distinct" if distinct else "example/current-name"
+                if distinct:
+                    store.write_repository_inventory_record(
+                        _inventory(repository_id=43, repository=repository)
+                    )
+                manifest = {
+                    **inert_manifest(),
+                    "repository": repository,
+                    "owner": {"github_login": "example-operator", "github_id": "123"},
+                }
+                if supplied_ids:
+                    manifest.update(repository_id="42", repository_owner_id="7")
+                app, sessions, session = self._registration_app(store)
+                with patch(
+                    "control_plane.http_app.github_api_request",
+                    return_value={"type": "User", "login": "example-operator", "id": 123},
+                ):
+                    payload: dict[str, object] = {
+                        "product": "launchplane",
+                        "mode": "dry_run",
+                        "manifest": manifest,
+                    }
+                    planned = await _asgi_request(
+                        app,
+                        "POST",
+                        ROUTE,
+                        headers=_browser_mutation_headers(sessions, session),
+                        payload=payload,
+                    )
+                    if state == "active" and not distinct:
+                        self.assertEqual(planned.status_code, 409, planned.text)
+                        self.assertEqual(
+                            planned.json()["error"]["code"], ProductRepositoryOwnershipError.code
+                        )
+                    else:
+                        self.assertEqual(planned.status_code, 202, planned.text)
+                        if late_reactivation:
+                            store.write_product_profile_record(
+                                LaunchplaneProductProfileRecord.model_validate(
+                                    {**runtime.model_dump(mode="json"), "lifecycle_state": "active"}
+                                )
+                            )
+                        applied = await _asgi_request(
+                            app,
+                            "POST",
+                            ROUTE,
+                            headers={
+                                **_browser_mutation_headers(sessions, session),
+                                "Idempotency-Key": "inventory-registration",
+                            },
+                            payload={
+                                **payload,
+                                "mode": "apply",
+                                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                            },
+                        )
+                        self.assertEqual(
+                            applied.status_code, 409 if late_reactivation else 202, applied.text
+                        )
+                profiles = store.list_product_profile_records()
+                self.assertEqual(
+                    {p.product for p in profiles},
+                    {"runtime", "desktop-tool"}
+                    if distinct or (state == "retired" and not late_reactivation)
+                    else {"runtime"},
+                )
+
+    async def test_reactivation_refuses_alias_after_supported_retired_identity_clear(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            runtime = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    **product_profile_payload("runtime"),
+                    "repository": "example/old-name",
+                    "repository_id": "42",
+                    "repository_owner_id": "7",
+                    "preview": {},
+                    "lifecycle_state": "retired",
+                }
+            )
+            store.write_product_profile_record(runtime)
+            store.write_repository_inventory_record(
+                _inventory(repository_id=42, repository=runtime.repository)
+            )
+            store.write_repository_inventory_record(
+                _inventory(
+                    repository_id=42, repository="example/current-name", inventory_revision=2
+                )
+            )
+            app, sessions, session = self._registration_app(store)
+
+            request_keys = count()
+
+            async def post(
+                path: str,
+                payload: dict[str, object],
+                *,
+                human: bool = False,
+                expected_status: int = 202,
+            ) -> Response:
+                headers = (
+                    _browser_mutation_headers(sessions, session)
+                    if human
+                    else {"Authorization": "Bearer valid-token"}
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    path,
+                    headers={
+                        **headers,
+                        "Idempotency-Key": str(next(request_keys)),
+                    },
+                    payload=payload,
+                )
+                self.assertEqual(response.status_code, expected_status, response.text)
+                return response
+
+            async def acceptance(mode: str) -> None:
+                current = store.read_product_profile_record("desktop-tool")
+                payload: dict[str, object] = {
+                    "mode": "dry-run",
+                    "production_use": current.production_use,
+                    "release_on_acceptance": mode,
+                    "reason": "Reviewed lifecycle continuation",
+                }
+                planned = await post(
+                    "/v1/product-profiles/desktop-tool/production-use", payload, human=True
+                )
+                await post(
+                    "/v1/product-profiles/desktop-tool/production-use",
+                    {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                    },
+                    human=True,
+                )
+
+            with patch(
+                "control_plane.http_app.github_api_request",
+                return_value={"type": "User", "login": "example-operator", "id": 123},
+            ):
+                payload: dict[str, object] = {
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "manifest": {
+                        **inert_manifest(),
+                        "repository": "example/current-name",
+                        "repository_id": "42",
+                        "repository_owner_id": "7",
+                        "owner": {"github_login": "example-operator", "github_id": "123"},
+                    },
+                }
+                planned = await post(ROUTE, payload, human=True)
+                await post(
+                    ROUTE,
+                    {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                    },
+                    human=True,
+                )
+                current = store.read_product_profile_record("desktop-tool")
+                await post(
+                    "/v1/product-profiles",
+                    {**current.model_dump(mode="json"), "lifecycle_state": "retired"},
+                )
+                await acceptance("held")
+                current = store.read_product_profile_record("desktop-tool")
+                await post(
+                    "/v1/product-profiles",
+                    {
+                        **current.model_dump(mode="json"),
+                        "repository_id": "",
+                        "repository_owner_id": "",
+                    },
+                )
+                await post(
+                    "/v1/product-profiles",
+                    {**runtime.model_dump(mode="json"), "lifecycle_state": "active"},
+                )
+                await acceptance("director_standing")
+                current = store.read_product_profile_record("desktop-tool")
+                refused = await post(
+                    "/v1/product-profiles",
+                    {**current.model_dump(mode="json"), "lifecycle_state": "active"},
+                    expected_status=409,
+                )
+                self.assertEqual(
+                    refused.json()["error"]["code"], ProductRepositoryOwnershipError.code
+                )
+                self.assertEqual(store.read_product_profile_record(current.product), current)
+                self.assertTrue(store.read_product_profile_record(runtime.product).is_active)
+
+    async def test_unknown_ownership_inventory_returns_bounded_identity_refusal(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(database_url=sqlite_database_url(Path(directory) / "db.sqlite"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            hidden = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    **product_profile_payload("private-runtime"),
+                    "repository": "example/private-repository",
+                    "preview": {},
+                }
+            )
+            store.write_product_profile_record(hidden)
+            app, sessions, session = self._registration_app(store)
+            response = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers=_browser_mutation_headers(sessions, session),
+                payload={
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "manifest": {
+                        **inert_manifest(),
+                        "owner": {"github_login": "example-operator", "github_id": "123"},
+                    },
+                },
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertNotIn(hidden.repository, response.text)
+            self.assertNotIn(hidden.product, response.text)
+            self.assertEqual(store.list_product_profile_records(), (hidden,))
 
     async def test_unsupported_client_registration_explains_the_domain_refusal(self) -> None:
         manifest = {**inert_manifest(), "release_on_acceptance": "held"}
@@ -1072,6 +1556,12 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             safe = inert_profile()
             store.write_product_profile_record(safe)
+            store.write_repository_inventory_record(
+                _inventory(repository_id=42, repository=safe.repository)
+            )
+            store.write_repository_inventory_record(
+                _inventory(repository_id=43, repository="example/shared")
+            )
             for product in ("first", "second"):
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(

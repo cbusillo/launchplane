@@ -7,6 +7,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.product_onboarding_service import build_product_onboarding_service_result
@@ -40,6 +41,11 @@ class _ProductOnboardingStore:
             for profile in self.product_profiles
             if not driver_id or profile.driver_id == driver_id
         )
+
+    def list_repository_inventory_records(
+        self, *, repository_id: str = "", limit: int | None = None
+    ) -> tuple[RepositoryInventoryRecord, ...]:
+        return ()
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self.dokploy_targets.append(record)

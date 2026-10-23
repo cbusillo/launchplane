@@ -968,6 +968,9 @@ back. Editing the draft invalidates its review. An interrupted apply preserves
 the original draft and operation key for an explicit same-request retry after
 reload. The service verifies the Client login and numeric ID on both planning
 and apply; admin access alone never identifies the Director.
+If the apply's outcome is known but readback fails, **Review registration again**
+clears only the tab's saved review and keeps its draft for a fresh dry run. An
+uncertain apply still requires the original same-request retry.
 
 The existing `POST /v1/product-onboarding/apply` surface uses
 `product_onboarding.plan` for planning (existing apply callers may also plan)
@@ -1008,14 +1011,24 @@ they are not inherited. An attempted classification change on the old key return
 to an inert profile, which cannot own runtime configuration. Retiring runtime
 resources still requires the existing resource-retirement service.
 
-Repository collisions mean equal normalized names or equal nonempty copied
-repository IDs when present. Writes involving an inert record refuse those
-collisions atomically; mapping suppresses all known conflicting names, including
-legacy runtime aliases, without choosing a winner. Repository inventory remains
-the runtime identity authority. Different names with omitted IDs cannot be
-established as aliases from profiles alone, so registration must use the current
-canonical repository name. Actual stale names use the existing identity/profile
-administration; registering an inert record is not a repository-rename repair.
+Repository collisions include equal normalized names, equal nonempty copied
+repository IDs, and the current inventory identity of each active profile.
+Writes involving an inert record recheck these facts under the profile-write
+lock, including when a retired record is reactivated. A stale profile name can
+still conflict through its copied ID and the current inventory stream, even
+when the incoming profile omits copied IDs. The highest inventory revision,
+including a retired revision, supplies negative collision evidence; it does not
+authorize runtime activation. Missing or ambiguous evidence cannot prove distinct
+repositories and returns an explicit identity refusal. Review the repository
+inventory and product profile through their existing administration surfaces,
+then retry. Inactive predecessors do not retain active repository ownership.
+
+Repository inventory remains the runtime identity authority. Registration uses
+the current canonical repository name and does not repair stale runtime names or
+change copied IDs, Client acceptance, credentials or enrollment. Mapping still
+suppresses known profile-name/copied-ID conflicts without choosing a winner.
+The current comparison snapshot does not serialize PostgreSQL inventory changes
+with profile writes or establish ownership against future inventory changes.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and

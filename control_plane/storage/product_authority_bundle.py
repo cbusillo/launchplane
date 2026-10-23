@@ -20,6 +20,8 @@ from control_plane.contracts.product_profile_record import (
     product_target_owner_products,
     validate_product_profile_classification_transition,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+from control_plane.product_repository_identity import ProductRepositoryIdentityRefusal
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -89,15 +91,50 @@ class ProductRepositoryOwnershipError(ValueError):
     code = "repository_owned_by_other_product"
 
 
+def _profile_repository_collision_identity(
+    profile: LaunchplaneProductProfileRecord,
+    inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]],
+) -> str:
+    repository = profile.repository.strip().lower()
+    matches = tuple(
+        current
+        for repository_id, current in inventory_streams.items()
+        if repository_id == profile.repository_id
+        or any(record.repository == repository for record in current)
+    )
+    if not matches:
+        raise ProductRepositoryIdentityRefusal(
+            "repository_identity_inventory_missing",
+            "Repository ownership cannot be compared without current "
+            "inventory evidence. Review the repository inventory and product profile before retrying.",
+        )
+    if len(matches) != 1 or len(matches[0]) != 1:
+        raise ProductRepositoryIdentityRefusal(
+            "repository_identity_inventory_ambiguous",
+            "Repository ownership has ambiguous inventory evidence. "
+            "Review the repository inventory and product profile before retrying.",
+        )
+    current = matches[0][0]
+    if profile.repository_id and profile.repository_id != current.repository_id:
+        raise ProductRepositoryIdentityRefusal(
+            "repository_identity_stored_mismatch",
+            "Repository identity differs from current inventory. "
+            "Review the repository inventory and product profile before retrying.",
+        )
+    return current.repository_id
+
+
 def require_product_profile_writes(
     records: Iterable[LaunchplaneProductProfileRecord],
     current_profiles: Iterable[LaunchplaneProductProfileRecord],
     *,
+    inventory_records: Iterable[RepositoryInventoryRecord],
     absent_product_ids: tuple[str, ...] = (),
 ) -> None:
     profiles = {profile.product: profile for profile in current_profiles}
     if any(product in profiles for product in absent_product_ids):
         raise ProductProfileConflictError("Product was registered before commit.")
+    inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]] | None = None
     for record in records:
         record = LaunchplaneProductProfileRecord.model_validate(record.model_dump(mode="json"))
         current = profiles.get(record.product)
@@ -111,6 +148,29 @@ def require_product_profile_writes(
                 if record.is_managed_runtime and other.is_managed_runtime:
                     continue
                 if product_profiles_share_repository(record, other):
+                    raise ProductRepositoryOwnershipError(
+                        "Repository already belongs to another product."
+                    )
+                if inventory_streams is None:
+                    inventory_streams = {}
+                    for inventory in inventory_records:
+                        current_inventory = inventory_streams.get(inventory.repository_id, ())
+                        if (
+                            not current_inventory
+                            or inventory.inventory_revision
+                            > current_inventory[0].inventory_revision
+                        ):
+                            inventory_streams[inventory.repository_id] = (inventory,)
+                        elif (
+                            inventory.inventory_revision == current_inventory[0].inventory_revision
+                        ):
+                            inventory_streams[inventory.repository_id] = (
+                                *current_inventory,
+                                inventory,
+                            )
+                if _profile_repository_collision_identity(
+                    record, inventory_streams
+                ) == _profile_repository_collision_identity(other, inventory_streams):
                     raise ProductRepositoryOwnershipError(
                         "Repository already belongs to another product."
                     )

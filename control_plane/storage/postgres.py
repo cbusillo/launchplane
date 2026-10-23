@@ -6778,6 +6778,12 @@ class PostgresRecordStore(HumanSessionStore):
                         self._read_product_profile_payload(row.payload)
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
+                    inventory_records=(
+                        self._read_payload(
+                            model_type=RepositoryInventoryRecord, payload=row.payload
+                        )
+                        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
+                    ),
                     absent_product_ids=bundle.absent_product_ids,
                 )
             if guard_provider is not None:
@@ -28749,6 +28755,10 @@ class PostgresRecordStore(HumanSessionStore):
                     self._read_product_profile_payload(row.payload)
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 ),
+                inventory_records=(
+                    self._read_payload(model_type=RepositoryInventoryRecord, payload=item.payload)
+                    for item in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
+                ),
             )
             session.merge(self._product_profile_row(record))
             session.commit()
@@ -29085,6 +29095,10 @@ class PostgresRecordStore(HumanSessionStore):
             (
                 self._read_product_profile_payload(item.payload)
                 for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            ),
+            inventory_records=(
+                self._read_payload(model_type=RepositoryInventoryRecord, payload=item.payload)
+                for item in session.scalars(select(LaunchplaneRepositoryInventoryRow)).all()
             ),
         )
         row.display_name = replacement_record.display_name

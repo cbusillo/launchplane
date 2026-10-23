@@ -22,6 +22,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
     validate_product_profile_history_transition,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.product_authority_bundle import (
@@ -39,6 +40,13 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 class ProductOnboardingRecordStore(ProductAuthorityBundleStore, Protocol):
+    def list_repository_inventory_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryInventoryRecord, ...]: ...
+
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
@@ -468,6 +476,7 @@ def plan_product_onboarding_authority_bundle(
         require_product_profile_writes(
             (product_profile,),
             record_store.list_product_profile_records(),
+            inventory_records=record_store.list_repository_inventory_records(),
             absent_product_ids=(product_profile.product,),
         )
         return (

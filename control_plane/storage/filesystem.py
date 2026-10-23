@@ -398,7 +398,13 @@ class FilesystemRecordStore:
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
         if isinstance(model, LaunchplaneProductProfileRecord):
-            require_product_profile_writes((model,), self._list_product_profile_records_locked())
+            require_product_profile_writes(
+                (model,),
+                self._list_product_profile_records_locked(),
+                inventory_records=self._list_models_locked(
+                    RepositoryInventoryRecord, "launchplane_repository_inventory_records"
+                ),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -544,7 +550,12 @@ class FilesystemRecordStore:
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
             require_product_profile_writes(
-                bundle.product_profiles, profiles, absent_product_ids=bundle.absent_product_ids
+                bundle.product_profiles,
+                profiles,
+                inventory_records=self._list_models_locked(
+                    RepositoryInventoryRecord, "launchplane_repository_inventory_records"
+                ),
+                absent_product_ids=bundle.absent_product_ids,
             )
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
