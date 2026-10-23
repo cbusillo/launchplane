@@ -17412,30 +17412,19 @@ def create_launchplane_fastapi_app(
                 message="A live production lane's or context's undeclared settings are recorded by an admin, "
                 "not with the local_operator credential the Director's agent uses.",
             )
-        if (
-            operator_identity
-            and product_config_request.mode == "apply"
-            and product_config_request.public_hosts is None
-            and not product_config_dry_run_exists(
-                record_store=database_store,
-                identity=identity,
-                request_payload=request_payload,
-                route_path=route_path,
-            )
-        ):
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="matching_dry_run_required",
-                message="Admin product-config apply requires a prior matching dry-run.",
-            )
         copy_references = [
             secret.copy_from
             for secret in product_config_request.secrets
             if secret.copy_from is not None
         ]
+        requires_matching_review = (
+            operator_identity
+            or bool(copy_references)
+            or product_config_request.adopts_provider_secrets()
+            or bool(product_config_request.disable_secret_bindings)
+        )
         if (
-            (copy_references or product_config_request.adopts_provider_secrets())
+            requires_matching_review
             and product_config_request.mode == "apply"
             and product_config_request.public_hosts is None
             and not product_config_dry_run_exists(
@@ -17449,7 +17438,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="matching_dry_run_required",
-                message="Secret copy and provider adoption require a prior matching dry-run.",
+                message="Product-config apply requires a prior matching dry-run.",
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -17640,10 +17629,7 @@ def create_launchplane_fastapi_app(
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
         if (
-            operator_identity
-            or copy_references
-            or product_config_request.adopts_provider_secrets()
-            or public_hosts_plan is not None
+            requires_matching_review or public_hosts_plan is not None
         ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,

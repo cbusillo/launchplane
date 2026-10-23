@@ -4591,7 +4591,8 @@ key. This metadata-only operation cannot be combined with other config writes.
 Retire the keys through product config and sync them out of provider configuration
 first. The service independently checks existing retirement intent, fresh provider
 key absence, unique lane bindings and current versions. Commit-time read sets
-protect retirement intent and secret metadata. Only the selected testing bindings
+protect retirement intent and secret metadata. The shared delivery selector must
+also find no inherited supplier after removal. Only the selected testing bindings
 become disabled; encrypted versions, secret records and other lanes stay intact.
 The response contains actions and names only. Provider persistence does not prove
 running-container adoption: complete the normal testing deployment and verify

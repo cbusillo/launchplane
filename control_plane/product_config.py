@@ -44,6 +44,7 @@ from control_plane.storage.product_authority_bundle import RuntimeEnvironmentSet
 from control_plane.storage.product_authority_bundle import SecretCopySourceExpectation
 from control_plane.storage.product_authority_bundle import SecretDeliverySetExpectation
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.runtime_environments import site_secret_scopes
 
 
 ProductConfigMode = Literal["dry-run", "apply"]
@@ -613,6 +614,7 @@ def _plan_product_config_binding_disables(
     writes: list[SecretBinding] = []
     events: list[SecretAuditEvent] = []
     summaries: list[dict[str, object]] = []
+    selected_binding_ids: set[str] = set()
     for item in entries:
         candidates = [
             binding
@@ -624,10 +626,16 @@ def _plan_product_config_binding_disables(
             raise ProductConfigError("Binding disable requires one exact existing lane binding.")
         binding = candidates[0]
         record = next((record for record in records if record.secret_id == binding.secret_id), None)
-        if record is None or record.current_version_id != item["version_id"]:
+        if (
+            record is None
+            or record.scope != "context_instance"
+            or (record.context, record.instance) != (context, instance)
+            or record.current_version_id != item["version_id"]
+        ):
             raise ProductConfigError(
                 "The selected binding version changed; review its current metadata."
             )
+        selected_binding_ids.add(binding.binding_id)
         action = "unchanged" if binding.status == "disabled" else "disabled"
         if mode == "apply" and action == "disabled":
             now = utc_now_timestamp()
@@ -647,13 +655,14 @@ def _plan_product_config_binding_disables(
                         "binding_key": binding.binding_key,
                         "context": context,
                         "instance": instance,
+                        "version_id": item["version_id"],
                     },
                 )
             )
         summaries.append(
             {
                 "action": action,
-                "scope": "context_instance",
+                "scope": record.scope,
                 "integration": binding.integration,
                 "name": record.name,
                 "binding_key": binding.binding_key,
@@ -662,6 +671,16 @@ def _plan_product_config_binding_disables(
                 "secret_id": record.secret_id,
             }
         )
+    effective_after = control_plane_secrets.resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration="runtime_environment",
+        context_name=context,
+        instance_name=instance,
+        scopes=site_secret_scopes(instance),
+        excluded_binding_ids=frozenset(selected_binding_ids),
+    )
+    if any(item["binding_key"] in effective_after for item in entries):
+        raise ProductConfigError("Disabling these bindings would expose another configured secret.")
     return summaries, ProductAuthorityBundle(
         secret_bindings=tuple(writes),
         secret_audit_events=tuple(events),
