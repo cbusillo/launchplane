@@ -12,6 +12,7 @@ from control_plane.provider_target_holds import (
     ProviderHoldLaneSnapshot,
     ProviderTargetHold,
     ProviderOperationReference,
+    ProviderOperationAttentionReference,
     TestingReplacementReference,
     bound_provider_target_origin,
     project_provider_target_hold,
@@ -20,7 +21,7 @@ from control_plane.provider_target_holds import (
 )
 from control_plane.legacy_testing_fence import (
     CapturedTestingFence,
-    TestingFenceAbandonment,
+    TestingFenceSettlement,
     capture_testing_fences,
     prove_testing_fence_history,
 )
@@ -8637,7 +8638,7 @@ class PostgresRecordStore(HumanSessionStore):
                 else None
             )
 
-    def _read_testing_fence_abandonment(
+    def _read_testing_fence_settlement(
         self,
         session: Any,
         capture: CapturedTestingFence,
@@ -8645,7 +8646,7 @@ class PostgresRecordStore(HumanSessionStore):
         product: str,
         context: str,
         for_update: bool = False,
-    ) -> TestingFenceAbandonment | None:
+    ) -> TestingFenceSettlement | None:
         from control_plane.event_deploy_recovery_reference import (
             validate_abandoned_testing_coordinates,
         )
@@ -8667,13 +8668,17 @@ class PostgresRecordStore(HumanSessionStore):
             return None
         try:
             completed = self._read_provider_hold_record(row)
-            coordinates = validate_abandoned_testing_coordinates(
-                completed, product=product, context=context, fingerprint=fingerprint
-            )
-            original = LaunchplaneIdempotencyRecord.model_validate(
-                completed.response_payload["abandonment"]["original"]
-            )
-            if capture.created_at and original.created_at != capture.created_at:
+            if (
+                completed.state != "completed"
+                or not requires_provider_target_origin(completed.provider_target_key)
+                or completed.record_id
+                != build_launchplane_mutation_reservation_id(
+                    scope=completed.scope,
+                    route_path=completed.route_path,
+                    idempotency_key=completed.idempotency_key,
+                )
+                or (capture.created_at and completed.created_at != capture.created_at)
+            ):
                 return None
             receipt = self._original_mutation_receipt(
                 session, completed, for_update=for_update, require_projection=True
@@ -8701,7 +8706,25 @@ class PostgresRecordStore(HumanSessionStore):
                 and hold.operation_nonce != capture.operation_nonce
             ):
                 return None
-            return TestingFenceAbandonment(completed, receipt, coordinates.reference)
+            from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
+
+            recovery = completed.response_payload.get("recovery")
+            abandoned = (
+                "abandonment" in completed.response_payload
+                or completed.response_payload.get("testing_settlement")
+                == TESTING_ORIGINAL_ABANDONED
+                or (
+                    isinstance(recovery, dict)
+                    and recovery.get("recovery_action") == "abandon_testing_original"
+                )
+            )
+            reference = ""
+            if capture.operation_nonce is None or abandoned:
+                coordinates = validate_abandoned_testing_coordinates(
+                    completed, product=product, context=context, fingerprint=fingerprint
+                )
+                reference = coordinates.reference
+            return TestingFenceSettlement(completed, receipt, reference)
         except (ValueError, TypeError, KeyError):
             return None
 
@@ -8712,7 +8735,7 @@ class PostgresRecordStore(HumanSessionStore):
         if len(captures) != 1 or not captures[0].created_at:
             return ""
         with self._session_factory() as session:
-            proof = self._read_testing_fence_abandonment(
+            proof = self._read_testing_fence_settlement(
                 session, captures[0], product=observation.product, context=observation.context
             )
             return proof.recovery_reference if proof else ""
@@ -9267,8 +9290,15 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
         settlement = (
-            authority.prove_testing_fence_settlement(product, context, instance)
-            if unavailable == ("provider-operation:unavailable",)
+            authority.prove_testing_fence_settlement(
+                product, context, instance, references=unavailable
+            )
+            if unavailable
+            and all(
+                value == "provider-operation:unavailable"
+                or ProviderOperationAttentionReference.parse(value) is not None
+                for value in unavailable
+            )
             else None
         )
         if settlement is not None:
@@ -34307,7 +34337,7 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
         return self._application_session.scalars(statement)
 
     def prove_testing_fence_settlement(
-        self, product: str, context: str, instance: str
+        self, product: str, context: str, instance: str, *, references: tuple[str, ...]
     ) -> object | None:
         from control_plane.workflows.public_ingress_monitor import DEPLOY_FENCE_CHECK_NAME
 
@@ -34357,9 +34387,21 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
                     )
                 )
             )
+            latest = next(
+                (row for row in observations if row.record_id == incident.latest_observation_id),
+                None,
+            )
+            if (
+                latest is None
+                or latest.material_fingerprint is None
+                or not (set(references) - {"provider-operation:unavailable"}).issubset(
+                    latest.material_fingerprint.route_authority.target_keys
+                )
+            ):
+                return None
 
-            def read_abandonment(capture: CapturedTestingFence) -> TestingFenceAbandonment | None:
-                return self._application_store._read_testing_fence_abandonment(
+            def read_settlement(capture: CapturedTestingFence) -> TestingFenceSettlement | None:
+                return self._application_store._read_testing_fence_settlement(
                     self._application_session,
                     capture,
                     product=product,
@@ -34367,7 +34409,7 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
                     for_update=self._proof_for_update,
                 )
 
-            return prove_testing_fence_history(incident, events, observations, read_abandonment)
+            return prove_testing_fence_history(incident, events, observations, read_settlement)
         except (ValueError, TypeError, KeyError):
             return None
 
