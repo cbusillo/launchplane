@@ -17,6 +17,7 @@ from control_plane.authz_grant_service import (
     AuthzPolicyRecordStore,
     AuthzCollectionType,
     AuthzManagedRuleEntry,
+    _authz_rule_sha256,
     _authz_policy_rule_collections,
     plan_managed_authz_policy_reconcile,
 )
@@ -315,14 +316,17 @@ def build_access_policy_review(
                 continue
             entries = dict(_authz_policy_rule_collections(policy))[principal_type]
             for rule in entries:
-                if (
+                if request.workflow_rule_retirement is not None:
+                    if kind != "removed" or _authz_rule_sha256(rule) != change.previous_rule_sha256:
+                        continue
+                elif (
                     rule.managed_set_id != request.managed_set_id
                     or rule.managed_rule_id != change.managed_rule_id
                 ):
                     continue
                 rules.append(
                     AccessPolicyRuleReview(
-                        managed_rule_id=change.managed_rule_id,
+                        managed_rule_id=change.managed_rule_id or change.previous_rule_sha256,
                         change=kind,
                         principal=_principal(
                             AuthzManagedRuleEntry(principal_type, rule), login_for_id

@@ -1961,10 +1961,18 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             current_policy=policy, identity=identity, intent="add"
         )
         assert grant is not None
-        policy = policy.model_copy(update={"local_operators": grant.desired_policy.local_operators})
+        from tests.test_reviewed_workflow_rule_retirement import retirement_policy
+
+        policy = policy.model_copy(
+            update={
+                "local_operators": grant.desired_policy.local_operators,
+                "github_actions": retirement_policy().github_actions,
+            }
+        )
         for descriptor, payload_builder in (
             ("managed-authz-policy-set", _managed_authz_plan_payload),
             ("managed-merge-train-policy-import", _merge_train_policy_plan_payload),
+            ("managed-authz-policy-set", None),
         ):
             with self.subTest(descriptor=descriptor), TemporaryDirectory() as directory:
                 store = PostgresRecordStore(
@@ -1987,7 +1995,32 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 try:
                     async with lifespan_client(app) as client:
-                        payload = payload_builder("local-proposal")
+                        payload: dict[str, object]
+                        if payload_builder is None:
+                            from tests.test_reviewed_workflow_rule_retirement import (
+                                retirement_proposal,
+                            )
+
+                            proposal = retirement_proposal(policy)
+                            assert proposal.workflow_rule_retirement is not None
+                            proposal = proposal.model_copy(
+                                update={
+                                    "workflow_rule_retirement": proposal.workflow_rule_retirement.model_copy(
+                                        update={
+                                            "policy_record_id": active.record_id,
+                                            "policy_revision": active.revision,
+                                            "policy_sha256": active.policy_sha256,
+                                        }
+                                    )
+                                }
+                            )
+                            payload = {
+                                "descriptor_id": descriptor,
+                                "source_event_id": "local-workflow-retirement",
+                                "request": proposal.model_dump(mode="json"),
+                            }
+                        else:
+                            payload = payload_builder("local-proposal")
                         proposed = await client.post(
                             "/v1/agent/privileged-operations/plans", json=payload
                         )
