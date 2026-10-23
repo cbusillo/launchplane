@@ -13523,6 +13523,26 @@ class PostgresRecordStore(HumanSessionStore):
                     "testing_activation", initial.model_dump(mode="json")
                 )
                 if record.published:
+                    assert before is not None
+                    if not before.published and not before.retained_reservations:
+                        from control_plane.workflows.generic_web_deploy_provider import (
+                            generic_web_provider_target_key,
+                        )
+
+                        old_key = generic_web_provider_target_key(
+                            provider_id=before.retained_provider.provider_id,
+                            context=before.context,
+                            instance="testing",
+                            target_type="application",
+                            target_id=before.retained_target_id.target_id,
+                        )
+                        if (
+                            session.scalar(
+                                self._active_provider_target_statement(provider_target_key=old_key)
+                            )
+                            is not None
+                        ):
+                            raise ValueError("An original writer appeared before publication.")
                     inventory = session.get(
                         LaunchplaneInventoryRow, (record.context, "testing"), with_for_update=True
                     )

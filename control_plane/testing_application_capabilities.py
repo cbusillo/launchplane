@@ -12,6 +12,8 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_reference import docker_image_repository, docker_image_digest
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import api, source
+from control_plane.dokploy.application_runtime import fetch_application_runtime
+from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient, _target_reservations
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -70,9 +72,15 @@ def retained_application_capability_spec(
     from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 
     deployments = {}
-    for row in _target_reservations(
-        store, product=product, context=context, target_key=key, target_id=target_id.target_id
-    ):
+    reservations = _target_reservations(
+        store,
+        product=product,
+        context=context,
+        target_key=key,
+        target_id=target_id.target_id,
+        require_complete=True,
+    )
+    for row in reservations:
         if row.provider_target_key != key:
             continue
         captured = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
@@ -118,6 +126,54 @@ def retained_application_capability_spec(
                 "provider_reference": identity.image_reference,
                 "source": identity.source_git_ref,
             }
+    if not reservations:
+        try:
+            observed = fetch_application_runtime(
+                host=host, token=token, application_id=target_id.target_id
+            )
+        except DokployEvidenceProviderError as error:
+            raise ValueError("The retained application runtime is unavailable.") from error
+        if (
+            observed.application_id != target_id.target_id
+            or observed.app_name != payload.get("appName")
+            or observed.server_id != (payload.get("serverId") or "")
+            or not observed.service_deployment_record_id
+        ):
+            raise ValueError("The retained runtime has no attributable application identity.")
+        try:
+            original = store.read_deployment_record(observed.service_deployment_record_id)
+        except FileNotFoundError as error:
+            raise ValueError("The retained runtime deployment is unavailable.") from error
+        identity = parse_runtime_identity_payload(original.runtime_identity)
+        if (
+            original.record_id != observed.service_deployment_record_id
+            or (original.context, original.instance) != (context, "testing")
+            or original.deployed_target is None
+            or (
+                original.deployed_target.provider_id,
+                original.deployed_target.target_category,
+                original.deployed_target.target_id,
+            )
+            != (provider.provider_id, "application", target_id.target_id)
+            or identity is None
+            or (
+                identity.product,
+                identity.context,
+                identity.instance,
+                identity.deployment_record_id,
+            )
+            != (product, context, "testing", original.record_id)
+            or not docker_image_digest(identity.artifact_id)
+            or original.artifact_identity is None
+            or original.artifact_identity.artifact_id != identity.artifact_id
+            or original.source_git_ref != identity.source_git_ref
+        ):
+            raise ValueError("The retained runtime deployment does not identify this application.")
+        deployments[original.record_id] = {
+            "artifact": identity.artifact_id,
+            "provider_reference": identity.image_reference,
+            "source": identity.source_git_ref,
+        }
     app_name = payload.get("appName")
     if not isinstance(app_name, str) or not app_name or not deployments:
         raise ValueError("The retained original has no attributable application identity.")
