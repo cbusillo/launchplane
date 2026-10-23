@@ -213,10 +213,16 @@ def require_retained_application_custody(
         target_id=target_id.target_id,
     )
     reservations = _target_reservations(
-        store, product=product, context=context, target_key=key, target_id=target_id.target_id
+        store,
+        product=product,
+        context=context,
+        target_key=key,
+        target_id=target_id.target_id,
+        require_complete=True,
     )
     if not reservations:
-        raise TestingExclusionRefused("reservation_fence_absent")
+        check()
+        return ()
     prefix = f"{RECONCILE_SOURCE}:{product}:{context}:testing:"
     check()
     current = []
@@ -267,12 +273,19 @@ def _digest(records: tuple[BaseModel, ...]) -> str:
 
 
 def _target_reservations(
-    store: PostgresRecordStore, *, product: str, context: str, target_key: str, target_id: str
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    target_key: str,
+    target_id: str,
+    require_complete: bool = False,
 ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
     from control_plane.product_reconcile import reconcile_reservation_scope, RECONCILE_SOURCE
 
     prefix = f"{RECONCILE_SOURCE}:{product}:{context}:testing:"
     selected = []
+    unattributed = False
     for row in store.list_held_provider_target_reservations():
         matches = row.provider_target_key == target_key or (
             row.scope == reconcile_reservation_scope(product)
@@ -283,9 +296,11 @@ def _target_reservations(
                 snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
                 matches = snapshot.provider_id == "dokploy" and snapshot.target_id == target_id
             except ValueError:
-                pass
+                unattributed = True
         if matches:
             selected.append(row)
+    if require_complete and not selected and unattributed:
+        raise TestingExclusionRefused("execution_ownership_unproved")
     return tuple(selected)
 
 

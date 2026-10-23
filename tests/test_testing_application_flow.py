@@ -117,6 +117,7 @@ class ApplicationFlowTests(unittest.TestCase):
     database_url = ""
     pre_image_unknown = False
     direct_original = False
+    no_original = False
     adapter: ApplicationActivationAdapter
     planned: TestingActivationRecord
 
@@ -320,6 +321,12 @@ class ApplicationFlowTests(unittest.TestCase):
                 return_value="ghcr.io/example/site@sha256:" + "a" * 64,
             )
         )
+        self.enterContext(
+            patch(
+                "control_plane.testing_application_capabilities.fetch_application_runtime",
+                side_effect=self.observed_application,
+            )
+        )
         if self.store.database_dialect_name != "postgresql":
             self.enterContext(
                 patch.object(
@@ -356,23 +363,25 @@ class ApplicationFlowTests(unittest.TestCase):
                 "scheduleId": "retained-schedule",
             }
         self.store.write_product_profile_record(profile)
-        self.lose_command = True
-        with patch.object(
-            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-        ):
-            self.assertEqual(self.normal("original").status, "reconcile_required")
         self.lose_command = False
-        self.original = next(
-            row
-            for row in self.store.list_held_provider_target_reservations()
-            if row.route_path == GENERIC_WEB_DEPLOY_ROUTE
-        )
-        self.assertEqual(
-            self.original.provider_effect_phase,
-            "application_schedule_restore"
-            if self.pre_image_unknown
-            else "application_maintenance_execute",
-        )
+        if not self.no_original:
+            self.lose_command = True
+            with patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
+            ):
+                self.assertEqual(self.normal("original").status, "reconcile_required")
+            self.lose_command = False
+            self.original = next(
+                row
+                for row in self.store.list_held_provider_target_reservations()
+                if row.route_path == GENERIC_WEB_DEPLOY_ROUTE
+            )
+            self.assertEqual(
+                self.original.provider_effect_phase,
+                "application_schedule_restore"
+                if self.pre_image_unknown
+                else "application_maintenance_execute",
+            )
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
         )
@@ -411,6 +420,30 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.lost_image_reply = False
         self.failed_image_type = ""
+
+    def observed_application(self, **kwargs: Any) -> Any:
+        from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+
+        payload = self.payloads[kwargs["application_id"]]
+        service = self.services[payload["appName"]]
+        configuration = service["Spec"]["TaskTemplate"]["ContainerSpec"]
+        values = dict(value.split("=", 1) for value in configuration["Env"])
+        identity = json.loads(values["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
+        return ApplicationRuntimeObservation(
+            application_id=payload["applicationId"],
+            app_name=payload["appName"],
+            server_id=payload["serverId"],
+            service_id=service["ID"],
+            service_image=configuration["Image"],
+            service_deployment_record_id=identity["deployment_record_id"],
+            desired_replicas=1,
+            rollout_state="completed",
+            rollout_started_at="",
+            running_container_images=(),
+            running_container_deployment_record_ids=(),
+            running_container_health=(),
+            pending_task_count=0,
+        )
 
     def fresh(self, identifier: str, name: str, environment: str, project: str) -> dict[str, Any]:
         return {
@@ -4714,6 +4747,173 @@ class ApplicationFlowTests(unittest.TestCase):
                     ),
                 )
                 self.assertIn(reference, bulk[foreign_lane].unavailable_references)
+
+
+class FreshApplicationFlowTests(unittest.TestCase):
+    def fresh_fixture(self) -> ApplicationFlowTests:
+        fixture = ApplicationFlowTests()
+        fixture.no_original = True
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    @staticmethod
+    def reserve_writer(fixture: ApplicationFlowTests, *, target_key: str) -> Any:
+        from control_plane.contracts.provider_target_origin import (
+            ProviderTargetOrigin,
+            requires_provider_target_origin,
+        )
+
+        return fixture.store.reserve_mutation(
+            scope="late-writer",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key="late-writer",
+            request_fingerprint="late-writer",
+            lease_owner="late-writer",
+            reconciliation_key="unattributed-original",
+            provider_target_key=target_key,
+            provider_target_origin=ProviderTargetOrigin(
+                product=fixture.product,
+                context=fixture.context,
+                instance="testing",
+                provider_id="dokploy",
+                target_type="application",
+                target_id=fixture.old_id,
+            )
+            if requires_provider_target_origin(target_key)
+            else None,
+        )
+
+    def test_fresh_application_publishes_without_fabricating_an_original(self) -> None:
+        fixture = self.fresh_fixture()
+        old_payload = json.loads(json.dumps(fixture.payloads[fixture.old_id]))
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+        fixture.prepare()
+        result = fixture.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = fixture.adapter.current()
+        self.assertTrue(record.published)
+        self.assertFalse(record.retained_reservations)
+        self.assertNotEqual(record.target_id, fixture.old_id)
+        self.assertEqual(fixture.payloads[fixture.old_id], old_payload)
+        self.assertEqual((fixture.old_backing / "keep").read_text(), "Retained original data")
+        self.assertNotEqual(fixture.canonical_password(), "retained-only-password")
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_actual_rollback_identity_is_attributed_from_its_exact_record(self) -> None:
+        fixture = self.fresh_fixture()
+        physical = deepcopy((fixture.services, fixture.tasks, fixture.containers, fixture.images))
+        self.assertEqual(fixture.normal("new-baseline").status, "completed")
+        fixture.services, fixture.tasks, fixture.containers, fixture.images = physical
+        fixture.prepare()
+        result = fixture.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(fixture.adapter.current().published)
+
+    def test_unproved_observed_deployment_refuses_before_preparation_effects(self) -> None:
+        fixture = self.fresh_fixture()
+        observed = fixture.observed_application(application_id=fixture.old_id)
+        read = fixture.store.read_deployment_record
+        original = read(observed.service_deployment_record_id)
+        assert original.deployed_target is not None
+        physical = deepcopy((fixture.services, fixture.tasks, fixture.containers, fixture.images))
+        self.assertEqual(fixture.normal("new-baseline").status, "completed")
+        fixture.services, fixture.tasks, fixture.containers, fixture.images = physical
+        writes = list(fixture.writes)
+        variants = {
+            "missing": None,
+            "no-identity": original.model_copy(update={"runtime_identity": None}),
+            "no-artifact": original.model_copy(update={"artifact_identity": None}),
+            "foreign-lane": original.model_copy(update={"instance": "production"}),
+            "foreign-target": original.model_copy(
+                update={
+                    "deployed_target": original.deployed_target.model_copy(
+                        update={"target_id": "another-application"}
+                    )
+                }
+            ),
+        }
+        for name, replacement in variants.items():
+            with self.subTest(name=name):
+
+                def deployment(record_id: str) -> Any:
+                    if record_id != original.record_id:
+                        return read(record_id)
+                    if replacement is None:
+                        raise FileNotFoundError(record_id)
+                    return replacement
+
+                with patch.object(fixture.store, "read_deployment_record", side_effect=deployment):
+                    with self.assertRaises(ValueError):
+                        fixture.prepare()
+                self.assertEqual(fixture.writes, writes)
+                self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_unattributed_hold_cannot_supply_fresh_absence(self) -> None:
+        fixture = self.fresh_fixture()
+        self.reserve_writer(fixture, target_key="unknown-provider-target")
+        writes = list(fixture.writes)
+        with self.assertRaises(ValueError):
+            fixture.prepare()
+        self.assertEqual(fixture.writes, writes)
+
+    def test_late_writer_keeps_original_target_before_and_after_creation(self) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.testing_separation_resources import preparation_binding
+
+        for after_creation in (False, True):
+            with self.subTest(after_creation=after_creation):
+                fixture = self.fresh_fixture()
+                try:
+                    fixture.prepare()
+                    old_key = preparation_binding(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        fixture.actor,
+                        fixture.root,
+                        fixture.specification,
+                    )[1]
+                    write = fixture.store.write_testing_activation
+                    inserted: list[Any] = []
+
+                    def insert(**kwargs: Any) -> None:
+                        write(**kwargs)
+                        if kwargs["replacement"]["phase"] == "recipient_ready" and not inserted:
+                            inserted.append(self.reserve_writer(fixture, target_key=old_key))
+
+                    if after_creation:
+                        with patch.object(
+                            fixture.store, "write_testing_activation", side_effect=insert
+                        ):
+                            result = fixture.activate()
+                        self.assertTrue(inserted)
+                        if result.status == "completed":
+                            self.assertFalse(result.response_payload["result"]["applied"])
+                    else:
+                        self.reserve_writer(fixture, target_key=old_key)
+                        with self.assertRaises(TestingActivationRefusal):
+                            fixture.activate()
+                    record = activation_record(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        scope=fixture.scope,
+                        preparation_key=fixture.request.preparation_key,
+                    )
+                    self.assertTrue(record is None or not record.published)
+                    self.assertEqual(
+                        fixture.store.read_dokploy_target_id_record(
+                            context_name=fixture.context, instance_name="testing"
+                        ).target_id,
+                        fixture.old_id,
+                    )
+                    self.assertFalse(
+                        any(path == "/api/application.deploy" for path, _ in fixture.writes)
+                    )
+                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
+                finally:
+                    fixture.doCleanups()
 
 
 class DirectApplicationContinuationTests(unittest.TestCase):

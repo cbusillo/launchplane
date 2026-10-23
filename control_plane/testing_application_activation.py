@@ -482,6 +482,41 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
         super().require_unchanged(record)
+        if not record.published and not record.retained_reservations:
+            from control_plane.generic_web_testing_exclusion import (
+                _target_reservations,
+                TestingExclusionRefused,
+            )
+            from control_plane.workflows.generic_web_deploy_provider import (
+                generic_web_provider_target_key,
+            )
+
+            key = generic_web_provider_target_key(
+                provider_id=record.retained_provider.provider_id,
+                context=record.context,
+                instance="testing",
+                target_type="application",
+                target_id=record.retained_target_id.target_id,
+            )
+            try:
+                reservations = _target_reservations(
+                    self.store,
+                    product=record.product,
+                    context=record.context,
+                    target_key=key,
+                    target_id=record.retained_target_id.target_id,
+                    require_complete=True,
+                )
+            except TestingExclusionRefused as error:
+                raise TestingActivationRefusal(
+                    "Original execution attribution became unavailable.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                ) from error
+            if reservations:
+                raise TestingActivationRefusal(
+                    "An original writer appeared after fresh admission.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
         if record.external_capabilities:
             from control_plane.testing_external_capabilities import require_discord_capability
 
