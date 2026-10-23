@@ -1282,6 +1282,8 @@ PrivilegedOperationSemanticReviewBlockerCode = Literal[
     "instances_not_singleton",
     "instance_not_exact",
     "secret_unreadable",
+    "privileged_operation_plan_stale",
+    "privileged_operation_planning_unavailable",
     "operation_past_expiry",
     "operation_expired",
     "execution_failed",
