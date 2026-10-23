@@ -1,5 +1,6 @@
 import { expect, setClockTime, test, type Page } from "./state";
 import type { Locator } from "@playwright/test";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 // Each badge's container, label and indicator must all carry the color the
 // shared badge rule gives its state, measured on a bare badge of that state.
@@ -67,7 +68,7 @@ test("lane evidence badge colors follow evidence, not lane health", { tag: "@res
     await expect(failedLane.locator(":scope > strong")).toHaveCSS("color", danger);
     await expect(failedLane.locator(".evidence-badge")).not.toHaveCSS("color", danger);
     await expectEvidenceColors(row.locator(".directory-lane .evidence-badge"));
-    await row.screenshot({ path: `../tmp/browser-smoke/evidence-badge-color-${state}-${testInfo.project.name}.png` });
+    await row.screenshot({ path: smokeArtifact(`evidence-badge-color-${state}-${testInfo.project.name}.png`) });
   }
 });
 
@@ -75,6 +76,6 @@ test("TLS domain evidence badges keep their evidence colors", { tag: "@responsiv
   await page.goto("/ui/products/atlas-commerce/environments/prod?fixture=products");
   const list = page.locator(".tls-domain-list");
   await expect(list.locator(".evidence-badge").first()).toBeVisible();
-  await list.screenshot({ path: `../tmp/browser-smoke/evidence-badge-color-tls-${testInfo.project.name}.png` });
+  await list.screenshot({ path: smokeArtifact(`evidence-badge-color-tls-${testInfo.project.name}.png`) });
   await expectEvidenceColors(list.locator(".evidence-badge"));
 });

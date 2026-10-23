@@ -1,15 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { smokeArtifact } from "./browser-smoke-paths.mjs";
 import { browserDeadlines } from "./playwright-deadlines.mjs";
-
-const frontendRoot = dirname(fileURLToPath(import.meta.url));
-const artifactRoot = resolve(frontendRoot, "../tmp/browser-smoke");
 
 export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
-  outputDir: resolve(artifactRoot, "test-results"),
+  outputDir: smokeArtifact("test-results"),
   // Tests mock their own API reads in fresh contexts. CI runners can share a
   // host, so keep browser fan-out bounded independently of its CPU count.
   fullyParallel: true,

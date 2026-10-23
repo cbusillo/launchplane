@@ -13,6 +13,9 @@ name: CI
 env:
   DOCKER_COMPOSE_VERSION: v5.3.1
   LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+  # Local smoke writes outside the checkout; CI keeps it in the workspace to
+  # upload. Relative paths resolve against the checkout, also in the container.
+  BROWSER_SMOKE_ARTIFACT_DIR: tmp/browser-smoke
   BROWSER_SMOKE_IMAGE: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
   LAUNCHPLANE_CI_TRAEFIK_IMAGE: traefik:v3.3@sha256:2cd5cc75530c8d07ae0587c743d23eb30cae2436d07017a5ff78498b1a43d09f
 
@@ -779,7 +782,7 @@ jobs:
           # Artifacts belong to this immutable workflow run/head. A failed-job
           # rerun replaces only its own leg and retains successful siblings.
           name: browser-smoke-${{ matrix.shard }}
-          path: tmp/browser-smoke
+          path: ${{ env.BROWSER_SMOKE_ARTIFACT_DIR }}
           if-no-files-found: error
           overwrite: true
           retention-days: 14
@@ -832,7 +835,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: browser-smoke-*
-          path: tmp/browser-smoke
+          path: ${{ env.BROWSER_SMOKE_ARTIFACT_DIR }}
           merge-multiple: true
 
       - name: Verify complete browser coverage and screenshots
