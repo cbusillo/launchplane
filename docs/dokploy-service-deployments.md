@@ -246,7 +246,8 @@ or retain the original custody first. The service uses the same durable runner a
 state-volume setup. The service generates unique names for each newly created
 project, environment and application, returned in `allocation`; supplied labels
 are not recovery identities. Existing placement ids remain exact existing
-placement. An omitted project name is resolved during adoption; an omitted server
+placement. As in direct setup, a supplied environment selects its actual project;
+a redundant project id does not override that environment. An omitted project name is resolved during adoption; an omitted server
 keeps the provider-selected placement. Every acknowledged identity and each pending dispatch is recorded
 under the original caller scope and key before the next effect.
 

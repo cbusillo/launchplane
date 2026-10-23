@@ -399,11 +399,12 @@ class ApplicationStateVolumeAdapter:
             intent = plan.response_payload
             if (
                 intent["request"] != _normalized(request)
-                or intent["product"] != product
                 or intent["plan_sha256"] != request.expected_plan_sha256
             ):
                 raise ValueError("Storage plan differs from the reviewed request.")
-        return cls(root, store, request, scope, trace, product, intent, operation_key)
+        return cls(
+            root, store, request, scope, trace, str(intent["product"]), intent, operation_key
+        )
 
     @classmethod
     def prepare_ordinary(
@@ -473,18 +474,6 @@ class ApplicationStateVolumeAdapter:
         intent = plan.response_payload
         if intent["request"] != _normalized(request):
             raise ValueError("Preserve the original allocation request and operation key.")
-        service_retention = (
-            request.retain_allocation
-            and intent.get("first_testing_setup") is False
-            and not first_testing_setup
-        )
-        if request.mode != "readback" and not service_retention and intent["product"] != product:
-            from control_plane.application_state_volume_retention import (
-                state_volume_plan_is_retained,
-            )
-
-            if not state_volume_plan_is_retained(store, scope, plan_id):
-                raise ValueError("Original allocation owner changed.")
         return cls(
             root,
             store,
@@ -770,7 +759,7 @@ class ApplicationStateVolumeAdapter:
             return {
                 key: value
                 for key, value in {
-                    "project": self.request.project_id,
+                    "project": self.request.project_id if not self.request.environment_id else "",
                     "environment": self.request.environment_id,
                 }.items()
                 if value
@@ -781,14 +770,14 @@ class ApplicationStateVolumeAdapter:
         inventory = read_dokploy_inventory(host=host, token=token, offset=0, limit=MAX_PROJECTS)
         if inventory.next_offset is not None or len(inventory.projects) != inventory.total_projects:
             raise ValueError("Original placement inventory is incomplete.")
-        if self.request.project_id:
-            projects = [p for p in inventory.projects if p.project_id == self.request.project_id]
-        elif self.request.environment_id:
+        if self.request.environment_id:
             projects = [
                 p
                 for p in inventory.projects
                 if any(e.environment_id == self.request.environment_id for e in p.environments)
             ]
+        elif self.request.project_id:
+            projects = [p for p in inventory.projects if p.project_id == self.request.project_id]
         else:
             projects = [p for p in inventory.projects if p.name == self.intent["project_marker"]]
         if len(projects) != 1 or (

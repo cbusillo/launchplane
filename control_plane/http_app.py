@@ -27336,7 +27336,7 @@ def create_launchplane_fastapi_app(
                     code="testing_target_source_evidence_unavailable",
                     message=str(error),
                 ) from error
-            except (ValueError, FileNotFoundError) as error:
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
                 raise _launchplane_http_error(
                     status_code=400
                     if ordinary_allocation and not isinstance(error, StateVolumeRefusal)

@@ -182,6 +182,140 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(recovered.json()["result"]["configuration_evidence"], "unavailable")
         self.assertEqual(self.provider.call_args_list, calls)
 
+    async def recover_receipt_after_owner_change(
+        self, *, service: bool, interrupted: bool, storage: bool = False
+    ) -> None:
+        if service:
+            self.set_service_permission(True)
+        if storage:
+            self.payload["state_volume_path"] = "/var/lib/example"
+            await self.plan()
+        if interrupted:
+            with patch.object(
+                ApplicationStateVolumeAdapter,
+                "_verify_adopted",
+                side_effect=OSError("fixture: interrupted receipt"),
+            ):
+                initial = await self.post()
+            self.assertEqual(initial.status_code, 409, initial.text)
+        else:
+            initial = await self.post()
+            self.assertEqual(initial.status_code, 202, initial.text)
+        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={"product": "new-owner", "repository": "example/new-owner"}
+            )
+        )
+        calls = self.provider.call_args_list.copy()
+        from contextlib import nullcontext
+
+        with (
+            self.expire_execution() if interrupted else nullcontext(),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=AssertionError("Receipt recovery requires no provider"),
+            ),
+            patch(
+                "control_plane.dokploy_inventory.read_dokploy_inventory",
+                side_effect=AssertionError("Receipt recovery requires no inventory"),
+            ),
+        ):
+            recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertTrue(recovered.json()["result"]["applied"])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(self.provider.call_args_list, calls)
+
+    async def test_service_committed_receipt_recovers_after_owner_change(self) -> None:
+        await self.recover_receipt_after_owner_change(service=True, interrupted=True)
+
+    async def test_director_committed_receipt_recovers_after_owner_change(self) -> None:
+        await self.recover_receipt_after_owner_change(service=False, interrupted=True)
+
+    async def test_completed_receipt_replays_after_owner_change(self) -> None:
+        await self.recover_receipt_after_owner_change(service=True, interrupted=False)
+
+    async def test_state_volume_committed_receipt_recovers_after_owner_change(self) -> None:
+        await self.recover_receipt_after_owner_change(service=False, interrupted=True, storage=True)
+
+    async def test_incomplete_state_volume_continuation_keeps_original_owner_fence(self) -> None:
+        self.payload["state_volume_path"] = "/var/lib/example"
+        await self.plan()
+        self.fail_after = PROJECT_CREATE_PATH
+        uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={"product": "new-owner", "repository": "example/new-owner"}
+            )
+        )
+        calls = self.provider.call_args_list.copy()
+        self.fail_after = ""
+        with self.expire_execution():
+            refused = await self.post()
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+
+    async def test_state_volume_completed_receipt_replays_after_owner_change(self) -> None:
+        await self.recover_receipt_after_owner_change(
+            service=False, interrupted=False, storage=True
+        )
+
+    async def recover_environment_with_redundant_project(self, *, interrupted: bool) -> None:
+        self.set_service_permission(True)
+        self.payload.update(
+            project_id="different-project", environment_id="created-environment", project_name=""
+        )
+        self.placement = {
+            "project_id": "created-project",
+            "name": "Existing project",
+            "environments": [
+                {
+                    "environment_id": "created-environment",
+                    "name": "Existing environment",
+                    "targets": [],
+                }
+            ],
+        }
+        self.fail_after = APPLICATION_CREATE_PATH if interrupted else ""
+        initial = await self.post()
+        if interrupted:
+            self.assertEqual(initial.status_code, 409, initial.text)
+            self.fail_after = ""
+            with self.expire_execution():
+                result = await self.post()
+        else:
+            result = initial
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertTrue(result.json()["result"]["applied"])
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list], [APPLICATION_CREATE_PATH]
+        )
+        self.assertEqual(self.live["environmentId"], self.payload["environment_id"])
+        self.assertEqual(self.current_testing_target_id(), "created-application")
+
+    async def test_supplied_environment_keeps_precedence_on_apply(self) -> None:
+        await self.recover_environment_with_redundant_project(interrupted=False)
+
+    async def test_supplied_environment_keeps_precedence_on_lost_response(self) -> None:
+        await self.recover_environment_with_redundant_project(interrupted=True)
+
+    async def test_missing_provider_configuration_is_a_structured_pre_effect_refusal(self) -> None:
+        import click
+
+        with patch(
+            "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+            side_effect=click.ClickException("fixture: Dokploy configuration unavailable"),
+        ):
+            refused = await self.post()
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "invalid_dokploy_target_setup")
+        self.provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
     async def test_legacy_completed_setup_receipt_replays_without_new_allocation(self) -> None:
         from control_plane.application_state_volume import ROUTE
         from control_plane.http_app import idempotency_request_fingerprint
@@ -504,6 +638,11 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             )
         elif change == "authority-loss":
             self.set_service_permission(False)
+        if change in {"registration", "profile-edit", "exclusive-change", "shared-change"}:
+            with self.expire_execution():
+                continuation = await self.post()
+            self.assertEqual(continuation.status_code, 409, continuation.text)
+            self.assertEqual(self.provider.call_args_list, effects)
         readback = await self.post(mode="readback")
         self.assertEqual(readback.status_code, 202, readback.text)
         if change == "unregistered":
