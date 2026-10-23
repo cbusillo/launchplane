@@ -34,7 +34,17 @@ class _Response:
         self.page = page
         self.url = "https://video.test" + path
         self.status = 200
+        self.headers: dict[str, str] = {}
         self.request = _Request(self, method)
+
+    def body(self) -> bytes:
+        if (
+            self.page.browser.failure == "qr-truncated"
+            and self.request.method == "POST"
+            and self.url.endswith("/dashboard")
+        ):
+            raise OSError("partial body")
+        return b"fixture completed"
 
 
 class _Request:
@@ -48,6 +58,8 @@ class _Request:
             else {}
         )
         self._response = response
+        self.redirected_from: _Request | None = None
+        self.failure: str | None = None
 
     def response(self) -> _Response:
         return self._response
@@ -98,6 +110,7 @@ class _Page:
         self.listeners: dict[str, list[Callable[[Any], None]]] = {}
         self.expected: tuple[Callable[[Any], bool], Any] | None = None
         self.closed = False
+        self.context = browser.current_context
         browser.pages.append(self)
 
     def on(self, event: str, callback: Callable[[Any], None]) -> None:
@@ -109,8 +122,11 @@ class _Page:
     def close(self) -> None:
         if self.browser.failure == "close":
             raise OSError("Browser connection lost while closing the page")
-        if self.browser.failure == "read-at-close":
-            self.emit("GET", "/billing?_rsc=fixture")
+        if self.browser.failure in {"read-at-close", "mutation-at-close"}:
+            self.emit(
+                "POST" if self.browser.failure == "mutation-at-close" else "GET",
+                "/billing?_rsc=fixture",
+            )
         self.closed = True
 
     def event(self, event: str, value: Any) -> None:
@@ -119,85 +135,18 @@ class _Page:
         for callback in self.listeners.get(event, []):
             callback(value)
 
-    def wait_for_event(self, event: str, *, predicate: Callable[[Any], bool], timeout: int) -> None:
-        self.finish_pending_request(predicate, timeout)
-        if self.browser.failure == "signup-buffered":
-            raise TimeoutError("Completion arrived before the asynchronous waiter registered")
-
-    @contextmanager
-    def expect_request_finished(
-        self, *, predicate: Callable[[Any], bool], timeout: int
-    ) -> Iterator[None]:
-        if self.is_closed():
-            raise OSError("Page closed before request settlement")
-        yield
-        self.finish_pending_request(predicate, timeout)
-
-    def finish_pending_request(self, predicate: Callable[[Any], bool], timeout: int) -> None:
-        if timeout <= 0:
-            raise AssertionError("Request completion needs a bounded built-in wait.")
-        self.browser.events.append("bounded-body-wait")
-        for request in self.browser.requests:
-            if (
-                self.browser.failure == "billing-aborted-in-wait"
-                and request.url.endswith("/billing")
-                and predicate(request)
-            ):
-                self.event("requestfailed", request)
-                raise TimeoutError("Only a request-failed event arrived during the finished wait")
-            if (
-                self.browser.failure == "signup-buffered"
-                and request.url.endswith("/api/auth/sign-up/email")
-                or self.browser.failure == "billing-pending"
-                and request.url.endswith("/billing")
-                or ("?_rsc=" in request.url and self.browser.failure != "refresh-unknown")
-            ) and predicate(request):
-                self.browser.finished.add(request)
-                self.event("requestfinished", request)
-                return
-        raise TimeoutError("response headers arrived without body completion")
-
     def emit(self, method: str, path: str) -> _Response:
         response = _Response(self, method, path)
         request = response.request
         self.browser.requests.append(request)
         self.event("request", request)
         self.event("response", response)
-        if path == "/billing" and self.browser.failure in {
-            "billing-aborted",
-            "billing-action-aborted",
-        }:
-            if self.browser.failure == "billing-action-aborted":
-                request.headers["next-action"] = "fixture"
-            self.event("requestfailed", request)
-        elif (
-            path == "/dashboard"
-            and method == "POST"
-            and self.browser.failure == "qr-aborted"
-            or path.startswith("/v/")
-            and self.browser.failure == "public-aborted"
-        ):
-            self.event("requestfailed", request)
-        elif path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
-            "signup",
-            "body_pending",
-            "signup-buffered",
-        }:
-            if self.browser.failure == "signup":
-                self.event("requestfailed", request)
-        elif path == "/billing" and self.browser.failure in {
-            "billing-pending",
-            "billing-aborted-in-wait",
-        }:
-            pass
-        elif "?_rsc=" in path:
-            pass
+        route = _Route(self, response)
+        if self.context.handler and self.context.predicate(request.url):
+            self.context.handler(route)
         else:
-            self.browser.finished.add(request)
-            self.browser.events.append("finished:" + response.url)
-            self.event("requestfinished", request)
-        if self.expected is not None and self.expected[0](response):
-            self.expected[1].value = response
+            route.fetch()
+            route.fulfill(response=response)
         return response
 
     def goto(self, url: str, **_kwargs: Any) -> _Response:
@@ -212,7 +161,6 @@ class _Page:
         )
         response = self.emit("GET", path)
         if self.browser.failure == "redirect-refusal":
-            response.status = 302
             raise OSError("Connection refused after following the original response redirect.")
         if self.browser.failure == "gateway-error":
             response.status = 503
@@ -224,12 +172,13 @@ class _Page:
         for request in self.browser.requests:
             if (
                 request._response.page is self
-                and "?_rsc=" in request.url
-                and request not in self.browser.finished
-                and request not in self.browser.failed
+                and request not in self.browser.upstream_completed
+                and request.failure is None
             ):
-                self.event("requestfailed", request)
-                raise OSError("Navigation or submission abandoned an outstanding product request.")
+                raise OSError("Navigation abandoned an outstanding product request.")
+
+    def wait_for_timeout(self, _milliseconds: float) -> None:
+        pass
 
     def set_default_timeout(self, _value: int) -> None:
         pass
@@ -267,6 +216,92 @@ class _Page:
             self.expected = None
 
 
+class _Route:
+    def __init__(self, page: _Page, response: _Response) -> None:
+        self.page = page
+        self.response = response
+        self.request = response.request
+
+    def fetch(
+        self, *, max_redirects: int = 20, max_retries: int = 0, timeout: float = 30_000
+    ) -> _Response:
+        browser = self.page.browser
+        browser.effects.append(self.request)
+        path = urlparse(self.request.url).path
+        affected = (
+            path == "/api/auth/sign-up/email"
+            and browser.failure in {"signup", "body_pending"}
+            or "?_rsc=" in self.request.url
+            and browser.failure == "refresh-unknown"
+            or path == "/dashboard"
+            and self.request.method == "POST"
+            and browser.failure in {"qr-upstream-lost", "qr-http-error", "qr-redirect"}
+            or path.startswith("/v/")
+            and browser.failure == "public-upstream-lost"
+        )
+        if affected:
+            if max_retries:
+                browser.effects.extend([self.request] * max_retries)
+            if browser.failure == "qr-redirect":
+                if max_redirects:
+                    browser.effects.append(self.request)
+                self.response.status = 307
+            elif browser.failure == "qr-http-error":
+                self.response.status = 500
+            else:
+                raise TimeoutError("private-transport-detail")
+        if browser.failure == "gateway-error":
+            self.response.status = 503
+        browser.upstream_completed.add(self.request)
+        return self.response
+
+    def fulfill(self, *, response: _Response) -> None:
+        browser = self.page.browser
+        browser.delivered.append(self.request)
+        self.page.event("response", response)
+        path = urlparse(self.request.url).path
+        aborted = (
+            path == "/billing"
+            and browser.failure
+            in {"billing-aborted", "billing-aborted-in-wait", "billing-action-aborted"}
+            or path == "/dashboard"
+            and self.request.method == "POST"
+            and browser.failure == "qr-aborted"
+            or path.startswith("/v/")
+            and browser.failure == "public-aborted"
+            or path == "/api/auth/sign-up/email"
+            and browser.failure == "signup-buffered"
+        )
+        if aborted:
+            self.request.failure = "net::ERR_ABORTED"
+            self.page.event("requestfailed", self.request)
+        else:
+            browser.finished.add(self.request)
+            self.page.event("requestfinished", self.request)
+        if self.page.expected is not None and self.page.expected[0](response):
+            self.page.expected[1].value = response
+
+    def abort(self) -> None:
+        self.request.failure = "net::ERR_ABORTED"
+        self.page.event("requestfailed", self.request)
+
+
+class _Context:
+    def __init__(self, browser: "_Browser") -> None:
+        self.browser = browser
+        self.handler: Callable[[Any], None] | None = None
+        self.predicate: Callable[[str], bool] = lambda _url: False
+
+    def new_page(self) -> _Page:
+        return _Page(self.browser)
+
+    def route(self, predicate: Callable[[str], bool], handler: Callable[[Any], None]) -> None:
+        self.predicate, self.handler = predicate, handler
+
+    def unroute_all(self, *, behavior: str) -> None:
+        self.handler = None
+
+
 class _Browser:
     def is_connected(self) -> bool:
         return self.failure != "disconnected"
@@ -280,9 +315,15 @@ class _Browser:
         self.failed: set[_Request] = set()
         self.pages: list[_Page] = []
         self.closed = False
+        self.effects: list[_Request] = []
+        self.delivered: list[_Request] = []
+        self.upstream_completed: set[_Request] = set()
+        self.current_context = _Context(self)
 
-    def new_context(self) -> Any:
-        return nullcontext(SimpleNamespace(new_page=lambda: _Page(self)))
+    @contextmanager
+    def new_context(self, **_kwargs: Any) -> Iterator[_Context]:
+        self.current_context = _Context(self)
+        yield self.current_context
 
     def close(self) -> None:
         self.closed = True
@@ -324,7 +365,7 @@ class ProductExecutionTests(unittest.TestCase):
             browser.events.append("maintenance:" + action)
             if action == "grant-sponsored":
                 self.billing_at_grant = [
-                    request in browser.finished or request in browser.failed
+                    request in browser.upstream_completed
                     for request in browser.requests
                     if urlparse(request.url).path == "/billing"
                 ]
@@ -406,6 +447,10 @@ class ProductExecutionTests(unittest.TestCase):
             "qr-refresh",
             "navigation-refresh",
             "public-refresh",
+            "billing-action-aborted",
+            "qr-aborted",
+            "public-aborted",
+            "mutation-at-close",
         ):
             with self.subTest(failure=failure):
                 recorder, browser, actions = self.verify(failure)
@@ -414,6 +459,16 @@ class ProductExecutionTests(unittest.TestCase):
                 self.assertIn("delete-user", actions)
                 self.assertTrue(self.billing_at_grant)
                 self.assertTrue(all(self.billing_at_grant))
+                for request in browser.requests:
+                    self.assertLessEqual(browser.effects.count(request), 1)
+                if failure == "mutation-at-close":
+                    late = [
+                        request
+                        for request in browser.requests
+                        if request.method == "POST" and "?_rsc=" in request.url
+                    ]
+                    self.assertTrue(late)
+                    self.assertTrue(all(request not in browser.effects for request in late))
 
     def test_lost_signup_or_maintenance_reply_skips_data_cleanup(self) -> None:
         for failure in (
@@ -426,9 +481,11 @@ class ProductExecutionTests(unittest.TestCase):
             "initial-refusal",
             "redirect-refusal",
             "gateway-error",
-            "billing-action-aborted",
-            "qr-aborted",
-            "public-aborted",
+            "qr-upstream-lost",
+            "public-upstream-lost",
+            "qr-http-error",
+            "qr-truncated",
+            "qr-redirect",
             "close",
         ):
             with self.subTest(failure=failure):
@@ -437,6 +494,20 @@ class ProductExecutionTests(unittest.TestCase):
                 self.assertNotIn("delete-user", self.actions)
                 self.assertEqual(self.recorder.receipt.entries[0].terminal, "")
                 self.assertTrue(self.browser.closed)
+                self.assertTrue(
+                    all(
+                        self.browser.effects.count(request) <= 1
+                        for request in self.browser.requests
+                    )
+                )
+                if failure == "qr-redirect":
+                    self.assertTrue(
+                        all(
+                            request.method != "POST"
+                            or request.url.endswith("/api/auth/sign-up/email")
+                            for request in self.browser.delivered
+                        )
+                    )
 
     def test_unknown_signup_retains_safe_exchange_cause_without_request_values(self) -> None:
         with (
@@ -452,7 +523,7 @@ class ProductExecutionTests(unittest.TestCase):
             request.resource_type,
         ):
             self.assertIn(value, output)
-        self.assertIn(f"status={request.response().status}", output)
+        self.assertIn("status=None", output)
         self.assertNotIn("https://video.test", output)
         self.assertNotIn("next-action", output)
         self.assertNotIn(verification.fixture_email(context().deployment_record_id), output)
@@ -460,29 +531,94 @@ class ProductExecutionTests(unittest.TestCase):
     def test_failed_exchange_diagnostic_omits_dynamic_paths_queries_and_transport_errors(
         self,
     ) -> None:
-        page = Mock()
+        browser = _Browser("public-upstream-lost")
+        page: Any = _Page(browser)
         guard = GenericWebPostDeployGuard()
-        exchanges = verification._TestingPageExchanges(page, "https://video.test", guard)
-        request = Mock(
-            url="https://video.test/v/private-record?_rsc=private-query",
-            method="GET",
-            resource_type="fetch",
-        )
-        response = Mock(request=request, status=200)
-        exchanges.started(request)
-        exchanges.responded(response)
-        page.expect_request_finished.side_effect = TimeoutError("private-transport-detail")
-        with (
-            self.assertLogs(verification.__name__, level="WARNING") as logs,
-            self.assertRaises(TimeoutError),
-        ):
-            exchanges.finish()
+        exchanges: Any = verification._TestingPageExchanges(page, "https://video.test", guard)
+        with self.assertLogs(verification.__name__, level="WARNING") as logs:
+            page.emit("GET", "/v/private-record?_rsc=private-query")
+            with self.assertRaises(ProviderMutationUnknownError):
+                exchanges.finish()
         output = "\n".join(logs.output)
         self.assertIn("/v/", output)
         self.assertNotIn("private-", output)
         self.assertNotIn("?_rsc", output)
         with self.assertRaises(ProviderMutationUnknownError):
             guard.require_completed_exchanges()
+
+    def test_one_request_receipt_cannot_complete_a_same_path_sibling(self) -> None:
+        browser = _Browser("")
+        page: Any = _Page(browser)
+        guard = GenericWebPostDeployGuard()
+        exchanges: Any = verification._TestingPageExchanges(page, "https://video.test", guard)
+        first = page.emit("POST", "/dashboard")
+        browser.failure = "qr-upstream-lost"
+        second = page.emit("POST", "/dashboard")
+        exchanges.finish_response(first)
+        with self.assertRaises(ProviderMutationUnknownError):
+            exchanges.finish_response(second)
+        for request in browser.requests:
+            self.assertEqual(browser.effects.count(request), 1)
+        with self.assertRaises(ProviderMutationUnknownError):
+            exchanges.finish_response(_Response(page, "POST", "/dashboard"))
+
+    def test_native_redirect_descendant_requires_its_own_completed_body(self) -> None:
+        for outcome in ("finished", "aborted", "missing", "mutation", "public"):
+            with self.subTest(outcome=outcome):
+                browser = _Browser("")
+                page: Any = _Page(browser)
+                guard = GenericWebPostDeployGuard()
+                exchanges: Any = verification._TestingPageExchanges(
+                    page, "https://video.test", guard
+                )
+                initial = _Response(page, "GET", "/site-config")
+                initial.status = 307
+                initial.headers = {"location": "/dashboard"}
+                exchanges.capture(_Route(page, initial))
+                final = _Response(
+                    page,
+                    "POST" if outcome == "mutation" else "GET",
+                    "/v/fixture" if outcome == "public" else "/dashboard",
+                )
+                final.request.redirected_from = initial.request
+                page.event("request", final.request)
+                if outcome == "aborted":
+                    final.request.failure = "net::ERR_ABORTED"
+                elif outcome == "missing":
+                    page.expect_request_finished = Mock(side_effect=TimeoutError("body missing"))
+                else:
+                    page.event("requestfinished", final.request)
+                if outcome == "finished":
+                    exchanges.finish_response(final)
+                    guard.require_completed_exchanges()
+                else:
+                    with self.assertRaises(ProviderMutationUnknownError):
+                        exchanges.finish_response(final)
+                    with self.assertRaises(ProviderMutationUnknownError):
+                        guard.require_completed_exchanges()
+
+    def test_unexpected_redirect_is_aborted_before_browser_replay(self) -> None:
+        for method, path, location in (
+            ("POST", "/dashboard", "/dashboard"),
+            ("GET", "/v/fixture", "/dashboard"),
+            ("GET", "/site-config", "https://other.test/dashboard"),
+            ("GET", "/site-config", "/api/auth/sign-up/email"),
+        ):
+            with self.subTest(method=method, path=path, location=location):
+                browser = _Browser("")
+                page: Any = _Page(browser)
+                guard = GenericWebPostDeployGuard()
+                exchanges: Any = verification._TestingPageExchanges(
+                    page, "https://video.test", guard
+                )
+                response = _Response(page, method, path)
+                response.status = 307
+                response.headers = {"location": location}
+                exchanges.capture(_Route(page, response))
+                self.assertFalse(browser.delivered)
+                self.assertEqual(browser.effects, [response.request])
+                with self.assertRaises(ProviderMutationUnknownError):
+                    exchanges.finish_response(response)
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
         for failure in ("fill", "assertion", "billing-assertion", "signup-click", "qr-click"):

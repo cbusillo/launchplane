@@ -25,6 +25,7 @@ from playwright.sync_api import (
     Page,
     Request as BrowserRequest,
     Response as BrowserResponse,
+    Route,
     expect,
     sync_playwright,
 )
@@ -51,21 +52,22 @@ from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
 MAX_TRANSIENT_QUALIFICATION_ATTEMPTS = 3
-_TESTING_READ_PATHS = {
+_TESTING_REQUEST_PATHS = {
     "/sign-up",
     "/billing",
     "/dashboard",
     "/site-config",
     "/site-config/billing",
+    "/api/auth/sign-up/email",
 }
-_TESTING_REQUEST_PATHS = _TESTING_READ_PATHS | {"/api/auth/sign-up/email"}
 
 
 def _is_testing_read(request: BrowserRequest) -> bool:
     return (
         request.method in {"GET", "HEAD"}
         and "next-action" not in request.headers
-        and urlparse(request.url).path in _TESTING_READ_PATHS
+        and urlparse(request.url).path in _TESTING_REQUEST_PATHS
+        and urlparse(request.url).path != "/api/auth/sign-up/email"
     )
 
 
@@ -83,6 +85,7 @@ def _unknown_testing_effect(
     request: BrowserRequest | None = None,
     response: BrowserResponse | None = None,
     phase: str = "unknown",
+    status: int | None = None,
 ) -> ProviderMutationUnknownError:
     if phase not in {
         "post_deploy_fixture_signup",
@@ -92,7 +95,7 @@ def _unknown_testing_effect(
         "post_deploy_delete-user",
     }:
         phase = "unknown"
-    method, path, resource_type, status = "unknown", "unknown", "unknown", None
+    method, path, resource_type = "unknown", "unknown", "unknown"
     try:
         if response is not None:
             request = response.request
@@ -364,103 +367,164 @@ def _goto(
 
 
 class _TestingPageExchanges:
-    """Only this verifier's known dynamic page/auth/action requests, in memory."""
-
     def __init__(self, page: Page, base_url: str, guard: GenericWebPostDeployGuard) -> None:
         self.origin = urlparse(base_url)
         self.page = page
         self.guard = guard
         self.requests: dict[BrowserRequest, str] = {}
+        self.redirects: set[BrowserRequest] = set()
         self.completed: set[BrowserRequest] = set()
-        self.failed: set[BrowserRequest] = set()
-        self.responses: dict[BrowserRequest, BrowserResponse] = {}
-        page.on("request", self.started)
-        page.on("response", self.responded)
-        page.on("requestfinished", self.finished)
-        page.on("requestfailed", self.failure)
+        self.pending: set[BrowserRequest] = set()
+        self.closing = False
+        page.on("request", self.started_redirect)
+        page.on("requestfinished", lambda request: self.completed.add(request))
+        page.context.route(self.matches, self.capture)
 
-    def finished(self, request: BrowserRequest) -> None:
-        self.completed.add(request)
+    def matches(self, url: str) -> bool:
+        parsed = urlparse(url)
+        return (parsed.scheme, parsed.netloc) == (
+            self.origin.scheme,
+            self.origin.netloc,
+        ) and _testing_request_path(url) != "unknown"
 
-    def failure(self, request: BrowserRequest) -> None:
-        self.failed.add(request)
-
-    def responded(self, response: BrowserResponse) -> None:
-        self.responses[response.request] = response
-
-    def started(self, request: BrowserRequest) -> None:
-        url = urlparse(request.url)
-        if (url.scheme, url.netloc) != (self.origin.scheme, self.origin.netloc):
-            return
-        if _testing_request_path(request.url) == "unknown":
-            return
+    def enroll(self, request: BrowserRequest) -> str:
         name = f"dynamic-request:{len(self.guard.exchanges)}"
         self.requests[request] = name
         self.guard.begin_exchange(name)
         if (
             request.method == "POST"
-            and url.path == "/dashboard"
+            and urlparse(request.url).path == "/dashboard"
             and "next-action" in request.headers
         ):
             self.guard.begin_exchange("qr-success")
+        return name
+
+    def started_redirect(self, request: BrowserRequest) -> None:
+        if request.redirected_from in self.requests:
+            self.enroll(request)
+            self.redirects.add(request)
+
+    def acceptable(self, request: BrowserRequest, status: int, headers: dict[str, str]) -> bool:
+        if 200 <= status < 300:
+            return True
+        target = urlparse(urljoin(request.url, headers.get("location", "")))
+        return (
+            300 <= status < 400
+            and _is_testing_read(request)
+            and self.matches(target.geturl())
+            and target.path in _TESTING_REQUEST_PATHS
+            and target.path != "/api/auth/sign-up/email"
+        )
+
+    def capture(self, route: Route) -> None:
+        if self.closing:
+            route.abort()
+            return
+        request = route.request
+        name = self.enroll(request)
+        self.pending.add(request)
+        status: int | None = None
+        try:
+            response = route.fetch(max_redirects=0, max_retries=0, timeout=30_000)
+            status = response.status
+            response.body()
+            if not self.acceptable(request, status, response.headers):
+                raise _unknown_testing_effect(
+                    "capture", "response_unavailable_or_failed", request=request, status=status
+                )
+            self.guard.complete_exchange(name)
+            try:
+                if self.closing:
+                    route.abort()
+                else:
+                    route.fulfill(response=response)
+            except Exception:
+                _LOGGER.warning("Testing browser delivery failed after upstream completion.")
+        except Exception:
+            _unknown_testing_effect(
+                "capture", "upstream_completion_unobserved", request=request, status=status
+            )
+            try:
+                route.abort()
+            except Exception:
+                _LOGGER.warning("Testing request abort failed after an unknown upstream effect.")
+        finally:
+            self.pending.discard(request)
 
     def finish_response(self, response: BrowserResponse) -> None:
-        self.finish_request(response.request)
+        self.finish_request(response.request, time.monotonic() + 30)
 
-    def finish_request(self, request: BrowserRequest) -> None:
-        if request not in self.completed and request not in self.failed:
+    def drain(self, deadline: float) -> None:
+        while self.pending and time.monotonic() < deadline:
+            self.page.wait_for_timeout(50)
+        if self.pending:
+            raise _unknown_testing_effect("drain", "upstream_completion_unobserved")
+
+    def finish_request(self, request: BrowserRequest, deadline: float) -> None:
+        self.drain(deadline)
+        name = self.requests.get(request)
+        if name is None:
+            raise _unknown_testing_effect("finish_request", "receipt_unavailable", request=request)
+        if self.guard.exchanges[name]:
+            return
+        if (
+            request not in self.redirects
+            or not self.matches(request.url)
+            or not _is_testing_read(request)
+        ):
+            raise _unknown_testing_effect(
+                "finish_request", "upstream_completion_unobserved", request=request
+            )
+        parent = request.redirected_from
+        if parent is None or not _is_testing_read(parent):
+            raise _unknown_testing_effect(
+                "finish_request", "redirect_receipt_unavailable", request=request
+            )
+        self.finish_request(parent, deadline)
+        if request not in self.completed and not request.failure:
             try:
                 with self.page.expect_request_finished(
                     predicate=lambda finished: finished == request,
-                    timeout=30_000,
+                    timeout=max(1, (deadline - time.monotonic()) * 1000),
                 ):
                     pass
-            except Exception:
-                if request not in self.failed:
-                    _unknown_testing_effect(
-                        "finish_request",
-                        "request_completion_unobserved",
-                        request=request,
-                        response=self.responses.get(request),
-                    )
-                    raise
-        response = self.responses.get(request)
-        read_aborted = (
-            request in self.failed
-            and _is_testing_read(request)
-            and (response is None or response.status < 400)
-        )
-        if not read_aborted and (
-            response is None or response.status >= 400 or request in self.failed
+            except Exception as error:
+                raise _unknown_testing_effect(
+                    "finish_request", "redirect_completion_unobserved", request=request
+                ) from error
+        response = request.response()
+        if (
+            request not in self.completed
+            or request.failure
+            or response is None
+            or not self.acceptable(request, response.status, response.headers)
         ):
             raise _unknown_testing_effect(
                 "finish_request",
-                "request_failed" if request in self.failed else "response_unavailable_or_failed",
+                "redirect_completion_unobserved",
                 request=request,
                 response=response,
             )
-        if not read_aborted:
-            self.completed.add(request)
-        if request in self.requests:
-            self.guard.complete_exchange(self.requests[request])
+        self.guard.complete_exchange(name)
 
     def finish(self) -> None:
+        deadline = time.monotonic() + 30
+        self.drain(deadline)
         while pending := [
             request for request, name in self.requests.items() if not self.guard.exchanges[name]
         ]:
             for request in pending:
-                self.finish_request(request)
+                self.finish_request(request, deadline)
+            if time.monotonic() >= deadline:
+                raise _unknown_testing_effect("finish", "exchange_completion_unobserved")
 
     def close(self) -> None:
+        self.closing = True
         try:
             self.page.close()
+            self.page.context.unroute_all(behavior="wait")
         except Exception as error:
             raise _unknown_testing_effect("close", "browser_lost") from error
-        self.failed.update(
-            request
-            for request in self.requests
-            if request not in self.completed and _is_testing_read(request)
-        )
         self.finish()
 
 
@@ -501,7 +565,7 @@ def verify_verireel_testing_product(
         with sync_playwright() as playwright:
             browser = launch_testing_browser(playwright.chromium)
             try:
-                with browser.new_context() as browser_context:
+                with browser.new_context(service_workers="block") as browser_context:
                     page = browser_context.new_page()
                     exchanges = _TestingPageExchanges(page, base_url, guard)
                     page.set_default_timeout(30_000)
@@ -576,20 +640,22 @@ def verify_verireel_testing_product(
                         path = verification_path(base_url, href)
                         guard.complete_exchange("qr-success")
                         exchanges.finish()
-                        with browser.new_context() as public_context:
+                        with browser.new_context(service_workers="block") as public_context:
                             public_page = public_context.new_page()
                             public_exchanges = _TestingPageExchanges(public_page, base_url, guard)
                             public_page.set_default_timeout(30_000)
-                            _goto(public_page, base_url, path, guard, public_exchanges)
-                            expect(
-                                public_page.get_by_text(public_label, exact=False)
-                            ).to_be_visible(timeout=30_000)
-                            public_exchanges.finish()
-                            expect(
-                                public_page.get_by_role("link", name=destination, exact=True)
-                            ).to_be_visible(timeout=30_000)
-                            public_exchanges.finish()
-                            public_exchanges.close()
+                            try:
+                                _goto(public_page, base_url, path, guard, public_exchanges)
+                                expect(
+                                    public_page.get_by_text(public_label, exact=False)
+                                ).to_be_visible(timeout=30_000)
+                                public_exchanges.finish()
+                                expect(
+                                    public_page.get_by_role("link", name=destination, exact=True)
+                                ).to_be_visible(timeout=30_000)
+                                public_exchanges.finish()
+                            finally:
+                                public_exchanges.close()
                         assert_verireel_testing_identity(base_url, context)
                         evidence["creator_verification_status"] = "pass"
                         exchanges.finish()
