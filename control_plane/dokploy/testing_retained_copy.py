@@ -54,6 +54,29 @@ def retained_inventory_sha256(containers: list[dict[str, Any]], spec: dict[str, 
     ).hexdigest()
 
 
+def retained_web_process(containers: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, str]:
+    web = [
+        item
+        for item in containers
+        if (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project")
+        == spec["project"]
+        and (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.service") == "web"
+    ]
+    if len(web) != 1:
+        return {}
+    state = web[0].get("State", {})
+    if state.get("Status") != "running" or not all(
+        isinstance(value, str) and value for value in (web[0].get("Id"), state.get("StartedAt"))
+    ):
+        return {}
+    return {
+        "id": web[0]["Id"],
+        "status": state.get("Status", ""),
+        "started_at": state["StartedAt"],
+        "health": state.get("Health", {}).get("Status", ""),
+    }
+
+
 def retained_copy_availability(containers: list[dict[str, Any]], spec: dict[str, Any]) -> str:
     members = [
         item
@@ -78,7 +101,10 @@ def retained_copy_availability(containers: list[dict[str, Any]], spec: dict[str,
         return "unknown"
     if not web or web[0]["State"]["Status"] in {"exited", "created"}:
         return "stopped"
-    if web[0]["State"].get("Health", {}).get("Status") == "unhealthy":
+    if (
+        web[0]["State"]["Status"] == "running"
+        and web[0]["State"].get("Health", {}).get("Status") == "unhealthy"
+    ):
         return "stopped"
     return "available"
 
@@ -204,6 +230,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         "resource_binding": binding,
         "stopped": stopped,
         "web_stopped": availability == "stopped" or state == "paused",
+        "web_process": retained_web_process(containers, spec),
         "volumes": sorted(volumes),
     }
 
@@ -230,6 +257,7 @@ def retained_copy_host_program() -> str:
         + inspect.getsource(qualify_retained_copy)
         + inspect.getsource(retained_inventory_sha256)
         + inspect.getsource(retained_copy_availability)
+        + inspect.getsource(retained_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)

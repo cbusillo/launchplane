@@ -101,10 +101,20 @@ class RetainedTestingCopyTests(unittest.TestCase):
 
     def test_unhealthy_running_web_uses_the_same_unavailable_copy_path(self) -> None:
         self.containers[0]["State"]["Health"] = {"Status": "unhealthy"}
+        self.containers[0]["State"]["StartedAt"] = "fixture-original-start"
         frame, _ = self.run_host(extra={"allow_unavailable": True})
         self.assertEqual(frame["availability"], "stopped")
         self.assertFalse(frame["stopped"])
         self.assertTrue(frame["physical_binding"])
+        self.assertEqual(
+            frame["web_process"],
+            {
+                "id": self.containers[0]["Id"],
+                "status": "running",
+                "started_at": self.containers[0]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
 
     def test_removed_web_preserves_database_custody_without_an_original_runtime(self) -> None:
         self.containers.pop(0)

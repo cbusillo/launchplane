@@ -1936,8 +1936,18 @@ class NativeTestingRebuildExecution:
             disable_auto_deploy,
             recovery=True,
         )
+        retirement = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":retire-old",
+        )
         if (
             isinstance(plan.old, UnavailableTestingPredecessor)
+            and (
+                retirement is None
+                or retirement.state != "completed"
+                and not retirement.provider_effect_started_at
+            )
             and retained_copy_operation(
                 host=self.host,
                 token=self.token,
@@ -1984,11 +1994,36 @@ class NativeTestingRebuildExecution:
         if self.unavailable_retirement_finished(self.plan):
             return
         self.require_old_quiescent()
-        self.require_current_unavailable(self.transport.read())
+        self.require_unavailable_forward_frame(self.transport.read())
 
-    @staticmethod
-    def require_current_unavailable(frame: dict[str, Any]) -> None:
+    def require_current_unavailable(self, frame: dict[str, Any]) -> None:
         if frame.get("old_availability") == "available":
+            original = self.intent.retained.get("web_process")
+            current = frame.get("old_web_process")
+            if (
+                isinstance(original, dict)
+                and isinstance(current, dict)
+                and original.get("health") == "unhealthy"
+                and original.get("status") == current.get("status") == "running"
+                and original.get("id")
+                and original.get("started_at")
+                and all(original.get(key) == current.get(key) for key in ("id", "started_at"))
+                and frame.get("old_inventory_sha256") == self.intent.retained["inventory_sha256"]
+            ):
+                proof = retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload=self.retained_payload("read"),
+                )
+                if (
+                    all(
+                        proof.get(key) == self.intent.retained.get(key)
+                        for key in ("resource_binding", "physical_binding", "identity")
+                    )
+                    and proof.get("web_process") == current
+                ):
+                    return
             raise NativeTestingRebuildAdmissionChanged(
                 "The unavailable predecessor changed before retirement completed."
             )

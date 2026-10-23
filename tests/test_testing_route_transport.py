@@ -1037,6 +1037,23 @@ class TestingRouteTransportTests(unittest.TestCase):
                 self.assertEqual(frame["old_availability"], "unknown")
                 self.assertFalse(self.client.unavailable_predecessor_matches(frame))
 
+    def test_route_observation_binds_the_unhealthy_running_original_process(self) -> None:
+        self.unavailable_route(preserve_file=True)
+        self.containers["old"]["State"].update(
+            Status="running", StartedAt="fixture-old-start", Health={"Status": "unhealthy"}
+        )
+        frame = self.client.read()
+        self.assertEqual(frame["old_availability"], "stopped")
+        self.assertEqual(
+            frame["old_web_process"],
+            {
+                "id": self.containers["old"]["Id"],
+                "status": "running",
+                "started_at": self.containers["old"]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
+
     def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
         self.unavailable_route()
         attempt = self.fenced_attempt(self.plan.new_backend)
