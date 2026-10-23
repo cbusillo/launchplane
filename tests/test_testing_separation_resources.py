@@ -516,17 +516,65 @@ class SeparationResourceTests(unittest.TestCase):
                 },
             ) as markers,
         ):
-            programs = self.adapter.inspect_original("original-operation")
+            programs = self.adapter.inspect_original("original-operation")["programs"]
         self.assertEqual(programs[0].deployment_id, "original-job")
         self.assertEqual(programs[0].deployment_status, "error")
         self.assertIs(programs[0].resources_ok, False)
         self.assertIs(programs[0].result_binding_matches, False)
+        self.assertTrue(programs[0].script_matches)
+        self.assertTrue(programs[0].disabled)
+        self.assertTrue(programs[0].markers_found)
         self.assertEqual(programs[1].status, "missing")
         self.assertNotIn("fixture-private-output", str(programs))
         self.assertNotIn(resources.script("prepare"), str(programs))
         markers.assert_called_once()
         dispatch.assert_not_called()
         upsert.assert_not_called()
+        self.assert_retained()
+
+    def test_inspection_reads_original_namespace_after_current_input_drift(self) -> None:
+        changed = self.retained.model_copy(deep=True)
+        changed.env["CHANGED_AFTER_ORIGINAL"] = "fixture"
+        self.store.write_dokploy_target_record(changed)
+        self.fixture.responses["/api/schedule.list"] = []
+        with patch.object(self.store, "testing_replacement_execution_lock") as execution_lock:
+            observed = self.adapter.inspect_original("original-operation")
+        self.assertIs(observed["inputs_match"], False)
+        self.assertTrue(observed["programs"])
+        execution_lock.assert_not_called()
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            changed,
+        )
+
+    def test_plan_provider_reads_leave_the_http_event_loop(self) -> None:
+        import threading
+
+        main_thread = threading.get_ident()
+        threads = []
+        plan = self.adapter.plan()
+
+        def read() -> dict[str, object]:
+            threads.append(threading.get_ident())
+            return plan
+
+        with patch.object(SeparationResourcesAdapter, "plan", side_effect=read):
+            result = asyncio.run(self.call_http(mode="dry-run"))
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertTrue(threads)
+        self.assertTrue(all(thread != main_thread for thread in threads))
+        import click
+
+        with patch.object(
+            SeparationResourcesAdapter,
+            "plan",
+            side_effect=click.ClickException("private-provider-fixture"),
+        ):
+            unavailable = asyncio.run(self.call_http(mode="dry-run"))
+        self.assertEqual(unavailable.status_code, 503, unavailable.text)
+        self.assertNotIn("private-provider-fixture", unavailable.text)
         self.assert_retained()
 
     def test_native_inspection_never_treats_missing_or_incomplete_history_as_a_result(self) -> None:
@@ -560,7 +608,7 @@ class SeparationResourceTests(unittest.TestCase):
                 with patch(
                     "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
                 ) as markers:
-                    programs = self.adapter.inspect_original("original-operation")
+                    programs = self.adapter.inspect_original("original-operation")["programs"]
                 markers.assert_not_called()
                 self.assertIsNone(programs[0].resources_ok)
                 self.assertNotIn("private/invalid-identifier", str(programs))
@@ -577,7 +625,7 @@ class SeparationResourceTests(unittest.TestCase):
                 with patch(
                     "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
                 ) as markers:
-                    programs = self.adapter.inspect_original("original-operation")
+                    programs = self.adapter.inspect_original("original-operation")["programs"]
                 markers.assert_not_called()
                 self.assertIsNone(programs[0].resources_ok)
                 self.assertNotIn("foreign-private-program", str(programs))
@@ -647,6 +695,14 @@ class SeparationResourceTests(unittest.TestCase):
         self.assertTrue(all(item.status == "missing" for item in programs[1:]))
         self.assertTrue(any(item.kind == "storage_preparation" for item in programs))
         dispatch.assert_not_called()
+        with patch(
+            "control_plane.testing_application_capabilities.retained_application_capability_spec",
+            side_effect=ValueError("fixture unavailable current capability"),
+        ):
+            incomplete = inspect_preparation_programs(
+                root=self.root, resources=resources, store=self.store, application=True
+            )
+        self.assertTrue(any(item.kind == "storage_preparation" for item in incomplete))
         self.assert_retained()
 
     def test_provider_placement_drift_refuses_before_any_new_storage(self) -> None:
@@ -801,6 +857,16 @@ class SeparationResourceTests(unittest.TestCase):
         self.assert_retained()
 
     def test_original_key_inspection_checks_request_and_never_changes_its_reservation(self) -> None:
+        from contextlib import redirect_stdout
+        import io
+        from pathlib import Path
+        import runpy
+        import threading
+        from pydantic import ValidationError
+        from control_plane.testing_separation_resources import (
+            SeparationResourcesResult,
+            SeparationResourcesInspection,
+        )
         from control_plane.http_routes.mutation_support import (
             idempotency_scope,
             request_fingerprint,
@@ -824,13 +890,71 @@ class SeparationResourceTests(unittest.TestCase):
         ).record
         assert reserved is not None
         programs = [{"kind": "storage_preparation", "status": "missing"}]
+        main_thread = threading.get_ident()
+        threads = []
+
+        def inspect_programs(_key: str) -> dict[str, object]:
+            threads.append(threading.get_ident())
+            return {"programs": programs, "inputs_match": True}
+
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        helper = self.root / "launchplane-write-action.py"
+        helper.touch()
+        responses = []
+
+        def request_from_client(**kwargs: object) -> dict[str, object]:
+            body = kwargs["body"]
+            assert isinstance(body, dict)
+            response = asyncio.run(self.call_http(key=str(kwargs["idempotency_key"]), **body))
+            responses.append(response)
+            payload = response.json()
+            assert isinstance(payload, dict)
+            return payload
+
+        transport = {
+            "resolve_settings": lambda args: {
+                "service_url": "https://service.invalid",
+                "token": "fixture",
+            },
+            "validate_service_url": lambda value: None,
+            "request_launchplane": request_from_client,
+            "public_trace_id": lambda value: value,
+        }
+        arguments = [
+            "client",
+            "resources-inspect",
+            "--operator-helper",
+            str(helper),
+            "--product",
+            self.product,
+            "--context",
+            self.context,
+            "--reason",
+            self.body.reason,
+            "--evidence-file",
+            str(self.root / "original-review.json"),
+            "--idempotency-key",
+            reserved.idempotency_key,
+        ]
         with patch.object(
-            SeparationResourcesAdapter, "inspect_original", create=True, return_value=programs
+            SeparationResourcesAdapter, "inspect_original", side_effect=inspect_programs
         ) as inspect_original:
-            response = asyncio.run(self.call_http(key=reserved.idempotency_key, mode="inspect"))
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch("sys.argv", arguments),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(client["main"](), 0)
+            response = responses[0]
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(response.json()["result"]["programs"][0]["status"], "missing")
+            SeparationResourcesInspection.model_validate(response.json()["result"])
+            with self.assertRaises(ValidationError):
+                SeparationResourcesResult.model_validate(response.json()["result"])
             inspect_original.assert_called_once()
+            self.assertTrue(all(thread != main_thread for thread in threads))
             inspect_original.reset_mock()
             for changes in ({"reason": "different request"}, {"context": "foreign"}):
                 with self.subTest(changes=changes):
@@ -839,7 +963,6 @@ class SeparationResourceTests(unittest.TestCase):
                     )
                     self.assertEqual(refused.status_code, 409, refused.text)
             inspect_original.assert_not_called()
-        self.assertNotIn("resources_verified", response.text)
         self.assertNotIn(fingerprint, response.text)
         self.assertEqual(
             self.store.read_idempotency_record(

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, Header, Path as PathParameter
+import click
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -13,7 +14,11 @@ from control_plane.http_routes.mutation_support import (
     request_fingerprint,
     idempotency_scope,
 )
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+    run_in_worker_thread,
+)
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -106,10 +111,15 @@ def register_testing_separation_resource_routes(
                             request_fingerprint=row.request_fingerprint,
                             reconciliation_key=row.reconciliation_key,
                         )
-                        observed = SeparationResourcesInspection(
-                            **observed.model_dump(mode="json"),
-                            programs=tuple(adapter.inspect_original(operation_key)),
-                            inspected_at=datetime.now(timezone.utc),
+                        native = await run_in_worker_thread(
+                            lambda: adapter.inspect_original(operation_key)
+                        )
+                        observed = SeparationResourcesInspection.model_validate(
+                            {
+                                **observed.model_dump(mode="json"),
+                                **native,
+                                "inspected_at": datetime.now(timezone.utc),
+                            }
                         )
                     return accepted_evidence_response(
                         trace_id=trace,
@@ -127,7 +137,9 @@ def register_testing_separation_resource_routes(
                     result=result.model_dump(mode="json"),
                 )
             if body.mode == "dry-run":
-                return accepted_evidence_response(trace_id=trace, records={}, result=adapter.plan())
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=await run_in_worker_thread(adapter.plan)
+                )
             if record_store.database_dialect_name != "postgresql":
                 raise dependencies.http_error(
                     status_code=503,
@@ -155,6 +167,13 @@ def register_testing_separation_resource_routes(
                 in_progress_message="Independent testing storage preparation is in progress.",
                 reconcile_message="Preparation outcome is unknown; retain its original key and both fences.",
             )
+        except click.ClickException as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="testing_resources_unavailable",
+                message="Testing preparation provider evidence is unavailable.",
+            ) from error
         except (ValueError, FileNotFoundError, SeparationResourcesRefused) as error:
             raise dependencies.http_error(
                 status_code=409,

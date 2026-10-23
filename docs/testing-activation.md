@@ -45,6 +45,15 @@ known result booleans; it returns no scripts, raw logs or credentials. Its
 `qualification=not_evaluated` result is diagnostic only. A missing schedule,
 empty history or failed marker proves no physical absence, retry authority or
 resource qualification. Keep the original key, review, resources and interlock.
+Inspection uses the original namespace on the current tracked placement and
+reports that target plus `inputs_match` separately. Input drift, active original
+work or an unavailable capability specification does not hide independently
+readable history. `script_matches` can be unknown when the current specification
+cannot be rebuilt. Result markers are read only for a disabled matching script
+with exact terminal history. `log_available` describes the bounded log read;
+`markers_found` distinguishes an actual result marker from empty, truncated or
+unavailable evidence. Neither establishes qualification. Provider I/O for plans
+and inspection runs outside the API event loop.
 
 `resources-read` uses the original key and reads only the saved service record.
 A completed operation returns its existing preparation receipt. A missing,

@@ -67,7 +67,9 @@ class TestingSeparationClientTests(unittest.TestCase):
                 redirect_stdout(output),
             ):
                 self.assertEqual(client["main"](), 0, output.getvalue())
-            self.assertEqual(call.call_args.kwargs["body"]["mode"], "inspect")
+            from control_plane.testing_separation_resources import SeparationResourcesRequest
+
+            SeparationResourcesRequest.model_validate(call.call_args.kwargs["body"])
             self.assertEqual(call.call_args.kwargs["idempotency_key"], "original-key")
             self.assertTrue(json.loads(output.getvalue())["retain_original_key"])
             self.assertEqual(review.read_text(), "original review")
