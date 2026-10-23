@@ -23,6 +23,7 @@ from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
+from tests import test_testing_preparation_recovery as preparation_recovery
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
@@ -13314,6 +13315,11 @@ def _application_testing_fixture(
         )
     )
     return fixture
+
+
+class RealPostgresPreparationRecoveryTests(preparation_recovery.PreparationRecoveryTests):
+    def application_fixture(self) -> Any:
+        return _application_testing_fixture(self, no_original=True)
 
 
 class RealPostgresDirectApplicationTestingActivationTests(unittest.TestCase):

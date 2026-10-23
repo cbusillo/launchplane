@@ -18,6 +18,9 @@ class TestingSeparationClientTests(unittest.TestCase):
     ) -> None:
         self.exercise_resource_roundtrip(None)
 
+    def test_negative_preparation_receipt_is_preserved_without_qualification(self) -> None:
+        self.exercise_resource_roundtrip(None, refused=True)
+
     def test_reviewed_application_specification_reaches_the_same_native_preparation(self) -> None:
         self.exercise_resource_roundtrip(
             {
@@ -39,7 +42,11 @@ class TestingSeparationClientTests(unittest.TestCase):
                 self.exercise_resource_roundtrip(None, read_error=failure)
 
     def exercise_resource_roundtrip(
-        self, application: dict[str, object] | None, *, read_error: Exception | None = None
+        self,
+        application: dict[str, object] | None,
+        *,
+        read_error: Exception | None = None,
+        refused: bool = False,
     ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
@@ -47,6 +54,7 @@ class TestingSeparationClientTests(unittest.TestCase):
         from control_plane.testing_separation_resources import (
             SeparationResourcesPlan,
             SeparationResourcesResult,
+            SeparationResourcesRefusal,
         )
         from control_plane.workflows.ship import utc_now_timestamp
 
@@ -70,6 +78,16 @@ class TestingSeparationClientTests(unittest.TestCase):
                     "application": application,
                 }
             ).model_dump(mode="json")
+            if refused:
+                completed = SeparationResourcesRefusal(
+                    product="example",
+                    context="example",
+                    plan_sha256=plan["plan_sha256"],
+                    retained_target_id="retained-application",
+                    allocation_operation_key="original-operation",
+                    capability_schedule_id="original-capability",
+                    capability_deployment_id="original-capability-execution",
+                ).model_dump(mode="json")
             call = Mock(
                 side_effect=[
                     {"status": "accepted", "trace_id": "fixture", "result": plan},
@@ -148,10 +166,18 @@ class TestingSeparationClientTests(unittest.TestCase):
                 ):
                     self.assertEqual(
                         client["main"](),
-                        int(read_error is not None and index == 4),
+                        int(
+                            (read_error is not None and index == 4)
+                            or (refused and index in {1, 2, 3})
+                        ),
                         output.getvalue(),
                     )
                 self.assertNotIn("private-volume", output.getvalue())
+                if refused and index in {1, 2, 3}:
+                    refusal = json.loads(output.getvalue())
+                    self.assertEqual(refusal["status"], "refused")
+                    self.assertIs(refusal["resources_verified"], False)
+                    self.assertNotIn("retain_original_key", refusal)
             receipt = evidence.with_name(evidence.name + ".receipt.json")
             self.assertEqual(json.loads(receipt.read_text())["result"], completed)
             returned = json.loads(output.getvalue())
