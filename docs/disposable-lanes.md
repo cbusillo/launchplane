@@ -178,7 +178,9 @@ healthy public observation. The candidate route comes from the original recorded
 template or the provider's converted web-router declaration, checked against the
 current proxy listeners, TLS resolver and applied conflicts. Missing placement or
 ingress declaration is a record/capability prerequisite; repairing or starting
-the old application is not an admission step. Forward checkpoints retain the
+the old application is not an admission step. Identical repeated provider labels
+normalize to the same declaration; contradictory values still refuse admission.
+Forward checkpoints retain the
 normalized web-ingress declaration and listener witnesses. Unrelated application
 environment, image or Compose formatting changes do not change that declaration
 witness. Listener witnesses cover the entrypoints and certificate resolvers used
