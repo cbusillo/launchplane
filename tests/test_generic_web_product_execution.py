@@ -704,6 +704,45 @@ class ProductExecutionTests(unittest.TestCase):
                 with self.assertRaises(ProviderMutationUnknownError):
                     exchanges.finish_response(response)
 
+    def test_failed_browser_abort_does_not_repeat_the_upstream_failure(self) -> None:
+        for failure in ("status", "fetch", "closing"):
+            with self.subTest(failure=failure):
+                page = Mock()
+                guard = GenericWebPostDeployGuard()
+                exchanges = verification._TestingPageExchanges(page, "https://video.test", guard)
+                request = Mock(
+                    url="https://video.test/billing",
+                    method="GET",
+                    headers={},
+                    resource_type="fetch",
+                )
+                route = Mock(request=request)
+                response = route.fetch.return_value
+                response.status = 500 if failure == "status" else 200
+                response.headers = {}
+                if failure == "fetch":
+                    route.fetch.side_effect = OSError("lost upstream channel")
+                elif failure == "closing":
+
+                    def close_during_fetch(**_kwargs: Any) -> Any:
+                        exchanges.closing = True
+                        return response
+
+                    route.fetch.side_effect = close_during_fetch
+                route.abort.side_effect = OSError("browser already gone")
+                with self.assertLogs(verification.__name__, level="WARNING") as logs:
+                    exchanges.capture(route)
+                route.fetch.assert_called_once()
+                route.abort.assert_called_once()
+                route.fulfill.assert_not_called()
+                self.assertEqual(len(logs.records), 1 if failure == "closing" else 2)
+                if failure == "closing":
+                    exchanges.finish()
+                    guard.require_completed_exchanges()
+                else:
+                    with self.assertRaises(ProviderMutationUnknownError):
+                        exchanges.finish()
+
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
         for failure in (
             "fill",

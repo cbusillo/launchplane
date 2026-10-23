@@ -20,6 +20,7 @@ from typing import cast
 
 import click
 from playwright.sync_api import (
+    APIResponse,
     Browser,
     BrowserType,
     Page,
@@ -420,13 +421,8 @@ class _TestingPageExchanges:
             and not target.path.startswith("/v/")
         )
 
-    def capture(self, route: Route) -> None:
-        if self.closing:
-            route.abort()
-            return
+    def fetch_response(self, route: Route) -> APIResponse | None:
         request = route.request
-        name = self.enroll(request)
-        self.pending.add(request)
         status: int | None = None
         try:
             response = route.fetch(max_redirects=0, max_retries=0, timeout=30_000)
@@ -436,24 +432,36 @@ class _TestingPageExchanges:
                 _unknown_testing_effect(
                     "capture", "response_unavailable_or_failed", request=request, status=status
                 )
-                route.abort()
-                return
-            self.guard.complete_exchange(name)
-            try:
-                if self.closing:
-                    route.abort()
-                else:
-                    route.fulfill(response=response)
-            except Exception:
-                _LOGGER.warning("Testing browser delivery failed after upstream completion.")
+                return None
+            self.guard.complete_exchange(self.requests[request])
+            return response
         except Exception:
             _unknown_testing_effect(
                 "capture", "upstream_completion_unobserved", request=request, status=status
             )
+            return None
+
+    def capture(self, route: Route) -> None:
+        if self.closing:
+            route.abort()
+            return
+        request = route.request
+        self.enroll(request)
+        self.pending.add(request)
+        try:
+            response = self.fetch_response(route)
             try:
-                route.abort()
+                if response is None or self.closing:
+                    route.abort()
+                else:
+                    route.fulfill(response=response)
             except Exception:
-                _LOGGER.warning("Testing request abort failed after an unknown upstream effect.")
+                if response is None:
+                    _LOGGER.warning(
+                        "Testing request abort failed after an unknown upstream effect."
+                    )
+                else:
+                    _LOGGER.warning("Testing browser delivery failed after upstream completion.")
         finally:
             self.pending.discard(request)
 
