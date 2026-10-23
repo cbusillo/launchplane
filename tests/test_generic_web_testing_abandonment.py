@@ -219,12 +219,36 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         self.assertNotIn(self.key, detail.model_dump_json())
 
     def test_legacy_fence_recovers_only_with_complete_retained_abandonment_history(self) -> None:
+        from dataclasses import replace
+        from control_plane.provider_target_holds import project_provider_target_hold
         from control_plane.workflows.public_ingress_monitor import (
             discover_public_ingress_monitor_targets,
             check_public_ingress_target,
         )
 
         observation = self.record_legacy_fence()
+        held_target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.check_name == observation.check_name
+        )
+        held_snapshot = held_target.provider_hold_snapshot
+        assert held_snapshot is not None
+
+        def render_unavailable(*, held: bool) -> tuple[Any, ...]:
+            snapshot = replace(
+                held_snapshot,
+                holds=(project_provider_target_hold(self.original, None),) if held else (),
+                unavailable_references=("provider-operation:unavailable",),
+            )
+            return check_public_ingress_target(
+                target=replace(held_target, provider_hold_snapshot=snapshot),
+                checked_at=observation.observed_at,
+                timeout_seconds=1,
+                http_get=Mock(side_effect=AssertionError("Unexpected HTTP probe")),
+                tls_get=Mock(side_effect=AssertionError("Unexpected TLS probe")),
+            ).targets
+
         plan = self.inspect()
         self.assertEqual(self.apply(plan["recovery_digest"])[0], 202)
         from control_plane.contracts.idempotency_record import (
@@ -269,16 +293,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                 "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
                     attention_fingerprint
                 ),
-                "targets": (
-                    observation.targets[0].model_copy(
-                        update={
-                            "summary": (
-                                "1 shared provider operations remain held for this lane; 0 require reconciliation."
-                                " Original operation or incarnation evidence is unavailable; settlement is unverified."
-                            )
-                        }
-                    ),
-                ),
+                "targets": render_unavailable(held=True),
             }
         )
         changed = reconcile_public_ingress_incident(record_store=self.store, record=attention)[0]
@@ -314,16 +329,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
                 "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
                     fingerprint
                 ),
-                "targets": (
-                    observation.targets[0].model_copy(
-                        update={
-                            "summary": (
-                                "0 shared provider operations remain held for this lane; 0 require reconciliation."
-                                " Original operation or incarnation evidence is unavailable; settlement is unverified."
-                            )
-                        }
-                    ),
-                ),
+                "targets": render_unavailable(held=False),
             }
         )
         updated = reconcile_public_ingress_incident(record_store=self.store, record=missing)[0]
