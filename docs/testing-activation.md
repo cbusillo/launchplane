@@ -36,6 +36,20 @@ preparation. Put that identical object in the activation request's `application`
 field, then use `scripts/activate-generic-web-testing.py --request-file ...`
 through the installed admin transport. Keep both reviews and original keys.
 
+`resources-read` uses the original key and reads only the saved service record.
+A completed operation returns its existing preparation receipt. A missing,
+running or reconciliation-required operation reports its stored state, effect
+phase, timestamps and original plan digest without contacting the provider or
+changing the reservation. This status is not resource qualification; keep the
+original key, review and interlock. The client preserves any completed receipt
+and prints the status separately. An uncertain apply also preserves the bounded
+service error code, HTTP status and trace, without response prose or headers.
+Both testing clients keep a supplied original key after a failed read or response
+validation, independently of whether this request submitted work. Their custom
+results report `retain_original_key`; standard HTTP error envelopes keep it in
+`request.retain_original_key`, preserving one result and the helper's refusal
+evidence. Activation readback still sends no idempotency header.
+
 The reviewed specification supplies the profile's actual `runtime_port` and
 `health_path`, the existing provider network name and one explicit state shape:
 
