@@ -351,6 +351,12 @@ reservation. The webhook request never waits on a deploy.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.
+  - Odoo preview addon settings explicitly supplied in the product profile's
+    `preview.override_env.ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` survive generated
+    website-bootstrap and import-source payloads. Settings merge by addon and
+    setting name; the explicit preview value wins. Generated bootstrap retains
+    the preview's canonical URL, and template addon settings remain excluded.
+    Invalid preview payloads fail before provider effects.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,

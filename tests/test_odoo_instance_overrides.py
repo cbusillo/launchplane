@@ -11,6 +11,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_instance_overrides import build_preview_website_bootstrap_environment
+from control_plane.odoo_instance_overrides import merge_preview_addon_settings
 from control_plane.odoo_instance_overrides import render_post_deploy_payload
 from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
 from click.testing import CliRunner, Result
@@ -65,6 +66,16 @@ def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Re
 
 
 class OdooInstanceOverrideTests(unittest.TestCase):
+    def test_preview_addon_settings_reject_malformed_payload_without_echoing_values(self) -> None:
+        for payload in ("invalid-base64", base64.b64encode(b'{"private-input": true}').decode()):
+            with self.subTest(payload=payload), self.assertRaises(click.ClickException) as refusal:
+                merge_preview_addon_settings(
+                    {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: payload},
+                    preview_override_environment={ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: payload},
+                )
+            self.assertNotIn(payload, str(refusal.exception))
+            self.assertNotIn("private-input", str(refusal.exception))
+
     def test_website_bootstrap_rejects_invalid_company_sender_on_write(self) -> None:
         for email in (
             "not-an-address",

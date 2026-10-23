@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +12,11 @@ from control_plane.contracts.artifact_identity import ArtifactBuildFlags
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooWebsiteBootstrapPayload,
+)
+from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_preview_apply_execution import run_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -341,7 +348,12 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
 
 class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
     def _service_environment(
-        self, *, manifest_odoo_version: str, site_odoo_version: str = ""
+        self,
+        *,
+        manifest_odoo_version: str,
+        site_odoo_version: str = "",
+        preview_payload: str = "",
+        website_bootstrap: bool = False,
     ) -> dict[str, str]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -355,7 +367,32 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                 ]
             }
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            if preview_payload:
+                profile = profile.model_copy(
+                    update={
+                        "preview": profile.preview.model_copy(
+                            update={
+                                "override_env": {
+                                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: preview_payload
+                                }
+                            }
+                        )
+                    }
+                )
             store.write_product_profile_record(profile)
+            if website_bootstrap:
+                store.write_odoo_instance_override_record(
+                    OdooInstanceOverrideRecord(
+                        context="cm",
+                        instance="testing",
+                        website_bootstrap=OdooWebsiteBootstrapPayload(
+                            tenant="cm",
+                            name="Preview fixture",
+                            canonical_url="https://testing.example.test",
+                        ),
+                        updated_at=profile.updated_at,
+                    )
+                )
             _write_odoo_preview_template_runtime_environment(store=store)
             if site_odoo_version:
                 store.write_runtime_environment_record(
@@ -408,6 +445,35 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
             self._service_environment(manifest_odoo_version="")
 
         self.assertEqual(refusal.exception.missing_keys, ("ODOO_VERSION",))
+
+    def test_preview_addon_settings_survive_website_bootstrap(self) -> None:
+        settings = [
+            {
+                "addon": "authentik_sso",
+                "setting": "client_id",
+                "value": {"source": "literal", "value": "preview-fixture-client"},
+            }
+        ]
+        payload = base64.b64encode(
+            json.dumps(
+                {
+                    "context": "cm",
+                    "instance": "preview",
+                    "addon_settings": settings,
+                }
+            ).encode()
+        ).decode()
+        values = self._service_environment(
+            manifest_odoo_version="19.0", preview_payload=payload, website_bootstrap=True
+        )
+        decoded = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        self.assertEqual(decoded["addon_settings"], settings)
+        self.assertEqual(
+            decoded["website_bootstrap"]["canonical_url"],
+            OdooPreviewApplyEnvelope.model_validate(
+                _refresh_payload()
+            ).apply.dry_run_plan.preview_url,
+        )
 
 
 if __name__ == "__main__":

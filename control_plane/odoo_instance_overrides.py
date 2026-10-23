@@ -1,4 +1,5 @@
 import base64
+import binascii
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
@@ -561,3 +562,37 @@ def build_preview_website_bootstrap_environment(
     # Preview website bootstrap carries only bootstrap intent. Preview integration-key
     # enforcement is tracked separately and is not decided by this payload.
     return build_post_deploy_environment(preview_record, clear_undeclared_shopify=False)
+
+
+def merge_preview_addon_settings(
+    environment: dict[str, str], *, preview_override_environment: dict[str, str]
+) -> None:
+    encoded_preview = preview_override_environment.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, "")
+    if not encoded_preview.strip():
+        return
+    preview_payload = _decode_preview_override_payload(encoded_preview)
+    if not preview_payload.addon_settings:
+        return
+    generated_payload = _decode_preview_override_payload(
+        environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+    )
+    settings = {
+        (item.addon, item.setting): item
+        for item in (*generated_payload.addon_settings, *preview_payload.addon_settings)
+    }
+    merged_payload = generated_payload.model_copy(
+        update={"addon_settings": tuple(settings.values())}
+    )
+    environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = _encode_post_deploy_payload(
+        merged_payload
+    )
+    environment[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY] = "true"
+
+
+def _decode_preview_override_payload(encoded_payload: str) -> OdooPostDeployPayload:
+    try:
+        return OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(encoded_payload, validate=True)
+        )
+    except (ValueError, binascii.Error):
+        raise click.ClickException("Invalid preview addon settings payload.") from None

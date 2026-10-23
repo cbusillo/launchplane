@@ -1163,6 +1163,9 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
+    control_plane_odoo_instance_overrides.merge_preview_addon_settings(
+        environment_values, preview_override_environment=preview_profile.override_env
+    )
     return _OdooPreviewServiceEnvironment(
         values=environment_values,
         omitted_integration_credential_keys=omitted_keys,
