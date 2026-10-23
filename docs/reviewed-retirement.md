@@ -124,7 +124,7 @@ reviewed managed set so its independent source cannot silently restore it.
 Prepare a private `managed-authz-policy-set` envelope with that request, a stable
 `source_event_id`, `reason` and optional `related_issue`. Submit it through the
 installed Launchplane helper's `privileged-policy-propose --payload-file` command.
-The helper keeps its existing private operator transport, response validation and
+The helper keeps its existing private admin transport, response validation and
 full review URL. It never approves or applies. Keep the identical envelope and
 source event after an uncertain submission; inspect or replay that proposal
 rather than creating another. Older installed clients need the companion
