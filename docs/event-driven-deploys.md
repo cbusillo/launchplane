@@ -356,8 +356,10 @@ reservation. The webhook request never waits on a deploy.
     website-bootstrap and import-source payloads. Generated bootstrap retains
     the preview's canonical URL, and template addon settings remain excluded.
     Only preview addon settings are carried over; other preview payload fields
-    are superseded by generated settings. Existing addon safety checks apply,
-    and invalid payloads or missing runtime bindings fail before provider effects.
+    are superseded by generated settings. Composed settings use the template
+    lane's protected/production store checks, canonical secret transport and
+    delivered runtime keys. Invalid composed payloads fail before provider effects.
+    Without generated settings, the original payload passes through unchanged.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
