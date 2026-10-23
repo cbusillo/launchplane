@@ -17584,7 +17584,6 @@
           },
           "managed_set_id": {
             "maxLength": 96,
-            "minLength": 1,
             "title": "Managed Set Id",
             "type": "string"
           },
@@ -17626,6 +17625,17 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "workflow_rule_retirement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRuleRetirementRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -17656,7 +17666,6 @@
           },
           "managed_set_id": {
             "maxLength": 96,
-            "minLength": 1,
             "title": "Managed Set Id",
             "type": "string"
           },
@@ -17698,6 +17707,17 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "workflow_rule_retirement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRuleRetirementRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -59178,6 +59198,92 @@
                     },
                     "title": "TerminalAgentPolicyRule",
                     "type": "object"
+                  },
+                  "WorkflowRuleRetirementRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {
+                        "default": "inspect",
+                        "enum": [
+                          "inspect",
+                          "plan"
+                        ],
+                        "title": "Mode",
+                        "type": "string"
+                      },
+                      "policy_record_id": {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "title": "Policy Record Id",
+                        "type": "string"
+                      },
+                      "policy_revision": {
+                        "minimum": 1,
+                        "title": "Policy Revision",
+                        "type": "integer"
+                      },
+                      "policy_sha256": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "title": "Policy Sha256",
+                        "type": "string"
+                      },
+                      "selection": {
+                        "items": {
+                          "$ref": "#/$defs/WorkflowRuleSelection"
+                        },
+                        "maxItems": 50,
+                        "minItems": 1,
+                        "title": "Selection",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "policy_record_id",
+                      "policy_revision",
+                      "policy_sha256",
+                      "selection"
+                    ],
+                    "title": "WorkflowRuleRetirementRequest",
+                    "type": "object"
+                  },
+                  "WorkflowRuleSelection": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "rule_sha256": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "title": "Rule Sha256",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "rule_sha256"
+                    ],
+                    "title": "WorkflowRuleSelection",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -59258,6 +59364,17 @@
                     ],
                     "title": "Unmanaged Adoption",
                     "type": "string"
+                  },
+                  "workflow_rule_retirement": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WorkflowRuleRetirementRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "x-launchplane-optional-response": true
                   }
                 },
                 "required": [
@@ -59646,6 +59763,17 @@
                         ],
                         "title": "Unmanaged Adoption",
                         "type": "string"
+                      },
+                      "workflow_rule_retirement": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/WorkflowRuleRetirementRequest"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -60260,6 +60388,92 @@
                       }
                     },
                     "title": "TerminalAgentPolicyRule",
+                    "type": "object"
+                  },
+                  "WorkflowRuleRetirementRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {
+                        "default": "inspect",
+                        "enum": [
+                          "inspect",
+                          "plan"
+                        ],
+                        "title": "Mode",
+                        "type": "string"
+                      },
+                      "policy_record_id": {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "title": "Policy Record Id",
+                        "type": "string"
+                      },
+                      "policy_revision": {
+                        "minimum": 1,
+                        "title": "Policy Revision",
+                        "type": "integer"
+                      },
+                      "policy_sha256": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "title": "Policy Sha256",
+                        "type": "string"
+                      },
+                      "selection": {
+                        "items": {
+                          "$ref": "#/$defs/WorkflowRuleSelection"
+                        },
+                        "maxItems": 50,
+                        "minItems": 1,
+                        "title": "Selection",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "policy_record_id",
+                      "policy_revision",
+                      "policy_sha256",
+                      "selection"
+                    ],
+                    "title": "WorkflowRuleRetirementRequest",
+                    "type": "object"
+                  },
+                  "WorkflowRuleSelection": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "rule_sha256": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "title": "Rule Sha256",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "rule_sha256"
+                    ],
+                    "title": "WorkflowRuleSelection",
                     "type": "object"
                   }
                 },

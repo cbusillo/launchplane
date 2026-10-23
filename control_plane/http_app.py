@@ -19502,6 +19502,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             )
+        if raw_payload.get("workflow_rule_retirement") is not None:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="reviewed_policy_proposal_required",
+                message="Selected workflow retirement requires a Director-approved policy proposal.",
+            )
         try:
             return control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope.model_validate(
                 raw_payload

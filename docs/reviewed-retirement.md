@@ -109,3 +109,39 @@ is checked again after planning so a concurrent change invalidates the result.
 This route has **no apply mode** (`apply_supported: false`). A later Director
 access-removal decision needs this exact plan and a supported reviewed admin
 policy operation; a plan digest never grants execution authority.
+
+### Reviewed workflow-rule removal
+
+The existing `managed-authz-policy-set` privileged-operation proposal accepts
+an optional `workflow_rule_retirement` containing that exact snapshot and selection
+with `mode: plan`. For this contraction, `managed_set_id` is empty and
+`desired_policy` is an empty schema-v2 or schema-v3 fragment. No managed set is
+reconciled. Schema migration, adoption, quorum changes and nonempty desired rules
+are rejected. The active schema, settings and every unselected rule remain exact.
+
+Prepare this proposal with the repository's `scripts/propose-workflow-rule-retirement.py`,
+using `uv run python`, `--operator-helper` pointing to the installed Launchplane
+write-action helper, a private `--selection-file`, stable `--source-event-id`,
+`--reason` and optional `--related-issue`. The script uses the helper's existing
+private operator transport, proposal response validation and full review URL.
+It never approves or applies. Keep the identical source event and input after an
+uncertain submission; inspect or replay that proposal rather than creating another.
+
+The existing proposer grant and signed-in Director approval govern the request;
+no new grant or operation descriptor is installed. The Director's review shows
+each selected workflow's full scope and permissions, including unmanaged rules.
+The ordinary managed-reconcile HTTP route rejects this contraction: execution
+belongs to the existing approved-operation worker. Approval binds the selection,
+reason, original active policy and candidate digest. The worker replans against
+fresh state, writes through the existing locked policy CAS and audit transaction,
+and verifies the resulting complete policy digest. An interrupted execution uses
+the same operation's existing completion receipt and recovery path.
+
+The inspect/plan route remains inert. Delivering this source performs no
+retirement. After approval, read the active inventory again and compare it with
+the reviewed candidate; a proposal or historical worker receipt alone does not
+prove current absence or unchanged survivors.
+
+After the first proposal containing this request is persisted, retain a rollback
+image with this request reader. Older strict readers cannot load that new proposal;
+rolling back the service image never restores removed authorization data.
