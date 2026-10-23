@@ -777,6 +777,7 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTa
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.preview_override_authorization import director_preview_override_allowed
+from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     NotificationPolicyScopeConflict,
@@ -13828,7 +13829,11 @@ def create_launchplane_fastapi_app(
                         "review or clear them through their supported configuration operation."
                     ),
                 ) from error
-        if director_preview_write:
+        scan_activation = (
+            director_preview_write
+            and control_plane_artifact_scan.is_artifact_scan_activation(existing_profile, profile)
+        )
+        if director_preview_write and not scan_activation:
             try:
                 integration_key_markers = latest_active_runtime_key_safety_policy(
                     cast(RuntimeKeySafetyPolicyReadStore, record_store)
@@ -13943,6 +13948,19 @@ def create_launchplane_fastapi_app(
                 code="product_onboarding_review_required",
                 message="Register a non-runtime product through reviewed product onboarding.",
             )
+        if scan_activation:
+            scan = await run_in_threadpool(
+                control_plane_artifact_scan.qualify_product_artifact,
+                record_store,
+                product=profile.product,
+            )
+            if scan.status != "pass":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="artifact_scan_refused",
+                    message="Artifact scan activation requires a passing verified-image scan.",
+                )
         response = accepted_evidence_response(
             trace_id=trace_id, records={"product_profile": profile.product}
         )
