@@ -253,9 +253,24 @@ reservation. The webhook request never waits on a deploy.
     exception text are never logged. The verifier logs the deployment record ID
     separately for correlation. These diagnostics leave qualification unknown and
     do not release the reservation or permit cleanup or replay.
-    Request-body completion expectations register synchronously before browser
-    events resume, so a queued completion cannot pass the listener. The bounded
-    wait still requires the matching finished request and a successful response.
+    The verifier buffers each tracked same-origin request using Playwright's
+    upstream fetch, with no retries or redirect following and a finite deadline.
+    Its full response body and successful status acknowledge the exact intercepted
+    request before delivery to the browser. Browser cancellation cannot erase that
+    receipt. Missing bodies, unsuccessful status and write redirects stay unknown;
+    signup, server actions and public verification (which records a scan) share
+    this rule. Native read redirects retain actual browser navigation. Each known
+    same-origin read descendant requires its own successful response and matching
+    finished request, because Playwright does not route redirect descendants.
+    A cancelled native descendant remains unknown. Same-origin sign-in redirects
+    retain their own receipt, so a lost application session can fail the product
+    check and clean up its acknowledged fixture.
+    Closing fences new routed requests before upstream dispatch and waits for
+    handlers already in flight. No cancelled-read or page-close inference completes
+    an exchange. A failed page close remains unknown, with cleanup skipped.
+    Service workers are blocked so they cannot bypass interception. The billing
+    page must render its main heading after signup; transport receipts do not
+    replace the product assertions.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.
