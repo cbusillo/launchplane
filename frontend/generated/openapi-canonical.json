@@ -49988,6 +49988,23 @@
             "title": "Current Version Id",
             "type": "string"
           },
+          "current_version_value_origin": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "provider",
+                  "generated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Value Origin",
+            "x-launchplane-optional-response": true
+          },
           "description": {
             "title": "Description",
             "type": "string"

@@ -336,6 +336,11 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value leaves historical origin unknown; neither
+  mutable binding metadata nor another version certifies it. This diagnostic
+  does not qualify external-resource isolation or change observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not

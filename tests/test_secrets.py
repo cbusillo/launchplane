@@ -331,6 +331,27 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         audit_events = cast("list[dict[str, object]]", status["recent_audit_events"])
         self.assertEqual(audit_events[0]["event_type"], "rotated")
 
+    def test_status_origin_comes_from_current_immutable_version_without_decryption(self) -> None:
+        store = _FakeSecretReadStore()
+        current = store.versions[-1]
+        store.records = (
+            store.records[0].model_copy(update={"current_version_id": current.version_id}),
+        )
+        for origin in (None, "supplied", "provider", "generated"):
+            with (
+                self.subTest(origin=origin),
+                patch.object(control_plane_secrets, "_decrypt_secret_value") as decrypt,
+            ):
+                selected = current.model_copy(update={"value_origin": origin})
+                store.versions = (store.versions[0], selected)
+                status = control_plane_secrets.build_secret_status(
+                    store, secret_id=selected.secret_id
+                )
+                self.assertEqual(status["current_version_value_origin"], selected.value_origin)
+                self.assertEqual(status["current_version_created_at"], selected.created_at)
+                decrypt.assert_not_called()
+                self.assertNotIn(selected.ciphertext, json.dumps(status))
+
     def test_read_dokploy_config_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)

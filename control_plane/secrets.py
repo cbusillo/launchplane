@@ -915,6 +915,9 @@ def relabel_secret_binding(
 def build_secret_status(record_store: SecretReadStore, *, secret_id: str) -> dict[str, object]:
     record = record_store.read_secret_record(secret_id)
     versions = record_store.list_secret_versions(secret_id=secret_id)
+    current_version = next(
+        (version for version in versions if version.version_id == record.current_version_id), None
+    )
     binding = _binding_for_secret(record_store, secret_id=secret_id)
     audit_events = record_store.list_secret_audit_events(secret_id=secret_id)
     return {
@@ -932,8 +935,9 @@ def build_secret_status(record_store: SecretReadStore, *, secret_id: str) -> dic
         "updated_by": record.updated_by,
         "last_validated_at": record.last_validated_at,
         "current_version_id": record.current_version_id,
+        "current_version_value_origin": current_version.value_origin if current_version else None,
         "version_count": len(versions),
-        "current_version_created_at": versions[0].created_at if versions else "",
+        "current_version_created_at": current_version.created_at if current_version else "",
         "binding": (
             {
                 "binding_id": binding.binding_id,

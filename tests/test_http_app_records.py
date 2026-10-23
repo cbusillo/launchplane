@@ -847,6 +847,11 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             secret_ids = _write_secret_status_records(database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            record = app_store.read_secret_record(secret_ids["context"])
+            version = app_store.read_secret_version(record.current_version_id).model_copy(
+                update={"value_origin": "provider"}
+            )
+            app_store.write_secret_version(version)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_record_read_policy(
@@ -889,6 +894,14 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(show_payload["status"], "ok")
         self.assertEqual(show_payload["secret"]["secret_id"], secret_ids["context"])
         self.assertEqual(show_payload["secret"]["context"], "example-site")
+        for payload in (context_payload, instance_payload):
+            selected = next(
+                secret for secret in payload["secrets"] if secret["secret_id"] == version.secret_id
+            )
+            self.assertEqual(selected["current_version_value_origin"], version.value_origin)
+        self.assertEqual(
+            show_payload["secret"]["current_version_value_origin"], version.value_origin
+        )
         self.assertEqual(
             show_payload["secret"]["binding"]["binding_key"],
             "GITHUB_WEBHOOK_SECRET",
