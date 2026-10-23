@@ -370,7 +370,7 @@ def prepared_container_id(task, identifiers, service, nodes, values):
         or container.get("State", {}).get("Status") != "created"
         or container.get("State", {}).get("Running") is not False
         or container.get("Config", {}).get("Image") != task["Spec"]["ContainerSpec"].get("Image")
-        or json.loads(docker("inspect", container["Name"])) != [container]):
+        or json.loads(docker("inspect", "--type", "container", container["Name"][1:])) != [container]):
         raise ValueError("prepared task container ownership unavailable")
     image_id = container.get("Image")
     if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
@@ -387,7 +387,7 @@ def prepared_container_id(task, identifiers, service, nodes, values):
 """
 
 PREPARED_CONTAINER_LOOKUP = r"""
-            if not container_id:
+            if not container_id and "@" not in configuration.get("Image", ""):
                 container_id = prepared_container_id(task[0], container_ids, service[0], local_nodes, values)
 """
 

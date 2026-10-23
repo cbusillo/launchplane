@@ -331,12 +331,13 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             )
         elif values[:3] == ["inspect", "--type", "task"]:
             result = json.dumps([self.tasks[values[3]]])
-        elif len(values) == 2 and values[0] == "inspect" and values[1].startswith("/"):
+        elif values[:3] == ["inspect", "--type", "container"]:
             result = json.dumps(
                 [
                     container
                     for container in self.containers.values()
-                    if container.get("Name") == values[1]
+                    if container.get("Name", "").removeprefix("/") == values[3]
+                    and not values[3].startswith("/")
                 ]
             )
         elif len(values) == 2 and values[0] == "inspect" and values[1] in self.containers:
@@ -406,6 +407,14 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
     def test_prepared_container_proves_image_before_task_status_publishes_id(self) -> None:
         self.prepare_container_without_status_id()
         self.assertIn("testing_resources_ok=true", self.observe())
+
+    def test_prepared_digest_pinned_task_keeps_existing_image_proof(self) -> None:
+        self.prepare_container_without_status_id()
+        self.task["Spec"]["ContainerSpec"]["Image"] = self.configuration["Image"]
+        for state in ("preparing", "ready", "shutdown"):
+            with self.subTest(state=state):
+                self.task["Status"] = {"State": state}
+                self.assertIn("testing_resources_ok=true", self.observe())
 
     def test_prepared_container_requires_actual_digest_and_merged_image_inputs(self) -> None:
         self.prepare_container_without_status_id()
