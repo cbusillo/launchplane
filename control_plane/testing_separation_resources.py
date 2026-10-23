@@ -140,9 +140,14 @@ def preparation_binding(
         target_id=target_id.target_id,
     )
     reservations = _target_reservations(
-        store, product=product, context=context, target_key=key, target_id=target_id.target_id
+        store,
+        product=product,
+        context=context,
+        target_key=key,
+        target_id=target_id.target_id,
+        require_complete=application is not None,
     )
-    if not reservations:
+    if not reservations and application is None:
         raise SeparationResourcesRefused("The retained historical reservation is required.")
     host, token = source.read_dokploy_config(control_plane_root=root)
     placement = api.fetch_dokploy_target_payload(

@@ -23,6 +23,13 @@ An original still needs the same physical runtime and isolation proof; this does
 not claim that its remote work stopped. Create-only admission does not weaken the
 ordinary deploy fence.
 
+An application with no held original uses a complete empty operation enumeration
+under the old-target execution lock, rechecked before later effects. Unattributed
+holds refuse fresh admission. Its current service deployment selects one exact
+Launchplane record for lane, target, source and immutable artifact attribution;
+the fixed native capability and image inspection remains required. Compose
+preparation still requires its retained historical reservation.
+
 Use `scripts/stage-testing-separation.py resources-dry-run` and
 `resources-apply` with `--application-file <private-specification.json>` for
 preparation. Put that identical object in the activation request's `application`
