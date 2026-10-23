@@ -123,43 +123,44 @@ try:
     with sync_playwright() as playwright:
         browser = launch_testing_browser(playwright.chromium)
         try:
-            page = browser.new_page(service_workers="block")
-            guard = GenericWebPostDeployGuard()
-            base_url = f"http://{sys.argv[1]}:{server.server_port}"
-            exchanges = _TestingPageExchanges(page, base_url, guard)
-            response = page.goto(f"{base_url}/sign-up", wait_until="load")
-            assert response is not None
-            exchanges.finish_response(response)
-            assert guard.exchanges and all(guard.exchanges.values())
-            assert page.locator("h1").inner_text() == heading
-            page.set_content("""<input id="business" name="name">
-                <input id="private-password" type="password">
-                <input id="private-hidden" type="hidden">
-                <input id="private-file" type="file">
-                <input id="private-key" name="api_key">
-                <input id="private-token" name="access_token">
-                <iframe srcdoc="&lt;input id=business&gt;"></iframe>""")
-            require_safe_browser_control(page.locator("#business"))
-            page.locator("#business").fill("TEST browser qualification")
-            assert page.locator("#business").input_value() == "TEST browser qualification"
-            refused = [
-                page.locator(f"#{name}")
-                for name in (
-                    "private-password",
-                    "private-hidden",
-                    "private-file",
-                    "private-key",
-                    "private-token",
-                )
-            ]
-            refused.append(page.frame_locator("iframe").locator("#business"))
-            for locator in refused:
-                try:
-                    require_safe_browser_control(locator)
-                except ValueError:
-                    continue
-                raise AssertionError("Sensitive or iframe control was accepted")
-            exchanges.close()
+            with browser.new_context(service_workers="block") as browser_context:
+                page = browser_context.new_page()
+                guard = GenericWebPostDeployGuard()
+                base_url = f"http://{sys.argv[1]}:{server.server_port}"
+                exchanges = _TestingPageExchanges(page, base_url, guard)
+                response = page.goto(f"{base_url}/sign-up", wait_until="load")
+                assert response is not None
+                exchanges.finish_response(response)
+                assert guard.exchanges and all(guard.exchanges.values())
+                assert page.locator("h1").inner_text() == heading
+                page.set_content("""<input id="business" name="name">
+                    <input id="private-password" type="password">
+                    <input id="private-hidden" type="hidden">
+                    <input id="private-file" type="file">
+                    <input id="private-key" name="api_key">
+                    <input id="private-token" name="access_token">
+                    <iframe srcdoc="&lt;input id=business&gt;"></iframe>""")
+                require_safe_browser_control(page.locator("#business"))
+                page.locator("#business").fill("TEST browser qualification")
+                assert page.locator("#business").input_value() == "TEST browser qualification"
+                refused = [
+                    page.locator(f"#{name}")
+                    for name in (
+                        "private-password",
+                        "private-hidden",
+                        "private-file",
+                        "private-key",
+                        "private-token",
+                    )
+                ]
+                refused.append(page.frame_locator("iframe").locator("#business"))
+                for locator in refused:
+                    try:
+                        require_safe_browser_control(locator)
+                    except ValueError:
+                        continue
+                    raise AssertionError("Sensitive or iframe control was accepted")
+                exchanges.close()
         finally:
             browser.close()
 finally:
