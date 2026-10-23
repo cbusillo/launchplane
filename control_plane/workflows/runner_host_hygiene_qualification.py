@@ -81,6 +81,7 @@ def qualify_runner_host_hygiene(
         and report.status == "healthy"
         and (not blockers or not_needed)
         and not unresolved
+        and (not current.request.mutate or not_needed or audit.maintenance_completed)
         and (audit.terminal_audit is None or audit.terminal_audit.status == "completed")
         and audit.planned_delivery_state == "delivered",
         "blockers": blockers,

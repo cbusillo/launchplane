@@ -691,8 +691,10 @@ dry-run planning only.
 
 ## Qualify an existing configuration after drift
 
-Weekday green means a report's planned audit was delivered. It does not mean
-retention is working. The workflow summary now separates report delivery,
+The workflow requires qualified audit artifacts before passing. A blocked or
+unqualified report, missing evidence, or requested maintenance without accepted
+terminal completion fails the job; a healthy report-only plan and a recognized
+not-needed action can pass without claiming maintenance ran. The workflow summary separates report delivery,
 report status, retention qualification and accepted terminal maintenance. The
 qualifier uses the audit envelope's single `maintenance_completed` rule.
 The latest existing audit record supplies the report and blockers; terminal
@@ -780,7 +782,9 @@ remain unqualified. `--maximum-age-seconds` bounds review-artifact age separatel
 from the executor's unchanged idle freshness gate. To reproduce historical
 qualification, pin `--as-of YYYY-MM-DDTHH:MM:SS+0000`; this proves only that saved
 instant, never current host state. Terminal completion comes from that artifact's
-own exact audit, without matching today's scheduler key to a prior run.
+own exact audit, without matching today's scheduler key to a prior run. A
+requested mutation must have accepted terminal completion or a recognized
+not-needed outcome to qualify; a ready plan alone does not prove it ran.
 
 For a correction, first run the existing report-only path and retain its accepted
 audit plus complete private service/registration and producer readbacks. Compare
