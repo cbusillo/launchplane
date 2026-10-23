@@ -1867,8 +1867,9 @@ A deployment continuing a fresh generation must carry that generation's
 certificate setting into every provider route write, including failed deploys.
 Changing it silently breaks original-bootstrap readback before the copy finishes.
 
-Fix a bad testing certificate by rebuilding the disposable lane through its
-supported rebuild path. Original-bootstrap route verification is not a
+Fix a bad testing certificate by rebuilding the disposable lane through the
+[signed-in testing rebuild and native preflight](#signed-in-testing-rebuild-and-native-preflight).
+Original-bootstrap route verification is not a
 prerequisite for a reviewed deployment retry. The retry's own eligibility,
 resource, credential, use and custody checks still apply; a rebuild never
 releases an operation with unknown provider effects.

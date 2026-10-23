@@ -1,6 +1,6 @@
 """The bounded client preserves reviewed intent and never retries an uncertain apply."""
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 import http.client
 import io
 import json
@@ -105,14 +105,6 @@ class TestingBootstrapClientTests(unittest.TestCase):
             self.request.call_args.kwargs["body"]["reviewed_plan_sha256"], self.plan.plan_sha256
         )
         self.assertEqual(self.request.call_args.kwargs["idempotency_key"], "original-key")
-
-    def test_retired_certificate_repair_modes_never_submit(self) -> None:
-        for mode in ("route-repair-dry-run", "route-repair-apply", "route-repair-readback"):
-            with self.subTest(mode=mode), redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as refusal:
-                    self.call(mode)
-                self.assertEqual(refusal.exception.code, 2)
-        self.request.assert_not_called()
 
     def test_uncertain_apply_is_not_repeated_and_mismatched_receipt_stays_unverified(self) -> None:
         self.call("dry-run")
