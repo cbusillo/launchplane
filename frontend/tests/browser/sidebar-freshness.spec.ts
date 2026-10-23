@@ -1,5 +1,6 @@
 import { waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 for (const theme of ["dark", "light"] as const) {
   test(`sidebar refreshes, distinguishes stale data and recovers in ${theme}`, { tag: "@layout" }, async ({ page }, testInfo) => {
@@ -54,7 +55,7 @@ for (const theme of ["dark", "light"] as const) {
     const testing = page.locator('.rail-product-link [data-lane="testing"]');
     await expect(testing).toHaveAttribute("data-tone", "verified");
     const screenshot = async (state: string) => {
-      await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${theme}-${testInfo.project.name}.png`, animations: "disabled" });
+      await page.screenshot({ path: smokeArtifact(`sidebar-${state}-${theme}-${testInfo.project.name}.png`), animations: "disabled" });
     };
     await screenshot("fresh");
     mode = "warning";

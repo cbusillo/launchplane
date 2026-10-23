@@ -344,7 +344,8 @@ The isolation test holds two focused browser probes open together, proves their
 actual caches and origins differ, and checks that one server's cleanup preserves
 its peer's serving cache.
 It runs as part of `test:browser`; the standalone command above is for focused
-diagnosis. It writes only task-local test artifacts.
+diagnosis. Its scratch folders live under the OS temp directory and are removed
+after the run.
 
 CI uses a bounded worker count in `frontend/playwright.config.ts`, including
 self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
@@ -356,7 +357,7 @@ CI divides the unchanged suite into two jobs with Playwright's built-in
 probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
 partition through `(cd frontend && pnpm test:browser)`; without that variable,
 the local command still runs the whole browser suite and checks all screenshots.
-Sharded runs write Playwright JSON reports under `tmp/browser-smoke/reports`.
+Sharded runs write Playwright JSON reports under the artifact folder's `reports/`.
 After both jobs succeed, CI downloads their evidence into a freshly cleared
 directory, independently discovers the complete current suite and requires
 each discovered test to pass exactly once across the reports. Missing,
@@ -458,10 +459,17 @@ duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
-Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
-job. Every run clears prior evidence first and verifies the complete desktop and
-narrow screenshot set before passing. These screenshots are review evidence
+Screenshots, traces, and failure evidence go to a per-checkout folder under
+the OS temp directory, outside the checkout, so a finished worktree holds no
+smoke output. `pnpm test:browser` prints the folder when it ends.
+`BROWSER_SMOKE_ARTIFACT_DIR` overrides it; a relative value resolves against
+the checkout, and a value that is the checkout or contains it is refused,
+because each run deletes the folder first. CI sets it to a workspace folder in
+the top-level workflow env and uploads that folder from the dedicated browser
+job. Vite's per-server optimizer caches and the isolation test's scratch
+folders also live under the OS temp directory. Every run clears prior evidence
+first and verifies the complete desktop and narrow screenshot set before
+passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 

@@ -1,4 +1,5 @@
 import { expect, setClockTime, test } from "./state";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 test("lane evidence stays readable within its column", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");
@@ -40,7 +41,7 @@ test("lane evidence stays readable within its column", { tag: "@responsive" }, a
           && rect.top >= badgeBounds.top && rect.bottom <= badgeBounds.bottom + 1);
     }))).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `../tmp/browser-smoke/evidence-badge-${state}-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`evidence-badge-${state}-${testInfo.project.name}.png`), fullPage: true });
   }
   await row.click();
   await expect(page.getByRole("heading", { name: product.display_name, exact: true })).toBeVisible();

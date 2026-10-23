@@ -1,5 +1,6 @@
 import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 for (const view of ["index", "workspace", "environment"] as const) {
   for (const journey of ["long-lived", "stopped", "failed"] as const) {
@@ -127,7 +128,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
         await advance(DEADLINE_RETRY_INTERVAL_MS, healthy);
       }
       if (journey === "long-lived") {
-        await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
+        await page.screenshot({ path: smokeArtifact(`production-cadence-${view}-${testInfo.project.name}.png`), fullPage: true });
         expect(mutations).toEqual([]);
         return;
       }
@@ -135,7 +136,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // not keep polling at the short follow-up interval.
       const recoveredReads = reads;
       await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
-      await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-recovered-${journey}-${view}-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`production-cadence-recovered-${journey}-${view}-${testInfo.project.name}.png`), fullPage: true });
       expect(reads).toBe(recoveredReads);
       if (journey === "failed") {
         unavailable = true;
@@ -144,7 +145,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
         await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
         const failedReads = reads;
         await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
-        await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-failed-${view}-${testInfo.project.name}.png`, fullPage: true });
+        await page.screenshot({ path: smokeArtifact(`production-cadence-failed-${view}-${testInfo.project.name}.png`), fullPage: true });
         expect(reads).toBe(failedReads);
         unavailable = false;
         await advance(READ_REFRESH_INTERVAL_MS + DEADLINE_RETRY_INTERVAL_MS, healthy);
@@ -161,7 +162,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const stoppedReads = reads;
       browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
       await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
-      await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-stopped-${view}-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`production-cadence-stopped-${view}-${testInfo.project.name}.png`), fullPage: true });
       expect(reads).toBe(stoppedReads);
       unavailable = true;
       await advanceRead(READ_REFRESH_INTERVAL_MS);
