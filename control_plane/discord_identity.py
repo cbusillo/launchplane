@@ -154,10 +154,13 @@ def capture_identity_inputs(store: TestingCredentialStore, product: str) -> Disc
 
 def token_bot_id(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value) is None:
-        raise ValueError("Credential shape unavailable")
+        return ""
     first = value.split(".", 1)[0]
-    decoded = base64.b64decode(first + "=" * (-len(first) % 4), altchars=b"-_", validate=True)
-    return discord_snowflake(decoded.decode("ascii"))
+    try:
+        decoded = base64.b64decode(first + "=" * (-len(first) % 4), altchars=b"-_", validate=True)
+        return discord_snowflake(decoded.decode("ascii"))
+    except (ValueError, UnicodeError):
+        return ""
 
 
 def read_discord_identity(
@@ -182,19 +185,20 @@ def read_discord_identity(
             raise ExternalResourceInputsChanged()
 
         value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
-        matches_production = any(
-            hmac.compare_digest(
-                value.encode(),
-                secrets._decrypt_secret_value(version.ciphertext, version.key_id).encode(),
-            )
+        production_values = tuple(
+            secrets._decrypt_secret_value(version.ciphertext, version.key_id)
             for _, _, version in captured.production
+        )
+        expected_bot = token_bot_id(value)
+        matches_production = any(
+            hmac.compare_digest(value.encode(), production_value.encode())
+            or bool(expected_bot and expected_bot == token_bot_id(production_value))
+            for production_value in production_values
         )
         check_current()
         if matches_production:
             return DiscordIdentityResult(status="matches_production")
-        try:
-            expected_bot = token_bot_id(value)
-        except (ValueError, UnicodeError):
+        if not expected_bot:
             return DiscordIdentityResult(failure_code="credential_ineligible")
         check_current()
         store.write_secret_audit_event(

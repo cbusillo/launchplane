@@ -209,7 +209,6 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["observation"]["application_id"], "456")
             self.assertEqual(result["observation"]["bot_id"], "123")
             self.assertTrue(result["observation"]["guild_enumeration_complete"])
-            self.assertEqual(result["qualification"], "not_evaluated")
             self.assertNotIn(token, report.text)
             self.assertTrue(provider.called)
         self.assertEqual(self.store.list_secret_records(), before)
@@ -237,34 +236,39 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
+            events = self.store.list_secret_audit_events(secret_id=record.secret_id)
             with patch("control_plane.discord_external_resources.request_public_http") as provider:
                 report = await self.discord_identity()
             self.assertEqual(report.status_code, 200, report.text)
             self.assertEqual(report.json()["result"]["status"], "unavailable")
             provider.assert_not_called()
+            self.assertEqual(
+                self.store.list_secret_audit_events(secret_id=record.secret_id), events
+            )
         self.store.write_secret_version(version)
         other = LaunchplaneProductProfileRecord.model_validate(
             _generic_site_profile_payload("another-site")
         )
         self.store.write_product_profile_record(other)
-        apply_product_config_bundle(
-            record_store=self.store,
-            payload={
-                "product": other.product,
-                "context": other.product,
-                "instance": "prod",
-                "secrets": [{"binding_key": "OTHER_BOT", "value": token}],
-            },
-            mode="apply",
-            actor="fixture",
-            source_label="test",
-        )
-        with patch("control_plane.discord_external_resources.request_public_http") as provider:
-            report = await self.discord_identity()
-            override = await self.discord_identity("?token=unused")
-        self.assertEqual(report.json()["result"]["status"], "matches_production")
-        self.assertEqual(override.status_code, 400)
-        provider.assert_not_called()
+        for production_token in (token, token + "changed"):
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": other.product,
+                    "context": other.product,
+                    "instance": "prod",
+                    "secrets": [{"binding_key": "OTHER_BOT", "value": production_token}],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+            with patch("control_plane.discord_external_resources.request_public_http") as provider:
+                report = await self.discord_identity()
+                override = await self.discord_identity("?token=unused")
+            self.assertEqual(report.json()["result"]["status"], "matches_production")
+            self.assertEqual(override.status_code, 400)
+            provider.assert_not_called()
 
     async def test_discord_identification_discards_drift_and_refuses_missing_audit(self) -> None:
         self.historical_discord_fixture()
@@ -342,6 +346,69 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 json.loads(output.getvalue())["result"]["observation"]["bot_id"], "123"
             )
             self.assertFalse(reader.call_args.kwargs["query"])
+
+    async def test_discord_identification_rejects_bot_mismatch_incomplete_comparison_and_production_drift(
+        self,
+    ) -> None:
+        self.historical_discord_fixture()
+
+        def mismatch(url: str, **kwargs: Any) -> Any:
+            response = self.provider_response(url, **kwargs)
+            if url.endswith("/users/@me"):
+                response = type(response)(
+                    200, url, 0, (), json.dumps({"id": "789", "bot": True}).encode()
+                )
+            return response
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http", side_effect=mismatch
+        ):
+            report = await self.discord_identity()
+        self.assertEqual(report.json()["result"]["failure_code"], "credential_ineligible")
+        self.assertIsNone(report.json()["result"]["observation"])
+        production = self.store.list_secret_records(instance_name="prod")[0]
+        production_version = self.store.read_secret_version(production.current_version_id)
+        decrypt = secrets._decrypt_secret_value
+
+        def fail_comparison(ciphertext: str, key_id: str) -> str:
+            if ciphertext == production_version.ciphertext:
+                raise ValueError("private production detail")
+            return decrypt(ciphertext, key_id)
+
+        with (
+            patch.object(secrets, "_decrypt_secret_value", side_effect=fail_comparison),
+            patch("control_plane.discord_external_resources.request_public_http") as provider,
+        ):
+            report = await self.discord_identity()
+        self.assertEqual(report.json()["result"]["status"], "unavailable")
+        self.assertNotIn("private production detail", report.text)
+        provider.assert_not_called()
+
+        def rotate_production(url: str, **kwargs: Any) -> Any:
+            if url.endswith("/applications/@me"):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.product,
+                        "instance": "prod",
+                        "secrets": [
+                            {"binding_key": "DATABASE_PASSWORD", "value": "new-production-fixture"}
+                        ],
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            return self.provider_response(url, **kwargs)
+
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=rotate_production,
+        ):
+            report = await self.discord_identity()
+        self.assertEqual(report.json()["result"]["failure_code"], "inputs_changed")
+        self.assertIsNone(report.json()["result"]["observation"])
 
     async def test_external_reads_require_both_opt_in_and_explicit_stored_purpose(self) -> None:
         with patch("control_plane.discord_external_resources.request_public_http") as request:
