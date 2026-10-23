@@ -1,3 +1,15 @@
+"""Supported, audited reads and writes of a testing lane's staff-testing hold.
+
+While site staff test on a product's testing lane, an admin holds it:
+the event-driven reconcile records its testing deploy as held and does not
+deploy, and the worker cancels a reconcile deploy it queued just before the
+hold. The hold lives on the lane's tracked Dokploy target record. Writes follow
+the integration-allowances shape: dry-run returns the change and a digest, and
+apply requires that digest, compare-and-writes, then reads the record back.
+Lifting the hold requests a reconcile of the product's testing target, so the
+newest verified build deploys without waiting for the sweep.
+"""
+
 from __future__ import annotations
 
 from typing import Literal, Protocol, runtime_checkable
@@ -203,30 +215,6 @@ def _hold_terms(
     return (*terms, hold.rehearsal.model_dump_json()) if hold.rehearsal else terms
 
 
-def is_compose_staging_lift(
-    store: TestingHoldReader, request: TestingHoldApplyRequest, *, actor: str
-) -> bool:
-    if (
-        request.instance != TESTING_HOLD_INSTANCE
-        or request.hold
-        or request.purpose != "isolation_staging"
-        or request.rehearsal
-        or request.activation_plan_sha256
-    ):
-        return False
-    try:
-        target = store.read_dokploy_target_record(
-            context_name=request.context, instance_name=request.instance
-        )
-    except FileNotFoundError:
-        return False
-    hold = target.policies.staff_testing_hold
-    return target.target_type == "compose" and (
-        hold is None
-        or (hold.purpose == request.purpose and hold.recorded_by == actor and not hold.rehearsal)
-    )
-
-
 def _desired_hold(
     *,
     request: TestingHoldApplyRequest,
@@ -353,6 +341,12 @@ def apply_testing_hold_plan(
     activation_verified: bool = False,
     rehearsal: TestingHoldRehearsal | None = None,
 ) -> TestingHoldPlan:
+    """Re-plan against the current record, require the reviewed digest, write, read back.
+
+    An apply that leaves the lane unheld requests a reconcile of the product's
+    testing target, so a deploy that waited on the hold runs now.
+    """
+
     plan, replacement = build_testing_hold_plan(
         record_store=record_store, request=request, actor=actor, rehearsal=rehearsal
     )

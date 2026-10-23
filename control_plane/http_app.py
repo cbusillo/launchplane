@@ -9069,13 +9069,6 @@ def create_launchplane_fastapi_app(
         director_application_lift = director_agent_identity(
             identity
         ) and is_application_staging_lift(record_store, hold_request)
-        director_compose_staging_lift = director_agent_identity(
-            identity
-        ) and control_plane_testing_lane_hold.is_compose_staging_lift(
-            cast(control_plane_testing_lane_hold.TestingHoldReader, record_store),
-            hold_request,
-            actor=launchplane_identity_actor(identity),
-        )
         _authorize_lane_product_config(
             identity=identity,
             action=(
@@ -9145,8 +9138,8 @@ def create_launchplane_fastapi_app(
             and not activated_interlock
             and not director_staff_hold
             and not director_application_lift
-            and not director_compose_staging_lift
         ):
+            # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
