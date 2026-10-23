@@ -54,6 +54,7 @@ class TestingSeparationClientTests(unittest.TestCase):
         from control_plane.testing_separation_resources import (
             SeparationResourcesPlan,
             SeparationResourcesResult,
+            SeparationResourcesRefusal,
         )
         from control_plane.workflows.ship import utc_now_timestamp
 
@@ -78,18 +79,15 @@ class TestingSeparationClientTests(unittest.TestCase):
                 }
             ).model_dump(mode="json")
             if refused:
-                completed = {
-                    **plan,
-                    "applied": False,
-                    "resources_verified": False,
-                    "failure": "retained_capability_refused",
-                    "storage_dispatched": False,
-                    "qualification": "not_evaluated",
-                    "retained_target_id": "retained-application",
-                    "allocation_operation_key": "original-operation",
-                    "capability_schedule_id": "original-capability",
-                    "capability_deployment_id": "original-capability-execution",
-                }
+                completed = SeparationResourcesRefusal(
+                    product="example",
+                    context="example",
+                    plan_sha256=plan["plan_sha256"],
+                    retained_target_id="retained-application",
+                    allocation_operation_key="original-operation",
+                    capability_schedule_id="original-capability",
+                    capability_deployment_id="original-capability-execution",
+                ).model_dump(mode="json")
             call = Mock(
                 side_effect=[
                     {"status": "accepted", "trace_id": "fixture", "result": plan},
@@ -179,7 +177,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                     refusal = json.loads(output.getvalue())
                     self.assertEqual(refusal["status"], "refused")
                     self.assertIs(refusal["resources_verified"], False)
-                    self.assertTrue(refusal["retain_original_key"])
+                    self.assertNotIn("retain_original_key", refusal)
             receipt = evidence.with_name(evidence.name + ".receipt.json")
             self.assertEqual(json.loads(receipt.read_text())["result"], completed)
             returned = json.loads(output.getvalue())

@@ -27,7 +27,6 @@ from control_plane.workflows.generic_web_deploy_provider import (
 )
 
 RETAINED_CAPABILITY_PROGRAM_NAME = "Launchplane retained application capabilities"
-APPLICATION_CAPABILITY_PHASE = "application_capability_inspection"
 
 
 def retained_application_capability_spec(

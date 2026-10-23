@@ -3,7 +3,10 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.provider_operations import (
+    run_durable_provider_operation,
+    ProviderMutationUnknownError,
+)
 from control_plane.dokploy import post_deploy
 from control_plane.contracts.testing_activation import TestingActivationRefusal
 from control_plane.testing_separation_resources import (
@@ -11,6 +14,8 @@ from control_plane.testing_separation_resources import (
     STORAGE_PROGRAM_NAME,
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
+    SeparationResourcesRefusal,
+    parse_preparation_receipt,
     preparation_binding,
 )
 from tests import test_testing_application_flow as application_flow
@@ -26,6 +31,7 @@ class PreparationRecoveryTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.fixture = self.application_fixture()
+        self.retained_data = (self.fixture.old_backing / "keep").read_bytes()
         self.store = self.fixture.store
         self.body = SeparationResourcesRequest(
             context=self.fixture.context,
@@ -122,12 +128,23 @@ class PreparationRecoveryTests(unittest.TestCase):
             **options,
         )
 
+    def run_legacy_preparation(self, phase: str) -> Any:
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+        with patch.object(
+            self.store,
+            "checkpoint_mutation_provider_effect",
+            side_effect=lambda **kwargs: checkpoint(**{**kwargs, "effect_phase": phase}),
+        ):
+            result = self.run_preparation()
+        self.assertEqual(result.record.provider_effect_phase, phase)
+        return result
+
     def assert_negative(self, result: Any) -> None:
         self.assertEqual(result.status, "completed", result)
         receipt = result.response_payload["result"]
         self.assertIs(receipt["applied"], False)
         self.assertIs(receipt["resources_verified"], False)
-        self.assertEqual(receipt["failure"], "retained_capability_refused")
+        self.assertIsInstance(parse_preparation_receipt(receipt), SeparationResourcesRefusal)
         self.assertNotIn("volumes", receipt)
         from control_plane.contracts.testing_activation import TestingActivationRequest
         from control_plane.testing_activation import preparation_resources
@@ -153,7 +170,7 @@ class PreparationRecoveryTests(unittest.TestCase):
             ),
             self.fixture.retained,
         )
-        self.assertEqual((self.fixture.old_backing / "keep").read_text(), "Retained original data")
+        self.assertEqual((self.fixture.old_backing / "keep").read_bytes(), self.retained_data)
 
     def test_first_determinate_capability_refusal_completes_without_storage(self) -> None:
         self.assert_negative(self.run_preparation())
@@ -163,11 +180,7 @@ class PreparationRecoveryTests(unittest.TestCase):
     def test_original_key_recovers_lost_refusal_without_dispatching_another_program(self) -> None:
         self.lose_reply = True
         self.capability_status = "done"
-        with patch(
-            "control_plane.testing_application_capabilities.APPLICATION_CAPABILITY_PHASE",
-            post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER,
-        ):
-            held = self.run_preparation()
+        held = self.run_legacy_preparation(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
         self.assertEqual(held.status, "reconcile_required", held)
         self.assertEqual(self.run_preparation("new-key").status, "target_busy")
         original = held.record
@@ -205,8 +218,25 @@ class PreparationRecoveryTests(unittest.TestCase):
             return inspect(*args) if proof_count == 1 else None
 
         self.storage.reset_mock()
-        with patch.object(self.adapter, "inspection_refusal", side_effect=lost_proof):
+        apply = self.adapter.apply
+        failures = []
+
+        def capture_failure(*args: Any) -> Any:
+            try:
+                return apply(*args)
+            except Exception as error:
+                failures.append(error)
+                raise
+
+        with (
+            patch.object(self.adapter, "inspection_refusal", side_effect=lost_proof),
+            patch.object(self.adapter, "apply", side_effect=capture_failure),
+        ):
             self.assertEqual(self.run_preparation().status, "reconcile_required")
+        self.assertTrue(failures)
+        self.assertTrue(
+            all(isinstance(error, ProviderMutationUnknownError) for error in failures), failures
+        )
         self.assertEqual(self.capability_calls, calls)
         self.storage.assert_not_called()
 
@@ -214,11 +244,10 @@ class PreparationRecoveryTests(unittest.TestCase):
         self,
     ) -> None:
         self.lose_reply = True
-        with patch(
-            "control_plane.testing_application_capabilities.APPLICATION_CAPABILITY_PHASE",
-            post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT,
-        ):
-            self.assertEqual(self.run_preparation().status, "reconcile_required")
+        self.assertEqual(
+            self.run_legacy_preparation(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT).status,
+            "reconcile_required",
+        )
         self.lose_reply = False
         calls = list(self.capability_calls)
         self.assertEqual(self.run_preparation().status, "reconcile_required")
@@ -235,6 +264,7 @@ class PreparationRecoveryTests(unittest.TestCase):
         mutations = (
             lambda: self.fixture.schedules[identifier].update(enabled=True),
             lambda: self.fixture.schedules[identifier].update(script="unrelated program"),
+            lambda: self.fixture.schedules.update({"duplicate": deepcopy(schedules[identifier])}),
             lambda: self.fixture.schedule_history[identifier][0].update(status="running"),
             lambda: self.fixture.schedule_history[identifier][0].pop("logs"),
             lambda: self.fixture.schedule_history[identifier].append(

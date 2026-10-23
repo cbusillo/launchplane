@@ -281,7 +281,6 @@ def main() -> int:
                         {
                             "resources_verified": False,
                             "failure": result["failure"],
-                            "retain_original_key": True,
                         }
                         if resources and result.get("resources_verified") is False
                         else {}

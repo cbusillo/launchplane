@@ -86,8 +86,11 @@ existing runner's `absent + retry_safe` path and preserves the original effect
 checkpoint. Under the retained executor lock and a fresh original lease, it
 rechecks unchanged reviewed inputs, the matching disabled capability program's
 unique terminal false result, and complete absence of capability readback and
-storage programs. The legacy trigger phase also requires the original
-upsert-before-trigger ordering; an upsert checkpoint alone remains unknown.
+storage programs. A legacy trigger checkpoint follows a returned upsert; coupled
+with the matched false original and missing storage programs, this excludes a
+storage request still awaiting its upsert reply. An upsert checkpoint alone
+remains unknown. Legacy compatibility can retire only after all unresolved
+preparations from that producer are accounted for, not merely one lane's key.
 Future capability work uses its own phase. Reacquired preparation never resumes
 forward work if the refusal proof changes. Pending, ambiguous, unavailable or
 possibly dispatched storage stays fenced.
@@ -99,6 +102,7 @@ allocated volumes. First-apply refusals use the same proof, so another original
 key cannot recreate that wedge merely because its capability check refuses.
 Receipt reads return the saved refusal without provider calls. The supported
 client saves that negative receipt, prints `refused` and exits unsuccessfully.
+It omits the unresolved-key hint while preserving the original key in the receipt.
 Activation rejects it; it cannot lift a hold or publish inventory or delivery
 credit. The old application, state, interlock and capability schedules remain.
 A later preparation requires a new review/key and all physical capability gates.

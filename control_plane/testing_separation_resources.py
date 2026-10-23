@@ -49,6 +49,7 @@ from control_plane.workflows.generic_web_deploy_provider import generic_web_prov
 
 ROUTE = "/v1/products/{product}/testing-separation-resources"
 STORAGE_PROGRAM_NAME = "Launchplane independent testing storage"
+APPLICATION_CAPABILITY_PHASE = "application_capability_inspection"
 
 
 def application_resource_generation(binding: str, provider_operation_key: str) -> str:
@@ -333,8 +334,6 @@ class SeparationResourcesAdapter:
     def inspection_refusal(
         self, provider_operation_key: str, provider_effect_phase: str
     ) -> SeparationResourcesRefusal | None:
-        from control_plane.testing_application_capabilities import APPLICATION_CAPABILITY_PHASE
-
         if self.request.application is None:
             return None
         if provider_effect_phase not in {
@@ -498,7 +497,10 @@ class SeparationResourcesAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        started = False
+        evidence_lease = lease if isinstance(lease, ProviderEvidenceLease) else None
+        started = bool(
+            evidence_lease and evidence_lease.evidence_reservation().provider_effect_started_at
+        )
         try:
             if self.request.application is None:
                 observed = inspect_generic_web_testing_exclusion(
@@ -544,16 +546,15 @@ class SeparationResourcesAdapter:
                 resources = self.resources(binding, provider_operation_key)
                 if self.request.application is not None:
                     from control_plane.testing_application_capabilities import (
-                        APPLICATION_CAPABILITY_PHASE,
                         inspect_retained_application_capabilities,
                     )
 
                     def refuse() -> ProviderMutationOutcome | None:
-                        if not isinstance(lease, ProviderEvidenceLease):
+                        if evidence_lease is None:
                             return None
                         refused = self.inspection_refusal(
                             provider_operation_key,
-                            lease.evidence_reservation().provider_effect_phase,
+                            evidence_lease.evidence_reservation().provider_effect_phase,
                         )
                         if refused is None:
                             return None
@@ -566,15 +567,12 @@ class SeparationResourcesAdapter:
                                     records={},
                                     result=refused.model_dump(mode="json"),
                                 ),
-                                provider_effect_performed=False,
                             )
 
                     refusal = refuse()
                     if refusal is not None:
                         return refusal
-                    if not isinstance(lease, ProviderEvidenceLease) or (
-                        lease.evidence_reservation().provider_effect_started_at
-                    ):
+                    if evidence_lease is None or started:
                         raise ProviderMutationUnknownError("Original inspection proof changed.")
                     try:
                         inspect_retained_application_capabilities(
