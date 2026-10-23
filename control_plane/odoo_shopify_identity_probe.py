@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import sys
+from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -68,7 +69,7 @@ def read_identity(spec: dict[str, object], *, require_domain_match: bool = True)
             if error.code in {401, 403}
             else unknown
         )
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, HTTPException, ValueError, TypeError, AttributeError):
         return unknown
 
 

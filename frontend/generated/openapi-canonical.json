@@ -50518,7 +50518,6 @@
             "enum": [
               "authority",
               "production_runtime",
-              "testing_runtime",
               "testing_credential",
               "testing_probe",
               "production_probe",
