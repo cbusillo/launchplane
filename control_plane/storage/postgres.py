@@ -18,6 +18,12 @@ from control_plane.provider_target_holds import (
     provider_hold_source_sha256,
     provider_hold_classification,
 )
+from control_plane.legacy_testing_fence import (
+    CapturedTestingFence,
+    TestingFenceAbandonment,
+    capture_testing_fences,
+    prove_testing_fence_history,
+)
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceSnapshot,
     generic_web_source_target_key,
@@ -8628,6 +8634,86 @@ class PostgresRecordStore(HumanSessionStore):
                 else None
             )
 
+    def _read_testing_fence_abandonment(
+        self,
+        session: Any,
+        capture: CapturedTestingFence,
+        *,
+        product: str,
+        context: str,
+        for_update: bool = False,
+    ) -> TestingFenceAbandonment | None:
+        from control_plane.event_deploy_recovery_reference import (
+            validate_abandoned_testing_coordinates,
+        )
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.http_routes.mutation_support import request_fingerprint
+
+        def fingerprint(*, route_path: str, payload: dict[str, object]) -> str:
+            if route_path != GENERIC_WEB_DEPLOY_ROUTE:
+                raise ValueError("Testing archive requires its original route.")
+            return request_fingerprint(payload)
+
+        statement = select(LaunchplaneIdempotencyRow).where(
+            LaunchplaneIdempotencyRow.record_id == capture.record_id
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            return None
+        try:
+            completed = self._read_provider_hold_record(row)
+            coordinates = validate_abandoned_testing_coordinates(
+                completed, product=product, context=context, fingerprint=fingerprint
+            )
+            original = LaunchplaneIdempotencyRecord.model_validate(
+                completed.response_payload["abandonment"]["original"]
+            )
+            if capture.created_at and original.created_at != capture.created_at:
+                return None
+            receipt = self._original_mutation_receipt(
+                session, completed, for_update=for_update, require_projection=True
+            )
+            if (
+                receipt is None
+                and session.scalar(
+                    self._idempotency_statement(
+                        scope=completed.scope,
+                        route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                        idempotency_key=completed.record_id,
+                    )
+                )
+                is not None
+            ):
+                return None
+            hold = project_provider_target_hold(completed, receipt)
+            if hold.lane != (product, context, "testing") or hold.attribution not in {
+                "retained",
+                "legacy",
+            }:
+                return None
+            if (
+                capture.operation_nonce is not None
+                and hold.operation_nonce != capture.operation_nonce
+            ):
+                return None
+            return TestingFenceAbandonment(completed, receipt, coordinates.reference)
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def read_testing_fence_recovery_reference(
+        self, observation: PublicIngressObservationRecord
+    ) -> str:
+        captures = capture_testing_fences(observation)
+        if len(captures) != 1 or not captures[0].created_at:
+            return ""
+        with self._session_factory() as session:
+            proof = self._read_testing_fence_abandonment(
+                session, captures[0], product=observation.product, context=observation.context
+            )
+            return proof.recovery_reference if proof else ""
+
     def find_generic_preview_refresh_receipts(
         self, runtime_deployment_record_id: str
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
@@ -9079,7 +9165,9 @@ class PostgresRecordStore(HumanSessionStore):
                 {"lock_name": "launchplane:product-authority-bundle"},
             ):
                 raise ProviderHoldAuthorityBusy("Product authority is being published.")
-        authority = _ProviderHoldAuthorityView(self, session, replacements=replacements)
+        authority = _ProviderHoldAuthorityView(
+            self, session, replacements=replacements, for_update=for_update
+        )
         from control_plane.testing_activation import retained_fence_is_separated
         from control_plane.workflows.generic_web_deploy_provider import (
             generic_web_provider_target_key,
@@ -9175,6 +9263,13 @@ class PostgresRecordStore(HumanSessionStore):
                 and value not in by_replacement_reference
             )
         )
+        settlement = (
+            authority.prove_testing_fence_settlement(product, context, instance)
+            if unavailable == ("provider-operation:unavailable",)
+            else None
+        )
+        if settlement is not None:
+            unavailable = ()
         selected = tuple(
             hold
             for hold in holds
@@ -9203,6 +9298,7 @@ class PostgresRecordStore(HumanSessionStore):
             ],
             references,
             unavailable,
+            settlement,
             authority.material_for_lane(
                 product,
                 context,
@@ -34137,6 +34233,7 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
         session: Any,
         *,
         replacements: tuple[OdooStableTargetReplacementOperationRecord, ...] = (),
+        for_update: bool = False,
     ) -> None:
         self.replacement_operations = replacements
         self._profiles = tuple(
@@ -34180,10 +34277,96 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
 
         self._application_store = store
         self._application_session = session
+        self._proof_for_update = for_update
         self._application_evidence: dict[
             tuple[str, str],
             tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...] | None,
         ] = {}
+
+    def _read_fence_history_row(self, row: Any, model: type[RecordModel]) -> RecordModel:
+        record = model.model_validate(row.payload)
+        payload = record.model_dump(mode="json")
+        for column in row.__table__.columns:
+            if column.name == "payload":
+                continue
+            expected = (
+                canonical_health_check_record_token(str(payload.get("check_name", "")))
+                if column.name == "check_token"
+                else payload.get(column.name)
+            )
+            if getattr(row, column.name) != expected:
+                raise ValueError("Testing fence history projection changed.")
+        return record
+
+    def _fence_history_rows(self, statement: Any) -> Any:
+        if self._proof_for_update and not self._application_store.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return self._application_session.scalars(statement)
+
+    def prove_testing_fence_settlement(
+        self, product: str, context: str, instance: str
+    ) -> object | None:
+        from control_plane.workflows.public_ingress_monitor import DEPLOY_FENCE_CHECK_NAME
+
+        if instance != "testing":
+            return None
+        try:
+            incidents = tuple(
+                self._fence_history_rows(
+                    select(LaunchplanePublicIngressIncidentRow).where(
+                        LaunchplanePublicIngressIncidentRow.product == product,
+                        LaunchplanePublicIngressIncidentRow.context == context,
+                        LaunchplanePublicIngressIncidentRow.instance == instance,
+                        LaunchplanePublicIngressIncidentRow.check_kind == "provider",
+                        LaunchplanePublicIngressIncidentRow.check_token
+                        == canonical_health_check_record_token(DEPLOY_FENCE_CHECK_NAME),
+                        LaunchplanePublicIngressIncidentRow.status == "open",
+                    )
+                )
+            )
+            if len(incidents) != 1:
+                return None
+            incident = self._read_fence_history_row(incidents[0], PublicIngressIncidentRecord)
+            events = tuple(
+                self._read_fence_history_row(row, PublicIngressIncidentEventRecord)
+                for row in self._fence_history_rows(
+                    select(LaunchplanePublicIngressIncidentEventRow)
+                    .where(
+                        LaunchplanePublicIngressIncidentEventRow.incident_id
+                        == incident.incident_id,
+                    )
+                    .order_by(
+                        LaunchplanePublicIngressIncidentEventRow.occurred_at,
+                        LaunchplanePublicIngressIncidentEventRow.event_id,
+                    )
+                )
+            )
+            observations = tuple(
+                self._read_fence_history_row(row, PublicIngressObservationRecord)
+                for row in self._fence_history_rows(
+                    select(LaunchplanePublicIngressObservationRow)
+                    .where(
+                        LaunchplanePublicIngressObservationRow.incident_id == incident.incident_id,
+                    )
+                    .order_by(
+                        LaunchplanePublicIngressObservationRow.observed_at,
+                        LaunchplanePublicIngressObservationRow.record_id,
+                    )
+                )
+            )
+
+            def read_abandonment(capture: CapturedTestingFence) -> TestingFenceAbandonment | None:
+                return self._application_store._read_testing_fence_abandonment(
+                    self._application_session,
+                    capture,
+                    product=product,
+                    context=context,
+                    for_update=self._proof_for_update,
+                )
+
+            return prove_testing_fence_history(incident, events, observations, read_abandonment)
+        except (ValueError, TypeError, KeyError):
+            return None
 
     def __getattr__(self, name: str) -> NoReturn:
         if name == "_session_factory":
