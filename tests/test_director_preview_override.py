@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from httpx2 import Response
 
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.product_profile_record import (
@@ -170,6 +171,63 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
             response = await self.post(payload)
             self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_plain_override_transports_and_integration_keys_are_refused(self) -> None:
+        for key in (
+            config_parameter_runtime_key("web.base.url"),
+            "ENV_OVERRIDE_SHOPIFY__SHOP_URL",
+            "SMTP_HOST",
+        ):
+            payload = self.before.model_dump(mode="json")
+            payload["preview"]["override_env"][key] = "https://business.example.test"
+            response = await self.post(payload)
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_replacing_a_restricted_encoded_payload_is_refused(self) -> None:
+        self.before.preview.override_env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = (
+            base64.b64encode(
+                OdooPostDeployPayload.model_validate(
+                    {
+                        "context": self.before.preview.context,
+                        "instance": "preview",
+                        "addon_settings": [
+                            {
+                                "addon": "shopify",
+                                "setting": "shop_url_key",
+                                "value": {"source": "literal", "value": "protected-store"},
+                            }
+                        ],
+                    }
+                ).to_wire_json_bytes()
+            ).decode()
+        )
+        self.store.write_product_profile_record(self.before)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        self.after = self.before.model_dump(mode="json")
+        self.after["preview"]["override_env"][ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = (
+            base64.b64encode(
+                OdooPostDeployPayload.model_validate(
+                    {
+                        "context": self.before.preview.context,
+                        "instance": "preview",
+                        "addon_settings": [
+                            {
+                                "addon": "example",
+                                "setting": "base_url",
+                                "value": {
+                                    "source": "literal",
+                                    "value": "https://identity.example.test",
+                                },
+                            }
+                        ],
+                    }
+                ).to_wire_json_bytes()
+            ).decode()
+        )
+        response = await self.post()
+        self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
 
     async def test_secret_binding_metadata_blocks_an_innocently_named_key(self) -> None:

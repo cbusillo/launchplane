@@ -36,11 +36,15 @@ revision before saving and retains atomic compare-and-write protection.
 Same-key idempotent replay precedes the revision precondition. The helper
 refuses services without revision support, changed input, concurrent profile
 edits, or evidence changing anything beyond the selected preview key.
-The service reconstructs the one-key change from its stored profile and compares the entire replacement before its atomic save. Secret-bearing keys,
-managed-secret destinations and credential payloads are refused on this
+The service reconstructs the one-key change from its stored profile and
+compares the entire replacement before its atomic save. Recognized credential
+keys, managed-secret destinations and credential payloads are refused on this
 Director-agent path. Encoded addon payloads must contain only literal
-nonsecret addon settings for the preview; Shopify uses its own managed
-settings route. A save records intent; runtime delivery and login verification remain separate.
+nonsecret addon settings for the preview. Plain override transports and
+business-integration keys are refused; those use their managed settings
+routes. An existing encoded payload must meet the same restrictions before
+replacement. A save records intent; runtime delivery and login verification
+remain separate.
 
 Refusals include a fixed `reason` code without input values. For
 `profile_changed_since_review`, read the changed profile and create a new dry
