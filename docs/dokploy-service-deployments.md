@@ -239,11 +239,15 @@ service-generated names used by apply. Without a key, dry-run names are explicit
 placeholders and `allocation_preview` reports `requires-original-key`; that is
 not an exact allocation review. A dry run creates no provider resource or saved
 allocation intent. Apply saves
-the allocation intent before dispatch and uses the same durable runner as
+the allocation intent before dispatch and binds that key to the unchanged request,
+even if a later refusal confirms that no effect began. Corrected input uses a
+new key only after confirmed pre-effect refusal; an unknown effect must recover
+or retain the original custody first. The service uses the same durable runner as
 state-volume setup. The service generates unique names for each newly created
 project, environment and application, returned in `allocation`; supplied labels
 are not recovery identities. Existing placement ids remain exact existing
-placement. Every acknowledged identity and each pending dispatch is recorded
+placement. An omitted project name is resolved during adoption; an omitted server
+keeps the provider-selected placement. Every acknowledged identity and each pending dispatch is recorded
 under the original caller scope and key before the next effect.
 
 For recovery, send the unchanged setup request with `mode: readback` and the
@@ -262,11 +266,14 @@ custody digest. Send the same request and key in apply mode with
 `retain_allocation: true` and
 `expected_allocation_custody_sha256: <custody_sha256>`, plus the normal exact
 confirmation and reason. The existing retention operation requires an expired
-execution lease and current exclusive ownership. A service-scoped caller that
-originally allocated in an unregistered or shared context may retain its own
-allocation while that original context authority remains unchanged; it does not
-acquire ownership of a product or its resources. It retains all resource ids
-and pending effects, fences the old worker and returns
+execution lease. Original Director first-setup allocations require current
+exclusive ownership. An original service-scoped allocation instead requires
+current service setup authorization and its exact original caller, request, key
+and reviewed digest. It may retain its own custody after context registration,
+profile edits or ownership changes, which still prevent provider continuation.
+Losing service permission does not allow retention through the narrower Director
+first-setup path. Retention does not acquire product or resource ownership.
+It retains all resource ids and pending effects, fences the old worker and returns
 `allocation_state: retained_uncertain`, `resources_retained: true` and
 `applied: false`. It performs no provider deletion or deployment. Original-key
 apply replays that retained receipt; a new allocation uses a new key and

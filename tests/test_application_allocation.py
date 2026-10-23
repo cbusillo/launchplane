@@ -123,6 +123,10 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertFalse(replay.json()["result"]["applied"])
         self.assertEqual(self.provider.call_args_list, effects)
+        self.fail_before = ""
+        fresh = await self.post(idempotency_key="fresh-after-retention")
+        self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assertTrue(fresh.json()["result"]["applied"])
         self.assert_production_unchanged()
 
     async def test_owner_drift_preserves_acknowledged_project_and_refuses_next_effect(self) -> None:
@@ -224,7 +228,11 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(self.provider.call_args_list, effects)
 
     async def recover_service_placement(
-        self, existing_environment: bool, *, loses_service_scope: bool = False
+        self,
+        existing_environment: bool,
+        *,
+        loses_service_scope: bool = False,
+        committed: bool = False,
     ) -> None:
         from control_plane.application_state_volume import ROUTE
         from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
@@ -235,7 +243,7 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             "name": "existing-project",
             "environments": [],
         }
-        self.payload.update(project_id="created-project")
+        self.payload.update(project_id="created-project", project_name="")
         if existing_environment:
             self.payload.update(environment_id="created-environment")
             self.placement["environments"].append(
@@ -255,6 +263,19 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             self.profile.product,
             "existing-placement",
         )
+        mutate = self.provider.side_effect
+
+        def named_project(
+            host: str, token: str, path: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            try:
+                result: dict[str, Any] = mutate(host, token, path, payload)
+            finally:
+                if path == APPLICATION_CREATE_PATH:
+                    self.live["environment"]["project"]["name"] = "existing-project"
+            return result
+
+        self.provider.side_effect = named_project
         self.fail_after = (
             APPLICATION_CREATE_PATH if existing_environment else ENVIRONMENT_CREATE_PATH
         )
@@ -272,7 +293,16 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
                 original_intent=adapter.intent,
             )
 
-        uncertain = apply()
+        if committed:
+            self.fail_after = ""
+            with patch.object(
+                ApplicationStateVolumeAdapter,
+                "_verify_adopted",
+                side_effect=OSError("fixture: interrupted receipt"),
+            ):
+                uncertain = apply()
+        else:
+            uncertain = apply()
         self.assertEqual(uncertain.status, "reconcile_required")
         self.fail_after = ""
         if loses_service_scope:
@@ -293,8 +323,15 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
             self.assertEqual(self.provider.call_args_list, calls)
             return
         with self.expire_execution():
-            completed = apply()
-        self.assertEqual(completed.status, "completed")
+            if committed:
+                with patch(
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                    side_effect=AssertionError("Receipt recovery requires no provider"),
+                ):
+                    completed = apply()
+            else:
+                completed = apply()
+        self.assertEqual(completed.status, "adopted" if committed else "completed")
         self.assertEqual(
             [call.args[2] for call in self.provider.call_args_list],
             [APPLICATION_CREATE_PATH]
@@ -308,6 +345,12 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
 
     async def test_service_setup_recovers_original_existing_environment(self) -> None:
         await self.recover_service_placement(True)
+
+    async def test_existing_project_without_name_recovers_committed_receipt(self) -> None:
+        await self.recover_service_placement(False, committed=True)
+
+    async def test_existing_environment_without_name_recovers_committed_receipt(self) -> None:
+        await self.recover_service_placement(True, committed=True)
 
     async def test_another_caller_scope_cannot_read_or_retain_original_custody(self) -> None:
         from tests.http_app_test_support import _local_operator_bearer_config
@@ -365,75 +408,186 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self.provider.assert_not_called()
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
-    async def retain_service_owned_context(
-        self, *, shared: bool = False, changes_context: bool = False
-    ) -> None:
-        from control_plane.application_state_volume import ROUTE
-        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
-        from control_plane.provider_operations import run_durable_provider_operation
+    def set_service_permission(self, allowed: bool) -> None:
+        from control_plane.contracts.authz_policy_record import (
+            LaunchplaneAuthzPolicyRecord,
+            build_authz_policy_record_id,
+        )
+        from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+        from tests.http_app_test_support import _local_operator_bearer_config
 
-        context = self.context if shared else "unregistered-context"
-        if shared:
+        config = _local_operator_bearer_config()
+        policy = LaunchplaneAuthzPolicy(
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=(config.local_operator_subject,),
+                    token_labels=(config.local_operator_token_label,),
+                    contexts=("launchplane",),
+                    actions=("dokploy_target.setup",),
+                ),
+            )
+            if allowed
+            else (),
+        )
+        replacement = LaunchplaneAuthzPolicyRecord(
+            record_id="fixture-service-policy",
+            source="test:ordinary-allocation",
+            updated_at=self.profile.updated_at,
+            policy=policy,
+        )
+        current = self.store.seed_authz_policy_if_absent(replacement)
+        if current.policy != policy:
+            replacement = replacement.model_copy(
+                update={
+                    "revision": current.revision + 1,
+                    "record_id": build_authz_policy_record_id(
+                        revision=current.revision + 1, policy_sha256=replacement.policy_sha256
+                    ),
+                }
+            )
+            self.assertEqual(
+                self.store.compare_and_write_authz_policy_record(
+                    expected_record=current, replacement_record=replacement
+                ).status,
+                "written",
+            )
+        self.app = self.make_app(config, policy)
+
+    async def retain_service_owned_context(self, *, change: str = "unregistered") -> None:
+        self.set_service_permission(True)
+        if change in {"unregistered", "registration"}:
+            self.payload["context"] = "unregistered-context"
+        if change in {"shared", "shared-change"}:
             self.store.write_product_profile_record(
                 self.profile.model_copy(
-                    update={
-                        "product": "other-product",
-                        "repository": "example/other-product",
-                    }
+                    update={"product": "other-product", "repository": "example/other"}
                 )
             )
-        envelope = DokployTargetSetupEnvelope.model_validate({**self.payload, "context": context})
-        adapter = ApplicationStateVolumeAdapter.prepare(
-            self.root, self.store, envelope, "service-fixture", "fixture", "", "unowned-allocation"
-        )
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+
+        self.payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
+            self.payload
+        ).expected_confirmation
         self.fail_before = ENVIRONMENT_CREATE_PATH
-        uncertain = run_durable_provider_operation(
-            store=self.store,
-            scope=adapter.scope,
-            route_path=ROUTE,
-            idempotency_key=adapter.operation_key,
-            request_fingerprint=adapter.reconciliation_key(),
-            lease_owner="fixture-worker",
-            response_trace_id="fixture",
-            adapter=adapter,
-            original_intent=adapter.intent,
-        )
-        self.assertEqual(uncertain.status, "reconcile_required")
-        readback = adapter.readback(adapter.operation_key)
+        uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
         effects = self.provider.call_args_list.copy()
-        adapter.request = envelope.model_copy(
-            update={
-                "retain_allocation": True,
-                "expected_allocation_custody_sha256": readback["custody_sha256"],
-            }
-        )
-        if changes_context:
+        if change == "registration":
             self.store.write_product_profile_record(
                 self.profile.model_copy(
                     update={
                         "product": "new-owner",
                         "repository": "example/new-owner",
                         "lanes": tuple(
-                            lane.model_copy(update={"context": context})
+                            lane.model_copy(update={"context": self.payload["context"]})
                             for lane in self.profile.lanes
                         ),
                     }
                 )
             )
-            with (
-                self.expire_execution(),
-                self.assertRaisesRegex(ValueError, "context authority changed"),
-            ):
-                adapter.retain(adapter.operation_key)
-            self.assertTrue(self.store.list_held_provider_target_reservations())
-            self.assertEqual(self.provider.call_args_list, effects)
-            return
+        elif change == "profile-edit":
+            self.store.write_product_profile_record(
+                self.profile.model_copy(update={"display_name": "Edited label"})
+            )
+        elif change == "shared-change":
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={"product": "third-product", "repository": "example/third"}
+                )
+            )
+        elif change == "exclusive-change":
+            self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={"product": "new-owner", "repository": "example/new-owner"}
+                )
+            )
+        elif change == "authority-loss":
+            self.set_service_permission(False)
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        if change == "unregistered":
+            active = await self.post(
+                retain_allocation=True,
+                expected_allocation_custody_sha256=readback.json()["result"]["custody_sha256"],
+            )
+            self.assertEqual(active.status_code, 409, active.text)
         with self.expire_execution():
-            retained = adapter.retain(adapter.operation_key)
-        self.assertEqual(retained["allocation_state"], "retained_uncertain")
-        self.assertFalse(retained["applied"])
-        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            retained = await self.post(
+                retain_allocation=True,
+                expected_allocation_custody_sha256=readback.json()["result"]["custody_sha256"],
+            )
+        if change == "authority-loss":
+            self.assertEqual(retained.status_code, 400, retained.text)
+            self.assertTrue(self.store.list_held_provider_target_reservations())
+        else:
+            self.assertEqual(retained.status_code, 202, retained.text)
+            self.assertEqual(retained.json()["result"]["allocation_state"], "retained_uncertain")
+            self.assertFalse(retained.json()["result"]["applied"])
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            replay = await self.post()
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertFalse(replay.json()["result"]["applied"])
         self.assertEqual(self.provider.call_args_list, effects)
+
+    async def default_server_setup(self, server: str | None) -> None:
+        self.set_service_permission(True)
+        self.payload["server_id"] = ""
+        mutate = self.provider.side_effect
+
+        def selected_server(
+            host: str, token: str, path: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = mutate(host, token, path, payload)
+            if path == APPLICATION_CREATE_PATH:
+                self.assertNotIn("serverId", payload)
+                self.live["serverId"] = server
+            return result
+
+        self.provider.side_effect = selected_server
+        completed = await self.post()
+        self.assertEqual(completed.status_code, 202, completed.text)
+        self.assertTrue(completed.json()["result"]["applied"])
+        self.assertEqual(self.current_testing_target_id(), "created-application")
+
+    async def test_ordinary_default_server_may_be_null(self) -> None:
+        await self.default_server_setup(None)
+
+    async def test_ordinary_default_server_may_be_empty(self) -> None:
+        await self.default_server_setup("")
+
+    async def test_ordinary_default_server_may_be_provider_selected(self) -> None:
+        await self.default_server_setup("provider-selected-server")
+
+    async def test_explicit_server_mismatch_holds_without_adoption(self) -> None:
+        mutate = self.provider.side_effect
+
+        def different_server(
+            host: str, token: str, path: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = mutate(host, token, path, payload)
+            if path == APPLICATION_CREATE_PATH:
+                self.live["serverId"] = "unexpected-server"
+            return result
+
+        self.provider.side_effect = different_server
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        with self.assertRaises(FileNotFoundError):
+            self.current_testing_target_id()
+
+    async def test_service_retention_after_profile_edit(self) -> None:
+        await self.retain_service_owned_context(change="profile-edit")
+
+    async def test_service_retention_after_shared_owner_change(self) -> None:
+        await self.retain_service_owned_context(change="shared-change")
+
+    async def test_service_retention_after_exclusive_owner_change(self) -> None:
+        await self.retain_service_owned_context(change="exclusive-change")
+
+    async def test_lost_service_permission_cannot_retain_through_first_setup(self) -> None:
+        await self.retain_service_owned_context(change="authority-loss")
 
     async def test_dry_run_with_original_key_previews_effective_apply_names(self) -> None:
         dry = await self.post(mode="dry-run")
@@ -456,12 +610,12 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         await self.retain_service_owned_context()
 
     async def test_service_owned_shared_context_can_retain_its_partial_allocation(self) -> None:
-        await self.retain_service_owned_context(shared=True)
+        await self.retain_service_owned_context(change="shared")
 
-    async def test_service_owned_context_drift_keeps_custody_for_existing_authority_resolution(
+    async def test_service_owned_context_registration_does_not_strand_original_custody(
         self,
     ) -> None:
-        await self.retain_service_owned_context(changes_context=True)
+        await self.retain_service_owned_context(change="registration")
 
     async def test_dry_run_without_a_key_reports_non_exact_generated_names(self) -> None:
         dry = await self.post(mode="dry-run", idempotency_key="")

@@ -473,8 +473,18 @@ class ApplicationStateVolumeAdapter:
         intent = plan.response_payload
         if intent["request"] != _normalized(request):
             raise ValueError("Preserve the original allocation request and operation key.")
-        if request.mode != "readback" and intent["product"] != product:
-            raise ValueError("Original allocation owner changed.")
+        service_retention = (
+            request.retain_allocation
+            and intent.get("first_testing_setup") is False
+            and not first_testing_setup
+        )
+        if request.mode != "readback" and not service_retention and intent["product"] != product:
+            from control_plane.application_state_volume_retention import (
+                state_volume_plan_is_retained,
+            )
+
+            if not state_volume_plan_is_retained(store, scope, plan_id):
+                raise ValueError("Original allocation owner changed.")
         return cls(
             root,
             store,
@@ -611,11 +621,12 @@ class ApplicationStateVolumeAdapter:
             for key, value in {
                 "applicationId": application_id,
                 "environmentId": environment_id,
-                "serverId": self.request.server_id,
                 "appName": app_name,
             }.items()
         ):
             raise ValueError("New application identity or placement differs from the plan.")
+        if self.request.server_id and live.get("serverId") != self.request.server_id:
+            raise ValueError("New application server differs from the plan.")
         return live
 
     def _configuration_matches(self, live: api.JsonObject) -> bool:
@@ -692,7 +703,10 @@ class ApplicationStateVolumeAdapter:
 
         if (
             target.target_type != "application"
-            or target.project_name != self.intent["project_marker"]
+            or (
+                self.intent["project_marker"]
+                and target.project_name != self.intent["project_marker"]
+            )
             or target.target_name != self.intent["target_marker"]
             or target_id.target_id != application_id
             or current.to_deployed_target_reference()
@@ -923,6 +937,15 @@ class ApplicationStateVolumeAdapter:
     def retain(self, key: str) -> dict[str, object]:
         from control_plane.application_state_volume_retention import retain_state_volume_allocation
 
+        if (
+            self.intent.get("ordinary") is True
+            and self.intent.get("first_testing_setup") is False
+            and self.first_testing_setup
+        ):
+            raise ValueError(
+                "Original service allocation retention requires current service authority."
+            )
+
         with self.store.testing_replacement_execution_lock(
             LANE_LOCK_PREFIX + self.request.context
         ) as check:
@@ -950,10 +973,10 @@ class ApplicationStateVolumeAdapter:
                     product=self.product,
                     context=self.request.context,
                     application_id=allocation.get("application", ""),
-                    unowned_context_binding=(
-                        str(self.intent["binding"])
-                        if self.intent.get("ordinary") and not self.product
-                        else ""
+                    require_exclusive_owner=not (
+                        self.intent.get("ordinary") is True
+                        and self.intent.get("first_testing_setup") is False
+                        and not self.first_testing_setup
                     ),
                 )
 
