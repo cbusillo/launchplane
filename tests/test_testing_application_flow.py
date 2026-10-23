@@ -2890,9 +2890,42 @@ class ApplicationFlowTests(unittest.TestCase):
             record.state_recipient["application_deployment_id"],
             api.deployment_key(self.deployments[record.target_id][0]),
         )
+        self.assertIn(
+            api.deployment_status(self.deployments[record.target_id][0]),
+            api._DEPLOYMENT_SUCCESS_STATUSES,
+        )
         self.assertEqual(
             len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
         )
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_external_conflict_before_configure_keeps_credentials_and_candidate_unused(
+        self,
+    ) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        original_password = self.canonical_password()
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with (
+            patch.object(self.adapter, "require_production_separation", side_effect=conflict),
+            patch.object(api, "update_dokploy_target_env") as env,
+            patch.object(api, "trigger_deployment") as deploy,
+        ):
+            result = self.activate()
+            env.assert_not_called()
+            deploy.assert_not_called()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(self.canonical_password(), original_password)
         before = tuple(self.writes)
         self.assertEqual(self.activate().status, "replayed")
         self.assertEqual(tuple(self.writes), before)
