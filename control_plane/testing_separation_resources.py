@@ -40,6 +40,7 @@ from control_plane.testing_event_deploy_recovery import testing_event_execution_
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 
 ROUTE = "/v1/products/{product}/testing-separation-resources"
+STORAGE_PROGRAM_NAME = "Launchplane independent testing storage"
 
 
 def application_resource_generation(binding: str, provider_operation_key: str) -> str:
@@ -55,7 +56,7 @@ class SeparationResourcesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     context: str = Field(min_length=1)
-    mode: Literal["dry-run", "apply", "receipt"] = "dry-run"
+    mode: Literal["dry-run", "apply", "receipt", "inspect"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     application: TestingApplicationSpecification | None = Field(
@@ -112,6 +113,33 @@ class SeparationResourcesStatus(BaseModel):
     updated_at: str = ""
     lease_expires_at: str = ""
     provider_effect_started_at: str = ""
+
+
+class SeparationProgramInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[
+        "retained_capability",
+        "retained_capability_readback",
+        "storage_preparation",
+        "storage_readback",
+    ]
+    status: Literal["observed", "missing", "ambiguous", "unavailable", "provenance_mismatch"]
+    schedule_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    history_count: int | None = Field(default=None, ge=0, le=10000)
+    deployment_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    deployment_status: str = Field(
+        default="unknown", pattern=r"^(?:done|error|running|queued|unknown)$"
+    )
+    log_available: bool = False
+    resources_ok: bool | None = None
+    result_binding_matches: bool | None = None
+
+
+class SeparationResourcesInspection(SeparationResourcesStatus):
+    programs: tuple[SeparationProgramInspection, ...]
+    inspected_at: AwareDatetime
+    qualification: Literal["not_evaluated"] = "not_evaluated"
 
 
 def preparation_binding(
@@ -234,6 +262,32 @@ class SeparationResourcesAdapter:
 
     def reconciliation_key(self) -> str:
         return self.request.reviewed_plan_sha256
+
+    def inspect_original(self, provider_operation_key: str) -> list[SeparationProgramInspection]:
+        from control_plane.testing_separation_inspection import inspect_preparation_programs
+
+        binding, old_key = self.binding()
+        if binding != self.request.reviewed_plan_sha256:
+            raise SeparationResourcesRefused("Original preparation inputs changed.")
+        with self.store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(old_key)
+        ) as check:
+            if check is None:
+                raise SeparationResourcesRefused("The original executor is active.")
+            if self.request.application is not None:
+                require_retained_application_custody(
+                    self.store, product=self.product, context=self.request.context, check=check
+                )
+            programs = inspect_preparation_programs(
+                root=self.root,
+                resources=self.resources(binding, provider_operation_key),
+                store=self.store,
+                application=self.request.application is not None,
+            )
+            check()
+            if self.binding() != (binding, old_key):
+                raise SeparationResourcesRefused("Original preparation inputs changed.")
+            return programs
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
@@ -442,7 +496,7 @@ def run_preparation_schedule(
         compose_name=resources.context,
         target_payload=payload,
     )
-    name = "Launchplane independent testing storage"
+    name = STORAGE_PROGRAM_NAME
     original_name = name
 
     def find(schedule_name: str) -> api.JsonObject | None:

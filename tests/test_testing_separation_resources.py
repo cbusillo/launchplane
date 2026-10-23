@@ -16,6 +16,7 @@ from control_plane.provider_operations import (
 from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.testing_separation_resources import (
     ROUTE,
+    STORAGE_PROGRAM_NAME,
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
     SeparationResourcesRefused,
@@ -481,6 +482,173 @@ class SeparationResourceTests(unittest.TestCase):
         dispatch.assert_not_called()
         self.assert_retained()
 
+    def test_native_inspection_reads_only_correlated_program_markers(self) -> None:
+        resources = self.adapter.resources(self.body.reviewed_plan_sha256, "original-operation")
+        self.fixture.responses["/api/schedule.list"] = [
+            {
+                "scheduleId": "original-storage",
+                "name": STORAGE_PROGRAM_NAME,
+                "appName": resources.namespace,
+                "script": resources.script("prepare"),
+                "enabled": False,
+                "private": "fixture-private-output",
+            }
+        ]
+        self.fixture.responses["/api/deployment.allByType"] = [
+            {
+                "scheduleId": "original-storage",
+                "deploymentId": "original-job",
+                "status": "error",
+                "startedAt": self.fixture.now(),
+                "finishedAt": self.fixture.now(),
+            }
+        ]
+        with (
+            patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as dispatch,
+            patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert,
+            patch(
+                "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers",
+                return_value={
+                    "log_available": "true",
+                    "testing_resources_ok": "false",
+                    "testing_resources_binding_sha256": "wrong-fixture-binding",
+                    "private": "fixture-private-output",
+                },
+            ) as markers,
+        ):
+            programs = self.adapter.inspect_original("original-operation")
+        self.assertEqual(programs[0].deployment_id, "original-job")
+        self.assertEqual(programs[0].deployment_status, "error")
+        self.assertIs(programs[0].resources_ok, False)
+        self.assertIs(programs[0].result_binding_matches, False)
+        self.assertEqual(programs[1].status, "missing")
+        self.assertNotIn("fixture-private-output", str(programs))
+        self.assertNotIn(resources.script("prepare"), str(programs))
+        markers.assert_called_once()
+        dispatch.assert_not_called()
+        upsert.assert_not_called()
+        self.assert_retained()
+
+    def test_native_inspection_never_treats_missing_or_incomplete_history_as_a_result(self) -> None:
+        resources = self.adapter.resources(self.body.reviewed_plan_sha256, "original-operation")
+        schedule = {
+            "scheduleId": "original-storage",
+            "name": STORAGE_PROGRAM_NAME,
+            "appName": resources.namespace,
+            "script": resources.script("prepare"),
+            "enabled": False,
+        }
+        self.fixture.responses["/api/schedule.list"] = [schedule]
+        history = {
+            "scheduleId": schedule["scheduleId"],
+            "deploymentId": "original-job",
+            "status": "done",
+            "startedAt": self.fixture.now(),
+            "finishedAt": self.fixture.now(),
+        }
+        for rows in (
+            [],
+            [history, history],
+            [{**history, "scheduleId": "foreign"}],
+            [{**history, "status": "running"}],
+            [{**history, "finishedAt": None}],
+            [{**history, "deploymentId": "private/invalid-identifier"}],
+            {"rows": [history], "hasMore": True},
+        ):
+            with self.subTest(history=rows):
+                self.fixture.responses["/api/deployment.allByType"] = rows
+                with patch(
+                    "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
+                ) as markers:
+                    programs = self.adapter.inspect_original("original-operation")
+                markers.assert_not_called()
+                self.assertIsNone(programs[0].resources_ok)
+                self.assertNotIn("private/invalid-identifier", str(programs))
+        for schedule_rows in (
+            [],
+            [schedule, schedule],
+            [{**schedule, "enabled": True}],
+            [{**schedule, "script": "foreign-private-program"}],
+            {"rows": [schedule], "hasMore": True},
+            [None],
+        ):
+            with self.subTest(schedules=schedule_rows):
+                self.fixture.responses["/api/schedule.list"] = schedule_rows
+                with patch(
+                    "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
+                ) as markers:
+                    programs = self.adapter.inspect_original("original-operation")
+                markers.assert_not_called()
+                self.assertIsNone(programs[0].resources_ok)
+                self.assertNotIn("foreign-private-program", str(programs))
+        self.assert_retained()
+
+    def test_application_inspection_separates_original_capability_and_storage_programs(
+        self,
+    ) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.odoo_testing_resources import ApplicationTestingResources
+        from control_plane.testing_application_capabilities import RETAINED_CAPABILITY_PROGRAM_NAME
+        from control_plane.testing_separation_inspection import inspect_preparation_programs
+
+        resources = ApplicationTestingResources(
+            product=self.product,
+            context=self.context,
+            target_id=self.fixture.target.resolved_target.target_id,
+            operation_id=self.body.reviewed_plan_sha256,
+            namespace="lp-testing-" + "a" * 32,
+            state_kind="volume",
+        )
+        spec = {"application_id": resources.target_id}
+        self.fixture.payload["applicationId"] = resources.target_id
+        self.fixture.responses["/api/schedule.list"] = [
+            {
+                "name": RETAINED_CAPABILITY_PROGRAM_NAME,
+                "appName": resources.namespace,
+                "scheduleId": "original-capability",
+                "script": "fixed-fixture-capability-program",
+                "enabled": False,
+            }
+        ]
+        self.fixture.responses["/api/deployment.allByType"] = [
+            {
+                "scheduleId": "original-capability",
+                "deploymentId": "original-job",
+                "status": "done",
+                "startedAt": self.fixture.now(),
+                "finishedAt": self.fixture.now(),
+            }
+        ]
+        with (
+            patch(
+                "control_plane.testing_application_capabilities.retained_application_capability_spec",
+                return_value=spec,
+            ),
+            patch(
+                "control_plane.testing_application_capabilities.retained_application_capability_program",
+                return_value="fixed-fixture-capability-program",
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers",
+                return_value={
+                    "log_available": "true",
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": canonical_json_sha256(spec),
+                },
+            ),
+            patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as dispatch,
+        ):
+            programs = inspect_preparation_programs(
+                root=self.root, resources=resources, store=self.store, application=True
+            )
+        self.assertTrue(programs[0].resources_ok)
+        self.assertTrue(programs[0].result_binding_matches)
+        self.assertEqual(programs[0].schedule_id, "original-capability")
+        self.assertTrue(all(item.status == "missing" for item in programs[1:]))
+        self.assertTrue(any(item.kind == "storage_preparation" for item in programs))
+        dispatch.assert_not_called()
+        self.assert_retained()
+
     def test_provider_placement_drift_refuses_before_any_new_storage(self) -> None:
         self.fixture.payload["serverId"] = "different-server"
         with patch(
@@ -630,4 +798,55 @@ class SeparationResourceTests(unittest.TestCase):
             )
         foreign = asyncio.run(call(mode="receipt", key="http-status", context="foreign"))
         self.assertEqual(foreign.status_code, 409, foreign.text)
+        self.assert_retained()
+
+    def test_original_key_inspection_checks_request_and_never_changes_its_reservation(self) -> None:
+        from control_plane.http_routes.mutation_support import (
+            idempotency_scope,
+            request_fingerprint,
+        )
+
+        scope = idempotency_scope(
+            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        )
+        fingerprint = request_fingerprint(
+            {"product": self.product, **self.body.model_dump(mode="json")}
+        )
+        reserved = self.store.reserve_mutation(
+            scope=scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="original-inspection",
+            request_fingerprint=fingerprint,
+            lease_owner="original-worker",
+            lease_seconds=300,
+            reconciliation_key=self.body.reviewed_plan_sha256,
+            provider_target_key=self.adapter.target_key(),
+        ).record
+        assert reserved is not None
+        programs = [{"kind": "storage_preparation", "status": "missing"}]
+        with patch.object(
+            SeparationResourcesAdapter, "inspect_original", create=True, return_value=programs
+        ) as inspect_original:
+            response = asyncio.run(self.call_http(key=reserved.idempotency_key, mode="inspect"))
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["programs"][0]["status"], "missing")
+            inspect_original.assert_called_once()
+            inspect_original.reset_mock()
+            for changes in ({"reason": "different request"}, {"context": "foreign"}):
+                with self.subTest(changes=changes):
+                    refused = asyncio.run(
+                        self.call_http(key=reserved.idempotency_key, mode="inspect", **changes)
+                    )
+                    self.assertEqual(refused.status_code, 409, refused.text)
+            inspect_original.assert_not_called()
+        self.assertNotIn("resources_verified", response.text)
+        self.assertNotIn(fingerprint, response.text)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key=reserved.idempotency_key,
+            ),
+            reserved,
+        )
         self.assert_retained()

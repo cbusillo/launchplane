@@ -19,6 +19,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesPlan,
     SeparationResourcesResult,
     SeparationResourcesStatus,
+    SeparationResourcesInspection,
 )
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
@@ -43,6 +44,7 @@ def main() -> int:
             "resources-dry-run",
             "resources-apply",
             "resources-read",
+            "resources-inspect",
         ),
     )
     parser.add_argument("--operator-helper", type=Path, required=True)
@@ -67,7 +69,7 @@ def main() -> int:
     retain_original_key = bool(args.idempotency_key.strip())
     applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
     resources = args.mode.startswith("resources-")
-    resource_read = args.mode == "resources-read"
+    resource_read = args.mode in {"resources-read", "resources-inspect"}
     application = None
     if args.application_file is not None:
         if not resources:
@@ -178,7 +180,7 @@ def main() -> int:
         elif not resource_read and evidence.exists():
             raise ValueError("Preserve existing evidence; select a new path.")
         if resource_read:
-            body["mode"] = "receipt"
+            body["mode"] = "inspect" if args.mode == "resources-inspect" else "receipt"
         submitted = applying
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
@@ -223,7 +225,11 @@ def main() -> int:
             raise ValueError("Unexpected deployment result.")
         if resources:
             if resource_read and "state" in result:
-                observed = SeparationResourcesStatus.model_validate(result)
+                observed = (
+                    SeparationResourcesInspection.model_validate(result)
+                    if "programs" in result
+                    else SeparationResourcesStatus.model_validate(result)
+                )
                 if (observed.product, observed.context) != (args.product, args.context):
                     raise ValueError("Preparation status belongs to another lane.")
                 print(

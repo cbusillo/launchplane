@@ -13,6 +13,66 @@ from urllib.error import HTTPError, URLError
 
 
 class TestingSeparationClientTests(unittest.TestCase):
+    def test_native_inspection_preserves_review_receipt_and_original_key(self) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            review = root / "review.json"
+            receipt = root / "review.json.receipt.json"
+            review.write_text("original review")
+            receipt.write_text("original receipt")
+            result = {
+                "product": "example",
+                "context": "example",
+                "state": "reconcile_required",
+                "inspected_at": "2026-01-01T00:00:00Z",
+                "programs": [{"kind": "storage_preparation", "status": "missing"}],
+            }
+            call = Mock(
+                return_value={"status": "accepted", "trace_id": "fixture", "result": result}
+            )
+            transport = {
+                "resolve_settings": lambda args: {
+                    "service_url": "https://service.invalid",
+                    "token": "fixture",
+                },
+                "validate_service_url": lambda value: None,
+                "request_launchplane": call,
+                "public_trace_id": lambda value: value,
+            }
+            arguments = [
+                "client",
+                "resources-inspect",
+                "--operator-helper",
+                str(helper),
+                "--product",
+                "example",
+                "--context",
+                "example",
+                "--reason",
+                "original reason",
+                "--evidence-file",
+                str(review),
+                "--idempotency-key",
+                "original-key",
+            ]
+            output = io.StringIO()
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch("sys.argv", arguments),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(client["main"](), 0, output.getvalue())
+            self.assertEqual(call.call_args.kwargs["body"]["mode"], "inspect")
+            self.assertEqual(call.call_args.kwargs["idempotency_key"], "original-key")
+            self.assertTrue(json.loads(output.getvalue())["retain_original_key"])
+            self.assertEqual(review.read_text(), "original review")
+            self.assertEqual(receipt.read_text(), "original receipt")
+
     def test_independent_resources_preserve_review_and_save_a_private_replayable_receipt(
         self,
     ) -> None:

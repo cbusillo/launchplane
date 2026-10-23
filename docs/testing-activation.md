@@ -36,6 +36,16 @@ preparation. Put that identical object in the activation request's `application`
 field, then use `scripts/activate-generic-web-testing.py --request-file ...`
 through the installed admin transport. Keep both reviews and original keys.
 
+When stored status cannot identify the unfinished program, use
+`resources-inspect` with the original key, reason and identical application
+specification. It reads the namespace's capability, preparation and readback
+schedules and their exact histories without triggering a program or changing a
+reservation. It reports bounded identifiers, provenance, provider status and
+known result booleans; it returns no scripts, raw logs or credentials. Its
+`qualification=not_evaluated` result is diagnostic only. A missing schedule,
+empty history or failed marker proves no physical absence, retry authority or
+resource qualification. Keep the original key, review, resources and interlock.
+
 `resources-read` uses the original key and reads only the saved service record.
 A completed operation returns its existing preparation receipt. A missing,
 running or reconciliation-required operation reports its stored state, effect

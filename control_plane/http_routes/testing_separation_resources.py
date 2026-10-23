@@ -1,6 +1,7 @@
 """Create independent testing storage without releasing a retained interlock."""
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from control_plane.http_routes.mutation_support import (
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
+from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_separation_resources import (
     ROUTE,
@@ -22,6 +24,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesRequest,
     SeparationResourcesResult,
     SeparationResourcesStatus,
+    SeparationResourcesInspection,
 )
 
 
@@ -60,7 +63,7 @@ def register_testing_separation_resource_routes(
             root, record_store, product, body, actor(identity), trace
         )
         try:
-            if body.mode == "receipt":
+            if body.mode in {"receipt", "inspect"}:
                 if not idempotency_key.strip():
                     raise ValueError("Readback requires the original preparation key.")
                 row = record_store.read_idempotency_record(
@@ -82,6 +85,32 @@ def register_testing_separation_resource_routes(
                         lease_expires_at=row.lease_expires_at if row else "",
                         provider_effect_started_at=row.provider_effect_started_at if row else "",
                     )
+                    if body.mode == "inspect" and row is not None:
+                        original = body.model_copy(
+                            update={"mode": "apply", "reviewed_plan_sha256": row.reconciliation_key}
+                        )
+                        if (
+                            request_fingerprint(
+                                {"product": product, **original.model_dump(mode="json")}
+                            )
+                            != row.request_fingerprint
+                        ):
+                            raise ValueError(
+                                "Inspection requires the original preparation request."
+                            )
+                        adapter.request = original
+                        operation_key = build_provider_operation_key(
+                            scope=row.scope,
+                            route_path=row.route_path,
+                            idempotency_key=row.idempotency_key,
+                            request_fingerprint=row.request_fingerprint,
+                            reconciliation_key=row.reconciliation_key,
+                        )
+                        observed = SeparationResourcesInspection(
+                            **observed.model_dump(mode="json"),
+                            programs=tuple(adapter.inspect_original(operation_key)),
+                            inspected_at=datetime.now(timezone.utc),
+                        )
                     return accepted_evidence_response(
                         trace_id=trace,
                         records={},
