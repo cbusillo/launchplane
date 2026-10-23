@@ -570,11 +570,12 @@
         "modes": [
           "dry-run",
           "apply",
-          "readback"
+          "readback",
+          "release"
         ],
         "operation_id": "prepare_testing_replacement_resources",
         "path": "/v1/products/{product}/testing-replacement-resources",
-        "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, qualify their actual backing storage or release an unused initial preparation; this never restores data or starts web.",
         "response_statuses": [
           "202",
           "400",
@@ -1106,8 +1107,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "970f9f99660ebefd877e222d125c8b0b02ffc78d"
+    "source_commit_sha": "e0ecdef38bfed67eabe7700d0c1af5999cdd7045"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "78981ad698545d2cd56824c41de1a7df14217de8ab8274c30264f64d195ca696"
+  "semantic_digest_sha256": "b56152ef8902e4a0e48ee68e96882e6799876a0e128609a3da503ab94bc5cd69"
 }
