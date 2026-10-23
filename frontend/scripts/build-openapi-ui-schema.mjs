@@ -109,12 +109,12 @@ function hoistInlineSchemaDefinitions(value, inlineSchemas) {
   }
   if (isObject(value.$defs)) {
     for (const [schemaName, schema] of Object.entries(value.$defs)) {
+      hoistInlineSchemaDefinitions(schema, inlineSchemas);
       const existingSchema = inlineSchemas[schemaName];
       if (existingSchema && JSON.stringify(existingSchema) !== JSON.stringify(schema)) {
         throw new Error(`Canonical OpenAPI defines conflicting inline schema: ${schemaName}`);
       }
       inlineSchemas[schemaName] = schema;
-      hoistInlineSchemaDefinitions(schema, inlineSchemas);
     }
     delete value.$defs;
   }

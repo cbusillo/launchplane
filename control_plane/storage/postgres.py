@@ -649,6 +649,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
+    require_product_profile_writes,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6770,6 +6771,16 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if bundle.product_profiles or bundle.absent_product_ids:
+                require_product_profile_writes(
+                    bundle.product_profiles,
+                    (
+                        self._read_product_profile_payload(row.payload)
+                        for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                    ),
+                    inventory_records=self._iter_repository_inventory_records(session),
+                    absent_product_ids=bundle.absent_product_ids,
+                )
             if guard_provider is not None:
                 guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
@@ -21826,6 +21837,12 @@ class PostgresRecordStore(HumanSessionStore):
         assert insert_error is not None
         raise insert_error
 
+    def _iter_repository_inventory_records(
+        self, session: Any
+    ) -> Iterator[RepositoryInventoryRecord]:
+        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)):
+            yield self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
+
     def list_repository_inventory_records(
         self,
         *,
@@ -28827,6 +28844,14 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
+            require_product_profile_writes(
+                (record,),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+                inventory_records=self._iter_repository_inventory_records(session),
+            )
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29157,6 +29182,14 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
+        require_product_profile_writes(
+            (replacement_record,),
+            (
+                self._read_product_profile_payload(item.payload)
+                for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            ),
+            inventory_records=self._iter_repository_inventory_records(session),
+        )
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id

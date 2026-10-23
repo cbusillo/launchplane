@@ -79,6 +79,8 @@ def resolve_generic_web_rollback_lane(
 def product_profile_supports_generic_web_route(
     *, profile: LaunchplaneProductProfileRecord, route_path: str
 ) -> bool:
+    if not profile.is_managed_runtime:
+        return False
     profile_driver_id = profile.driver_id.strip()
     if profile_driver_id == GENERIC_WEB_DRIVER_ID:
         return True

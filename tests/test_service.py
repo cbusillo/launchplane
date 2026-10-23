@@ -19,6 +19,7 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import secrets as control_plane_secrets
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
     EveryCodeNotificationDestination,
@@ -2902,36 +2903,62 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
+            applied_request: dict[str, object] = {
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": "apply",
+                "reviewed_plan_sha256": plan_sha256,
+                "resolved_target_id": "app-demo-web",
+                "generic_web": generic_web,
+            }
             apply_status, apply_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             replay_status, replay_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
+                first_lookup = True
+                read_receipt = PostgresRecordStore.read_idempotency_record
+
+                def delayed_receipt(
+                    current_store: PostgresRecordStore,
+                    *,
+                    scope: str,
+                    route_path: str,
+                    idempotency_key: str,
+                ) -> LaunchplaneIdempotencyRecord | None:
+                    nonlocal first_lookup
+                    if first_lookup and route_path == "/v1/product-onboarding/apply":
+                        first_lookup = False
+                        return None
+                    return read_receipt(
+                        current_store,
+                        scope=scope,
+                        route_path=route_path,
+                        idempotency_key=idempotency_key,
+                    )
+
+                with patch.object(PostgresRecordStore, "read_idempotency_record", delayed_receipt):
+                    raced_status, raced_payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/product-onboarding/apply",
+                        payload=applied_request,
+                        headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                    )
+                self.assertEqual(raced_status, 202, raced_payload)
+                self.assertEqual(raced_payload["original_trace_id"], apply_payload["trace_id"])
+                self.assertEqual(raced_payload["result"], apply_payload["result"])
                 profiles = store.list_product_profile_records()
                 profile = store.read_product_profile_record("demo-web")
                 runtime_environments = store.list_runtime_environment_records(
