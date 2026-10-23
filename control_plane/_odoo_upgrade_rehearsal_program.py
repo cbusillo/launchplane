@@ -822,8 +822,6 @@ def upgrade_final(spec,root,containers):
 
 
 def main():
-    global COMMAND_FAILURE_CONTEXT
-    COMMAND_FAILURE_CONTEXT=None
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
     namespace=record['rehearsal_id']

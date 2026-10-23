@@ -2380,6 +2380,74 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_copy_runner_delegates_logging_and_failures_to_its_artifact(self) -> None:
+        import ast
+        import subprocess
+        from control_plane.odoo_testing_restore import rehearsal_copy_runner
+
+        class ArtifactRunner:
+            @staticmethod
+            def run_command(command: str) -> str:
+                if "--fail" in command.split():
+                    raise subprocess.CalledProcessError(7, command)
+                return command
+
+            @staticmethod
+            def _odoo_shell_command() -> list[str]:
+                return ["artifact-native-shell"]
+
+            @staticmethod
+            def _run_odoo_shell(script: str, label: str) -> tuple[str, str]:
+                return script, label
+
+        runner = next(
+            node
+            for node in ast.parse(rehearsal_copy_runner(sanitize_source_only=False)).body
+            if isinstance(node, ast.ClassDef) and node.name == "CopyRunner"
+        )
+        namespace: dict[str, Any] = {
+            "OdooDataWorkflowRunner": ArtifactRunner,
+            "expected_copy_instance": "rehearsal",
+        }
+        exec(
+            compile(ast.Module(body=[runner], type_ignores=[]), "<artifact-runner>", "exec"),
+            namespace,
+        )
+        copy = namespace["CopyRunner"]()
+        command = "/odoo/odoo-bin --stop-after-init --update all"
+        self.assertEqual(copy.run_command(command), ArtifactRunner.run_command(command))
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            copy.run_command(command + " --fail")
+        self.assertEqual(failure.exception.returncode, 7)
+        self.assertEqual(copy._odoo_shell_command(), ArtifactRunner._odoo_shell_command())
+        self.assertEqual(
+            copy._run_odoo_shell("fixture-script", "fixture-step"),
+            ArtifactRunner._run_odoo_shell("fixture-script", "fixture-step"),
+        )
+
+    def test_bound_failure_writer_withholds_text_and_extra_child_fields(self) -> None:
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        self.host["retain_command_failure"](
+            spec,
+            root,
+            {
+                "step": "clone",
+                "exit_status": 7,
+                "error_text": copied,
+                "unexpected": copied,
+            },
+        )
+        self.assertNotIn(
+            copied.encode(), self.host["command_failure_path"](spec, root).read_bytes()
+        )
+        failure = self.host["read_command_failure"](spec, root)
+        self.assertEqual(failure["step"], "clone")
+        self.assertEqual(failure["exit_status"], 7)
+        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+
     def test_child_receipts_withhold_arbitrary_copied_values(self) -> None:
         import sys
 
@@ -2397,6 +2465,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                         f"import sys;print({copied!r});print({copied!r},file=sys.stderr);sys.exit(7)",
                     ]
                 )
+        self.assertNotIn(
+            copied.encode(), self.host["command_failure_path"](spec, root).read_bytes()
+        )
         failure = self.host["read_command_failure"](spec, root)
         self.assertNotIn(copied, str(failure))
         self.assertEqual(failure["exit_status"], 7)
@@ -2567,7 +2638,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual(path.read_bytes(), original)
 
-    def test_native_subprocess_readers_bound_and_preserve_failure(self) -> None:
+    def test_capture_failure_discards_output_and_preserves_exit_status(self) -> None:
         import sys
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
 
@@ -3481,6 +3552,8 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
 
         exec(compile(tree, REHEARSAL_HOST_FILENAME, "exec"), self.host)
+        self.native_docker = self.host["docker"]
+        self.native_private_health = self.host["private_health"]
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if arguments[:2] == ("inspect", "testing-data"):

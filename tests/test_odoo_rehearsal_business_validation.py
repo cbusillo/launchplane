@@ -771,31 +771,37 @@ class BusinessValidationHostTests(unittest.TestCase):
                     scenario = BusinessValidationHostTests()
                     scenario.setUp()
                     self.addCleanup(scenario.doCleanups)
-                    calls = 0
+                    scenario.spec["record"]["target_artifact"]["artifact_id"] = scenario.plan[
+                        "artifact_id"
+                    ]
+                    calls = {"connection": 0, "health": 0}
 
-                    def fail_selected_check(*args: Any, **kwargs: Any) -> bytes:
-                        nonlocal calls
-                        calls += 1
-                        if calls >= phase:
-                            return cast(bytes, scenario.host["command"](["fixture-check"]))
-                        return b"integration_readback_ok=true\n"
+                    def run_check(
+                        arguments: list[str], **kwargs: Any
+                    ) -> subprocess.CompletedProcess[bytes]:
+                        check = (
+                            "connection"
+                            if kwargs.get("input") == scenario.spec["readback_program"].encode()
+                            else "health"
+                        )
+                        calls[check] += 1
+                        failed = check == source and calls[check] >= phase
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            7 if failed else 0,
+                            copied.encode() if failed else b"integration_readback_ok=true\n",
+                            copied.encode() if failed else b"",
+                        )
 
                     with (
                         patch.dict(
                             scenario.host,
                             {
-                                "docker"
-                                if source == "connection"
-                                else "private_health": fail_selected_check
+                                "docker": scenario.fixture.native_docker,
+                                "private_health": scenario.fixture.native_private_health,
                             },
                         ),
-                        patch.object(
-                            scenario.host["subprocess"],
-                            "run",
-                            return_value=subprocess.CompletedProcess(
-                                [], 7, copied.encode(), copied.encode()
-                            ),
-                        ),
+                        patch.object(scenario.host["subprocess"], "run", side_effect=run_check),
                     ):
                         if phase == 1:
                             observed = scenario.fixture.run_host(scenario.spec)
@@ -810,7 +816,12 @@ class BusinessValidationHostTests(unittest.TestCase):
                             failure = failed.exception.diagnostic
                             self.assertNotIn(copied, str(failure))
                             self.assertEqual(failure["exit_status"], 7)
-                            self.assertTrue(failure["step"])
+                            expected_step = scenario.host[
+                                "private_health"
+                                if source == "health"
+                                else "business_validation_precheck"
+                            ].__name__
+                            self.assertEqual(failure["step"], expected_step)
                             observed = scenario.fixture.run_host(
                                 {**scenario.spec, "mode": "observe", "inspect_capture": True}
                             )
@@ -818,6 +829,7 @@ class BusinessValidationHostTests(unittest.TestCase):
                                 observed["pending_business_validation"]["attempt_sha256"],
                                 scenario.spec["attempt_sha256"],
                             )
+                            self.assertNotIn("child_failure", observed)
                             self.assertTrue(
                                 observed["pending_business_validation"]["receipt"]["committed"]
                             )
