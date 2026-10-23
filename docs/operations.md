@@ -3628,7 +3628,14 @@ alone is not proof that an existing testing copy has been repaired.
   and `testing-hold-apply` with the saved dry-run evidence, expected digest,
   reviewed acknowledgement and idempotency key. Use the same exact
   `--product`, `--context`, `--instance testing` for review and apply. A lift
-  requests testing reconciliation and can deploy. The original Director agent
+  of a staff-testing hold requests testing reconciliation and can deploy.
+  With existing `product_config.apply` authority, the original Director agent
+  can lift its own Compose `isolation_staging` hold using `--purpose isolation_staging`
+  on both dry-run and apply. That record-only lift queues no reconciliation;
+  staff holds, rehearsal provenance, other callers' holds, lane ownership and
+  stale-record protections remain enforced. Application staging holds retain
+  their separately qualified continuation path.
+  The original Director agent
   may set and lift a rehearsal hold on a currently qualified disposable testing
   lane without a new grant. For rehearsal holds use the repo's
   `scripts/stage-testing-separation.py` with `--hold-purpose staff_testing`,

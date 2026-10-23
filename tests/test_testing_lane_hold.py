@@ -569,6 +569,33 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(_read_hold(store), hold)
                 self.assertEqual(store.list_product_reconcile_requests(), ())
 
+    def _director_app(self, store: PostgresRecordStore, root: Path, *actions: str) -> FastAPI:
+        return create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_operators": [
+                        {
+                            "subjects": ["operator-agent"],
+                            "token_labels": ["operator-agent-token"],
+                            "products": [_PRODUCT],
+                            "contexts": [_CONTEXT],
+                            "instances": ["testing"],
+                            "actions": list(actions),
+                        }
+                    ],
+                }
+            ),
+            record_store_factory=lambda: store,
+            control_plane_root_path=root,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="local-operator-token",
+                local_operator_subject="operator-agent",
+                local_operator_token_label="operator-agent-token",
+            ),
+        )
+
     async def test_director_can_plan_an_ordinary_hold_lift_but_cannot_apply_it(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -577,31 +604,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 reason=_HOLD_REASON, recorded_by="operator-agent", recorded_at=_TIMESTAMP
             )
             _seed_target(store, hold=original)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                    {
-                        "schema_version": 2,
-                        "local_operators": [
-                            {
-                                "subjects": ["operator-agent"],
-                                "token_labels": ["operator-agent-token"],
-                                "products": [_PRODUCT],
-                                "contexts": [_CONTEXT],
-                                "instances": ["testing"],
-                                "actions": ["product_config.plan", "product_config.apply"],
-                            }
-                        ],
-                    }
-                ),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-                bearer_identity_config=BearerIdentityConfig(
-                    local_operator_token="local-operator-token",
-                    local_operator_subject="operator-agent",
-                    local_operator_token_label="operator-agent-token",
-                ),
-            )
+            app = self._director_app(store, root, "product_config.plan", "product_config.apply")
             headers = {"Authorization": "Bearer local-operator-token"}
             read = await http_request(
                 app,
@@ -639,6 +642,153 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lift.status_code, 202, lift.text)
         self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
         self.assertEqual(denied_apply.json()["error"]["code"], "local_operator_lane_scope_required")
+
+    async def test_director_lifts_own_compose_staging_hold_without_reconcile_and_replays(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            original = DokployTargetStaffTestingHold(
+                reason="Separation pending.",
+                purpose="isolation_staging",
+                recorded_by="local-operator:operator-agent",
+                recorded_at=_TIMESTAMP,
+            )
+            _seed_target(store, hold=original)
+            app = self._director_app(store, root, "product_config.plan", "product_config.apply")
+            headers = {"Authorization": "Bearer local-operator-token"}
+            payload = _payload(hold=False, reason="Separation proved.") | {
+                "purpose": "isolation_staging"
+            }
+            plan = await http_request(
+                app, "POST", TESTING_HOLD_APPLY_ROUTE, headers=headers, payload=payload
+            )
+            self.assertEqual(plan.status_code, 202, plan.text)
+            self.assertEqual(_read_hold(store), original)
+            applied_payload = payload | {
+                "mode": "apply",
+                "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+            }
+            apply_headers = headers | {"Idempotency-Key": "compose-staging-lift"}
+            applied = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=apply_headers,
+                payload=applied_payload,
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            result = applied.json()["result"]
+            self.assertEqual(result["action"], "clear")
+            self.assertTrue(result["applied"])
+            self.assertTrue(result["read_back_matches"])
+            self.assertFalse(result["reconcile_requested"])
+            replay = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=apply_headers,
+                payload=applied_payload,
+            )
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            lost_receipt = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=headers | {"Idempotency-Key": "compose-staging-lift-recovery"},
+                payload=applied_payload,
+            )
+            self.assertEqual(lost_receipt.status_code, 202, lost_receipt.text)
+            self.assertFalse(lost_receipt.json()["result"]["applied"])
+            self.assertFalse(lost_receipt.json()["result"]["reconcile_requested"])
+            read = await http_request(
+                app,
+                "GET",
+                f"{TESTING_HOLD_ROUTE}?product={_PRODUCT}&context={_CONTEXT}&instance=testing",
+                headers=headers,
+            )
+            self.assertIsNone(read.json()["result"]["hold"])
+            self.assertIsNone(_read_hold(store))
+            self.assertEqual(store.list_product_reconcile_requests(), ())
+
+    async def test_director_staging_lift_retains_foreign_staff_and_rehearsal_holds(self) -> None:
+        from control_plane.contracts.dokploy_target_record import TestingHoldRehearsal
+
+        own = DokployTargetStaffTestingHold(
+            reason="Separation pending.",
+            purpose="isolation_staging",
+            recorded_by="local-operator:operator-agent",
+        )
+        protected = (
+            own.model_copy(update={"recorded_by": "local-operator:another-agent"}),
+            own.model_copy(update={"purpose": "staff_testing"}),
+            own.model_copy(
+                update={
+                    "rehearsal": TestingHoldRehearsal(
+                        binding_sha256="a" * 64,
+                        target_updated_at=_TIMESTAMP,
+                        target_source_label="fixture",
+                    )
+                }
+            ),
+        )
+        for original in protected:
+            with self.subTest(hold=original), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = self._store(root)
+                _seed_target(store, hold=original)
+                app = self._director_app(store, root, "product_config.plan", "product_config.apply")
+                headers = {"Authorization": "Bearer local-operator-token"}
+                payload = _payload(hold=False) | {"purpose": "isolation_staging"}
+                plan = await http_request(
+                    app, "POST", TESTING_HOLD_APPLY_ROUTE, headers=headers, payload=payload
+                )
+                applied = await http_request(
+                    app,
+                    "POST",
+                    TESTING_HOLD_APPLY_ROUTE,
+                    headers=headers | {"Idempotency-Key": "protected-staging-lift"},
+                    payload=payload
+                    | {
+                        "mode": "apply",
+                        "reviewed_plan_sha256": plan.json()
+                        .get("result", {})
+                        .get("plan_sha256", "a" * 64),
+                    },
+                )
+                self.assertEqual(applied.status_code, 403, applied.text)
+                self.assertEqual(_read_hold(store), original)
+                self.assertEqual(store.list_product_reconcile_requests(), ())
+
+    async def test_director_staging_lift_keeps_apply_authorization(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            original = DokployTargetStaffTestingHold(
+                reason="Separation pending.",
+                purpose="isolation_staging",
+                recorded_by="local-operator:operator-agent",
+            )
+            _seed_target(store, hold=original)
+            app = self._director_app(store, root, "product_config.plan")
+            payload = _payload(hold=False) | {"purpose": "isolation_staging"}
+            headers = {"Authorization": "Bearer local-operator-token"}
+            plan = await http_request(
+                app, "POST", TESTING_HOLD_APPLY_ROUTE, headers=headers, payload=payload
+            )
+            applied = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=headers | {"Idempotency-Key": "ungranted-staging-lift"},
+                payload=payload
+                | {"mode": "apply", "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"]},
+            )
+            self.assertEqual(applied.status_code, 403, applied.text)
+            self.assertEqual(_read_hold(store), original)
+            self.assertEqual(store.list_product_reconcile_requests(), ())
 
     async def test_plan_and_apply_require_their_actions(self) -> None:
         with TemporaryDirectory() as directory:
