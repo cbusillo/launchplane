@@ -6,6 +6,7 @@ set -euo pipefail
 # Evidence must land in the checkout mount; the container's own /tmp is lost.
 : "${BROWSER_SMOKE_ARTIFACT_DIR:?Set a checkout-relative artifact folder from the CI workflow}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+pnpm --dir "$repo_root/frontend" generate:openapi-types
 node_executable="$(realpath -- "$(command -v node)")"
 host_network_namespace="$(readlink /proc/self/ns/net)"
 container_id=""
@@ -55,7 +56,7 @@ container_id="$(docker create --init --shm-size=1g \
       "$namespace" "$BROWSER_SMOKE_HOST_NETNS" "$(id -u)" "$(id -g)"
     node --version
     cd frontend
-    exec corepack pnpm test:browser
+    exec corepack pnpm test:browser:prepared
   ')"
 docker start --attach "$container_id" &
 # Bash defers traps while a foreground command runs. Waiting on a background
