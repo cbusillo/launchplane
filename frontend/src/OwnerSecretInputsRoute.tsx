@@ -36,7 +36,7 @@ function SecretRequests({ product, environment, fixtureMode }: { product: string
       <p className="eyebrow">Credential setup</p>
       <h1 data-route-heading tabIndex={-1}>{request?.display_name || "Provide requested credentials"}</h1>
       {request ? <p>{request.environment} environment</p> : null}
-      <p>{request?.application_required === false ? "Your credential is stored securely for the service to use. Saved values are never shown again." : "Your submission is stored securely for an admin to apply to this product."}</p>
+      {request ? <p>{request.application_required === false ? "Your credential is stored securely for the service to use. Saved values are never shown again." : "Your submission is stored securely for an admin to apply to this product."}</p> : null}
     </div>
     {error ? <p role="alert">{error}</p> : !request ? <p role="status">Loading credential request…</p> : !request.fields.length ? <p>No credentials are requested here.</p> : request.fields.map(field => (
       <SecretInput key={field.request_revision} field={field} request={request} onSaved={setRequest} fixtureMode={fixtureMode} />
