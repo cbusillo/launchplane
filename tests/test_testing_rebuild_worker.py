@@ -32,7 +32,10 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
-from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+from control_plane.workflows.odoo_verification import (
+    DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
+    default_odoo_health_url,
+)
 from control_plane.dokploy.testing_route import (
     route_document,
     compile_testing_route,
@@ -407,6 +410,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def health(self, base_url: str, path: str | None = None) -> HealthcheckEvidence:
         url = base_url if path is None else base_url.rstrip("/") + "/" + path.lstrip("/")
+        lane = next(
+            item
+            for item in self.intent.profile.lanes
+            if (item.context, item.instance) == (self.operation.context, "testing")
+        )
+        legacy_url = default_odoo_health_url(
+            base_url=lane.base_url, health_path=self.intent.profile.health_path
+        )
         identity = (
             self.original_identity
             if self.owned is None
@@ -419,7 +430,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         return self.fixture.health.model_copy(
             update={
                 "observed_runtime_identity": identity
-                if urlsplit(url).path == DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+                if urlsplit(url).path == DEFAULT_ODOO_RUNTIME_HEALTH_PATH or url != legacy_url
                 else None,
                 "urls": (url,),
                 "status": "fail"
@@ -4711,7 +4722,20 @@ class NativeHistoricalUseTests(unittest.TestCase):
             "testing",
             usage=recorded,
         )
-        with patch.object(service, "read_odoo_testing_usage", return_value=OdooTestingUsage(fresh)):
+        lane = next(
+            item
+            for item in fixture.intent.profile.lanes
+            if (item.context, item.instance) == (fixture.operation.context, "testing")
+        )
+
+        def health(url: str, path: str | None = None) -> HealthcheckEvidence:
+            self.assertEqual(url, lane.health_url)
+            return fixture.health(url, path)
+
+        with (
+            patch.object(service, "read_odoo_testing_usage", return_value=OdooTestingUsage(fresh)),
+            patch.object(service, "read_public_testing_health", side_effect=health),
+        ):
             self.assertEqual(fixture.execute().deploy_status, "pass")
         self.assertEqual(
             fixture.current().target_id.target_id, fixture.fixture.candidate.compose_id

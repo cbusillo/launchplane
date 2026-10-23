@@ -58,7 +58,7 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
             authorized_at=datetime.now(UTC).isoformat(),
         )
 
-        def uncertain_health(base_url: str, path: str) -> HealthcheckEvidence:
+        def uncertain_health(base_url: str, path: str | None = None) -> HealthcheckEvidence:
             if self.worker.owned is not None:
                 return HealthcheckEvidence(status="pending", urls=(base_url,))
             return self.worker.health(base_url, path)
