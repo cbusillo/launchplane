@@ -361,17 +361,24 @@ class ShopifyComparisonTests(unittest.TestCase):
             ("token_rejected", "token_rejected"),
             ("unavailable", "settings_changed"),
             ("unavailable", "runtime_changed"),
+            ("unavailable", "probe_failed"),
         ):
-            with self.subTest(status=status):
+            with self.subTest(status=status, reason=reason):
                 self.production_probe.return_value = {"status": status, "reason": reason}
                 result = self.run_comparison().model_dump()
                 self.assertEqual(result["stage"], "production_probe")
                 self.assertEqual(result["reason"], reason)
                 self.assertEqual(result["probe"], status)
                 self.assertEqual(result["separation"], "unknown")
-                if reason in {"settings_changed", "runtime_changed"}:
+                if reason in {"settings_changed", "runtime_changed", "probe_failed"}:
                     self.assertEqual(result["testing_domain_sha256"], "")
                     self.assertEqual(result["testing_shop_id_sha256"], "")
+
+    def test_verified_identity_rejects_malformed_hashes(self) -> None:
+        for field in ("domain_sha256", "shop_id_sha256"):
+            for value in ("", "invalid", self.observation[field][1:]):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.comparison.validate_identity({**self.observation, field: value})
 
     def test_verified_testing_hashes_survive_unavailable_production_settings(self) -> None:
         self.production_probe.return_value = {

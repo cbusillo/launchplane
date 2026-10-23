@@ -347,6 +347,13 @@ def validate_identity(result: object) -> dict[str, str]:
         set(result) != keys
         or any(not isinstance(value, str) for value in result.values())
         or (
+            result["status"] == "verified"
+            and any(
+                re.fullmatch(r"[a-f0-9]{64}", result[key]) is None
+                for key in ("domain_sha256", "shop_id_sha256")
+            )
+        )
+        or (
             result["status"] != "verified"
             and result["reason"] not in set(get_args(IdentityReason)) - {""}
         )
@@ -411,23 +418,17 @@ def compare_identity(
             return ShopifyIdentityResult(stage=stage, reason=reason)
         reason = "runtime_changed"
         reads.assert_selection_current(store, production_selection)
-        if production.get("status") != "verified" or any(
-            re.fullmatch(r"[a-f0-9]{64}", production.get(key, "")) is None
-            for key in ("domain_sha256", "shop_id_sha256")
-        ):
+        if production["status"] != "verified":
             failure_reason = cast(IdentityReason, production.get("reason", "probe_unavailable"))
+            retain_testing = failure_reason == "settings_unavailable"
             return ShopifyIdentityResult(
                 stage="production_probe",
                 reason=failure_reason,
                 probe="token_rejected"
                 if production.get("status") == "token_rejected"
                 else "unavailable",
-                testing_domain_sha256=observed["domain_sha256"]
-                if failure_reason not in {"runtime_changed", "settings_changed"}
-                else "",
-                testing_shop_id_sha256=observed["shop_id_sha256"]
-                if failure_reason not in {"runtime_changed", "settings_changed"}
-                else "",
+                testing_domain_sha256=observed["domain_sha256"] if retain_testing else "",
+                testing_shop_id_sha256=observed["shop_id_sha256"] if retain_testing else "",
             )
         same = (
             observed["domain_sha256"] == production["domain_sha256"]
