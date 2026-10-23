@@ -1421,7 +1421,8 @@ class NativeTestingRebuildExecution:
                 self.adapter.authorize("testing_rebuild_observe")
                 if existing_publication is None:
                     raise NativeTestingRebuildPending("The original route receipt is unavailable.")
-                self.route = existing_publication.plan.route
+                self.publication = existing_publication.plan
+                self.route = self.publication.route
                 try:
                     self.switch(
                         historical.plan,
@@ -1835,6 +1836,13 @@ class NativeTestingRebuildExecution:
                 raise NativeTestingRebuildPending("A legacy route writer remains observation-only.")
             raise NativeTestingRebuildPending("Route writes require their durable physical child.")
 
+        desired_compose_project = None
+        if desired == plan.new:
+            assert self.publication is not None
+            application = self.publication.candidate.application
+            assert application is not None and application.prepared is not None
+            desired_compose_project = application.prepared.compose_project or None
+
         self.run_effect(
             phase,
             lambda: self.route_backend() == desired.private_url,
@@ -1852,6 +1860,7 @@ class NativeTestingRebuildExecution:
                 execution=attempt.execution,
                 execution_key=attempt.key,
                 writer_attempt=attempt,
+                desired_compose_project=desired_compose_project,
             ),
         )
 

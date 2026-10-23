@@ -375,6 +375,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         execution: Any = None,
         execution_key: str = "",
         writer_attempt: Any = None,
+        desired_compose_project: str | None = None,
     ) -> str:
         def publish() -> None:
             if backend == plan.new_backend:
@@ -1428,7 +1429,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.admit_unavailable("absent")
         preimage = deepcopy(self.raw)
         self.fail_public = True
-        result = self.execute()
+
+        def publish(plan: Any, backend: str | None, **kwargs: Any) -> str:
+            self.assertEqual(
+                kwargs["desired_compose_project"],
+                self.prepared.compose_project if backend == plan.new_backend else None,
+            )
+            return self.switch(plan, backend, **kwargs)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=publish):
+            result = self.execute()
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertEqual(self.raw, preimage)
@@ -1465,6 +1475,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         switch = self.switch
 
         def lost(*args: Any, **kwargs: Any) -> str:
+            self.assertEqual(kwargs["desired_compose_project"], self.prepared.compose_project)
             switch(*args, **kwargs)
             raise NativeSourceUnavailable("fixture lost original route reply")
 
@@ -3438,6 +3449,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 runtime_identity=inputs.plan.runtime_identity,
                 private_endpoint=self.fixture.route.new_backend,
                 deployment_id="candidate-deployment",
+                compose_project=namespace + "-abc123",
                 source_witness="empty:" + inputs.plan.digest,
                 integration_isolation_verified=True,
                 credentials_verified=True,
@@ -4273,6 +4285,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execution: Any = None,
             execution_key: str = "",
             writer_attempt: Any = None,
+            desired_compose_project: str | None = None,
         ) -> None:
             def send() -> None:
                 pending.append(
@@ -4282,6 +4295,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         expected_backend=expected_backend,
                         dispatch_guard=lambda write: write(),
                         desired_runtime_identity=desired_runtime_identity,
+                        desired_compose_project=desired_compose_project,
                     )
                 )
                 raise NativeSourceUnavailable("fixture proxy writer has not returned")
@@ -4350,7 +4364,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             (
                 "new",
                 shell.plan.new_backend,
-                str(urlsplit(shell.plan.new_backend).hostname),
+                self.prepared.compose_project,
                 shell.new_identity,
             ),
         ):

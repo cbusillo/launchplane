@@ -67,11 +67,11 @@ def exercise_published_copy_maintenance(
             case.assertEqual(kwargs["query"]["composeId"], candidate.compose_id)
             return []
         if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
-            case.assertEqual(kwargs["query"]["appName"], candidate.namespace)
+            case.assertEqual(kwargs["query"]["appName"], provider["appName"])
             return [
                 {
                     "containerId": "web",
-                    "name": candidate.namespace + "-web-1",
+                    "name": str(provider["appName"]) + "-web-1",
                     "state": "running",
                 }
             ]

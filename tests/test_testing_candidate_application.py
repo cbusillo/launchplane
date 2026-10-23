@@ -139,9 +139,11 @@ class CandidateApplicationTests(unittest.TestCase):
         self.store.write_product_profile_record(self.profile)
         self.fixture.before = self.fixture.authority()
         self.execution()
+        self.provider_state["appName"] = self.allocation.namespace + "-abc123"
 
         def remote(**kwargs: Any) -> None:
             self.assertEqual(kwargs["payload"]["http_port"], self.profile.runtime_port)
+            self.assertEqual(kwargs["payload"]["compose_project"], self.provider_state["appName"])
             kwargs["receive"]({"type": "complete", "private_readiness_verified": True})
 
         with (
@@ -151,10 +153,67 @@ class CandidateApplicationTests(unittest.TestCase):
             result = self.prepare_application()
         assert result.application is not None and result.application.prepared is not None
         self.assertEqual(
+            result.application.prepared.compose_project, self.provider_state["appName"]
+        )
+        self.assertEqual(
             result.application.prepared.private_endpoint,
             f"http://{result.namespace}:{self.profile.runtime_port}",
         )
         self.fixture.assert_serving_unchanged()
+
+    def test_private_project_must_belong_to_the_original_namespace_before_probe(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        self.provider_state["appName"] = "foreign-project"
+        with patch.object(application, "_read_remote") as remote:
+            with self.assertRaises(ValueError):
+                real_readiness(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    allocation=allocation,
+                    inputs=self.inputs(allocation),
+                    deployment_id=allocation.application.deployment_id,
+                )
+            remote.assert_not_called()
+
+    def test_prepared_project_preserves_legacy_wire_and_rejects_foreign_custody(self) -> None:
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        legacy = allocation.application.model_dump(mode="json")
+        assert legacy["prepared"] is not None
+        legacy["prepared"].pop("compose_project", None)
+        self.assertEqual(
+            TestingCandidateApplication.model_validate(legacy).model_dump(mode="json"), legacy
+        )
+        assert legacy["prepared"] is not None
+        for project in ("foreign-project", allocation.namespace + "-too-long"):
+            with self.subTest(project=project):
+                legacy["prepared"]["compose_project"] = project
+                with self.assertRaises(ValueError):
+                    TestingCandidateApplication.model_validate(legacy)
+
+    def test_prepared_project_cannot_be_replaced_by_a_fresh_readiness_probe(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        self.provider_state["appName"] = allocation.namespace + "-def456"
+        with patch.object(application, "_read_remote") as remote:
+            remote.side_effect = lambda **kwargs: kwargs["receive"](
+                {"type": "complete", "private_readiness_verified": True}
+            )
+            with self.assertRaises(application.CandidateObservationUnavailable):
+                real_readiness(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    allocation=allocation,
+                    inputs=self.inputs(allocation),
+                    deployment_id=allocation.application.deployment_id,
+                )
+            remote.assert_not_called()
 
     def test_private_probe_distinguishes_returned_failure_from_transport_or_denial(self) -> None:
         from control_plane.dokploy.native_copy_stream import (
@@ -248,7 +307,7 @@ class CandidateApplicationTests(unittest.TestCase):
             "composeFile": "",
             "env": "",
             "autoDeploy": False,
-            "appName": self.allocation.namespace,
+            "appName": self.allocation.namespace + "-abc123",
         }
         self.deployments: list[dict[str, Any]] = []
         self.restore_deployments: list[dict[str, Any]] = []
@@ -344,6 +403,7 @@ class CandidateApplicationTests(unittest.TestCase):
             runtime_identity=self.compiled.plan.runtime_identity,
             private_endpoint="http://" + self.allocation.namespace + ":8069",
             deployment_id="candidate-deployment",
+            compose_project=str(self.provider_state["appName"]),
             source_witness="fixture-restored",
             integration_isolation_verified=True,
             credentials_verified=True,
