@@ -97,6 +97,7 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.openapi import ui_openapi_document
 
 
 def _test_key(offset: int) -> str:
@@ -328,9 +329,9 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         assert isinstance(legacy_request_payload, dict)
         self.assertNotIn("schema_migration", current_request_payload)
         self.assertNotIn("schema_migration", legacy_request_payload)
-        ui_schema = json.loads(
-            Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
-        )["components"]["schemas"]["ManagedAuthzPolicySetProposalInput-Output"]
+        ui_schema = ui_openapi_document()["components"]["schemas"][
+            "ManagedAuthzPolicySetProposalInput-Output"
+        ]
         self.assertTrue(set(ui_schema["required"]).issubset(json.loads(expected_request_json)))
 
         current_loaded = PrivilegedOperationRecord.model_validate(current_payload)
