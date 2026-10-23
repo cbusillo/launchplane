@@ -5,11 +5,11 @@ product profile's `preview.override_env`. Keep preview-specific values in that
 layer rather than changing the template or shared context.
 
 From this repository, use `scripts/set-preview-override.py` with the installed
-Launchplane operator helper and existing private operator configuration. It
+Launchplane admin helper and existing private admin configuration. It
 edits one key, preserves every other profile field, and prints no supplied
 value. It creates no scope or grant and starts no deployment.
 
-Write the string value to an owner-only file outside Git checkouts. The helper
+Write the string value to a mode-0600 file outside Git checkouts. The helper
 trims surrounding whitespace. The evidence file must also be outside the
 checkout and must not already exist for a new dry run.
 
@@ -38,7 +38,7 @@ records intent; runtime delivery and login verification remain separate.
 Refusals include a fixed `reason` code without input values. For
 `profile_changed_since_review`, read the changed profile and create a new dry
 run. `conditional_save_unsupported` means the read supplied no single strong revision.
-`private_file_permissions` requires owner-only file permissions. An
+`private_file_permissions` requires mode-0600 file permissions. An
 `outcome_unknown` or `accepted_unverified` result requires readback with the
 original files and idempotency key; do not start another write.
 Readback does not require revision support or a matching local profile model.
