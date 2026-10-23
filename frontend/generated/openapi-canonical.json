@@ -50545,7 +50545,8 @@
             "enum": [
               "dry-run",
               "apply",
-              "receipt"
+              "receipt",
+              "inspect"
             ],
             "title": "Mode",
             "type": "string"

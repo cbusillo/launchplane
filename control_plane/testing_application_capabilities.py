@@ -26,6 +26,8 @@ from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
 )
 
+RETAINED_CAPABILITY_PROGRAM_NAME = "Launchplane retained application capabilities"
+
 
 def retained_application_capability_spec(
     store: PostgresRecordStore, root: Path, product: str, context: str
@@ -289,7 +291,7 @@ def inspect_retained_application_capabilities(
         retained_target_id=str(spec["application_id"]),
         context=context,
         namespace=namespace,
-        name="Launchplane retained application capabilities",
+        name=RETAINED_CAPABILITY_PROGRAM_NAME,
         prepare_script=script,
         readback_script=script,
         before_effect=before_effect,

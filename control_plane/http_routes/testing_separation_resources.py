@@ -1,10 +1,12 @@
 """Create independent testing storage without releasing a retained interlock."""
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, Header, Path as PathParameter
+import click
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -12,8 +14,14 @@ from control_plane.http_routes.mutation_support import (
     request_fingerprint,
     idempotency_scope,
 )
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+    run_in_worker_thread,
+)
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
+from control_plane.provider_operations import build_provider_operation_key
+from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_separation_resources import (
     ROUTE,
@@ -22,6 +30,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesRequest,
     SeparationResourcesResult,
     SeparationResourcesStatus,
+    SeparationResourcesInspection,
 )
 
 
@@ -60,7 +69,7 @@ def register_testing_separation_resource_routes(
             root, record_store, product, body, actor(identity), trace
         )
         try:
-            if body.mode == "receipt":
+            if body.mode in {"receipt", "inspect"}:
                 if not idempotency_key.strip():
                     raise ValueError("Readback requires the original preparation key.")
                 row = record_store.read_idempotency_record(
@@ -82,6 +91,37 @@ def register_testing_separation_resource_routes(
                         lease_expires_at=row.lease_expires_at if row else "",
                         provider_effect_started_at=row.provider_effect_started_at if row else "",
                     )
+                    if body.mode == "inspect" and row is not None:
+                        original = body.model_copy(
+                            update={"mode": "apply", "reviewed_plan_sha256": row.reconciliation_key}
+                        )
+                        if (
+                            request_fingerprint(
+                                {"product": product, **original.model_dump(mode="json")}
+                            )
+                            != row.request_fingerprint
+                        ):
+                            raise ValueError(
+                                "Inspection requires the original preparation request."
+                            )
+                        adapter.request = original
+                        operation_key = build_provider_operation_key(
+                            scope=row.scope,
+                            route_path=row.route_path,
+                            idempotency_key=row.idempotency_key,
+                            request_fingerprint=row.request_fingerprint,
+                            reconciliation_key=row.reconciliation_key,
+                        )
+                        native = await run_in_worker_thread(
+                            lambda: adapter.inspect_original(operation_key)
+                        )
+                        observed = SeparationResourcesInspection.model_validate(
+                            {
+                                **observed.model_dump(mode="json"),
+                                **native,
+                                "inspected_at": datetime.now(timezone.utc),
+                            }
+                        )
                     return accepted_evidence_response(
                         trace_id=trace,
                         records={},
@@ -98,7 +138,9 @@ def register_testing_separation_resource_routes(
                     result=result.model_dump(mode="json"),
                 )
             if body.mode == "dry-run":
-                return accepted_evidence_response(trace_id=trace, records={}, result=adapter.plan())
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=await run_in_worker_thread(adapter.plan)
+                )
             if record_store.database_dialect_name != "postgresql":
                 raise dependencies.http_error(
                     status_code=503,
@@ -126,12 +168,24 @@ def register_testing_separation_resource_routes(
                 in_progress_message="Independent testing storage preparation is in progress.",
                 reconcile_message="Preparation outcome is unknown; retain its original key and both fences.",
             )
-        except (ValueError, FileNotFoundError, SeparationResourcesRefused) as error:
+        except (
+            PlatformCredentialRefusedError,
+            ValueError,
+            FileNotFoundError,
+            SeparationResourcesRefused,
+        ) as error:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,
                 code="testing_resources_refused",
                 message="Retained testing preparation inputs changed or remain unproved.",
+            ) from error
+        except click.ClickException as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="testing_resources_unavailable",
+                message="Testing preparation provider evidence is unavailable.",
             ) from error
 
     app.add_api_route(
