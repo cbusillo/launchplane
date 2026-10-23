@@ -331,3 +331,141 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         self,
     ) -> None:
         await self.recover_service_placement(False, loses_service_scope=True)
+
+    async def test_supplied_placement_refusal_before_effects_does_not_hold_lane(self) -> None:
+        from control_plane.application_state_volume import ROUTE
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        self.register_unused_testing_compose()
+        envelope = DokployTargetSetupEnvelope.model_validate(
+            {**self.payload, "project_id": "existing-project"}
+        )
+        adapter = ApplicationStateVolumeAdapter.prepare(
+            self.root,
+            self.store,
+            envelope,
+            "service-fixture",
+            "fixture",
+            self.profile.product,
+            "pre-effect-refusal",
+        )
+        with self.assertRaisesRegex(ValueError, "provider target"):
+            run_durable_provider_operation(
+                store=self.store,
+                scope=adapter.scope,
+                route_path=ROUTE,
+                idempotency_key=adapter.operation_key,
+                request_fingerprint=adapter.reconciliation_key(),
+                lease_owner="fixture-worker",
+                response_trace_id="fixture",
+                adapter=adapter,
+                original_intent=adapter.intent,
+            )
+        self.provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    async def retain_service_owned_context(
+        self, *, shared: bool = False, changes_context: bool = False
+    ) -> None:
+        from control_plane.application_state_volume import ROUTE
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        context = self.context if shared else "unregistered-context"
+        if shared:
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={
+                        "product": "other-product",
+                        "repository": "example/other-product",
+                    }
+                )
+            )
+        envelope = DokployTargetSetupEnvelope.model_validate({**self.payload, "context": context})
+        adapter = ApplicationStateVolumeAdapter.prepare(
+            self.root, self.store, envelope, "service-fixture", "fixture", "", "unowned-allocation"
+        )
+        self.fail_before = ENVIRONMENT_CREATE_PATH
+        uncertain = run_durable_provider_operation(
+            store=self.store,
+            scope=adapter.scope,
+            route_path=ROUTE,
+            idempotency_key=adapter.operation_key,
+            request_fingerprint=adapter.reconciliation_key(),
+            lease_owner="fixture-worker",
+            response_trace_id="fixture",
+            adapter=adapter,
+            original_intent=adapter.intent,
+        )
+        self.assertEqual(uncertain.status, "reconcile_required")
+        readback = adapter.readback(adapter.operation_key)
+        effects = self.provider.call_args_list.copy()
+        adapter.request = envelope.model_copy(
+            update={
+                "retain_allocation": True,
+                "expected_allocation_custody_sha256": readback["custody_sha256"],
+            }
+        )
+        if changes_context:
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={
+                        "product": "new-owner",
+                        "repository": "example/new-owner",
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": context})
+                            for lane in self.profile.lanes
+                        ),
+                    }
+                )
+            )
+            with (
+                self.expire_execution(),
+                self.assertRaisesRegex(ValueError, "context authority changed"),
+            ):
+                adapter.retain(adapter.operation_key)
+            self.assertTrue(self.store.list_held_provider_target_reservations())
+            self.assertEqual(self.provider.call_args_list, effects)
+            return
+        with self.expire_execution():
+            retained = adapter.retain(adapter.operation_key)
+        self.assertEqual(retained["allocation_state"], "retained_uncertain")
+        self.assertFalse(retained["applied"])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(self.provider.call_args_list, effects)
+
+    async def test_dry_run_with_original_key_previews_effective_apply_names(self) -> None:
+        dry = await self.post(mode="dry-run")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.provider.assert_not_called()
+        applied = await self.post()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        preview = dry.json()["result"]["setup"]
+        actual = applied.json()["result"]["setup"]
+        self.assertEqual(
+            preview["target_record"]["project_name"], actual["target_record"]["project_name"]
+        )
+        self.assertEqual(
+            preview["target_record"]["target_name"], actual["target_record"]["target_name"]
+        )
+
+    async def test_service_owned_unregistered_context_can_retain_its_partial_allocation(
+        self,
+    ) -> None:
+        await self.retain_service_owned_context()
+
+    async def test_service_owned_shared_context_can_retain_its_partial_allocation(self) -> None:
+        await self.retain_service_owned_context(shared=True)
+
+    async def test_service_owned_context_drift_keeps_custody_for_existing_authority_resolution(
+        self,
+    ) -> None:
+        await self.retain_service_owned_context(changes_context=True)
+
+    async def test_dry_run_without_a_key_reports_non_exact_generated_names(self) -> None:
+        dry = await self.post(mode="dry-run", idempotency_key="")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertEqual(dry.json()["result"]["allocation_preview"], "requires-original-key")
+        self.provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())

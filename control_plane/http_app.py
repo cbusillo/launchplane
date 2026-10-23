@@ -27407,6 +27407,23 @@ def create_launchplane_fastapi_app(
                 separation_only=True,
             )
 
+        execution_request = setup_request
+        ordinary_preview: dict[str, str] = {}
+        if (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode == "dry-run"
+            and not setup_request.state_volume_path
+        ):
+            from control_plane.application_state_volume import (
+                ordinary_allocation_names,
+                named_application_request,
+            )
+
+            ordinary_preview = ordinary_allocation_names(
+                setup_request, idempotency_scope(identity), idempotency_key.strip()
+            )
+            execution_request = named_application_request(setup_request, ordinary_preview)
         try:
             rebuild_checkpoint()
             # Replacing a testing target holds the lock its event deploys run under.
@@ -27435,7 +27452,7 @@ def create_launchplane_fastapi_app(
                 result = execute_dokploy_target_setup(
                     control_plane_root_path=resolved_control_plane_root,
                     record_store=database_store,
-                    request=setup_request,
+                    request=execution_request,
                     director_source_completion=director_source_completion,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
@@ -27513,6 +27530,16 @@ def create_launchplane_fastapi_app(
                 code="invalid_dokploy_target_setup",
                 message=str(error),
             ) from error
+        if ordinary_preview:
+            result["allocation"] = {
+                "project_name": ordinary_preview["project_marker"],
+                "environment_name": ordinary_preview["environment_marker"],
+                "target_name": ordinary_preview["target_marker"],
+                "app_name": ordinary_preview["app_name"],
+            }
+            result["allocation_preview"] = (
+                "exact-for-key" if idempotency_key.strip() else "requires-original-key"
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},

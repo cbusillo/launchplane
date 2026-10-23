@@ -66,7 +66,9 @@ def require_no_held_state_volume(
         )
         for row in store.list_held_provider_target_reservations()
     ):
-        raise ValueError("Testing storage setup is unresolved; preserve its original key and plan.")
+        raise ValueError(
+            "Testing application setup is unresolved; preserve its original request and key."
+        )
 
 
 def validate_volume_request(request: "DokployTargetSetupEnvelope") -> None:
@@ -127,6 +129,41 @@ def application_allocation_names(plan_id: str, *, state_volume: bool) -> dict[st
     if not state_volume:
         names.update(volume_name="", app_name="lp-testing-app-" + plan_id + "-empty")
     return names
+
+
+def ordinary_allocation_id(scope: str, key: str) -> str:
+    return request_fingerprint({"scope": scope, "route": ROUTE, "key": key})[:32]
+
+
+def ordinary_allocation_names(
+    request: "DokployTargetSetupEnvelope", scope: str, key: str
+) -> dict[str, str]:
+    names = application_allocation_names(ordinary_allocation_id(scope, key), state_volume=False)
+    if not key:
+        names.update(
+            project_marker="<service-generated-project>",
+            environment_marker="<service-generated-environment>",
+            target_marker="<service-generated-target>",
+            app_name="<service-generated-application>",
+        )
+    if request.project_id or request.environment_id:
+        names["project_marker"] = request.project_name
+    if request.environment_id:
+        names["environment_marker"] = request.environment_name
+    return names
+
+
+def named_application_request(
+    request: "DokployTargetSetupEnvelope", names: dict[str, Any]
+) -> "DokployTargetSetupEnvelope":
+    return request.model_copy(
+        update={
+            "app_name": names["app_name"],
+            "project_name": names["project_marker"],
+            "environment_name": names["environment_marker"],
+            "target_name": names["target_marker"],
+        }
+    )
 
 
 def _normalized(request: "DokployTargetSetupEnvelope") -> dict[str, Any]:
@@ -384,7 +421,7 @@ class ApplicationStateVolumeAdapter:
         validate_ordinary_allocation_request(request)
         if not operation_key:
             raise ValueError("Allocation recovery requires the original operation key.")
-        plan_id = request_fingerprint({"scope": scope, "route": ROUTE, "key": operation_key})[:32]
+        plan_id = ordinary_allocation_id(scope, operation_key)
         plan = store.read_idempotency_record(
             scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id
         )
@@ -400,12 +437,8 @@ class ApplicationStateVolumeAdapter:
                 "plan_id": plan_id,
                 "ordinary": True,
                 "first_testing_setup": first_testing_setup,
-                **application_allocation_names(plan_id, state_volume=False),
+                **ordinary_allocation_names(request, scope, operation_key),
             }
-            if request.project_id or request.environment_id:
-                intent["project_marker"] = request.project_name
-            if request.environment_id:
-                intent["environment_marker"] = request.environment_name
             intent["plan_sha256"] = request_fingerprint(intent)
             adapter = cls(
                 root,
@@ -917,6 +950,11 @@ class ApplicationStateVolumeAdapter:
                     product=self.product,
                     context=self.request.context,
                     application_id=allocation.get("application", ""),
+                    unowned_context_binding=(
+                        str(self.intent["binding"])
+                        if self.intent.get("ordinary") and not self.product
+                        else ""
+                    ),
                 )
 
             return retain_state_volume_allocation(
@@ -1090,9 +1128,9 @@ class ApplicationStateVolumeAdapter:
 
                 execution_check()
                 created = self._resume_phase(phase)
-                started = bool(created)
+                started = bool(phase)
                 lease.assert_current()
-                if created:
+                if phase:
                     self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                 try:
                     current = self.store.read_provider_target_record(
@@ -1119,14 +1157,7 @@ class ApplicationStateVolumeAdapter:
                     execute_dokploy_target_setup(
                         control_plane_root_path=self.root,
                         record_store=self.store,
-                        request=self.request.model_copy(
-                            update={
-                                "app_name": self.intent["app_name"],
-                                "project_name": self.intent["project_marker"],
-                                "environment_name": self.intent["environment_marker"],
-                                "target_name": self.intent["target_marker"],
-                            }
-                        ),
+                        request=named_application_request(self.request, self.intent),
                         lane_lock_held=True,
                         required_context_owner=(self.product, self.request.context)
                         if self.product
@@ -1148,6 +1179,7 @@ class ApplicationStateVolumeAdapter:
                     if isinstance(
                         error, StateVolumeRefusal | TestingTargetSourceEvidenceUnavailable
                     )
+                    or (not self.request.state_volume_path and isinstance(error, ValueError))
                     else ValueError("Testing application allocation refused before effects.")
                 ) from error
             raise ProviderMutationUnknownError(

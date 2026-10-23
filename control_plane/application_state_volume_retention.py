@@ -14,7 +14,12 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 def require_state_volume_retention_eligibility(
-    store: PostgresRecordStore, *, product: str, context: str, application_id: str
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    application_id: str,
+    unowned_context_binding: str = "",
 ) -> None:
     """Check current lane ownership and untracked custody under the authority lock."""
     try:
@@ -26,6 +31,15 @@ def require_state_volume_retention_eligibility(
             "application_state_volume_already_adopted",
             "Original allocation is already tracked; use original-key recovery.",
         )
+    if not product and unowned_context_binding:
+        from control_plane.application_state_volume import _binding
+
+        if _binding(store, context) != unowned_context_binding:
+            raise StateVolumeRefusal(
+                "application_state_volume_owner_changed",
+                "Original service-owned context authority changed; preserve custody.",
+            )
+        return
     require_state_volume_owner(store, product=product, context=context)
 
 
