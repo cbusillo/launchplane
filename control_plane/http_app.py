@@ -829,6 +829,7 @@ from control_plane.runtime_key_safety_http import (
     apply_runtime_key_safety_policy_route,
 )
 from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
@@ -13828,11 +13829,18 @@ def create_launchplane_fastapi_app(
                     ),
                 ) from error
         if director_preview_write:
+            try:
+                integration_key_markers = latest_active_runtime_key_safety_policy(
+                    cast(RuntimeKeySafetyPolicyReadStore, record_store)
+                ).integration_key_markers
+            except (AttributeError, ValueError):
+                integration_key_markers = ()
             list_bindings = getattr(record_store, "list_secret_bindings", None)
             if not callable(list_bindings) or not director_preview_override_allowed(
                 existing=existing_profile,
                 replacement=profile,
                 secret_bindings=tuple(list_bindings(limit=None)),
+                integration_key_markers=integration_key_markers,
             ):
                 raise _launchplane_http_error(
                     status_code=403,

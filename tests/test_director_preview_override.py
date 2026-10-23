@@ -11,6 +11,10 @@ from httpx2 import Response
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
@@ -143,7 +147,11 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
 
     async def test_plain_and_encoded_credentials_and_shopify_are_refused(self) -> None:
-        for key, value in (("API_TOKEN", "live-value"), ("GITHUB_TOKEN", "opaque")):
+        for key, value in (
+            ("API_TOKEN", "live-value"),
+            ("GITHUB_TOKEN", "opaque"),
+            ("CONNECTION_OPTIONS", "host=example password=fixture"),
+        ):
             payload = self.before.model_dump(mode="json")
             payload["preview"]["override_env"][key] = value
             response = await self.post(payload)
@@ -151,6 +159,7 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         for addon, setting, value in (
             ("shopify", "shop_url_key", "business-store"),
             ("example", "api_token", "live-value"),
+            ("example", "connection_options", "host=example password=fixture"),
         ):
             settings = OdooPostDeployPayload.model_validate(
                 {
@@ -181,6 +190,48 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         ):
             payload = self.before.model_dump(mode="json")
             payload["preview"]["override_env"][key] = "https://business.example.test"
+            response = await self.post(payload)
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_active_policy_markers_cover_plain_and_encoded_settings(self) -> None:
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="fixture-key-policy",
+                source="test",
+                updated_at=self.before.updated_at,
+                rules=(
+                    RuntimeSecretSafetyRule(binding_key="OTHER_TOKEN", secret_class="shared_safe"),
+                ),
+                integration_key_markers=("EXAMPLE_CONNECTOR",),
+            )
+        )
+        plain = self.before.model_dump(mode="json")
+        plain["preview"]["override_env"]["EXAMPLE_CONNECTOR_BASE_URL"] = (
+            "https://business.example.test"
+        )
+        encoded = self.before.model_dump(mode="json")
+        encoded["preview"]["override_env"][ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = (
+            base64.b64encode(
+                OdooPostDeployPayload.model_validate(
+                    {
+                        "context": self.before.preview.context,
+                        "instance": "preview",
+                        "addon_settings": [
+                            {
+                                "addon": "example_connector",
+                                "setting": "base_url",
+                                "value": {
+                                    "source": "literal",
+                                    "value": "https://business.example.test",
+                                },
+                            }
+                        ],
+                    }
+                ).to_wire_json_bytes()
+            ).decode()
+        )
+        for payload in (plain, encoded):
             response = await self.post(payload)
             self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)

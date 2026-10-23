@@ -22,6 +22,7 @@ def director_preview_override_allowed(
     existing: LaunchplaneProductProfileRecord | None,
     replacement: LaunchplaneProductProfileRecord,
     secret_bindings: tuple[SecretBinding, ...],
+    integration_key_markers: tuple[str, ...],
 ) -> bool:
     if (
         existing is None
@@ -55,7 +56,7 @@ def director_preview_override_allowed(
         not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
         or key in secret_keys
         or key.startswith("ENV_OVERRIDE_")
-        or is_integration_runtime_key(key)
+        or is_integration_runtime_key(key, extra_markers=integration_key_markers)
     ):
         return False
     try:
@@ -68,14 +69,20 @@ def director_preview_override_allowed(
             return True
         payloads = (before[key], value) if key in before else (value,)
         return all(
-            _nonsecret_preview_payload_allowed(encoded, context=existing.preview.context)
+            _nonsecret_preview_payload_allowed(
+                encoded,
+                context=existing.preview.context,
+                integration_key_markers=integration_key_markers,
+            )
             for encoded in payloads
         )
     except (ValueError, binascii.Error, PlatformCredentialRefusedError):
         return False
 
 
-def _nonsecret_preview_payload_allowed(value: str, *, context: str) -> bool:
+def _nonsecret_preview_payload_allowed(
+    value: str, *, context: str, integration_key_markers: tuple[str, ...]
+) -> bool:
     payload = OdooPostDeployPayload.model_validate_json(base64.b64decode(value, validate=True))
     pairs = [(item.addon, item.setting) for item in payload.addon_settings]
     return (
@@ -88,7 +95,9 @@ def _nonsecret_preview_payload_allowed(value: str, *, context: str) -> bool:
         and bool(pairs)
         and len(pairs) == len(set(pairs))
         and all(
-            not is_integration_runtime_key(f"{item.addon}_{item.setting}")
+            not is_integration_runtime_key(
+                f"{item.addon}_{item.setting}", extra_markers=integration_key_markers
+            )
             and item.value.source == "literal"
             and not plain_setting_looks_like_credential(item.setting, str(item.value.value))
             and not runtime_value_carries_credentials(str(item.value.value))
