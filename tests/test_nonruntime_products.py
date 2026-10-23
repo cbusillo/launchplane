@@ -27,6 +27,11 @@ from control_plane.contracts.product_reconcile import ProductReconcileRequestRec
 from control_plane.contracts.repo_product_mapping_read_model import (
     build_repo_product_mapping_from_records,
 )
+from control_plane.generic_web_onboarding import (
+    GenericWebOnboardingIntent,
+    build_generic_web_onboarding_manifest,
+)
+from control_plane.product_repository_identity import current_tracked_inventory_record
 from control_plane.github_app_webhook import _product_for_repository
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_reconcile import (
@@ -566,9 +571,17 @@ class NonruntimeProductTests(unittest.TestCase):
         renamed_inventory = _inventory(
             repository_id=42, repository="example/no-longer-tool", inventory_revision=2
         )
-        require_product_profile_writes(
-            (inert,), (renamed,), inventory_records=(own, renamed_inventory)
-        )
+        with self.assertRaises(ProductRepositoryOwnershipError):
+            require_product_profile_writes(
+                (inert,), (renamed,), inventory_records=(own, renamed_inventory)
+            )
+        for state in ("tracked", "retired"):
+            reused_name = _inventory(
+                repository_id=43, repository=inert.repository, inventory_state=state
+            )
+            require_product_profile_writes(
+                (inert,), (renamed,), inventory_records=(own, renamed_inventory, reused_name)
+            )
 
     def test_runtime_onboarding_does_not_require_unrelated_inventory(self) -> None:
         for with_inert in (False, True):
@@ -990,6 +1003,209 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(store.read_product_profile_record(current.product), current)
                 self.assertTrue(store.read_product_profile_record(runtime.product).is_active)
+
+    async def test_historical_alias_refuses_without_overriding_current_name_reuse(self) -> None:
+        for reused in (False, True):
+            with (
+                self.subTest(reused=reused),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                runtime = LaunchplaneProductProfileRecord.model_validate(
+                    {
+                        **product_profile_payload("runtime"),
+                        "repository": "example/old-name",
+                        "owner": {"github_login": "client", "github_id": "5678"},
+                    }
+                )
+                store.write_repository_inventory_record(
+                    _inventory(repository_id=42, repository=runtime.repository)
+                )
+                store.write_product_profile_record(runtime)
+                store.write_repository_inventory_record(
+                    _inventory(
+                        repository_id=42, repository="example/current-name", inventory_revision=2
+                    )
+                )
+                if reused:
+                    store.write_repository_inventory_record(
+                        _inventory(repository_id=43, repository=runtime.repository)
+                    )
+                app, sessions, session = self._registration_app(store)
+
+                def token(*, repository: str, **kwargs: object) -> str:
+                    current_tracked_inventory_record(
+                        repository=repository,
+                        inventory_records=store.list_repository_inventory_records(),
+                    )
+                    return "fixture-token"
+
+                def github(*, method: str = "GET", **kwargs: object) -> dict[str, object] | None:
+                    return (
+                        None
+                        if method == "DELETE"
+                        else {"type": "User", "login": "example-operator", "id": 123}
+                    )
+
+                payload: dict[str, object] = {
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "manifest": {
+                        **inert_manifest(),
+                        "repository": "example/current-name",
+                        "owner": {"github_login": "example-operator", "github_id": "123"},
+                    },
+                }
+                with (
+                    patch(
+                        "control_plane.http_app.resolve_launchplane_github_token", side_effect=token
+                    ),
+                    patch("control_plane.http_app.github_api_request", side_effect=github),
+                ):
+                    planned = await _asgi_request(
+                        app,
+                        "POST",
+                        ROUTE,
+                        headers=_browser_mutation_headers(sessions, session),
+                        payload=payload,
+                    )
+                    self.assertEqual(planned.status_code, 202 if reused else 409, planned.text)
+                    if reused:
+                        applied = await _asgi_request(
+                            app,
+                            "POST",
+                            ROUTE,
+                            headers={
+                                **_browser_mutation_headers(sessions, session),
+                                "Idempotency-Key": "name-reuse",
+                            },
+                            payload={
+                                **payload,
+                                "mode": "apply",
+                                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                            },
+                        )
+                        self.assertEqual(applied.status_code, 202, applied.text)
+                    else:
+                        self.assertEqual(
+                            planned.json()["error"]["code"], ProductRepositoryOwnershipError.code
+                        )
+                self.assertEqual(store.read_product_profile_record(runtime.product), runtime)
+                self.assertEqual(len(store.list_product_profile_records()), 2 if reused else 1)
+
+    async def test_generic_web_plan_refuses_inert_ownership_before_resource_planning(self) -> None:
+        for kind in ("collision", "existing-key", "distinct"):
+            with (
+                self.subTest(kind=kind),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                inert = inert_profile()
+                store.write_product_profile_record(inert)
+                before = store.list_product_profile_records()
+                generic: dict[str, object] = {
+                    "product": inert.product if kind == "existing-key" else "runtime",
+                    "display_name": "Runtime",
+                    "repository": inert.repository if kind == "collision" else "example/runtime",
+                    "repository_id": "42",
+                    "repository_owner_id": "7",
+                    "image_repository": "ghcr.io/example/runtime",
+                    "runtime_port": 3000,
+                    "health_path": "/healthz",
+                    "preview_base_url": "https://preview.example.com",
+                }
+                rule = _product_config_policy(
+                    action="generic_web_onboarding.plan",
+                    product="launchplane",
+                    context="launchplane",
+                ).model_dump(mode="json")["github_actions"][0]
+                sessions = HumanSessionManager(
+                    config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                )
+                session = sessions.issue(_github_human_identity())
+                app = create_launchplane_fastapi_app(
+                    verifier=StubVerifier(identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "github_actions": [
+                                {
+                                    **rule,
+                                    "actions": [
+                                        "generic_web_onboarding.plan",
+                                        "product_onboarding.apply",
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                    record_store_factory=lambda: store,
+                    human_session_manager=sessions,
+                )
+                payload: dict[str, object] = {
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "generic_web": generic,
+                }
+                human = await _asgi_request(
+                    app,
+                    "POST",
+                    ROUTE,
+                    headers=_browser_mutation_headers(sessions, session),
+                    payload=payload,
+                )
+                self.assertEqual(human.status_code, 403, human.text)
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    ROUTE,
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=payload,
+                )
+                self.assertEqual(
+                    response.status_code,
+                    {"collision": 409, "existing-key": 400, "distinct": 202}[kind],
+                    response.text,
+                )
+                if kind == "collision":
+                    self.assertEqual(
+                        response.json()["error"]["code"], ProductRepositoryOwnershipError.code
+                    )
+                elif kind == "distinct":
+                    self.assertTrue(response.json()["result"]["plan_sha256"])
+                manifest = build_generic_web_onboarding_manifest(
+                    intent=GenericWebOnboardingIntent.model_validate(generic),
+                    target_id="fixture-target",
+                )
+                if kind != "distinct":
+                    with (
+                        patch(
+                            "control_plane.workflows.product_onboarding.build_provider_target_records",
+                            side_effect=AssertionError("Rejected profiles must not plan resources"),
+                        ),
+                        self.assertRaises(
+                            ProductRepositoryOwnershipError
+                            if kind == "collision"
+                            else ProductClassificationChangeError
+                        ),
+                    ):
+                        plan_product_onboarding_authority_bundle(
+                            record_store=store, manifest=manifest
+                        )
+                self.assertEqual(store.list_product_profile_records(), before)
+                self.assertEqual(store.list_physical_provider_target_records(), ())
+                self.assertEqual(store.list_runtime_environment_records(), ())
+                self.assertEqual(store.list_secret_bindings(), ())
+                self.assertEqual(store.list_repository_inventory_records(), ())
 
     async def test_stale_inert_inventory_does_not_block_runtime_settings(self) -> None:
         with (

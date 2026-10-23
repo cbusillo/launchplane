@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 import hashlib
 import json
 import re
@@ -454,6 +455,24 @@ def apply_product_onboarding_manifest(
     return result
 
 
+def require_product_onboarding_profile_write(
+    *,
+    record_store: ProductOnboardingRecordStore,
+    product_profile: LaunchplaneProductProfileRecord,
+) -> None:
+    def inventory_snapshot() -> Iterator[RepositoryInventoryRecord]:
+        yield from record_store.list_repository_inventory_records()
+
+    require_product_profile_writes(
+        (product_profile,),
+        record_store.list_product_profile_records(),
+        inventory_records=inventory_snapshot(),
+        absent_product_ids=(product_profile.product,)
+        if not product_profile.is_managed_runtime
+        else (),
+    )
+
+
 def plan_product_onboarding_authority_bundle(
     *,
     record_store: ProductOnboardingRecordStore,
@@ -472,13 +491,10 @@ def plan_product_onboarding_authority_bundle(
         updated_at=recorded_at,
         existing_profile=existing_product_profile,
     )
+    require_product_onboarding_profile_write(
+        record_store=record_store, product_profile=product_profile
+    )
     if not product_profile.is_managed_runtime:
-        require_product_profile_writes(
-            (product_profile,),
-            record_store.list_product_profile_records(),
-            inventory_records=record_store.list_repository_inventory_records(),
-            absent_product_ids=(product_profile.product,),
-        )
         return (
             ProductOnboardingApplyResult(
                 product=product_profile.product, product_profile=product_profile

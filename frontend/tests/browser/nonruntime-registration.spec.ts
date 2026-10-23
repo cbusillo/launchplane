@@ -48,7 +48,7 @@ for (const outcome of ["saved", "lost-reply", "persistent-refusal", "storage-fai
         else profile = planned;
         if (lostReply && applies.length === 1) { await route.abort("failed"); return; }
         if (outcome === "definitive-conflict" && applies.length === 1) {
-          profile = { ...planned, repository: "example/different" };
+          profile = { ...planned, display_name: "Independent registration" };
           await route.fulfill({ status: 400, json: { error: { code: "invalid_product_onboarding_manifest", message: conflictRefusal } } });
           return;
         }
@@ -219,5 +219,5 @@ async function fillRegistration(page: Page): Promise<void> {
   await page.getByLabel("Repository", { exact: true }).fill("example/desktop-tool");
   await page.getByLabel("Client GitHub login", { exact: true }).fill(" @DiReCtOr ");
   await page.getByLabel("Client GitHub ID", { exact: true }).fill("1234");
-  await page.getByLabel("The recorded Client is the Director and accepts this product under standing direction.").check();
+  await page.getByRole("region", { name: "Director product registration" }).getByRole("checkbox").check();
 }

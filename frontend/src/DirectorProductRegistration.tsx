@@ -75,7 +75,8 @@ export function DirectorProductRegistration({ onRefresh }: { onRefresh: () => vo
     setReading(true); setError("");
     try {
       const profile = (await readProductProfile(saved.draft.product.trim())).profile;
-      if (profile.repository.toLowerCase() !== saved.draft.repository.trim().toLowerCase() ||
+      if (profile.display_name !== saved.draft.name.trim() ||
+          profile.repository.toLowerCase() !== saved.draft.repository.trim().toLowerCase() ||
           profile.owner.github_id !== saved.draft.githubId.trim() || profile.owner.github_login.toLowerCase() !== normalizeOwnerLoginInput(saved.draft.login).toLowerCase() ||
           profile.release_on_acceptance !== "director_standing" || profile.lifecycle_state !== "active" || profile.classification !== "active_awareness") {
         throw new Error("The saved product differs from this registration. Keep this record and inspect the product before proceeding.");

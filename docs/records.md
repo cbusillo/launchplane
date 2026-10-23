@@ -998,6 +998,14 @@ ownership; committed same-key requests replay their original result. The
 browser form uses this same audited surface. Runtime onboarding retains its
 existing bearer route and bounded Client/acceptance settings.
 
+Runtime-manifest plans and generic-web dry runs also preflight the same profile
+classification and known repository collisions. Runtime planning checks before
+building its resource bundle. A generic-web dry run checks only its planned
+profile with the placeholder target;
+it does not require an already created provider target or a full resource bundle.
+The reviewed digest remains bound to the generic-web intent, and apply retains
+its serialized commit-time ownership check.
+
 Full-profile writes cannot transfer standing acceptance to another repository
 or copied repository identity. Hold acceptance through the existing reviewed
 production-use setting before changing repository fields, then have a signed-in
@@ -1031,9 +1039,13 @@ repository names or equal nonempty copied repository IDs. Creating or activating
 an active profile, or changing its repository name or copied IDs, also compares
 known immutable IDs from the highest revision of each inventory stream. This
 includes possible matches from tied revisions and retired inventory as negative
-collision evidence. A stale profile name with a copied ID can therefore still
-conflict with a canonical incoming name whose copied IDs are omitted. Retired
-profiles do not retain active repository ownership.
+collision evidence. If no highest-revision stream names a profile's repository,
+retained inventory history for that name supplies possible negative IDs instead.
+A current name claim takes precedence over that history, so reuse of an old name
+does not reserve every repository that previously used it. Existing copied IDs
+remain negative evidence. This also detects an unclaimed historical name when
+both profiles omit copied IDs. Retired profiles do not retain active repository
+ownership.
 
 Missing or ambiguous inventory does not prove distinctness or complete alias
 coverage; only known intersections refuse the acquisition. An unrelated profile's

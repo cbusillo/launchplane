@@ -943,6 +943,8 @@ from control_plane.storage.postgres import (
     RouteBindingReconcileWriteResult,
 )
 from control_plane.workflows.product_onboarding import (
+    build_product_profile_record,
+    require_product_onboarding_profile_write,
     plan_product_onboarding_authority_bundle,
     product_onboarding_manifest_plan_sha256,
 )
@@ -18815,6 +18817,10 @@ def create_launchplane_fastapi_app(
                         intent=onboarding_request.generic_web,
                         target_id="planned-provider-target",
                     )
+                    planned_profile = build_product_profile_record(
+                        manifest=planned_manifest,
+                        updated_at=utc_now_timestamp(),
+                    )
                 except ValueError as error:
                     raise _launchplane_http_error(
                         status_code=400,
@@ -18822,6 +18828,10 @@ def create_launchplane_fastapi_app(
                         code="invalid_product_onboarding_manifest",
                         message=str(error),
                     ) from error
+                require_product_onboarding_profile_write(
+                    record_store=database_store,
+                    product_profile=planned_profile,
+                )
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={

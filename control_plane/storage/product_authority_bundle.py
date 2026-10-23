@@ -93,14 +93,19 @@ class ProductRepositoryOwnershipError(ValueError):
 def _known_repository_collision_ids(
     profile: LaunchplaneProductProfileRecord,
     inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]],
+    inventory_history: tuple[RepositoryInventoryRecord, ...],
 ) -> set[str]:
     repository = profile.repository.strip().lower()
-    return ({profile.repository_id} if profile.repository_id else set()) | {
+    current_ids = {
         record.repository_id
         for current in inventory_streams.values()
         for record in current
         if record.repository == repository
     }
+    known_ids = current_ids or {
+        record.repository_id for record in inventory_history if record.repository == repository
+    }
+    return ({profile.repository_id} if profile.repository_id else set()) | known_ids
 
 
 def require_product_profile_writes(
@@ -114,6 +119,7 @@ def require_product_profile_writes(
     if any(product in profiles for product in absent_product_ids):
         raise ProductProfileConflictError("Product was registered before commit.")
     inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]] | None = None
+    inventory_history: tuple[RepositoryInventoryRecord, ...] = ()
     for record in records:
         record = LaunchplaneProductProfileRecord.model_validate(record.model_dump(mode="json"))
         current = profiles.get(record.product)
@@ -142,7 +148,8 @@ def require_product_profile_writes(
             if ownership_changed and peers:
                 if inventory_streams is None:
                     inventory_streams = {}
-                    for inventory in inventory_records:
+                    inventory_history = tuple(inventory_records)
+                    for inventory in inventory_history:
                         current_inventory = inventory_streams.get(inventory.repository_id, ())
                         if (
                             not current_inventory
@@ -157,9 +164,12 @@ def require_product_profile_writes(
                                 *current_inventory,
                                 inventory,
                             )
-                known_ids = _known_repository_collision_ids(record, inventory_streams)
+                known_ids = _known_repository_collision_ids(
+                    record, inventory_streams, inventory_history
+                )
                 if any(
-                    known_ids & _known_repository_collision_ids(other, inventory_streams)
+                    known_ids
+                    & _known_repository_collision_ids(other, inventory_streams, inventory_history)
                     for other in peers
                 ):
                     raise ProductRepositoryOwnershipError(
