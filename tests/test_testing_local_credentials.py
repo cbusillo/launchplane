@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.outbound_http import PublicHttpResponse
 from control_plane.product_config import apply_product_config_bundle
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
@@ -322,8 +323,24 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         }
         for complete in (True, False):
             if not complete:
-                report["result"]["observation"]["guild_status"] = "unavailable"
-                report["result"]["observation"]["guild_enumeration_complete"] = False
+
+                def limited(url: str, **kwargs: Any) -> Any:
+                    if "/guilds?" in url:
+                        return PublicHttpResponse(
+                            429,
+                            "",
+                            0,
+                            (("X-RateLimit-Scope", "shared"),),
+                            b'{"retry_after":120.5,"global":false,"message":"private-provider-text"}',
+                        )
+                    return self.provider_response(url, **kwargs)
+
+                with patch(
+                    "control_plane.discord_external_resources.request_public_http",
+                    side_effect=limited,
+                ):
+                    report = (await self.discord_identity()).json()
+                reader.return_value = report
             output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
@@ -346,6 +363,12 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
                 json.loads(output.getvalue())["result"]["observation"]["bot_id"], "123"
             )
             self.assertFalse(reader.call_args.kwargs["query"])
+            if not complete:
+                observation = json.loads(output.getvalue())["result"]["observation"]
+                self.assertEqual(observation["rate_limits"][0]["retry_after"], 120.5)
+                self.assertEqual(observation["rate_limits"][0]["scope"], "shared")
+                self.assertFalse(observation["guild_enumeration_complete"])
+                self.assertNotIn("private-provider-text", output.getvalue())
 
     async def test_discord_identification_rejects_bot_mismatch_incomplete_comparison_and_production_drift(
         self,
