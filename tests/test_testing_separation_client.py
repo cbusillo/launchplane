@@ -65,6 +65,21 @@ class TestingSeparationClientTests(unittest.TestCase):
                     {"status": "accepted", "trace_id": "fixture", "result": completed},
                     {"status": "accepted", "trace_id": "fixture", "result": completed},
                     {"status": "accepted", "trace_id": "fixture", "result": completed},
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture",
+                        "result": {
+                            "product": "example",
+                            "context": "example",
+                            "state": "reconcile_required",
+                            "plan_sha256": plan["plan_sha256"],
+                            "provider_effect_phase": "schedule_trigger",
+                            "lease_expires_at": "",
+                            "created_at": "",
+                            "updated_at": "",
+                            "provider_effect_started_at": "",
+                        },
+                    },
                 ]
             )
             transport = {
@@ -97,6 +112,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                 "resources-apply",
                 "resources-apply",
                 "resources-read",
+                "resources-read",
             ):
                 args = ["client", mode, *common]
                 if mode.endswith("apply"):
@@ -113,6 +129,9 @@ class TestingSeparationClientTests(unittest.TestCase):
                 self.assertNotIn("private-volume", output.getvalue())
             receipt = evidence.with_name(evidence.name + ".receipt.json")
             self.assertEqual(json.loads(receipt.read_text())["result"], completed)
+            self.assertEqual(
+                json.loads(output.getvalue())["preparation"]["state"], "reconcile_required"
+            )
             self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(evidence.read_text())["result"], plan)
             self.assertEqual(
@@ -153,7 +172,14 @@ class TestingSeparationClientTests(unittest.TestCase):
                 status_code,
                 "Conflict",
                 Message(),
-                io.BytesIO(json.dumps({"error": {"code": code}}).encode()),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "trace_id": "launchplane_req_fixture",
+                            "error": {"code": code, "message": "private-error-fixture"},
+                        }
+                    ).encode()
+                ),
             )
             call = Mock(
                 side_effect=[
@@ -183,6 +209,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                 },
                 "validate_service_url": lambda value: None,
                 "public_trace_id": lambda value: value,
+                "public_code": lambda value, **kwargs: value,
                 "request_launchplane": call,
                 "emit_http_error_payload": emit,
             }
@@ -229,7 +256,12 @@ class TestingSeparationClientTests(unittest.TestCase):
             self.assertFalse(applied["body"]["deploy"])
             self.assertEqual(evidence.read_bytes(), saved)
             if unknown:
-                self.assertTrue(json.loads(output.getvalue())["retain_original_key"])
+                result = json.loads(output.getvalue())
+                self.assertTrue(result["retain_original_key"])
+                self.assertEqual(result["trace_id"], "launchplane_req_fixture")
+                self.assertEqual(result["error_code"], code)
+                self.assertEqual(result["http_status"], status_code)
+                self.assertNotIn("private-error-fixture", output.getvalue())
                 emit.assert_not_called()
             else:
                 emit.assert_called_once()

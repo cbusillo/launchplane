@@ -17,6 +17,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesRequest,
     SeparationResourcesPlan,
     SeparationResourcesResult,
+    SeparationResourcesStatus,
 )
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
@@ -219,6 +220,22 @@ def main() -> int:
         ):
             raise ValueError("Unexpected deployment result.")
         if resources:
+            if resource_read and "state" in result:
+                observed = SeparationResourcesStatus.model_validate(result)
+                if (observed.product, observed.context) != (args.product, args.context):
+                    raise ValueError("Preparation status belongs to another lane.")
+                print(
+                    json.dumps(
+                        {
+                            "status": "observed",
+                            "mode": args.mode,
+                            "trace_id": transport["public_trace_id"](response["trace_id"]),
+                            "preparation": observed.model_dump(mode="json"),
+                            "retain_original_key": True,
+                        }
+                    )
+                )
+                return 0
             result = (
                 SeparationResourcesResult.model_validate(result)
                 if applying or resource_read
@@ -266,8 +283,10 @@ def main() -> int:
         raw_error = error.read()
         error.close()
         try:
-            code = json.loads(raw_error).get("error", {}).get("code", "")
+            payload = json.loads(raw_error)
+            code = payload.get("error", {}).get("code", "")
         except (ValueError, AttributeError):
+            payload = {}
             code = ""
         with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw_error)
@@ -276,7 +295,17 @@ def main() -> int:
                 error.code >= 500
                 or code in {"mutation_reconciliation_required", "mutation_in_progress"}
             ):
-                print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
+                print(
+                    json.dumps(
+                        {
+                            "status": "outcome_unknown",
+                            "retain_original_key": True,
+                            "http_status": error.code,
+                            "error_code": transport["public_code"](code, default="unknown"),
+                            "trace_id": transport["public_trace_id"](payload.get("trace_id", "")),
+                        }
+                    )
+                )
             else:
                 transport["emit_http_error_payload"](
                     operation="testing-separation", request={"mode": args.mode}, exc=error

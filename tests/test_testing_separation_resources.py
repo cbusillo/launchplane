@@ -514,17 +514,79 @@ class SeparationResourceTests(unittest.TestCase):
             ),
         )
 
-        async def call(**changes: object) -> Response:
+        async def call(*, key: str = "http-prepare", **changes: object) -> Response:
             return await request(
                 app,
                 "POST",
                 ROUTE.replace("{product}", self.product),
-                headers={"Authorization": "Bearer fixture", "Idempotency-Key": "http-prepare"},
+                headers={"Authorization": "Bearer fixture", "Idempotency-Key": key},
                 payload={**self.body.model_dump(mode="json"), **changes},
             )
 
         plan = asyncio.run(call(mode="dry-run", reviewed_plan_sha256=""))
         self.assertEqual(plan.status_code, 202, plan.text)
+        missing = asyncio.run(call(mode="receipt", key="http-status"))
+        self.assertEqual(missing.status_code, 202, missing.text)
+        self.assertEqual(missing.json()["result"]["state"], "not_found")
+        no_key = asyncio.run(call(mode="receipt", key=""))
+        self.assertEqual(no_key.status_code, 409, no_key.text)
+        from control_plane.http_routes.mutation_support import idempotency_scope
+
+        scope = idempotency_scope(
+            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        )
+        reserved = self.store.reserve_mutation(
+            scope=scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="http-status",
+            request_fingerprint="b" * 64,
+            lease_owner="launchplane_req_original",
+            lease_seconds=300,
+            reconciliation_key=self.body.reviewed_plan_sha256,
+            provider_target_key=self.adapter.target_key(),
+        ).record
+        assert reserved is not None
+        checkpointed = self.store.checkpoint_mutation_provider_effect(
+            reservation=reserved, effect_phase="inspect_retained"
+        ).record
+        assert checkpointed is not None
+        reserved = checkpointed
+        for uncertain in (False, True):
+            if uncertain:
+                updated = self.store.mark_mutation_reconcile_required(
+                    reservation=reserved,
+                    reconciliation_key=reserved.reconciliation_key,
+                ).record
+                assert updated is not None
+                reserved = updated
+            with (
+                patch.object(SeparationResourcesAdapter, "observe") as observe,
+                patch.object(SeparationResourcesAdapter, "binding") as binding,
+            ):
+                pending = asyncio.run(call(mode="receipt", key="http-status"))
+            self.assertEqual(pending.status_code, 202, pending.text)
+            result = pending.json()["result"]
+            self.assertEqual(result["state"], reserved.state)
+            self.assertEqual(result["lease_expires_at"], reserved.lease_expires_at)
+            self.assertEqual(result["plan_sha256"], reserved.reconciliation_key)
+            self.assertEqual(result["provider_effect_phase"], reserved.provider_effect_phase)
+            self.assertEqual(
+                result["provider_effect_started_at"], reserved.provider_effect_started_at
+            )
+            self.assertNotIn("applied", result)
+            self.assertNotIn(reserved.request_fingerprint, pending.text)
+            observe.assert_not_called()
+            binding.assert_not_called()
+            self.assertEqual(
+                self.store.read_idempotency_record(
+                    scope=scope,
+                    route_path=ROUTE.format(product=self.product),
+                    idempotency_key="http-status",
+                ),
+                reserved,
+            )
+        foreign = asyncio.run(call(mode="receipt", key="http-status", context="foreign"))
+        self.assertEqual(foreign.status_code, 409, foreign.text)
         with scoped_agent_transport():
             denied = asyncio.run(call(mode="dry-run"))
         self.assertEqual(denied.status_code, 403, denied.text)
