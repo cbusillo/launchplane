@@ -58,6 +58,7 @@ def candidate_private_readiness(
         host=host, token=token, target_type="compose", target_id=allocation.compose_id
     )
     require_candidate_configuration(allocation, inputs, payload)
+    compose_project = str(payload["appName"])
     generation = plan.generation
     spec: dict[str, object] = {
         "generation": generation.model_dump(mode="json")
@@ -67,7 +68,7 @@ def candidate_private_readiness(
             "instance": "testing",
             "resources_binding_sha256": allocation.resources_binding_sha256,
         },
-        "compose_project": str(payload.get("appName") or ""),
+        "compose_project": compose_project,
         "database_name": inputs.runtime_environment["ODOO_DB_NAME"],
         "database_data_directory": compose.ODOO_DATABASE_DATA_DIRECTORY,
         "image_reference": plan.image_reference,
@@ -116,6 +117,7 @@ def candidate_private_readiness(
         + ":"
         + inputs.runtime_environment["ODOO_HTTP_PORT"],
         deployment_id=deployment_id,
+        compose_project=compose_project,
         source_witness=generation_binding(generation) if generation else "empty:" + plan.digest,
         integration_isolation_verified=True,
         credentials_verified=True,
@@ -140,6 +142,11 @@ def require_candidate_configuration(
         allocation.namespace,
     ):
         raise ValueError("Candidate placement changed.")
+    if not re.fullmatch(
+        re.escape(allocation.namespace) + r"(?:-[a-z0-9]{6})?",
+        str(payload.get("appName") or ""),
+    ):
+        raise ValueError("Candidate Compose project changed.")
     if (
         payload.get("autoDeploy") is not False
         or payload.get("sourceType") != "raw"

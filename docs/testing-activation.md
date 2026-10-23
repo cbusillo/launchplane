@@ -382,6 +382,12 @@ before candidate mutations and rechecked before switching. A proven contradictio
 before any route writer can retain an exactly closed private candidate negatively;
 unavailable transport and possibly dispatched writers keep the original key.
 Readiness is observed within a bounded window with the canonical identity parser.
+Native Compose readiness records the exact provider project it inspected. Route
+publication uses that retained project together with the candidate's stable DNS
+alias, which may differ by the provider's project suffix. Replay retains the
+original publication proof; it does not discover a replacement project. Legacy
+proof without a project retains the exact unsuffixed comparison and fails closed
+for a suffixed project.
 Warm-up and replacement tasks can become healthy on the original key. Redirects,
 transport/framing/JSON errors and nonmapping bodies stay unknown; a final stable
 attributed failure is recovery-only under the original receipt. No fixture or

@@ -1,6 +1,7 @@
 """An admitted build/source for a private copy, before serving publication."""
 
 from datetime import datetime
+import re
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
@@ -130,6 +131,7 @@ class TestingCandidatePrepared(FrozenRecord):
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     runtime_identity: RuntimeIdentity
     private_endpoint: str = Field(min_length=1)
+    compose_project: str = Field(default="", exclude_if=lambda value: not value)
     deployment_id: str = Field(min_length=1)
     source_witness: str = Field(min_length=1)
     integration_isolation_verified: Literal[True]
@@ -213,6 +215,14 @@ class TestingCandidateApplication(FrozenRecord):
             raise ValueError("Prepared evidence differs from the original candidate/build.")
         if self.phase == "prepared" and self.prepared is None:
             raise ValueError("Candidate completion requires private readiness evidence.")
+        if (
+            self.prepared is not None
+            and self.prepared.compose_project
+            and not re.fullmatch(
+                re.escape(self.plan.namespace) + r"(?:-[a-z0-9]{6})?", self.prepared.compose_project
+            )
+        ):
+            raise ValueError("Prepared project differs from the original candidate namespace.")
         if (self.phase == "abandoned") != bool(self.abandonment_evidence):
             raise ValueError("Candidate abandonment requires a terminal provider/custody receipt.")
         return self

@@ -375,7 +375,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
         execution: Any = None,
         execution_key: str = "",
         writer_attempt: Any = None,
+        desired_compose_project: str | None = None,
     ) -> str:
+        if backend == plan.new_backend:
+            application = self.fixture.candidate.application
+            assert application is not None and application.prepared is not None
+            self.assertEqual(desired_compose_project, application.prepared.compose_project or None)
+        else:
+            self.assertIsNone(desired_compose_project)
+
         def publish() -> None:
             if backend == plan.new_backend:
                 self.assertEqual(self.current().target_id, self.fixture.before.target_id)
@@ -1471,6 +1479,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(DokployTestingRouteTransport, "publish", side_effect=lost):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
+        self.prepared = self.prepared.model_copy(
+            update={"compose_project": self.fixture.candidate.namespace + "-def456"}
+        )
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(self.effects, ["switch-new"])
@@ -4273,6 +4284,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execution: Any = None,
             execution_key: str = "",
             writer_attempt: Any = None,
+            desired_compose_project: str | None = None,
         ) -> None:
             def send() -> None:
                 pending.append(
@@ -4282,6 +4294,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         expected_backend=expected_backend,
                         dispatch_guard=lambda write: write(),
                         desired_runtime_identity=desired_runtime_identity,
+                        desired_compose_project=desired_compose_project,
                     )
                 )
                 raise NativeSourceUnavailable("fixture proxy writer has not returned")

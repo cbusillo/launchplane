@@ -115,6 +115,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             },
         }
         namespace = self.plan.new_backend.removeprefix("http://").split(":")[0]
+        self.candidate_project: str | None = namespace + "-abc123"
         self.containers["new"] = {
             "Id": "new",
             "Name": "/" + namespace + "-web-1",
@@ -122,8 +123,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             "Mounts": [],
             "Config": {
                 "Labels": {
-                    "com.docker.compose.project": namespace,
+                    "com.docker.compose.project": self.candidate_project,
                     "com.docker.compose.service": "web",
+                    "traefik.enable": "false",
                 },
                 "Env": [
                     "PLATFORM_INSTANCE=testing",
@@ -402,6 +404,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution=execution,
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
+            desired_compose_project=self.candidate_project,
         )
         frame = self.client.read()
         observe_testing_route(
@@ -457,6 +460,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution=attempt.execution,
             execution_key=attempt.key,
             writer_attempt=attempt,
+            desired_compose_project=self.candidate_project,
         )
 
     def test_a_lost_initializer_reply_is_observed_without_another_send(self) -> None:
@@ -699,7 +703,16 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_candidate_alias_must_be_unique_running_web_and_the_admitted_runtime(self) -> None:
         original = deepcopy(self.containers["new"])
-        for problem in ("missing", "shared", "stopped", "identity", "project"):
+        for problem in (
+            "missing",
+            "shared",
+            "stopped",
+            "identity",
+            "project",
+            "suffix",
+            "unsuffixed",
+            "service",
+        ):
             with self.subTest(problem=problem):
                 self.containers["new"] = deepcopy(original)
                 self.containers.pop("foreign", None)
@@ -715,14 +728,41 @@ class TestingRouteTransportTests(unittest.TestCase):
                         "PLATFORM_INSTANCE=testing",
                         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.identity.model_dump_json(),
                     ]
-                else:
+                elif problem in {"project", "suffix", "unsuffixed"}:
                     self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
                         "foreign"
+                        if problem == "project"
+                        else self.plan.new_backend.removeprefix("http://").split(":")[0]
+                        + ("-def456" if problem == "suffix" else "")
                     )
+                else:
+                    self.containers["new"]["Config"]["Labels"]["com.docker.compose.service"] = "db"
                 with self.assertRaises(NativeSourceUnavailable):
                     self.publish(self.plan.new_backend, self.plan.old_backend)
                 self.assertEqual(self.effect_count, 0)
                 self.assertFalse(self.route_file.exists())
+
+    def test_recorded_project_cannot_cross_the_candidate_namespace(self) -> None:
+        self.candidate_project = "foreign-project"
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.candidate_project
+        )
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
+    def test_legacy_project_requires_exact_unsuffixed_custody(self) -> None:
+        self.candidate_project = None
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.plan.new_backend.removeprefix("http://").split(":")[0]
+        )
+        self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertTrue(self.route_file.exists())
 
     def test_alias_ownership_covers_every_proxy_network_and_dns_spelling(self) -> None:
         original = deepcopy(self.containers)

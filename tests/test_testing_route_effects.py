@@ -104,6 +104,7 @@ class TestingRouteFenceControllerTests(unittest.TestCase):
                     execution=execution,
                     execution_key=attempt.key,
                     writer_attempt=attempt,
+                    desired_compose_project=self.fixture.candidate_project,
                 )
             finally:
                 self.fixture.lose_writer_reply = False
