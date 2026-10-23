@@ -652,7 +652,11 @@ class SeparationResourceTests(unittest.TestCase):
     ) -> None:
         from control_plane.contracts.canonical_json import canonical_json_sha256
         from control_plane.odoo_testing_resources import ApplicationTestingResources
-        from control_plane.testing_application_capabilities import RETAINED_CAPABILITY_PROGRAM_NAME
+        from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+        from control_plane.testing_application_capabilities import (
+            RETAINED_CAPABILITY_PROGRAM_NAME,
+            retained_application_capability_program,
+        )
         from control_plane.testing_separation_inspection import inspect_preparation_programs
 
         resources = ApplicationTestingResources(
@@ -663,14 +667,24 @@ class SeparationResourceTests(unittest.TestCase):
             namespace="lp-testing-" + "a" * 32,
             state_kind="volume",
         )
-        spec = {"application_id": resources.target_id}
+        spec: dict[str, object] = {"application_id": resources.target_id}
+        current = retained_application_capability_program(spec)
+        line = next(
+            row for row in current.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
+        )
+        historical = current.replace(
+            line,
+            "PLATFORM_CREDENTIAL_KEYS=frozenset({"
+            + ", ".join(map(repr, sorted(PLATFORM_CREDENTIAL_KEYS, reverse=True)))
+            + "})",
+        )
         self.fixture.payload["applicationId"] = resources.target_id
         self.fixture.responses["/api/schedule.list"] = [
             {
                 "name": RETAINED_CAPABILITY_PROGRAM_NAME,
                 "appName": resources.namespace,
                 "scheduleId": "original-capability",
-                "script": "fixed-fixture-capability-program",
+                "script": historical,
                 "enabled": False,
             }
         ]
@@ -687,10 +701,6 @@ class SeparationResourceTests(unittest.TestCase):
             patch(
                 "control_plane.testing_application_capabilities.retained_application_capability_spec",
                 return_value=spec,
-            ),
-            patch(
-                "control_plane.testing_application_capabilities.retained_application_capability_program",
-                return_value="fixed-fixture-capability-program",
             ),
             patch(
                 "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers",

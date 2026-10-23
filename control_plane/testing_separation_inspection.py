@@ -108,6 +108,17 @@ def inspect_preparation_programs(
             observed.script_matches = (
                 program.get("script") == expected_script if expected_script is not None else None
             )
+            if expected_script is not None and observed.kind in {
+                "retained_capability",
+                "retained_capability_readback",
+            }:
+                from control_plane.testing_application_capabilities import (
+                    capability_program_matches,
+                )
+
+                observed.script_matches = capability_program_matches(
+                    program.get("script"), expected_script
+                )
             enabled = program.get("enabled")
             observed.disabled = not enabled if isinstance(enabled, bool) else None
             if observed.schedule_id:

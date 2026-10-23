@@ -3,6 +3,7 @@
 import base64
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import partial
 from io import StringIO
 import json
 import os
@@ -37,6 +38,136 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
     configuration: dict[str, Any]
     task: dict[str, Any]
     containers: dict[str, Any]
+
+    def test_fixed_program_is_identical_across_process_hash_seeds(self) -> None:
+        code = (
+            "import hashlib,json,sys; "
+            "from control_plane.testing_application_capabilities import retained_application_capability_program; "
+            "print(hashlib.sha256(retained_application_capability_program(json.load(sys.stdin)).encode()).hexdigest())"
+        )
+        programs = [
+            subprocess.run(
+                [sys.executable, "-c", code],
+                input=json.dumps(self.spec),
+                capture_output=True,
+                text=True,
+                check=True,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            ).stdout
+            for seed in ("1", "2")
+        ]
+        self.assertEqual(*programs)
+
+    def test_program_provenance_accepts_only_key_order_permutations(self) -> None:
+        from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+        from control_plane.testing_application_capabilities import (
+            capability_program_matches,
+            retained_application_capability_program,
+        )
+
+        current = retained_application_capability_program(self.spec)
+        line = next(
+            row for row in current.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
+        )
+        keys = sorted(PLATFORM_CREDENTIAL_KEYS, reverse=True)
+        historical_line = "PLATFORM_CREDENTIAL_KEYS=frozenset({" + ", ".join(map(repr, keys)) + "})"
+        historical = current.replace(line, historical_line, 1)
+        self.assertTrue(capability_program_matches(historical, current))
+        self.assertTrue(capability_program_matches(current, current))
+        replaced = ["X" * len(keys[0]), *keys[1:]]
+        duplicated = [keys[1], *keys[1:]]
+        foreign = [
+            None,
+            historical + "\n",
+            historical.replace("set -euo pipefail", "set -euO pipefail", 1),
+            historical.replace("python3 - ", "python3 + ", 1),
+            historical.replace(historical_line, historical_line.replace("'", '"')),
+            historical.replace(historical_line, historical_line + "\n" + historical_line),
+            historical.replace(
+                historical_line, "PLATFORM_CREDENTIAL_KEYS=frozenset(" + repr(keys) + ")"
+            ),
+        ]
+        for altered in (replaced, duplicated):
+            changed = "PLATFORM_CREDENTIAL_KEYS=frozenset({" + ", ".join(map(repr, altered)) + "})"
+            foreign.append(historical.replace(historical_line, changed))
+        for observed in foreign:
+            with self.subTest(observed=type(observed).__name__):
+                self.assertFalse(capability_program_matches(observed, current))
+
+    def test_historical_host_program_keeps_terminal_and_provenance_guards(self) -> None:
+        from pathlib import Path
+
+        from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+        from control_plane.testing_application_capabilities import (
+            capability_program_matches,
+            retained_application_capability_program,
+        )
+        from control_plane.testing_application_host import run_application_host_program
+
+        current = retained_application_capability_program(self.spec)
+        line = next(
+            row for row in current.splitlines() if row.startswith("PLATFORM_CREDENTIAL_KEYS=")
+        )
+        historical = current.replace(
+            line,
+            "PLATFORM_CREDENTIAL_KEYS=frozenset({"
+            + ", ".join(map(repr, sorted(PLATFORM_CREDENTIAL_KEYS, reverse=True)))
+            + "})",
+        )
+        original = {"scheduleId": "original", "script": historical, "enabled": False}
+        readback = {**original, "scheduleId": "readback"}
+        for program in (
+            original,
+            {**original, "enabled": True},
+            {**original, "script": historical + "\n"},
+        ):
+            with (
+                self.subTest(program=program["enabled"]),
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("fixture", "fixture"),
+                ),
+                patch(
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                    return_value={"applicationId": "fixture"},
+                ),
+                patch(
+                    "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                    return_value=("application", "fixture", "fixture", "fixture"),
+                ),
+                patch(
+                    "control_plane.testing_application_host._find_storage_schedule",
+                    side_effect=[program, readback],
+                ),
+                patch(
+                    "control_plane.testing_application_host._require_terminal_storage_history"
+                ) as terminal,
+                patch(
+                    "control_plane.dokploy.post_deploy.run_manual_data_schedule", return_value={}
+                ) as dispatch,
+            ):
+                run = partial(
+                    run_application_host_program,
+                    root=Path("."),
+                    retained_target_id="fixture",
+                    context="fixture",
+                    namespace="fixture",
+                    name="fixture",
+                    prepare_script=current,
+                    readback_script=current,
+                    before_effect=Mock(),
+                    script_matches=capability_program_matches,
+                )
+                if program == original:
+                    run()
+                    self.assertEqual(terminal.call_count, 2)
+                    self.assertEqual(
+                        dispatch.call_args.kwargs["schedule_payload"]["script"], current
+                    )
+                else:
+                    with self.assertRaises(ValueError):
+                        run()
+                    dispatch.assert_not_called()
 
     def setUp(self) -> None:
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord

@@ -20,6 +20,7 @@ def run_application_host_program(
     prepare_script: str,
     readback_script: str,
     before_effect: Callable[[str], None],
+    script_matches: Callable[[object, str], bool],
 ) -> dict[str, str]:
     """An existing uncertain program must finish before a separate readback can run."""
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -38,14 +39,20 @@ def run_application_host_program(
     original = _find_storage_schedule(host, token, lookup, kind, name, namespace)
     script = prepare_script
     if original is not None:
-        if original.get("script") != prepare_script or original.get("enabled") is not False:
+        if (
+            not script_matches(original.get("script"), prepare_script)
+            or original.get("enabled") is not False
+        ):
             raise ValueError("The original host program provenance changed.")
         _require_terminal_storage_history(host, token, api.schedule_key(original), original=True)
         name += " readback"
         script = readback_script
         previous = _find_storage_schedule(host, token, lookup, kind, name, namespace)
         if previous is not None:
-            if previous.get("script") != script or previous.get("enabled") is not False:
+            if (
+                not script_matches(previous.get("script"), script)
+                or previous.get("enabled") is not False
+            ):
                 raise ValueError("The host readback program provenance changed.")
             _require_terminal_storage_history(
                 host, token, api.schedule_key(previous), original=False

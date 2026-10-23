@@ -57,6 +57,15 @@ means no valid OK marker was found, including empty or truncated evidence.
 None of these establishes qualification. Provider I/O for plans
 and inspection runs outside the API event loop.
 
+Fixed capability programs serialize their credential-key set in sorted order,
+so a service process change preserves program identity. Inspection and admitted
+host readback also recognize an older serialization only when it permutes the
+identical credential-key tokens in that one literal and every remaining byte
+matches. Different keys, quoting, inputs or code still refuse provenance.
+Storage programs retain exact comparison. Disabled-program, terminal-history,
+binding and all physical capability checks remain required; this compatibility
+does not authorize retry, allocation, settlement or hold lifting.
+
 `resources-read` uses the original key and reads only the saved service record.
 A completed operation returns its existing preparation receipt. A missing,
 running or reconciliation-required operation reports its stored state, effect
