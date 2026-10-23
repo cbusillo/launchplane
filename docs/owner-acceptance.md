@@ -98,11 +98,15 @@ recording a decision's first base branch or choosing an acceptance to carry.
 The train independently reads the latest saved decision for the product's
 current Client at admission and immediately before merging. A Request changes
 decision blocks even after a base update or new commits, after notes are edited
-to engineering-only, or while its GitHub projection is stale. Engineering-only
-checks also preserve that rejection across heads. Restore Client test notes
+to engineering-only, or while its GitHub projection is stale. Review checks
+also preserve that rejection across heads. Restore Client test notes
 and request review of the current preview to resolve it; a later Accept clears
 the veto. Decisions for another product, pull request or former Client do not
 veto this change. Acceptance remains bound to the reviewed head or proven carry.
+For a Director-standing product, the Director signs in as the recorded Client,
+opens the change's `/ui/owner-review` page and accepts its current serving preview.
+Standing acceptance suppresses invitations; it does not prevent that explicit
+decision. A serving preview remains required by the normal review path.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
@@ -289,7 +293,10 @@ The service serializes with Client decision saves and refuses withdrawal if
 any Client decision for this product already names the current head. It
 removes only the product's configured review label, confirms the removal,
 and adds a withdrawal entry to the PR history. Its durable operation retains
-the actor, head, reason and Director-decision citation. An uncertain response
+the actor, head, reason and Director-decision citation. Withdrawal changes the
+pending request only; an earlier-head Client rejection still vetoes the change
+and needs the Client's later Accept through the review path above.
+An uncertain response
 keeps the same request, digest and key; read back before recovery. Recovery can
 finish undelivered history after the label is absent, but never removes a label
 again. A pre-dispatch failure can resume the same reviewed operation. If a

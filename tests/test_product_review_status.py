@@ -769,6 +769,14 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertEqual(github.check_runs[0]["conclusion"], "failure")
+        github.labels = ("owner-review",)
+        github.body = "## Client test notes\nTry the corrected page."
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        github.labels = ()
+        github.body = "## Client test notes\nNothing for the Client to test: CI only."
         self.store.write_product_review_decision_record(
             _decision(decision="accepted", decided_at="2026-09-20T11:00:00Z")
         )
