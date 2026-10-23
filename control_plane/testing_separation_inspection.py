@@ -14,6 +14,7 @@ from control_plane.testing_program_evidence import (
 from control_plane.testing_separation_resources import (
     SeparationProgramInspection,
     STORAGE_PROGRAM_NAME,
+    ProgramLogReadStatus,
 )
 
 
@@ -102,6 +103,7 @@ def inspect_preparation_programs(
                 else "unavailable"
             )
         else:
+            observed.status = "observed"
             observed.schedule_id = program_identifier(api.schedule_key(program))
             observed.script_matches = (
                 program.get("script") == expected_script if expected_script is not None else None
@@ -125,18 +127,22 @@ def inspect_program_history(
             query={"id": observed.schedule_id, "type": "schedule"},
         )
     except click.ClickException:
+        observed.history_status = "unavailable"
         return
-    history = classify_program_history(payload, schedule_id=observed.schedule_id, original=True)
+    history = classify_program_history(
+        payload,
+        schedule_id=observed.schedule_id,
+        original=observed.kind in {"storage_preparation", "retained_capability"},
+    )
+    observed.history_status = history.status
     if history.status in {"unavailable", "uncorrelated"}:
         return
-    observed.status = "ambiguous" if history.status == "ambiguous" else "observed"
     observed.history_count = len(history.rows)
     if len(history.rows) != 1:
         return
     row = history.rows[0]
     identifier = program_identifier(api.deployment_key(row))
     if not identifier:
-        observed.status = "unavailable"
         return
     observed.deployment_id = identifier
     status = api.deployment_status(row)
@@ -156,10 +162,13 @@ def inspect_program_history(
         deployment_id=observed.deployment_id,
         deployment=row,
     )
-    observed.log_available = markers.get("log_available") == "true"
+    observed.log_read_status = (
+        ProgramLogReadStatus.AVAILABLE
+        if markers.get("log_available") == "true"
+        else ProgramLogReadStatus.UNAVAILABLE
+    )
     marker = markers.get("testing_resources_ok")
-    observed.markers_found = marker in {"true", "false"}
-    if observed.markers_found:
+    if marker in {"true", "false"}:
         observed.resources_ok = marker == "true"
     marker_binding = markers.get("testing_resources_binding_sha256")
     if marker_binding and binding is not None:

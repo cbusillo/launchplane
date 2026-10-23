@@ -50,9 +50,11 @@ reports that target plus `inputs_match` separately. Input drift, active original
 work or an unavailable capability specification does not hide independently
 readable history. `script_matches` can be unknown when the current specification
 cannot be rebuilt. Result markers are read only for a disabled matching script
-with exact terminal history. `log_available` describes the bounded log read;
-`markers_found` distinguishes an actual result marker from empty, truncated or
-unavailable evidence. Neither establishes qualification. Provider I/O for plans
+with exact terminal history. `history_status` retains the shared classifier's
+result, including repeated readbacks. `log_read_status` distinguishes a skipped
+read, an unavailable log and an available bounded log. A null `resources_ok`
+means no valid OK marker was found, including empty or truncated evidence.
+None of these establishes qualification. Provider I/O for plans
 and inspection runs outside the API event loop.
 
 `resources-read` uses the original key and reads only the saved service record.

@@ -17,6 +17,7 @@ from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.testing_separation_resources import (
     ROUTE,
     STORAGE_PROGRAM_NAME,
+    ProgramLogReadStatus,
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
     SeparationResourcesRefused,
@@ -523,7 +524,7 @@ class SeparationResourceTests(unittest.TestCase):
         self.assertIs(programs[0].result_binding_matches, False)
         self.assertTrue(programs[0].script_matches)
         self.assertTrue(programs[0].disabled)
-        self.assertTrue(programs[0].markers_found)
+        self.assertEqual(programs[0].log_read_status, ProgramLogReadStatus.AVAILABLE)
         self.assertEqual(programs[1].status, "missing")
         self.assertNotIn("fixture-private-output", str(programs))
         self.assertNotIn(resources.script("prepare"), str(programs))
@@ -575,6 +576,21 @@ class SeparationResourceTests(unittest.TestCase):
             unavailable = asyncio.run(self.call_http(mode="dry-run"))
         self.assertEqual(unavailable.status_code, 503, unavailable.text)
         self.assertNotIn("private-provider-fixture", unavailable.text)
+        from control_plane.runtime_platform_credentials import (
+            PlatformCredentialRefusedError,
+            PlatformCredentialFinding,
+        )
+
+        protective = PlatformCredentialRefusedError(
+            target="private-target-fixture",
+            findings=(
+                PlatformCredentialFinding(key="DOKPLOY_TOKEN", reason="platform_credential_key"),
+            ),
+        )
+        with patch.object(SeparationResourcesAdapter, "plan", side_effect=protective):
+            refused = asyncio.run(self.call_http(mode="dry-run"))
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertNotIn("private-target-fixture", refused.text)
         self.assert_retained()
 
     def test_native_inspection_never_treats_missing_or_incomplete_history_as_a_result(self) -> None:
@@ -713,6 +729,115 @@ class SeparationResourceTests(unittest.TestCase):
             with self.assertRaises(SeparationResourcesRefused):
                 self.run_preparation()
             schedule.assert_not_called()
+        self.assert_retained()
+
+    def test_inspection_uses_readback_history_rules_and_reports_marker_read_status(self) -> None:
+        from control_plane.testing_separation_resources import SeparationProgramInspection
+        from control_plane.testing_separation_inspection import inspect_program_history
+        from control_plane.testing_program_evidence import classify_program_history
+
+        first = {
+            "scheduleId": "fixture-history",
+            "deploymentId": "first-job",
+            "status": "done",
+            "startedAt": self.fixture.now(),
+            "finishedAt": self.fixture.now(),
+        }
+        for kind, original in (
+            ("storage_preparation", True),
+            ("retained_capability", True),
+            ("storage_readback", False),
+            ("retained_capability_readback", False),
+        ):
+            for second_status in ("done", "running"):
+                rows = [first, {**first, "deploymentId": "second-job", "status": second_status}]
+                observed = SeparationProgramInspection.model_validate(
+                    {
+                        "kind": kind,
+                        "status": "unavailable",
+                        "schedule_id": "fixture-history",
+                        "script_matches": True,
+                        "disabled": True,
+                    }
+                )
+                expected = classify_program_history(
+                    rows, schedule_id=observed.schedule_id, original=original
+                )
+                with (
+                    self.subTest(kind=kind, second_status=second_status),
+                    patch("control_plane.dokploy.api.dokploy_request", return_value=rows),
+                    patch(
+                        "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
+                    ) as markers,
+                ):
+                    inspect_program_history(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        observed=observed,
+                        binding=None,
+                    )
+                self.assertEqual(observed.history_status, expected.status)
+                self.assertEqual(observed.history_count, len(rows))
+                self.assertFalse(observed.deployment_id)
+                self.assertIsNone(observed.resources_ok)
+                self.assertEqual(observed.log_read_status, ProgramLogReadStatus.NOT_ATTEMPTED)
+                markers.assert_not_called()
+        for finished_at in (None, "2000-01-01T00:00:00Z"):
+            untimed_rows = [{**first, "finishedAt": finished_at}]
+            observed = SeparationProgramInspection(
+                kind="storage_preparation",
+                status="unavailable",
+                schedule_id="fixture-history",
+                script_matches=True,
+                disabled=True,
+            )
+            expected = classify_program_history(
+                untimed_rows, schedule_id=observed.schedule_id, original=True
+            )
+            with (
+                patch("control_plane.dokploy.api.dokploy_request", return_value=untimed_rows),
+                patch(
+                    "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
+                ) as markers,
+            ):
+                inspect_program_history(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    observed=observed,
+                    binding=None,
+                )
+            self.assertEqual(observed.history_status, expected.status)
+            self.assertIsNone(observed.resources_ok)
+            self.assertEqual(observed.log_read_status, ProgramLogReadStatus.NOT_ATTEMPTED)
+            markers.assert_not_called()
+        statuses = []
+        for available in (False, True):
+            observed = SeparationProgramInspection(
+                kind="storage_preparation",
+                status="unavailable",
+                schedule_id="fixture-history",
+                script_matches=True,
+                disabled=True,
+            )
+            with (
+                patch("control_plane.dokploy.api.dokploy_request", return_value=[first]),
+                patch(
+                    "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers",
+                    return_value={"log_available": str(available).lower()},
+                ) as markers,
+            ):
+                inspect_program_history(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    observed=observed,
+                    binding=None,
+                )
+            statuses.append(observed.log_read_status)
+            self.assertIsNone(observed.resources_ok)
+            markers.assert_called_once()
+        self.assertEqual(
+            statuses, [ProgramLogReadStatus.UNAVAILABLE, ProgramLogReadStatus.AVAILABLE]
+        )
         self.assert_retained()
 
     async def call_http(self, *, key: str = "http-prepare", **changes: object) -> Response:
@@ -859,6 +984,7 @@ class SeparationResourceTests(unittest.TestCase):
     def test_original_key_inspection_checks_request_and_never_changes_its_reservation(self) -> None:
         from contextlib import redirect_stdout
         import io
+        import json
         from pathlib import Path
         import runpy
         import threading
@@ -902,6 +1028,11 @@ class SeparationResourceTests(unittest.TestCase):
         )
         helper = self.root / "launchplane-write-action.py"
         helper.touch()
+        review = self.root / "original-review.json"
+        receipt = self.root / "original-review.json.receipt.json"
+        review_content, receipt_content = "original review", "original receipt"
+        review.write_text(review_content)
+        receipt.write_text(receipt_content)
         responses = []
 
         def request_from_client(**kwargs: object) -> dict[str, object]:
@@ -934,21 +1065,23 @@ class SeparationResourceTests(unittest.TestCase):
             "--reason",
             self.body.reason,
             "--evidence-file",
-            str(self.root / "original-review.json"),
+            str(review),
             "--idempotency-key",
             reserved.idempotency_key,
         ]
         with patch.object(
             SeparationResourcesAdapter, "inspect_original", side_effect=inspect_programs
         ) as inspect_original:
+            output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
                 patch("sys.argv", arguments),
-                redirect_stdout(io.StringIO()),
+                redirect_stdout(output),
             ):
                 self.assertEqual(client["main"](), 0)
             response = responses[0]
             self.assertEqual(response.status_code, 202, response.text)
+            self.assertTrue(json.loads(output.getvalue())["retain_original_key"])
             self.assertEqual(response.json()["result"]["programs"][0]["status"], "missing")
             SeparationResourcesInspection.model_validate(response.json()["result"])
             with self.assertRaises(ValidationError):
@@ -963,6 +1096,8 @@ class SeparationResourceTests(unittest.TestCase):
                     )
                     self.assertEqual(refused.status_code, 409, refused.text)
             inspect_original.assert_not_called()
+        self.assertEqual(review.read_text(), review_content)
+        self.assertEqual(receipt.read_text(), receipt_content)
         self.assertNotIn(fingerprint, response.text)
         self.assertEqual(
             self.store.read_idempotency_record(

@@ -21,6 +21,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.provider_operations import build_provider_operation_key
+from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_separation_resources import (
     ROUTE,
@@ -167,19 +168,24 @@ def register_testing_separation_resource_routes(
                 in_progress_message="Independent testing storage preparation is in progress.",
                 reconcile_message="Preparation outcome is unknown; retain its original key and both fences.",
             )
+        except (
+            PlatformCredentialRefusedError,
+            ValueError,
+            FileNotFoundError,
+            SeparationResourcesRefused,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="testing_resources_refused",
+                message="Retained testing preparation inputs changed or remain unproved.",
+            ) from error
         except click.ClickException as error:
             raise dependencies.http_error(
                 status_code=503,
                 trace_id=trace,
                 code="testing_resources_unavailable",
                 message="Testing preparation provider evidence is unavailable.",
-            ) from error
-        except (ValueError, FileNotFoundError, SeparationResourcesRefused) as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace,
-                code="testing_resources_refused",
-                message="Retained testing preparation inputs changed or remain unproved.",
             ) from error
 
     app.add_api_route(

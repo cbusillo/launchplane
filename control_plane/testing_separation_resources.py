@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -40,6 +41,7 @@ from control_plane.testing_program_evidence import (
     MAX_PROGRAM_ROWS,
     classify_program_inventory,
     classify_program_history,
+    ProgramHistoryStatus,
 )
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -120,6 +122,12 @@ class SeparationResourcesStatus(BaseModel):
     provider_effect_started_at: str = ""
 
 
+class ProgramLogReadStatus(StrEnum):
+    NOT_ATTEMPTED = "not_attempted"
+    UNAVAILABLE = "unavailable"
+    AVAILABLE = "available"
+
+
 class SeparationProgramInspection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -134,12 +142,12 @@ class SeparationProgramInspection(BaseModel):
     script_matches: bool | None = None
     disabled: bool | None = None
     history_count: int | None = Field(default=None, ge=0, le=MAX_PROGRAM_ROWS)
+    history_status: ProgramHistoryStatus | Literal["not_read"] = "not_read"
     deployment_id: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
     deployment_status: str = Field(
         default="unknown", pattern=r"^(?:done|error|running|queued|unknown)$"
     )
-    log_available: bool = False
-    markers_found: bool = False
+    log_read_status: ProgramLogReadStatus = ProgramLogReadStatus.NOT_ATTEMPTED
     resources_ok: bool | None = None
     result_binding_matches: bool | None = None
 
