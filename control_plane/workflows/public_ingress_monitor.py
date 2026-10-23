@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from control_plane.provider_target_holds import (
+    canonical_provider_operation_reference,
     ProviderHoldLaneSnapshot,
-    ProviderOperationReference,
     ProviderOperationAttentionReference,
     TestingReplacementReference,
     DEPLOY_FENCE_RECONCILE_GRACE as DEPLOY_FENCE_RECONCILE_GRACE,
@@ -551,16 +551,9 @@ def _held_generic_web_deploy_fences(
             continue
         fingerprint = incident.material_fingerprint
         refs = tuple(
-            value
-            if (
-                ProviderOperationReference.parse(value) is not None
-                or TestingReplacementReference.parse(value) is not None
-            )
-            else (
-                ProviderOperationAttentionReference(attention.record_id).encode()
-                if (attention := ProviderOperationAttentionReference.parse(value)) is not None
-                else "provider-operation:unavailable"
-            )
+            ProviderOperationAttentionReference(attention.record_id).encode()
+            if (attention := ProviderOperationAttentionReference.parse(value)) is not None
+            else canonical_provider_operation_reference(value)
             for value in (fingerprint.route_authority.target_keys if fingerprint else ())
             if value.startswith("provider-operation:")
         )

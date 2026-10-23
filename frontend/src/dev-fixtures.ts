@@ -382,6 +382,7 @@ export function incidentForFixture(
     : `observation-${incident.incident_id}-latest`;
   return {
     incident,
+    opening_observation: null,
     material_evidence: {
       check_kind: incident.check_kind,
       failure_code: incident.failure_code,

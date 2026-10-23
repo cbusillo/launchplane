@@ -463,11 +463,19 @@ class ProductIncidentReadModelTests(unittest.TestCase):
         self.assertNotIn("payload", payload["outbox_deliveries"][0])
 
     def test_fence_detail_retains_opening_reservation_after_recent_window_moves(self) -> None:
-        from control_plane.provider_target_holds import ProviderOperationReference
+        from control_plane.provider_target_holds import (
+            ProviderOperationAttentionReference,
+            ProviderOperationReference,
+            TestingReplacementReference,
+        )
 
         store = _Store()
         reservation_id = "mutation-reservation-" + hashlib.sha256(b"original").hexdigest()
         reference = ProviderOperationReference(reservation_id, uuid4()).encode()
+        attention = ProviderOperationAttentionReference(reservation_id).encode()
+        replacement = TestingReplacementReference(
+            "testing-operation", store.profile.product, "example-product-prod", "prod", NOW
+        ).encode()
         fingerprint = PublicIngressIncidentMaterialFingerprint.model_validate(
             {
                 "check_kind": "provider",
@@ -479,7 +487,12 @@ class ProductIncidentReadModelTests(unittest.TestCase):
                     "kind": "provider",
                     "provider": "launchplane",
                     "provider_check": "launchplane-deploy-fence",
-                    "target_keys": (reference, "provider-operation:private-secret"),
+                    "target_keys": (
+                        reference,
+                        attention,
+                        replacement,
+                        "provider-operation:private-secret",
+                    ),
                 },
             }
         )
@@ -519,7 +532,10 @@ class ProductIncidentReadModelTests(unittest.TestCase):
             )
         self.assertIsNotNone(detail.opening_observation)
         assert detail.opening_observation is not None
-        self.assertEqual(detail.opening_observation.provider_operation_references, (reference,))
+        self.assertEqual(
+            set(detail.opening_observation.provider_operation_references),
+            {reference, attention, replacement, "provider-operation:unavailable"},
+        )
         self.assertEqual(detail.opening_observation.provider_reservation_ids, (reservation_id,))
         self.assertNotIn("private-secret", detail.model_dump_json())
 
@@ -554,6 +570,20 @@ class ProductIncidentReadModelTests(unittest.TestCase):
             incident_id=store.open_incident.incident_id,
         )
         self.assertIsNone(missing.opening_observation)
+
+    def test_unreadable_opening_preserves_recent_incident_evidence(self) -> None:
+        store = _Store()
+        with patch.object(
+            store, "read_public_ingress_observation_record", side_effect=ValueError("unreadable")
+        ):
+            detail = build_product_environment_incident_detail(
+                record_store=store,
+                product=store.profile.product,
+                environment="prod",
+                incident_id=store.open_incident.incident_id,
+            )
+        self.assertIsNone(detail.opening_observation)
+        self.assertEqual(detail.observations[0].record_id, store.observations[0].record_id)
 
     def test_open_incident_limit_prioritizes_older_critical_incidents(self) -> None:
         store = _Store()

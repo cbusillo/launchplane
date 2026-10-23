@@ -2153,9 +2153,9 @@ recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
 Incident detail also reads the exact opening observation independently of its
-bounded recent-observation window. Missing or differently scoped opening evidence
+bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
 is returned as absent. Deploy-fence observations expose only canonical opaque
-provider-operation references and hashed reservation IDs, including IDs retained
+provider-operation references and opaque reservation record IDs, including IDs retained
 in legacy provider summaries. These are diagnostic links, not proof of settlement
 or authority to recover. Missing reservations and unmatched incarnations remain
 held until their corresponding supported recovery proves disposition.

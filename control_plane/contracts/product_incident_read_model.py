@@ -40,6 +40,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.secrets import keyed_secret_payload_fingerprint
 from control_plane.provider_target_holds import (
+    canonical_provider_operation_reference,
     ProviderOperationAttentionReference,
     ProviderOperationReference,
 )
@@ -465,7 +466,7 @@ def build_product_environment_incident_detail(
         opening = record_store.read_public_ingress_observation_record(
             incident.opened_observation_id
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         opening = None
     if opening is not None and (
         opening.record_id != incident.opened_observation_id
@@ -745,14 +746,14 @@ def _observation_read_summary(
     if record.check_kind == "provider" and record.failure_code == "deploy_fence_held":
         fingerprint = record.material_fingerprint
         for value in fingerprint.route_authority.target_keys if fingerprint else ():
+            if not value.startswith("provider-operation:"):
+                continue
+            references.add(canonical_provider_operation_reference(value))
             reference = ProviderOperationReference.parse(
                 value
             ) or ProviderOperationAttentionReference.parse(value)
             if reference is not None:
-                references.add(reference.encode())
                 reservation_ids.add(reference.record_id)
-            elif value == "provider-operation:unavailable":
-                references.add(value)
         for target in record.targets:
             if target.target == "provider":
                 reservation_ids.update(
