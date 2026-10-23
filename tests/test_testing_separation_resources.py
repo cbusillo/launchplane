@@ -721,6 +721,31 @@ class SeparationResourceTests(unittest.TestCase):
         self.assertTrue(all(item.status == "missing" for item in programs[1:]))
         self.assertTrue(any(item.kind == "storage_preparation" for item in programs))
         dispatch.assert_not_called()
+        for suffix, kind in (
+            ("", "retained_capability"),
+            (" readback", "retained_capability_readback"),
+        ):
+            self.fixture.responses["/api/schedule.list"][0].update(
+                name=RETAINED_CAPABILITY_PROGRAM_NAME + suffix,
+                script=historical.replace("set -euo pipefail", "set -euO pipefail", 1),
+            )
+            with (
+                self.subTest(kind=kind),
+                patch(
+                    "control_plane.testing_application_capabilities.retained_application_capability_spec",
+                    return_value=spec,
+                ),
+                patch(
+                    "control_plane.dokploy.post_deploy._read_odoo_post_deploy_log_markers"
+                ) as markers,
+            ):
+                changed = inspect_preparation_programs(
+                    root=self.root, resources=resources, store=self.store, application=True
+                )
+            observed = next(item for item in changed if item.kind == kind)
+            self.assertFalse(observed.script_matches)
+            self.assertIsNone(observed.resources_ok)
+            markers.assert_not_called()
         with patch(
             "control_plane.testing_application_capabilities.retained_application_capability_spec",
             side_effect=ValueError("fixture unavailable current capability"),

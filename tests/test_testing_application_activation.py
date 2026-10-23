@@ -58,6 +58,10 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
         ]
         self.assertEqual(*programs)
 
+    @patch(
+        "control_plane.runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS",
+        frozenset({"FIXTURE_A", "FIXTURE_B", "FIXTURE_C"}),
+    )
     def test_program_provenance_accepts_only_key_order_permutations(self) -> None:
         from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
         from control_plane.testing_application_capabilities import (
@@ -116,10 +120,13 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
         )
         original = {"scheduleId": "original", "script": historical, "enabled": False}
         readback = {**original, "scheduleId": "readback"}
-        for program in (
-            original,
-            {**original, "enabled": True},
-            {**original, "script": historical + "\n"},
+        changed = historical.replace("set -euo pipefail", "set -euO pipefail", 1)
+        for program, previous in (
+            (original, readback),
+            ({**original, "enabled": True}, readback),
+            ({**original, "script": changed}, readback),
+            (original, {**readback, "enabled": True}),
+            (original, {**readback, "script": changed}),
         ):
             with (
                 self.subTest(program=program["enabled"]),
@@ -137,7 +144,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.testing_application_host._find_storage_schedule",
-                    side_effect=[program, readback],
+                    side_effect=[program, previous],
                 ),
                 patch(
                     "control_plane.testing_application_host._require_terminal_storage_history"
@@ -158,7 +165,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                     before_effect=Mock(),
                     script_matches=capability_program_matches,
                 )
-                if program == original:
+                if program == original and previous == readback:
                     run()
                     self.assertEqual(terminal.call_count, 2)
                     self.assertEqual(
