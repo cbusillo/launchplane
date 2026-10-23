@@ -526,6 +526,7 @@ jobs:
             "${target_generated_cache_args[@]}"
 
       - name: Summarize report delivery and maintenance qualification
+        id: qualification
         if: always() && steps.executor.outcome != 'skipped'
         shell: bash
         run: |
@@ -538,6 +539,7 @@ jobs:
           fi
           uv run launchplane runner-host-hygiene-qualify \
             "${artifact_args[@]}" --require-qualified \
+            --maximum-age-seconds 10800 \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload executor result

@@ -694,7 +694,8 @@ dry-run planning only.
 The workflow requires qualified audit artifacts before passing. A blocked or
 unqualified report, missing evidence, or requested maintenance without accepted
 terminal completion fails the job; a healthy report-only plan and a recognized
-not-needed action can pass without claiming maintenance ran. The workflow summary separates report delivery,
+not-needed action can pass without claiming maintenance ran. The workflow
+summary separates report delivery,
 report status, retention qualification and accepted terminal maintenance. The
 qualifier uses the audit envelope's single `maintenance_completed` rule.
 The latest existing audit record supplies the report and blockers; terminal
@@ -774,6 +775,8 @@ or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`
 only bounded action/audit identifiers, snapshot time and contract codes are
 rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
 current-time freshness after a long Sunday batch. The explicit qualification
+step allows snapshots up to the job's three-hour execution limit so earlier
+Sunday actions do not expire during the same batch. The qualification CLI
 mode exits nonzero for stale/missing evidence, report
 findings, unresolved execution/recovery, pending delivery or action blockers other
 than recognized existing not-needed outcomes and the expected
@@ -782,9 +785,7 @@ remain unqualified. `--maximum-age-seconds` bounds review-artifact age separatel
 from the executor's unchanged idle freshness gate. To reproduce historical
 qualification, pin `--as-of YYYY-MM-DDTHH:MM:SS+0000`; this proves only that saved
 instant, never current host state. Terminal completion comes from that artifact's
-own exact audit, without matching today's scheduler key to a prior run. A
-requested mutation must have accepted terminal completion or a recognized
-not-needed outcome to qualify; a ready plan alone does not prove it ran.
+own exact audit, without matching today's scheduler key to a prior run.
 
 For a correction, first run the existing report-only path and retain its accepted
 audit plus complete private service/registration and producer readbacks. Compare

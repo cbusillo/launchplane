@@ -109,11 +109,19 @@ class HygieneQualificationTests(unittest.TestCase):
         workflow = load_workflow(
             Path(__file__).parents[1] / ".github/workflows/runner-host-hygiene.yml"
         )
-        step = workflow.step_named(
-            "runner-host-hygiene", "Summarize report delivery and maintenance qualification"
+        step = next(
+            step
+            for step in workflow.steps("runner-host-hygiene")
+            if step.data.get("id") == "qualification"
         )
-        assert step is not None
-        for state in ("healthy_report", "blocked_report", "completed", "planned", "missing"):
+        for state in (
+            "healthy_report",
+            "blocked_report",
+            "completed",
+            "completed_old",
+            "planned",
+            "missing",
+        ):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
                 directory = Path(root)
                 artifact = directory / "runner-host-hygiene-audit-evidence-report.json"
@@ -121,7 +129,9 @@ class HygieneQualificationTests(unittest.TestCase):
                     root=directory / "spool", artifact_file=artifact
                 )
                 execute_runner_host_hygiene_executor(
-                    request=request_with_budgets(mutate=state in {"completed", "planned"}),
+                    request=request_with_budgets(
+                        mutate=state in {"completed", "completed_old", "planned"}
+                    ),
                     remote_runner=ReportRunner(
                         runner_service_output=(
                             "launchplane-runner@unexpected.service active running\n"
@@ -149,6 +159,16 @@ class HygieneQualificationTests(unittest.TestCase):
                     )
                 if state == "missing":
                     artifact.unlink()
+                if state == "completed_old":
+                    completed = RunnerHostHygieneAuditDeliveryEnvelope.model_validate_json(
+                        artifact.read_text()
+                    )
+                    assert completed.terminal_audit is not None
+                    assert completed.terminal_audit.post_apply_report is not None
+                    completed.terminal_audit.post_apply_report.observed_at = (
+                        datetime.now(timezone.utc) - timedelta(hours=2)
+                    ).isoformat()
+                    artifact.write_text(completed.model_dump_json())
                 (directory / "runner-host-hygiene-expected.txt").write_text("report\n")
                 binary = directory / "bin"
                 binary.mkdir()
@@ -156,7 +176,9 @@ class HygieneQualificationTests(unittest.TestCase):
                 cli = shlex.join(
                     [sys.executable, "-c", "from control_plane.cli import main; main()"]
                 )
-                uv.write_text(f'#!/bin/sh\nshift 2\nexec {cli} "$@"\n')
+                uv.write_text(
+                    f'#!/bin/sh\nwhile [ "$1" != launchplane ]; do shift; done\nshift\nexec {cli} "$@"\n'
+                )
                 uv.chmod(0o700)
                 summary = directory / "summary.md"
                 response = subprocess.run(
@@ -174,7 +196,7 @@ class HygieneQualificationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     response.returncode == 0,
-                    state in {"healthy_report", "completed"},
+                    state in {"healthy_report", "completed", "completed_old"},
                     response.stderr,
                 )
                 self.assertTrue(summary.read_text())
