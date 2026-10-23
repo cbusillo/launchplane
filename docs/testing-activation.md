@@ -385,8 +385,9 @@ Readiness is observed within a bounded window with the canonical identity parser
 Native Compose readiness records the exact provider project it inspected. Route
 publication uses that retained project together with the candidate's stable DNS
 alias, which may differ by the provider's project suffix. Replay retains the
-original publication proof; it does not discover a replacement project. Legacy
-proof without a project retains the exact unsuffixed comparison and fails closed
+original publication proof; it does not discover a replacement project. A later
+readiness probe refuses a different project when the original proof recorded one.
+Legacy proof without a project retains the exact unsuffixed comparison and fails closed
 for a suffixed project.
 Warm-up and replacement tasks can become healthy on the original key. Redirects,
 transport/framing/JSON errors and nonmapping bodies stay unknown; a final stable

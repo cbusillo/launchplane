@@ -1482,9 +1482,6 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(DokployTestingRouteTransport, "publish", side_effect=lost):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
-        self.prepared = self.prepared.model_copy(
-            update={"compose_project": self.fixture.candidate.namespace + "-def456"}
-        )
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(self.effects, ["switch-new"])
