@@ -340,7 +340,11 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.reconcile(last_failed_error_code="deployment_failed")
         self.monitor()
         self.now += timedelta(minutes=1)
-        self.reconcile(last_failed_error_code="deploy_blocked.retained_database_credential_changed")
+        self.reconcile(
+            error="",
+            reason="already_deployed",
+            last_failed_error_code="deploy_blocked.retained_database_credential_changed",
+        )
         self.monitor()
         self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
         self.now += timedelta(minutes=1)
