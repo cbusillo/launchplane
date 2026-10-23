@@ -52,12 +52,12 @@ name: Product Onboarding
         required: true
         type: string
       target_name:
-        description: Optional Dokploy application name for a new product.
+        description: Application intent label; ordinary allocations use service-generated names.
         required: false
         default: ""
         type: string
       project_name:
-        description: Optional Dokploy project name.
+        description: Project intent label; ordinary allocations use service-generated names.
         required: false
         default: ""
         type: string
@@ -81,6 +81,14 @@ name: Product Onboarding
         options:
           - none
           - letsencrypt
+      allocation_control:
+        description: >-
+          Allocation JSON: optional original idempotency_key; mode readback or
+          apply selects recovery only. Retention also needs retain_allocation
+          and expected_allocation_custody_sha256 from reviewed readback.
+        required: false
+        default: ""
+        type: string
       confirmation:
         description: Type APPLY GENERIC WEB ONBOARDING when mode=apply.
         required: false
@@ -111,6 +119,7 @@ jobs:
       default_branch: ${{ steps.repository.outputs.default_branch }}
       onboarding_plan_sha256: ${{ steps.plan.outputs.onboarding_plan_sha256 }}
       product: ${{ steps.inputs.outputs.product }}
+      recovery: ${{ steps.inputs.outputs.recovery }}
       preview_context: ${{ steps.inputs.outputs.preview_context }}
       repository_id: ${{ steps.repository.outputs.repository_id }}
       repository_owner_id: ${{ steps.repository.outputs.repository_owner_id }}
@@ -119,6 +128,7 @@ jobs:
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
+      ALLOCATION_CONTROL: ${{ inputs.allocation_control }}
       PRODUCT: ${{ inputs.product }}
       DISPLAY_NAME: ${{ inputs.display_name }}
       REPOSITORY: ${{ inputs.repository }}
@@ -143,6 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import json
           import os
           import re
           from ipaddress import ip_address
@@ -169,6 +180,15 @@ jobs:
               raise SystemExit("apply requires exact confirmation text.")
           if mode == "dry_run" and os.environ["CONFIRMATION"].strip():
               raise SystemExit("dry_run rejects confirmation text.")
+          control_text = os.environ["ALLOCATION_CONTROL"]
+          control = json.loads(control_text) if control_text else {}
+          if not isinstance(control, dict):
+              raise SystemExit("allocation_control must be a JSON object.")
+          recovery = "mode" in control
+          if recovery and control["mode"] not in {"readback", "apply"}:
+              raise SystemExit("allocation_control mode must be readback or apply.")
+          if recovery and control["mode"] == "apply" and mode != "apply":
+              raise SystemExit("allocation recovery apply requires mode=apply and confirmation.")
           product = required("PRODUCT", 63).lower()
           if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
               raise SystemExit("product must use lowercase letters, numbers, and hyphens.")
@@ -224,6 +244,7 @@ jobs:
           output = os.environ["GITHUB_OUTPUT"]
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"product={product}\n")
+              handle.write(f"recovery={str(recovery).lower()}\n")
               handle.write(f"repository_owner={repository_match.group(1)}\n")
               handle.write(f"repository_name={repository_match.group(2)}\n")
               handle.write(f"testing_context={testing_context}\n")
@@ -233,6 +254,7 @@ jobs:
           PY
 
       - name: Mint repository metadata token
+        if: steps.inputs.outputs.recovery != 'true'
         id: repository-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -243,6 +265,7 @@ jobs:
           permission-contents: read
 
       - name: Resolve immutable repository identity
+        if: steps.inputs.outputs.recovery != 'true'
         id: repository
         shell: bash
         env:
@@ -270,6 +293,7 @@ jobs:
       - name: Render plan requests
         shell: bash
         env:
+          RECOVERY: ${{ steps.inputs.outputs.recovery }}
           DEFAULT_BRANCH: ${{ steps.repository.outputs.default_branch }}
           NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
           NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
@@ -280,6 +304,22 @@ jobs:
           REPOSITORY_OWNER_ID: ${{ steps.repository.outputs.repository_owner_id }}
         run: |
           set -euo pipefail
+          jq -n \
+            --arg context "$NORMALIZED_TESTING_CONTEXT" \
+            --arg target_name "$NORMALIZED_TARGET_NAME" \
+            --arg project_name "$NORMALIZED_PROJECT_NAME" \
+            --arg environment_name "$ENVIRONMENT_NAME" \
+            --arg server_id "$SERVER_ID" \
+            --arg healthcheck_path "$HEALTH_PATH" \
+            '{schema_version:1, mode:"dry-run", operation:"create-application",
+              product:"launchplane", context:$context, instance:"testing",
+              target_name:$target_name, project_name:$project_name,
+              environment_name:$environment_name, server_id:$server_id,
+              healthcheck_path:$healthcheck_path}' \
+            > target-plan-request.json
+          if [ "$RECOVERY" = true ]; then
+            exit 0
+          fi
           jq -n \
             --arg product "$NORMALIZED_PRODUCT" \
             --arg display_name "$DISPLAY_NAME" \
@@ -307,19 +347,6 @@ jobs:
               preview_context:$preview_context, preview_base_url:$preview_base_url,
               domain_certificate_type:$domain_certificate_type}' \
             > generic-web-intent.json
-          jq -n \
-            --arg context "$NORMALIZED_TESTING_CONTEXT" \
-            --arg target_name "$NORMALIZED_TARGET_NAME" \
-            --arg project_name "$NORMALIZED_PROJECT_NAME" \
-            --arg environment_name "$ENVIRONMENT_NAME" \
-            --arg server_id "$SERVER_ID" \
-            --arg healthcheck_path "$HEALTH_PATH" \
-            '{schema_version:1, mode:"dry-run", operation:"create-application",
-              product:"launchplane", context:$context, instance:"testing",
-              target_name:$target_name, project_name:$project_name,
-              environment_name:$environment_name, server_id:$server_id,
-              healthcheck_path:$healthcheck_path}' \
-            > target-plan-request.json
           jq -n --slurpfile intent generic-web-intent.json \
             '{schema_version:1, product:"launchplane", mode:"dry_run",
               generic_web:$intent[0]}' \
@@ -343,6 +370,7 @@ jobs:
             > authz-plan-request.json
 
       - name: Plan Dokploy application target
+        if: steps.inputs.outputs.recovery != 'true'
         id: target-plan
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
@@ -355,6 +383,7 @@ jobs:
           response-output-file: target-plan.json
 
       - name: Plan product records
+        if: steps.inputs.outputs.recovery != 'true'
         id: onboarding-plan
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
@@ -367,6 +396,7 @@ jobs:
           response-output-file: onboarding-plan.json
 
       - name: Plan preview authorization
+        if: steps.inputs.outputs.recovery != 'true'
         id: authz-plan
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
@@ -382,14 +412,30 @@ jobs:
         id: plan
         shell: bash
         env:
+          RECOVERY: ${{ steps.inputs.outputs.recovery }}
           NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
           NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
           NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
         run: |
           set -euo pipefail
+          target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
+          if [ "$RECOVERY" = true ]; then
+            {
+              echo "onboarding_plan_sha256="
+              echo "authz_plan_sha256="
+              echo "target_plan_sha256=$target_plan_sha256"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "## Generic-web allocation recovery"
+              echo
+              echo "- Product: $NORMALIZED_PRODUCT"
+              echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
+              echo "- Original target request: \`$target_plan_sha256\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
           authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
-          target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
           if ! [[ "$onboarding_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "Product onboarding plan did not return a valid digest." >&2
             exit 1
@@ -437,10 +483,11 @@ jobs:
           retention-days: 14
 
   apply:
-    if: ${{ inputs.mode == 'apply' }}
+    if: ${{ inputs.mode == 'apply' || needs.plan.outputs.recovery == 'true' }}
     needs: plan
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@ddc0533476246a9c4c52094ab1c945e294adb3c9 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@a3fbd1c47912b0b0975978a7cd8d18e040e28b2e # main
     with:
+      allocation_control: ${{ inputs.allocation_control }}
       product: ${{ needs.plan.outputs.product }}
       testing_context: ${{ needs.plan.outputs.testing_context }}
       onboarding_plan_sha256: ${{ needs.plan.outputs.onboarding_plan_sha256 }}
