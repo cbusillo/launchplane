@@ -4857,6 +4857,110 @@ class FreshApplicationFlowTests(unittest.TestCase):
             fixture.prepare()
         self.assertEqual(fixture.writes, writes)
 
+    def test_foreign_original_capsule_distinguishes_an_unrelated_hold(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        for same_target in (False, True):
+            with self.subTest(same_target=same_target):
+                fixture = self.fresh_fixture()
+                try:
+                    origin = ProviderTargetOrigin(
+                        product="another-product",
+                        context="another-testing-context",
+                        instance="testing",
+                        provider_id="dokploy",
+                        target_type="application",
+                        target_id=fixture.old_id if same_target else "another-application",
+                    )
+                    reservation = fixture.store.reserve_mutation(
+                        scope="foreign-writer",
+                        route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                        idempotency_key="foreign-writer",
+                        request_fingerprint="foreign-writer",
+                        lease_owner="foreign-writer",
+                        reconciliation_key="legacy-undecodable-target",
+                        provider_target_key=origin.target_key(),
+                        provider_target_origin=origin,
+                    )
+                    writes = list(fixture.writes)
+                    if same_target:
+                        with self.assertRaises(ValueError):
+                            fixture.prepare()
+                        self.assertEqual(fixture.writes, writes)
+                    else:
+                        fixture.prepare()
+                        self.assertEqual(fixture.activate().status, "completed")
+                        self.assertTrue(fixture.adapter.current().published)
+                    self.assertEqual(
+                        fixture.store.read_idempotency_record(
+                            scope=reservation.record.scope,
+                            route_path=reservation.record.route_path,
+                            idempotency_key=reservation.record.idempotency_key,
+                        ),
+                        reservation.record,
+                    )
+                finally:
+                    fixture.doCleanups()
+
+    def test_runtime_read_failure_refuses_before_preparation_effects(self) -> None:
+        from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+
+        fixture = self.fresh_fixture()
+        writes = list(fixture.writes)
+        with patch(
+            "control_plane.testing_application_capabilities.fetch_application_runtime",
+            side_effect=DokployEvidenceProviderError("target-inspect"),
+        ):
+            with self.assertRaises(ValueError):
+                fixture.prepare()
+        self.assertEqual(fixture.writes, writes)
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_late_writer_is_rechecked_inside_publication_transaction(self) -> None:
+        for state in ("running", "reconcile_required"):
+            with self.subTest(state=state):
+                fixture = self.fresh_fixture()
+                try:
+                    fixture.prepare()
+                    old_key = preparation_binding(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        fixture.actor,
+                        fixture.root,
+                        fixture.specification,
+                    )[1]
+                    write = fixture.store.write_testing_activation
+                    inserted: list[Any] = []
+
+                    def publish(**kwargs: Any) -> None:
+                        if kwargs["replacement"]["published"] and not inserted:
+                            reservation = self.reserve_writer(fixture, target_key=old_key)
+                            inserted.append(reservation.record)
+                            if state == "reconcile_required":
+                                updated = fixture.store.mark_mutation_reconcile_required(
+                                    reservation=reservation.record,
+                                    reconciliation_key=reservation.record.reconciliation_key,
+                                )
+                                self.assertEqual(updated.status, "updated")
+                        write(**kwargs)
+
+                    with patch.object(
+                        fixture.store, "write_testing_activation", side_effect=publish
+                    ):
+                        fixture.activate()
+                    self.assertTrue(inserted)
+                    self.assertFalse(fixture.adapter.current().published)
+                    self.assertEqual(
+                        fixture.store.read_dokploy_target_id_record(
+                            context_name=fixture.context, instance_name="testing"
+                        ).target_id,
+                        fixture.old_id,
+                    )
+                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
+                finally:
+                    fixture.doCleanups()
+
     def test_late_writer_keeps_original_target_before_and_after_creation(self) -> None:
         from control_plane.contracts.testing_activation import TestingActivationRefusal
         from control_plane.testing_separation_resources import preparation_binding

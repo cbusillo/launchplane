@@ -13,6 +13,7 @@ from control_plane.contracts.deploy_reference import docker_image_repository, do
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import api, source
 from control_plane.dokploy.application_runtime import fetch_application_runtime
+from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient, _target_reservations
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -126,9 +127,12 @@ def retained_application_capability_spec(
                 "source": identity.source_git_ref,
             }
     if not reservations:
-        observed = fetch_application_runtime(
-            host=host, token=token, application_id=target_id.target_id
-        )
+        try:
+            observed = fetch_application_runtime(
+                host=host, token=token, application_id=target_id.target_id
+            )
+        except DokployEvidenceProviderError as error:
+            raise ValueError("The retained application runtime is unavailable.") from error
         if (
             observed.application_id != target_id.target_id
             or observed.app_name != payload.get("appName")

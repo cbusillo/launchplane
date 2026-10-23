@@ -13218,12 +13218,15 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
-def _application_testing_fixture(case: unittest.TestCase, *, direct_original: bool = False) -> Any:
+def _application_testing_fixture(
+    case: unittest.TestCase, *, direct_original: bool = False, no_original: bool = False
+) -> Any:
     from tests.test_testing_application_flow import ApplicationFlowTests
 
     database = _head_postgres_database()
     fixture = ApplicationFlowTests()
     fixture.direct_original = direct_original
+    fixture.no_original = no_original
     fixture.database_url = database.__enter__()
     case.addCleanup(database.__exit__, None, None, None)
     fixture.setUp()
@@ -13249,6 +13252,19 @@ class RealPostgresDirectApplicationTestingActivationTests(unittest.TestCase):
     def test_direct_original_continuation_uses_native_operation_custody(self) -> None:
         fixture = _application_testing_fixture(self, direct_original=True)
         fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+
+class RealPostgresFreshApplicationTestingActivationTests(unittest.TestCase):
+    def test_fresh_publication_refuses_running_and_reconcile_required_old_writers(self) -> None:
+        from tests.test_testing_application_flow import FreshApplicationFlowTests
+
+        case = FreshApplicationFlowTests()
+        with patch.object(
+            case,
+            "fresh_fixture",
+            side_effect=lambda: _application_testing_fixture(self, no_original=True),
+        ):
+            case.test_late_writer_is_rechecked_inside_publication_transaction()
 
 
 class RealPostgresApplicationTestingActivationTests(unittest.TestCase):

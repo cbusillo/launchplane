@@ -296,7 +296,15 @@ def _target_reservations(
                 snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
                 matches = snapshot.provider_id == "dokploy" and snapshot.target_id == target_id
             except ValueError:
-                unattributed = True
+                origin = store.read_provider_target_origin(row) if require_complete else None
+                unattributed = (
+                    unattributed
+                    or origin is None
+                    or (
+                        origin.origin.provider_id == "dokploy"
+                        and origin.origin.target_id == target_id
+                    )
+                )
         if matches:
             selected.append(row)
     if require_complete and not selected and unattributed:
