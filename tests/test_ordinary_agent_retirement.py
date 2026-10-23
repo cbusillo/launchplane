@@ -123,6 +123,10 @@ class OrdinaryAgentRetirementTests(unittest.IsolatedAsyncioTestCase):
                     if suffix == "/review":
                         self.assertFalse(response.json()["review"]["can_approve"])
                         self.assertFalse(response.json()["review"]["can_revoke"])
+                        self.assertNotIn(
+                            "privileged_operation_plan_stale",
+                            response.json()["review"]["blockers"]["codes"],
+                        )
                 self.assertEqual(
                     (await client.get(path, headers=_HEADERS)).json()["record"],
                     record.model_dump(mode="json"),

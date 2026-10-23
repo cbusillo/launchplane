@@ -104,6 +104,24 @@ class AccessPolicyReviewTests(unittest.TestCase):
         effect = self.review(group_overlap=True).rules[0].role_effects[0]
         self.assertEqual(effect.state, "unknown")
 
+    def test_detailed_policy_read_fault_is_unavailable_without_rule_display(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        for error in (
+            OSError("Policy file cannot be read"),
+            OperationalError(None, None, OSError("Policy table cannot be read")),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.access_policy_review.plan_managed_authz_policy_reconcile",
+                    side_effect=error,
+                ),
+            ):
+                review = self.review()
+            self.assertEqual(review.state, "unavailable")
+            self.assertEqual(review.rules, ())
+
     def test_public_account_label_is_id_bound_and_uses_no_credentials(self) -> None:
         _public_github_account_login.cache_clear()
         response = Mock()

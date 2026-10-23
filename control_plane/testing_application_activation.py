@@ -8,6 +8,7 @@ import re
 from typing import Any, Iterator, cast
 
 import yaml
+from fastapi import HTTPException
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_activation import (
@@ -19,6 +20,7 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRefusedResult,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.testing_activation import TestingApplicationReadiness
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
@@ -274,8 +276,75 @@ def restored_application_route(store: Any, record: TestingActivationRecord) -> A
 
 @dataclass
 class ApplicationActivationAdapter(TestingActivationAdapter):
+    authorize_external: Callable[[], tuple[LaunchplaneProductProfileRecord, ...]] | None = None
+
+    def admit_external_capabilities(
+        self, record: TestingActivationRecord, check: Callable[[], None]
+    ) -> TestingActivationRecord:
+        specification = record.request.application
+        if (
+            specification is None
+            or not specification.external_credentials
+            or record.external_capabilities
+        ):
+            return record
+        if self.authorize_external is None or record.phase != "prepared" or record.project_id:
+            raise TestingActivationRefusal(
+                "Fresh authorized external capability admission is required."
+            )
+        from control_plane.testing_external_capabilities import observe_activation_discord
+
+        proof = observe_activation_discord(
+            self.store,
+            record,
+            authorize=self.authorize_external,
+            check_current=check,
+            actor=self.actor,
+            trace_id=self.trace_id,
+        )
+        check()
+        return self.save(record, external_capabilities=(proof,))
+
     def bindings(self) -> tuple[Any, Any, Any, Any]:
         return bind_testing_recipient(self.store, self.product, self.request.context, "testing")
+
+    def require_production_separation(
+        self, record: TestingActivationRecord, check: Callable[[], None]
+    ) -> None:
+        specification = record.request.application
+        if specification is None or not specification.external_credentials:
+            return
+        if self.authorize_external is None or len(record.external_capabilities) != 1:
+            raise TestingActivationRefusal("Current authorized external comparison is required.")
+        from control_plane import secrets
+        from control_plane.discord_identity import (
+            capture_identity_inputs,
+            discord_token_matches_production,
+            token_bot_id,
+        )
+        from control_plane.testing_external_capabilities import (
+            require_discord_capability,
+            ExternalCapabilityConflict,
+        )
+
+        profiles = self.authorize_external()
+        captured = capture_identity_inputs(self.store, record.product)
+        proof = record.external_capabilities[0]
+        require_discord_capability(self.store, record, proof)
+        check()
+        if (
+            captured.profiles != tuple(sorted(profiles, key=lambda item: item.product))
+            or captured.version.version_id != proof.version_id
+        ):
+            raise TestingActivationRefusal("External comparison inputs changed.")
+        value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
+        if token_bot_id(value) != proof.bot_id:
+            raise ExternalCapabilityConflict()
+        if discord_token_matches_production(value, captured):
+            raise ExternalCapabilityConflict()
+        check()
+        if capture_identity_inputs(self.store, record.product) != captured:
+            raise TestingActivationRefusal("External comparison inputs changed.")
 
     def current(self) -> TestingActivationRecord:
         existing = activation_record(
@@ -413,6 +482,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
         super().require_unchanged(record)
+        if record.external_capabilities:
+            from control_plane.testing_external_capabilities import require_discord_capability
+
+            for proof in record.external_capabilities:
+                require_discord_capability(self.store, record, proof)
         specification = record.request.application
         profile = self.store.read_product_profile_record(record.product)
         assert specification is not None
@@ -733,6 +807,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             secret_binding_keys=frozenset(set(bindings) - set(staged)),
         )
         values = {**environment.values, **staged}
+        if record.external_capabilities:
+            from control_plane.testing_external_capabilities import require_discord_capability
+
+            for proof in record.external_capabilities:
+                require_discord_capability(self.store, record, proof)
         from control_plane.runtime_platform_credentials import looks_like_credential
 
         if any(
@@ -2112,6 +2191,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             generic_web_provider_target_key,
         )
         from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
         from control_plane.testing_application_capabilities import (
             inspect_retained_application_capabilities,
         )
@@ -2164,11 +2244,40 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     if old_check is None:
                         raise TestingActivationRefusal("The retained original executor is active.")
 
-                    def checkpoint(phase: str) -> None:
-                        nonlocal started
+                    def require_current() -> None:
                         old_check()
                         lease.assert_current()
                         self.require_unchanged(record)
+
+                    def checkpoint(phase: str) -> None:
+                        nonlocal started
+                        if phase not in {
+                            APPLICATION_CAPABILITY_PHASE,
+                            "create_project",
+                            "create_environment",
+                            "create_application",
+                            "create_application_mount",
+                        }:
+                            try:
+                                self.require_production_separation(record, require_current)
+                            except ExternalCapabilityConflict:
+                                if (
+                                    started
+                                    or isinstance(lease, ProviderEvidenceLease)
+                                    and lease.evidence_reservation().provider_effect_started_at
+                                ):
+                                    require_current()
+                                    latest = self.current()
+                                    self.require_unchanged(latest)
+                                    self.save(
+                                        latest,
+                                        phase="restoring_application_route"
+                                        if latest.application_readiness is not None
+                                        and latest.application_readiness.route is not None
+                                        else "refusing_private_candidate",
+                                    )
+                                raise
+                        require_current()
                         lease.checkpoint_effect(phase)
                         started = True
 
@@ -2182,6 +2291,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             context=record.context,
                             check=old_check,
                         )
+
+                        record = self.admit_external_capabilities(record, require_current)
                         if record.phase in {
                             "create_project",
                             "create_environment",
@@ -2247,7 +2358,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if not started:
                     raise ProviderMutationRejectedError(
                         error
-                        if isinstance(error, TestingActivationRefusal)
+                        if isinstance(error, (TestingActivationRefusal, HTTPException))
                         else ValueError("Activation refused before provider effects.")
                     ) from error
                 raise ProviderMutationUnknownError(

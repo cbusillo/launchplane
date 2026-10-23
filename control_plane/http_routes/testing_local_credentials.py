@@ -22,6 +22,66 @@ from control_plane.testing_external_resources import (
 )
 
 
+def authorize_credential_profile(
+    dependencies: ReadRouteDependencies,
+    store: TestingCredentialStore,
+    product: str,
+    identity: LaunchplaneIdentity,
+) -> LaunchplaneProductProfileRecord:
+    trace = dependencies.next_trace_id()
+    if not dependencies.authorization_allows(
+        identity=identity,
+        action="product_profile.read",
+        product=product,
+        context="launchplane",
+        target=AuthorizationTarget(scope="context"),
+    ):
+        raise dependencies.http_error(
+            status_code=403,
+            trace_id=trace,
+            code="authorization_denied",
+            message="The caller cannot read this product.",
+        )
+    try:
+        profiles = store.list_product_profile_records()
+        profile = next(item for item in profiles if item.product == product)
+    except (AttributeError, StopIteration):
+        raise dependencies.http_error(
+            status_code=404,
+            trace_id=trace,
+            code="not_found",
+            message="Product credential audit is unavailable.",
+        ) from None
+    for lane in profile.lanes:
+        if lane.instance not in {"prod", "testing"}:
+            continue
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=product,
+            context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The caller cannot audit every product lane.",
+            )
+    return profile
+
+
+def authorize_discord_profiles(
+    dependencies: ReadRouteDependencies,
+    store: TestingCredentialStore,
+    identity: LaunchplaneIdentity,
+) -> tuple[LaunchplaneProductProfileRecord, ...]:
+    profiles = store.list_product_profile_records()
+    for profile in profiles:
+        authorize_credential_profile(dependencies, store, profile.product, identity)
+    return profiles
+
+
 def register_testing_credential_routes(
     app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
 ) -> None:
@@ -42,51 +102,10 @@ def register_testing_credential_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
     ) -> LaunchplaneProductProfileRecord:
-        trace = dependencies.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
-        store = cast(TestingCredentialStore, record_store)
-        if not dependencies.authorization_allows(
-            identity=identity,
-            action="product_profile.read",
-            product=product,
-            context="launchplane",
-            target=AuthorizationTarget(scope="context"),
-        ):
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace,
-                code="authorization_denied",
-                message="The caller cannot read this product.",
-            )
-        try:
-            profiles = store.list_product_profile_records()
-            profile = next(item for item in profiles if item.product == product)
-        except (AttributeError, StopIteration):
-            raise dependencies.http_error(
-                status_code=404,
-                trace_id=trace,
-                code="not_found",
-                message="Product credential audit is unavailable.",
-            ) from None
-        # Authorize every participating lane before decrypting anything. Partial access
-        # never produces an apparently complete product audit.
-        for lane in profile.lanes:
-            if lane.instance not in {"prod", "testing"}:
-                continue
-            if not dependencies.authorization_allows(
-                identity=identity,
-                action="product_environment.read",
-                product=product,
-                context=lane.context,
-                target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
-            ):
-                raise dependencies.http_error(
-                    status_code=403,
-                    trace_id=trace,
-                    code="authorization_denied",
-                    message="The caller cannot audit every product lane.",
-                )
-        return profile
+        return authorize_credential_profile(
+            dependencies, cast(TestingCredentialStore, record_store), product, identity
+        )
 
     def read(
         product: str,
@@ -144,10 +163,9 @@ def register_testing_credential_routes(
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         include_external_resources: bool = False,
     ) -> TestingCredentialInventoryResponse:
+        response.headers["Cache-Control"] = "no-store"
         store = cast(TestingCredentialStore, record_store)
-        profiles = store.list_product_profile_records()
-        for profile in profiles:
-            authorize(profile.product, response, identity, record_store)
+        profiles = authorize_discord_profiles(dependencies, store, identity)
         snapshot = (
             capture(store, tuple(profiles), inventory=True) if include_external_resources else None
         )
@@ -218,9 +236,7 @@ def register_testing_credential_routes(
             )
         authorize(product, response, identity, record_store)
         store = cast(TestingCredentialStore, record_store)
-        profiles = store.list_product_profile_records()
-        for profile in profiles:
-            authorize(profile.product, response, identity, record_store)
+        profiles = authorize_discord_profiles(dependencies, store, identity)
         return discord_identity.DiscordIdentityResponse(
             trace_id=trace,
             result=discord_identity.read_discord_identity(

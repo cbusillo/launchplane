@@ -8,6 +8,8 @@ import runpy
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import urllib.error
+from email.message import Message
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.testing_activation import (
@@ -25,7 +27,10 @@ class ActivationClientTests(unittest.TestCase):
     def test_refused_apply_readback_and_receipt_preserve_the_negative_result(self) -> None:
         self.exercise_review_and_replay(refused=True)
 
-    def exercise_review_and_replay(self, *, refused: bool) -> None:
+    def test_provider_backoff_survives_supported_caller_refusal(self) -> None:
+        self.exercise_review_and_replay(refused=False, external_refusal=True)
+
+    def exercise_review_and_replay(self, *, refused: bool, external_refusal: bool = False) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
         )
@@ -57,7 +62,7 @@ class ActivationClientTests(unittest.TestCase):
                 qualified_at="2026-10-15T00:00:00Z",
             )
         )
-        modes = (
+        modes: tuple[str, ...] = (
             ("dry-run", "apply", "apply", "readback", "receipt")
             if refused
             else ("dry-run", "apply", "apply")
@@ -72,6 +77,42 @@ class ActivationClientTests(unittest.TestCase):
                 for index in range(len(modes))
             ]
         )
+        if external_refusal:
+            from control_plane.discord_identity import DiscordIdentityResult
+            from control_plane.contracts.testing_external_resources import (
+                DiscordBotResourceObservation,
+                DiscordRateLimitEvidence,
+            )
+            from control_plane.contracts.testing_activation import TestingActivationRefusalCode
+
+            observed = DiscordIdentityResult(
+                observation=DiscordBotResourceObservation(
+                    started_at="2026-10-23T00:00:00Z",
+                    finished_at="2026-10-23T00:00:01Z",
+                    http_status=429,
+                    rate_limits=(
+                        DiscordRateLimitEvidence(
+                            phase="guilds", retry_after=120, global_limit=True
+                        ),
+                    ),
+                )
+            )
+            payload = {
+                "error": {"code": TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED},
+                "trace_id": "trace-refusal",
+                "records": {"discord_identity": observed.model_dump_json()},
+            }
+            post.side_effect = [
+                post.side_effect.__next__(),
+                urllib.error.HTTPError(
+                    "https://service.invalid",
+                    409,
+                    "refused",
+                    Message(),
+                    io.BytesIO(json.dumps(payload).encode()),
+                ),
+            ]
+            modes = ("dry-run", "apply")
         transport: dict[str, Any] = {
             "resolve_settings": lambda args: {
                 "service_url": "https://service.invalid",
@@ -113,8 +154,16 @@ class ActivationClientTests(unittest.TestCase):
                     patch("sys.argv", args),
                     redirect_stdout(output),
                 ):
-                    self.assertEqual(client["main"](), 0, output.getvalue())
+                    expected_refusal = external_refusal and mode == "apply"
+                    self.assertEqual(client["main"](), int(expected_refusal), output.getvalue())
                 self.assertNotIn("fixture-private-token", output.getvalue())
+                if expected_refusal:
+                    returned = json.loads(output.getvalue())
+                    self.assertEqual(
+                        returned["external_identity"], observed.model_dump(mode="json")
+                    )
+                    self.assertTrue(returned["retain_original_key"])
+                    return
                 if mode != "dry-run":
                     self.assertEqual(
                         json.loads(output.getvalue())["result"], result.model_dump(mode="json")

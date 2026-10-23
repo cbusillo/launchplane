@@ -30,6 +30,7 @@ from control_plane.http_routes.support import (
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_activation import ROUTE, activation_adapter, plan
+from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
 
 
 def register_testing_activation_routes(
@@ -67,6 +68,16 @@ def register_testing_activation_routes(
         adapter = activation_adapter(
             root, record_store, product, body, actor(identity), scope, trace
         )
+        if body.application is not None:
+            from control_plane.testing_application_activation import ApplicationActivationAdapter
+            from control_plane.http_routes.testing_local_credentials import (
+                authorize_discord_profiles,
+            )
+
+            assert isinstance(adapter, ApplicationActivationAdapter)
+            adapter.authorize_external = lambda: authorize_discord_profiles(
+                dependencies, record_store, identity
+            )
         try:
             if body.mode == "receipt":
                 row = record_store.read_idempotency_record(
@@ -194,6 +205,14 @@ def register_testing_activation_routes(
                 trace_id=trace,
                 code="authorization_denied",
                 message="The provider denied the read.",
+            ) from None
+        except ExternalCapabilityReadRefusal as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code=error.public_code,
+                message="Testing external capability remains unproved; retain the provider backoff evidence.",
+                records={"discord_identity": error.result.model_dump_json()},
             ) from None
         except TestingActivationRefusal as error:
             raise dependencies.http_error(

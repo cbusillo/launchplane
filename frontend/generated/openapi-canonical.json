@@ -32262,6 +32262,8 @@
                 "instances_not_singleton",
                 "instance_not_exact",
                 "secret_unreadable",
+                "privileged_operation_plan_stale",
+                "privileged_operation_planning_unavailable",
                 "operation_past_expiry",
                 "operation_expired",
                 "execution_failed",
@@ -52731,9 +52733,42 @@
         "title": "TestingApplicationCredential",
         "type": "object"
       },
+      "TestingApplicationExternalCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "guild_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4000,
+            "title": "Guild Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "binding_key",
+          "guild_ids"
+        ],
+        "title": "TestingApplicationExternalCredential",
+        "type": "object"
+      },
       "TestingApplicationSpecification": {
         "additionalProperties": false,
         "properties": {
+          "external_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationExternalCredential"
+            },
+            "maxItems": 1,
+            "title": "External Credentials",
+            "type": "array"
+          },
           "health_path": {
             "pattern": "^/[^\\s?#]*$",
             "title": "Health Path",

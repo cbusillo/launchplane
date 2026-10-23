@@ -140,10 +140,11 @@ class DiscordExternalResourcesTests(unittest.TestCase):
                 ),
             ) as request,
         ):
-            with self.assertRaises(ExternalResourceInputsChanged):
-                reader.observe_discord_bot(
-                    "synthetic-bot-token", deadline=monotonic() + 60, check_current=current
-                )
+            result = reader.observe_discord_bot(
+                "synthetic-bot-token", deadline=monotonic() + 60, check_current=current
+            )
+            self.assertEqual(result.failure_code, "inputs_changed")
+            self.assertEqual(result.rate_limits[0].retry_after, 0.25)
         request.assert_called_once()
         sleep.assert_called_once_with(0.25)
         with (

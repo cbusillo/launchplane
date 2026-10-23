@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
@@ -75,7 +76,9 @@ class DiscordIdentityInputs:
     production: tuple[tuple[SecretBinding, SecretRecord, SecretVersion], ...]
 
 
-def capture_identity_inputs(store: TestingCredentialStore, product: str) -> DiscordIdentityInputs:
+def capture_identity_inputs(
+    store: TestingCredentialStore, product: str, *, compare_production: bool = True
+) -> DiscordIdentityInputs:
     profiles = tuple(sorted(store.list_product_profile_records(), key=lambda item: item.product))
     profile = next(item for item in profiles if item.product == product)
     lanes = [lane for lane in profile.lanes if lane.instance == "testing"]
@@ -115,7 +118,7 @@ def capture_identity_inputs(store: TestingCredentialStore, product: str) -> Disc
     ):
         raise ValueError("Testing credential unavailable")
     production = []
-    for source in profiles:
+    for source in profiles if compare_production else ():
         for source_lane in source.lanes:
             if source_lane.instance != "prod":
                 continue
@@ -163,6 +166,19 @@ def token_bot_id(value: str) -> str:
         return ""
 
 
+def discord_token_matches_production(value: str, captured: DiscordIdentityInputs) -> bool:
+    expected_bot = token_bot_id(value)
+    production_values = tuple(
+        secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+        for _, _, version in captured.production
+    )
+    return any(
+        hmac.compare_digest(value.encode(), production_value.encode())
+        or bool(expected_bot and expected_bot == token_bot_id(production_value.strip()))
+        for production_value in production_values
+    )
+
+
 def read_discord_identity(
     store: TestingCredentialStore,
     product: str,
@@ -170,13 +186,20 @@ def read_discord_identity(
     profiles: tuple[LaunchplaneProductProfileRecord, ...],
     trace_id: str,
     actor: str,
+    captured_inputs: DiscordIdentityInputs | None = None,
+    purpose: Literal["identity_diagnostic", "activation_admission"] = "identity_diagnostic",
+    activation_plan_sha256: str = "",
+    before_read: Callable[[], None] | None = None,
 ) -> DiscordIdentityResult:
+    observation: DiscordBotResourceObservation | None = None
     try:
-        captured = capture_identity_inputs(store, product)
+        captured = captured_inputs or capture_identity_inputs(store, product)
         if captured.profiles != tuple(sorted(profiles, key=lambda item: item.product)):
             raise ExternalResourceInputsChanged()
 
         def check_current() -> None:
+            if before_read is not None:
+                before_read()
             try:
                 if capture_identity_inputs(store, product) == captured:
                     return
@@ -184,17 +207,10 @@ def read_discord_identity(
                 raise ExternalResourceInputsChanged() from None
             raise ExternalResourceInputsChanged()
 
+        check_current()
         value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
-        production_values = tuple(
-            secrets._decrypt_secret_value(version.ciphertext, version.key_id)
-            for _, _, version in captured.production
-        )
         expected_bot = token_bot_id(value)
-        matches_production = any(
-            hmac.compare_digest(value.encode(), production_value.encode())
-            or bool(expected_bot and expected_bot == token_bot_id(production_value.strip()))
-            for production_value in production_values
-        )
+        matches_production = discord_token_matches_production(value, captured)
         check_current()
         if matches_production:
             return DiscordIdentityResult(status="matches_production")
@@ -216,7 +232,12 @@ def read_discord_identity(
                     "version_id": captured.version.version_id,
                     "binding_id": captured.binding.binding_id,
                     "destination_class": "discord_bot",
-                    "purpose": "identity_diagnostic",
+                    "purpose": purpose,
+                    **(
+                        {"activation_plan_sha256": activation_plan_sha256}
+                        if activation_plan_sha256
+                        else {}
+                    ),
                 },
             )
         )
@@ -235,9 +256,13 @@ def read_discord_identity(
             observation=observation,
         )
     except ExternalResourceInputsChanged:
-        return DiscordIdentityResult(failure_code="inputs_changed")
+        return DiscordIdentityResult(failure_code="inputs_changed", observation=observation)
     except Exception:
+        if purpose == "activation_admission" and observation is None:
+            raise
         _logger.warning(
             "Discord identity unavailable: trace=%s code=configuration_unavailable", trace_id
         )
-        return DiscordIdentityResult(failure_code="configuration_unavailable")
+        return DiscordIdentityResult(
+            failure_code="configuration_unavailable", observation=observation
+        )

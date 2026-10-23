@@ -1,6 +1,35 @@
 from typing import Literal
+import re
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+DISCORD_GUILD_LIMIT = 4000
+
+
+def is_discord_snowflake(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None
+        and int(value) < 2**64
+    )
+
+
+class TestingExternalCapabilityProof(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    activation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    binding_key: str
+    binding_id: str
+    secret_id: str
+    version_id: str
+    bot_id: str
+    application_id: str
+    guild_ids: tuple[str, ...]
+    observed_at: str
+    trace_id: str
+    rate_limits: tuple["DiscordRateLimitEvidence", ...] = Field(default=(), max_length=2)
+    old_writer_exclusion: Literal["not_evaluated"] = "not_evaluated"
 
 
 ExternalResourceReadFailure = Literal[
