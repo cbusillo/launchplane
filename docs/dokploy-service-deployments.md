@@ -313,15 +313,24 @@ no product or authorization plan artifacts. Successful product registration keep
 the adopted target and project names, and compares both target and identity
 snapshots atomically before writing records.
 
-The worker interface and caller migration follow the two-landing policy in
-[GitHub Actions security](github-actions-security.md). The worker contract lands
-first with caller pins unchanged. A later change pins every caller to that exact
-landed commit before forwarding allocation_control. During that source window,
-the old pinned onboarding worker can only continue by rerunning its original
-apply; its readback and retention interface becomes callable after the follow-up
-pin migration. Complete the caller landing immediately after the worker landing.
-Neither source landing grants
-access or activates the new worker trust anchor; those remain separate operations.
+Product Onboarding forwards allocation_control to the protected worker pinned to
+the exact [worker-contract landing](https://github.com/cbusillo/launchplane/pull/4590),
+following the two-landing policy in [GitHub Actions security](github-actions-security.md).
+For readback, keep the original dispatch inputs, select outer mode dry_run and
+supply `{"mode":"readback"}`. The caller renders only the original target request,
+skips repository-token creation and all three planning API calls, and invokes the
+protected worker even though the outer mode is dry_run. The worker retains the
+original workflow identity and allocation key; no product or authorization plan
+is required. Ordinary dry_run without a recovery mode still only plans onboarding.
+
+To continue the original allocation, select outer mode apply, provide its exact
+confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add
+retain_allocation: true and expected_allocation_custody_sha256 to that envelope.
+Use the same explicit idempotency_key if the original apply supplied one. A
+key-only envelope still runs normal onboarding with all plan reviews. Neither
+source landing grants access or activates the new worker trust anchor; those
+remain separate operations. A denied worker identity stays denied and follows
+the recorded activation path without switching callers or scopes.
 
 ### Testing application state volume
 

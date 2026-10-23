@@ -16,6 +16,156 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.output = self.root / "outputs"
 
+    def caller_env(self, control: object = None, *, mode: str = "dry_run") -> dict[str, str]:
+        return {
+            **dict.fromkeys(
+                ("TESTING_CONTEXT", "PREVIEW_CONTEXT", "TARGET_NAME", "PROJECT_NAME", "SERVER_ID"),
+                "",
+            ),
+            "MODE": mode,
+            "CONFIRMATION": "APPLY GENERIC WEB ONBOARDING" if mode == "apply" else "",
+            "ALLOCATION_CONTROL": "" if control is None else json.dumps(control),
+            "PRODUCT": "fixture",
+            "DISPLAY_NAME": "Fixture",
+            "REPOSITORY": "fixture-owner/fixture",
+            "IMAGE_REPOSITORY": "registry.example/fixture",
+            "RUNTIME_PORT": "8080",
+            "HEALTH_PATH": "/healthz",
+            "PREVIEW_BASE_URL": "https://preview.example.com",
+            "ENVIRONMENT_NAME": "testing",
+            "DOMAIN_CERTIFICATE_TYPE": "none",
+            "REASON": "fixture recovery",
+            "RELATED_ISSUE": "fixture issue",
+            "GITHUB_SHA": "fixture-source",
+            "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
+        }
+
+    def caller_step(self, name: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return self.run_step("product-onboarding.yml", "plan", name, env)
+
+    def output_values(self) -> dict[str, str]:
+        return dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+
+    def test_caller_classifies_recovery_and_requires_apply_confirmation(self) -> None:
+        for control, mode, recovery in (
+            (None, "dry_run", "false"),
+            ({}, "apply", "false"),
+            ({"idempotency_key": "fresh key"}, "apply", "false"),
+            ({"mode": "readback"}, "dry_run", "true"),
+            ({"mode": "apply"}, "apply", "true"),
+            (
+                {
+                    "mode": "apply",
+                    "retain_allocation": True,
+                    "expected_allocation_custody_sha256": "a" * 64,
+                },
+                "apply",
+                "true",
+            ),
+        ):
+            with self.subTest(control=control, mode=mode):
+                result = self.caller_step(
+                    "Validate and normalize typed inputs", self.caller_env(control, mode=mode)
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.output_values()["recovery"], recovery)
+        invalid_controls: tuple[object, ...] = (
+            {"mode": "apply"},
+            {"mode": "other"},
+            {"mode": None},
+            {"retain_allocation": True},
+            {
+                "mode": "readback",
+                "retain_allocation": True,
+                "expected_allocation_custody_sha256": "a" * 64,
+            },
+            {"idempotency_kye": "key"},
+            {"idempotency_key": 5},
+            {"idempotency_key": "key\n"},
+            {"retain_allocation": "true"},
+            {"expected_allocation_custody_sha256": "a" * 64},
+            [],
+            "readback",
+        )
+        for invalid_control in invalid_controls:
+            with self.subTest(control=invalid_control):
+                result = self.caller_step(
+                    "Validate and normalize typed inputs", self.caller_env(invalid_control)
+                )
+                self.assertNotEqual(result.returncode, 0)
+        env = self.caller_env({"mode": "apply"}, mode="apply")
+        env["CONFIRMATION"] = ""
+        self.assertNotEqual(
+            self.caller_step("Validate and normalize typed inputs", env).returncode, 0
+        )
+
+    def render_caller(self, control: object = None) -> dict[str, str]:
+        env = self.caller_env(control, mode="apply")
+        result = self.caller_step("Validate and normalize typed inputs", env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = self.output_values()
+        env.update(
+            NORMALIZED_PRODUCT=outputs["product"],
+            NORMALIZED_PREVIEW_CONTEXT=outputs["preview_context"],
+            NORMALIZED_PROJECT_NAME=outputs["project_name"],
+            NORMALIZED_TARGET_NAME=outputs["target_name"],
+            NORMALIZED_TESTING_CONTEXT=outputs["testing_context"],
+            RECOVERY=outputs["recovery"],
+            REPOSITORY_ID="",
+            REPOSITORY_OWNER_ID="",
+            DEFAULT_BRANCH="",
+        )
+        if env["RECOVERY"] != "true":
+            env.update(REPOSITORY_ID="101", REPOSITORY_OWNER_ID="202", DEFAULT_BRANCH="main")
+        result = self.caller_step("Render plan requests", env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return env
+
+    def test_caller_recovery_finalizes_only_original_target_artifact(self) -> None:
+        self.render_caller({"idempotency_key": "original-key"})
+        target = self.root / "target-plan-request.json"
+        original_bytes = target.read_bytes()
+        for name in (
+            "generic-web-intent.json",
+            "onboarding-plan-request.json",
+            "authz-plan-request.json",
+        ):
+            (self.root / name).unlink()
+        for mode in ("readback", "apply"):
+            with self.subTest(mode=mode):
+                env = self.render_caller({"mode": mode, "idempotency_key": "original-key"})
+                self.assertEqual(target.read_bytes(), original_bytes)
+                self.assertEqual({path.name for path in self.root.glob("*.json")}, {target.name})
+                result = self.caller_step("Finalize onboarding plan", env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = self.output_values()
+                self.assertEqual(
+                    outputs["target_plan_sha256"], hashlib.sha256(original_bytes).hexdigest()
+                )
+                self.assertEqual(outputs["onboarding_plan_sha256"], "")
+                self.assertEqual(outputs["authz_plan_sha256"], "")
+                self.assertFalse((self.root / "authz-reconcile-request.json").exists())
+
+    def test_caller_normal_onboarding_keeps_all_planned_artifacts(self) -> None:
+        env = self.render_caller({"idempotency_key": "fresh-reviewed-key"})
+        intent = json.loads((self.root / "generic-web-intent.json").read_text())
+        self.assertEqual(intent["repository_id"], env["REPOSITORY_ID"])
+        self.assertEqual(intent["testing_context"], env["NORMALIZED_TESTING_CONTEXT"])
+        authz = {"fixture": "reviewed configuration"}
+        (self.root / "onboarding-plan.json").write_text(
+            json.dumps({"result": {"plan_sha256": "a" * 64}})
+        )
+        (self.root / "authz-plan.json").write_text(
+            json.dumps({"result": {"plan_sha256": "b" * 64, "configuration": authz}})
+        )
+        result = self.caller_step("Finalize onboarding plan", env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads((self.root / "authz-reconcile-request.json").read_text()), authz
+        )
+        self.assertEqual(self.output_values()["onboarding_plan_sha256"], "a" * 64)
+        self.assertEqual(self.output_values()["authz_plan_sha256"], "b" * 64)
+
     def run_step(
         self, workflow: str, job: str, name: str, env: dict[str, str]
     ) -> subprocess.CompletedProcess[str]:
