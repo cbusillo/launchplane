@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
 from typing import Annotated
 
 import click
@@ -7,6 +8,9 @@ from fastapi import Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane import secrets
+from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
+from control_plane.durable_operation_authorization import read_active_authz_policy_record
+from control_plane.product_config import _plan_product_config_secret_write
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -27,7 +31,10 @@ from control_plane.owner_secret_inputs import (
 from control_plane.product_review import viewer_is_product_owner
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import ProductProfileConflictError
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductProfileConflictError,
+)
 
 OWNER_SECRET_INPUT_ROUTE = "/v1/owner-secret-inputs"
 OWNER_SECRET_SUBMIT_ROUTE = "/v1/owner-secret-inputs/submit"
@@ -77,6 +84,124 @@ def register_owner_secret_input_routes(
     app: ApiRouteRegistrar, *, dependencies: OwnerSecretInputDependencies
 ) -> None:
     common = dependencies.common
+
+    def service_target(
+        identity: LaunchplaneIdentity, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        allowed = False
+        if isinstance(record_store, PostgresRecordStore) and isinstance(
+            identity, GitHubHumanIdentity
+        ):
+            try:
+                allowed = read_active_authz_policy_record(record_store).policy.names_administrator(
+                    identity
+                )
+            except (LookupError, TypeError):
+                allowed = False
+        if not allowed or not isinstance(record_store, PostgresRecordStore):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="owner_secret_input_unavailable",
+                message="This credential request is unavailable to you.",
+            )
+        return record_store
+
+    def service_projection(store: PostgresRecordStore, trace_id: str) -> OwnerSecretInputResponse:
+        fields = []
+        for key in ("username", "password"):
+            record = store.find_secret_record(
+                scope="context",
+                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                name=key,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+                instance="",
+            )
+            fields.append(
+                OwnerSecretInputField(
+                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                    binding_key=key,
+                    label="GHCR pull-only username"
+                    if key == "username"
+                    else "GHCR pull-only token",
+                    instructions="Only the Director can save this credential. It is used for artifact reads and is never shown again.",
+                    environments=(LAUNCHPLANE_SERVICE_CONTEXT,),
+                    request_revision=hashlib.sha256(
+                        f"{LAUNCHPLANE_SERVICE_CONTEXT}:{GHCR_ARTIFACT_READ_INTEGRATION}:{key}".encode()
+                    ).hexdigest(),
+                    submitted_at=record.updated_at if record else "",
+                    submission_version_id=record.current_version_id if record else "",
+                )
+            )
+        return OwnerSecretInputResponse(
+            trace_id=trace_id,
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            display_name="Artifact scan credentials",
+            environment=GHCR_ARTIFACT_READ_INTEGRATION,
+            can_submit=True,
+            fields=tuple(fields),
+        )
+
+    def submit_service_input(
+        envelope: OwnerSecretInputEnvelope,
+        identity: GitHubHumanIdentity,
+        record_store: object,
+        trace_id: str,
+    ) -> OwnerSecretInputResponse:
+        store = service_target(identity, record_store, trace_id)
+        field = next(
+            (
+                field
+                for field in service_projection(store, trace_id).fields
+                if field.request_revision == envelope.request_revision
+            ),
+            None,
+        )
+        if field is None or not envelope.value.get_secret_value().strip():
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_secret_request_changed",
+                message="This credential request changed. Refresh before submitting.",
+            )
+        try:
+            secrets.validate_secret_key_configuration()
+            plan = _plan_product_config_secret_write(
+                record_store=store,
+                scope="context",
+                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                name=field.binding_key,
+                plaintext_value=envelope.value.get_secret_value(),
+                binding_key=field.binding_key,
+                context_name=LAUNCHPLANE_SERVICE_CONTEXT,
+                actor=f"github:{identity.github_id}",
+                value_source="supplied",
+                source_label="Director credential input",
+            )
+            store.write_director_secret_bundle(
+                ProductAuthorityBundle(
+                    secret_records=tuple(plan["secret_records"]),
+                    secret_versions=tuple(plan["secret_versions"]),
+                    secret_bindings=tuple(plan["secret_bindings"]),
+                    secret_audit_events=tuple(plan["secret_audit_events"]),
+                ),
+                identity=identity,
+            )
+        except PermissionError as error:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="owner_secret_input_unavailable",
+                message="This credential request is unavailable to you.",
+            ) from error
+        except click.ClickException as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="secret_storage_unavailable",
+                message="Encrypted credential storage is unavailable.",
+            ) from error
+        return service_projection(store, trace_id)
 
     def target(
         product: str,
@@ -169,6 +294,8 @@ def register_owner_secret_input_routes(
     ) -> OwnerSecretInputResponse:
         response.headers["Cache-Control"] = "no-store"
         trace_id = common.next_trace_id()
+        if product == LAUNCHPLANE_SERVICE_CONTEXT and environment == GHCR_ARTIFACT_READ_INTEGRATION:
+            return service_projection(service_target(identity, record_store, trace_id), trace_id)
         store, profile, lane = target(product, environment, identity, record_store, trace_id)
         return projection(store, profile, lane, identity, trace_id)
 
@@ -182,6 +309,11 @@ def register_owner_secret_input_routes(
     ) -> OwnerSecretInputResponse:
         response.headers["Cache-Control"] = "no-store"
         trace_id = common.next_trace_id()
+        if (
+            envelope.product == LAUNCHPLANE_SERVICE_CONTEXT
+            and envelope.environment == GHCR_ARTIFACT_READ_INTEGRATION
+        ):
+            return submit_service_input(envelope, identity, record_store, trace_id)
         store, profile, lane = target(
             envelope.product, envelope.environment, identity, record_store, trace_id, writing=True
         )

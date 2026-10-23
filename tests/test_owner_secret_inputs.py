@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from control_plane import secrets
 from control_plane.owner_secret_inputs import resolve_owner_secret_submission
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
@@ -48,6 +49,217 @@ def _human(
 
 
 class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
+    def seed_director(self) -> None:
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="director-policy",
+                source="test",
+                updated_at="2026-10-23T00:00:00Z",
+                policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_humans": [
+                            {
+                                "github_ids": [9004],
+                                "roles": ["admin"],
+                                "actions": ["authz_policy_grant.write"],
+                                "products": ["launchplane"],
+                                "contexts": ["launchplane"],
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+
+    async def service_read(self, human: GitHubHumanIdentity) -> Response:
+        session = self.sessions.issue(human)
+        return await _asgi_get(
+            self.app,
+            "/v1/owner-secret-inputs?product=launchplane&environment=ghcr_artifact_read",
+            headers={"Cookie": self.sessions.session_cookie_header(session)},
+        )
+
+    async def test_director_stores_exact_context_bindings_without_plaintext_readback(self) -> None:
+        self.seed_director()
+        director = _human("renamed-director", 9004, "admin")
+        read = await self.service_read(director)
+        self.assertEqual(read.status_code, 200, read.text)
+        values = {"username": "synthetic-registry-user", "password": "synthetic-pull-token"}
+        for field in read.json()["fields"]:
+            value = values.pop(field["binding_key"])
+            response = await self.post(
+                {
+                    "product": "launchplane",
+                    "environment": "ghcr_artifact_read",
+                    "request_revision": field["request_revision"],
+                    "value": value,
+                },
+                human=director,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertNotIn(value, response.text)
+            record = self.store.read_secret_record(
+                next(
+                    binding.secret_id
+                    for binding in self.store.list_secret_bindings()
+                    if binding.binding_key == field["binding_key"]
+                )
+            )
+            version = self.store.read_secret_version(record.current_version_id)
+            self.assertNotIn(value, version.model_dump_json())
+            self.assertEqual(
+                secrets._decrypt_secret_value(version.ciphertext, version.key_id), value
+            )
+            self.assertEqual(version.created_by, "github:9004")
+            self.assertNotIn(
+                value,
+                json.dumps(
+                    [
+                        event.model_dump(mode="json")
+                        for event in self.store.list_secret_audit_events(secret_id=record.secret_id)
+                    ]
+                ),
+            )
+            self.assertEqual(
+                secrets.resolve_context_secret_value(
+                    integration="ghcr_artifact_read",
+                    context_name="launchplane",
+                    binding_key=field["binding_key"],
+                    database_url=self.store.database_url,
+                ),
+                value,
+            )
+        self.assertFalse(values)
+        for binding in self.store.list_secret_bindings():
+            self.assertEqual(
+                (binding.integration, binding.context, binding.instance),
+                ("ghcr_artifact_read", "launchplane", ""),
+            )
+            self.assertEqual(self.store.read_secret_record(binding.secret_id).scope, "context")
+        reread = await self.service_read(director)
+        self.assertTrue(all(field["submitted_at"] for field in reread.json()["fields"]))
+        self.assertNotIn("synthetic-pull-token", reread.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
+
+    async def test_service_secret_rotation_and_policy_revocation_at_commit(self) -> None:
+        self.seed_director()
+        director = _human("director", 9004, "admin")
+        read = await self.service_read(director)
+        self.assertEqual(read.status_code, 200, read.text)
+        payload = {
+            "product": "launchplane",
+            "environment": "ghcr_artifact_read",
+            "request_revision": read.json()["fields"][1]["request_revision"],
+            "value": "synthetic-first-token",
+        }
+        first = await self.post(payload, human=director)
+        self.assertEqual(first.status_code, 200, first.text)
+        second = await self.post({**payload, "value": "synthetic-rotated-token"}, human=director)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertNotEqual(
+            first.json()["fields"][1]["submission_version_id"],
+            second.json()["fields"][1]["submission_version_id"],
+        )
+        before = self.store.list_secret_records()
+        revoked = LaunchplaneAuthzPolicyRecord(
+            record_id="revoked",
+            source="test",
+            updated_at="2026-10-23T00:00:00Z",
+            policy=LaunchplaneAuthzPolicy(),
+        )
+        with patch.object(self.store, "_locked_active_authz_policy_record", return_value=revoked):
+            refused = await self.post({**payload, "value": "must-not-be-stored"}, human=director)
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(self.store.list_secret_records(), before)
+        self.assertEqual(
+            secrets.resolve_context_secret_value(
+                integration="ghcr_artifact_read",
+                context_name="launchplane",
+                binding_key="password",
+                database_url=self.store.database_url,
+            ),
+            "synthetic-rotated-token",
+        )
+
+    async def test_service_secret_bundle_failure_rolls_back_all_records(self) -> None:
+        self.seed_director()
+        director = _human("director", 9004, "admin")
+        read = await self.service_read(director)
+        self.assertEqual(read.status_code, 200, read.text)
+        with (
+            self.assertRaisesRegex(RuntimeError, "synthetic storage failure"),
+            patch.object(
+                self.store,
+                "_after_product_authority_bundle_step",
+                side_effect=RuntimeError("synthetic storage failure"),
+            ),
+        ):
+            await self.post(
+                {
+                    "product": "launchplane",
+                    "environment": "ghcr_artifact_read",
+                    "request_revision": read.json()["fields"][0]["request_revision"],
+                    "value": "must-not-be-stored",
+                },
+                human=director,
+            )
+        self.assertEqual(self.store.list_secret_records(), ())
+        self.assertEqual(self.store.list_secret_bindings(), ())
+
+    async def test_service_secret_denies_client_scoped_admin_and_login_impersonation(self) -> None:
+        self.seed_director()
+        for human in (
+            _human(),
+            _human("operator", 9003, "admin"),
+            _human("director", 9005, "admin"),
+            _human("director", 9004),
+        ):
+            response = await self.service_read(human)
+            self.assertEqual(response.status_code, 403, response.text)
+            response = await self.post(
+                {
+                    "product": "launchplane",
+                    "environment": "ghcr_artifact_read",
+                    "request_revision": "a" * 64,
+                    "value": "synthetic-pull-token",
+                },
+                human=human,
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertNotIn("synthetic-pull-token", response.text)
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_service_secret_missing_policy_stale_request_and_missing_key_never_write(
+        self,
+    ) -> None:
+        director = _human("director", 9004, "admin")
+        self.assertEqual((await self.service_read(director)).status_code, 403)
+        self.seed_director()
+        read = await self.service_read(director)
+        self.assertEqual(read.status_code, 200, read.text)
+        payload = {
+            "product": "launchplane",
+            "environment": "ghcr_artifact_read",
+            "request_revision": read.json()["fields"][0]["request_revision"],
+            "value": "synthetic-pull-token",
+        }
+        stale = await self.post({**payload, "request_revision": "a" * 64}, human=director)
+        self.assertEqual(stale.status_code, 409, stale.text)
+        session = self.sessions.issue(director)
+        csrf = await _asgi_request(
+            self.app,
+            "POST",
+            _SUBMIT,
+            payload=payload,
+            headers={"Cookie": self.sessions.session_cookie_header(session)},
+        )
+        self.assertEqual(csrf.status_code, 403, csrf.text)
+        with patch.dict(os.environ, {}, clear=True):
+            unavailable = await self.post(payload, human=director)
+        self.assertEqual(unavailable.status_code, 503, unavailable.text)
+        self.assertNotIn("synthetic-pull-token", unavailable.text)
+        self.assertEqual(self.store.list_secret_records(), ())
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

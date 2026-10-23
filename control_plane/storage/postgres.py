@@ -6480,6 +6480,19 @@ class PostgresRecordStore(HumanSessionStore):
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         self._write_product_authority_bundle(bundle)
 
+    def write_director_secret_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            active = self._locked_active_authz_policy_record(session)
+            if not active.policy.names_administrator(identity):
+                raise PermissionError("Only the Director can store service credentials.")
+            self._write_product_authority_bundle(
+                bundle, write_session=session, write_transaction_started=True
+            )
+
     def write_product_public_hosts_bundle(
         self,
         bundle: ProductAuthorityBundle,

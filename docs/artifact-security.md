@@ -54,9 +54,17 @@ GHCR-only auth entry in a mode-0600 file inside the private temporary Docker
 config directory. It never supplies global Trivy username/password settings,
 and removes the file when scanning ends. Other registry and advisory mirror
 hosts receive no such entry. It never falls back to a product token or host
-login. The Director creates/pastes any new
-credential through the existing managed-secret UI; the agent verifies only
-redacted reads. Absent credentials allow public reads; an enabled private scan
+login. The Director opens
+`/ui/owner-secrets?product=launchplane&environment=ghcr_artifact_read` on the
+deployed Launchplane service and saves the pull-only username and token in the
+existing write-only form. The service binds each value directly in its own
+context, without a product profile or a separate admin application step.
+Only the signed-in Director identified by the active policy's immutable GitHub
+administrator ID can read this request or submit it; product Clients, scoped
+admins and machine identities cannot. Values are encrypted, never returned or
+logged, and the form clears each input before dispatch. A saved receipt survives
+reload; replacing a credential rotates its encrypted version. The agent verifies
+only redacted reads. Absent credentials allow public reads; an enabled private scan
 without usable credentials remains unavailable and holds the deploy.
 
 Scanner databases and image-analysis cache stay in a private, process-owned
