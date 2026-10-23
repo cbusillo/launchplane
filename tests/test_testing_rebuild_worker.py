@@ -2057,6 +2057,31 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.capture.assert_called_once()
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
+    def test_stored_profiles_with_retired_preview_fields_do_not_block_rebuild_publication(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import product_profile_payload
+        from tests.support.stored_profiles import persist_historical_preview_transport
+
+        persist_historical_preview_transport(
+            self.store, self.operation.product, seed_command="", migration_command=""
+        )
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("historical-site")
+        )
+        self.store.write_product_profile_record(foreign)
+        persist_historical_preview_transport(
+            self.store, foreign.product, data_transport_mode="bootstrap", seed_command="old-seed"
+        )
+        profiles = self.store.list_product_profile_records()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.store.list_product_profile_records(), profiles)
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def test_failed_public_candidate_restores_the_old_route_without_retiring_it(self) -> None:
         self.fail_public = True
         result = self.execute()
@@ -3562,6 +3587,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
+                    return_value=effects_started,
+                ),
+                patch.object(
+                    self.store,
+                    "native_testing_rebuild_requires_reconciliation",
                     return_value=effects_started,
                 ),
                 patch.object(

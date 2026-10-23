@@ -5832,6 +5832,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     @staticmethod
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
+        if model_type is LaunchplaneProductProfileRecord:
+            return cast(RecordModel, PostgresRecordStore._read_product_profile_payload(payload))
         return model_type.model_validate(payload)
 
     def _write_row(self, row: Base) -> None:
@@ -11284,6 +11286,8 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         row: LaunchplaneOdooStableTargetReplacementOperationRow,
         record: OdooStableTargetReplacementOperationRecord,
+        *,
+        resume_failed_native: bool = False,
     ) -> None:
         current = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
         if odoo_replacement_original_identity(current) != odoo_replacement_original_identity(
@@ -11293,6 +11297,12 @@ class PostgresRecordStore(HumanSessionStore):
         if (
             odoo_stable_target_replacement_operation_is_terminal(current)
             and current.status != record.status
+            and not (
+                resume_failed_native
+                and current.is_native_testing_rebuild
+                and current.status == "fail"
+                and record.status == "pending"
+            )
         ):
             raise ValueError("Terminal Odoo replacement status cannot change or be reused.")
         row.product = record.product
@@ -11441,6 +11451,36 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> bool:
         with self._session_factory() as session:
             return self._native_testing_rebuild_effects_started(session, operation)
+
+    def native_testing_rebuild_requires_reconciliation(
+        self, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        with self._session_factory() as session:
+            return self._native_testing_rebuild_requires_reconciliation(session, operation)
+
+    def _native_testing_rebuild_requires_reconciliation(
+        self, session: Session, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+        if not operation.is_native_testing_rebuild:
+            return False
+        if self._native_testing_rebuild_effects_started(session, operation):
+            return True
+        row = session.scalar(
+            self._idempotency_statement(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE,
+                idempotency_key=operation.operation_id,
+            )
+        )
+        if row is None:
+            return False
+        receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        return (
+            receipt.state == "reconcile_required"
+            and receipt.request_fingerprint == operation.request_fingerprint
+        )
 
     def _native_testing_rebuild_effects_started(
         self, session: Session, operation: OdooStableTargetReplacementOperationRecord
@@ -11600,7 +11640,7 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     raise TestingRebuildResumeRefused("The original resume receipt conflicts.")
                 return current
-            if current.status != "reconciliation_required" or (
+            if (
                 current.updated_at,
                 current.attempt,
             ) != (expected_updated_at, expected_attempt):
@@ -11633,6 +11673,15 @@ class PostgresRecordStore(HumanSessionStore):
                 raise TestingRebuildResumeRefused(
                     "The original native execution receipt is unavailable."
                 )
+            legacy_pre_effect_failure = (
+                current.status == "fail"
+                and self._native_testing_rebuild_requires_reconciliation(session, current)
+                and not self._native_testing_rebuild_effects_started(session, current)
+            )
+            if current.status != "reconciliation_required" and not legacy_pre_effect_failure:
+                raise TestingRebuildResumeRefused(
+                    "Inspect the original fenced operation before resuming."
+                )
             replacement = OdooStableTargetReplacementOperationRecord.model_validate(
                 {
                     **current.model_dump(),
@@ -11640,6 +11689,10 @@ class PostgresRecordStore(HumanSessionStore):
                     "status": "pending",
                     "phase": "created",
                     "updated_at": now,
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
                     "error_code": "",
                     "error_message": "",
                     "error_detail_keys": (),
@@ -11672,7 +11725,9 @@ class PostgresRecordStore(HumanSessionStore):
                     "authorization": authorization.model_dump(mode="json"),
                 },
             )
-            self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
+            self._sync_odoo_stable_target_replacement_operation_row(
+                row, replacement, resume_failed_native=legacy_pre_effect_failure
+            )
             session.add(self._idempotency_row(receipt_record))
             session.commit()
             return replacement
@@ -12127,7 +12182,7 @@ class PostgresRecordStore(HumanSessionStore):
             profile_row = session.get(LaunchplaneProductProfileRow, product)
             if profile_row is None:
                 return None
-            profile = LaunchplaneProductProfileRecord.model_validate(profile_row.payload)
+            profile = self._read_product_profile_payload(profile_row.payload)
             private_checks = []
             for lane in profile.lanes:
                 if (lane.context, lane.instance) != (context, "testing"):
@@ -12327,7 +12382,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
 
             profiles = tuple(
-                LaunchplaneProductProfileRecord.model_validate(item.payload)
+                self._read_product_profile_payload(item.payload)
                 for item in session.scalars(select(LaunchplaneProductProfileRow))
             )
             profile = next((item for item in profiles if item.product == replacement.product), None)
@@ -30157,9 +30212,9 @@ class PostgresRecordStore(HumanSessionStore):
                 row = session.get(orm, identity, with_for_update=True)
                 if (
                     row is None
-                    or model.model_validate(getattr(row, "payload", None)).model_dump(
-                        mode="json", exclude_none=True
-                    )
+                    or self._read_payload(
+                        model_type=model, payload=getattr(row, "payload")
+                    ).model_dump(mode="json", exclude_none=True)
                     != expected[field]
                 ):
                     raise ValueError("Testing edge authority changed before publication.")
@@ -32148,7 +32203,7 @@ class PostgresRecordStore(HumanSessionStore):
             profile = None
             if request.scope != "global":
                 profiles = tuple(
-                    LaunchplaneProductProfileRecord.model_validate(row.payload)
+                    self._read_product_profile_payload(row.payload)
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 )
                 owners = product_context_owner_map(profiles).get(request.context, ())

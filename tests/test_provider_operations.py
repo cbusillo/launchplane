@@ -1134,6 +1134,34 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
 
 
 class MutationReservationAdoptionStorageTests(unittest.TestCase):
+    def test_profile_evidence_adopts_stored_history_and_refuses_authority_drift(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import product_profile_payload
+        from tests.support.stored_profiles import persist_historical_preview_transport
+
+        for drift in (False, True):
+            with self.subTest(drift=drift), TemporaryDirectory() as directory:
+                store, reservation = self._reconcile_required_store(directory)
+                self.addCleanup(store.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+                store.write_product_profile_record(profile)
+                persist_historical_preview_transport(
+                    store, profile.product, data_transport_mode="bootstrap", seed_command="old-seed"
+                )
+                expected = store.read_product_profile_record(profile.product)
+                if drift:
+                    store.write_product_profile_record(
+                        expected.model_copy(update={"display_name": "Changed authority"})
+                    )
+                adoption = store.adopt_reconciled_mutation(
+                    reservation=reservation,
+                    response_status_code=202,
+                    response_trace_id="adopting-instance",
+                    response_payload={"status": "accepted"},
+                    expected_binding_evidence=(expected,),
+                )
+                self.assertEqual(adoption.status, "reservation_mismatch" if drift else "adopted")
+
     @staticmethod
     def _reconcile_required_store(
         directory: str,

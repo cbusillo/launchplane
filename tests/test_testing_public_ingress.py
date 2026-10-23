@@ -292,6 +292,17 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_stored_profile_history_preserves_testing_edge_publication(self) -> None:
+        from tests.support.stored_profiles import persist_historical_preview_transport
+
+        persist_historical_preview_transport(
+            self.store, self.profile.product, seed_command="", migration_command=""
+        )
+        self.review_edge()
+        self.publish()
+        self.assertTrue(self.edge().readback()["applied"])
+        self.assertEqual(self.client.calls.count("create"), 1)
+
     def test_protected_continuation_preserves_audience_rules_and_original_route(self) -> None:
         config = self.protect_template()
         retained = self.client.proxy_hosts[0].model_copy(deep=True)
