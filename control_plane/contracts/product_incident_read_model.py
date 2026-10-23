@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import re
 from typing import Literal, Protocol, cast
@@ -738,6 +739,41 @@ def _event_summary(record: PublicIngressIncidentEventRecord) -> str:
     )
 
 
+def _legacy_testing_fence_reservation_id(
+    record: PublicIngressObservationRecord, summary: str
+) -> str | None:
+    if record.instance != "testing":
+        return None
+    match = re.fullmatch(
+        r"Deploy (.+) started at \S+ and holds this target "
+        r"\((?:running|reconcile_required), last at [^,]+, since [^)]+\)\. "
+        r"Every later deploy is refused until it is recovered with the generic-web deploy recovery dry-run\.",
+        summary,
+    )
+    if match is None:
+        return None
+    try:
+        key = ast.literal_eval(match[1])
+    except (ValueError, SyntaxError):
+        return None
+    from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
+    from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
+    from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+    from control_plane.product_reconcile import reconcile_reservation_scope
+
+    if (
+        not isinstance(key, str)
+        or repr(key) != match[1]
+        or not key.startswith(f"{RECONCILE_SOURCE}:{record.product}:{record.context}:testing:")
+    ):
+        return None
+    return build_launchplane_mutation_reservation_id(
+        scope=reconcile_reservation_scope(record.product),
+        route_path=GENERIC_WEB_DEPLOY_ROUTE,
+        idempotency_key=key,
+    )
+
+
 def _observation_read_summary(
     record: PublicIngressObservationRecord,
 ) -> ProductIncidentObservationSummary:
@@ -759,6 +795,9 @@ def _observation_read_summary(
                 reservation_ids.update(
                     re.findall(r"\bmutation-reservation-[0-9a-f]{64}\b", target.summary)
                 )
+                legacy_id = _legacy_testing_fence_reservation_id(record, target.summary)
+                if legacy_id is not None:
+                    reservation_ids.add(legacy_id)
     return ProductIncidentObservationSummary(
         record_id=record.record_id,
         purpose=record.purpose,
