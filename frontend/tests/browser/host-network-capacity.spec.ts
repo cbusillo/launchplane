@@ -1,5 +1,6 @@
 import { expect, test } from "./state";
 import type { HostNetworkCapacityObservation } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 test("placement shows host capacity and refreshes short, denied and unavailable evidence", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");
@@ -41,7 +42,7 @@ test("placement shows host capacity and refreshes short, denied and unavailable 
   await expect(capacity.getByLabel("Free bridge networks")).toHaveText(String(observation.capacity!.free_slots));
   await expect(capacity).toContainText(observation.reason);
   await capacity.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `../tmp/browser-smoke/host-network-capacity-short-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`host-network-capacity-short-${testInfo.project.name}.png`), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   for (const status of ["denied", "unavailable"] as const) {
     observation = { ...observation, status, capacity: null, reason: status === "denied" ? "The provider denied the capacity read." : "The host capacity could not be verified." };

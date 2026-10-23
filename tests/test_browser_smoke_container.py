@@ -44,6 +44,7 @@ esac
                 | {
                     "PATH": directory + os.pathsep + os.environ["PATH"],
                     "BROWSER_SMOKE_IMAGE": "fixture/browser:1",
+                    "BROWSER_SMOKE_ARTIFACT_DIR": "tmp/browser-smoke",
                     "SMOKE_EXIT": str(smoke_exit),
                     "CREATE_EXIT": str(create_exit),
                     "ATTACH_EXIT": str(attach_exit),

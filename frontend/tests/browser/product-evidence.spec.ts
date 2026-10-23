@@ -1,4 +1,5 @@
 import { expect, setClockTime, test } from "./state";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 test("Product Ops scopes evidence and preserves each distinct warning", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");
@@ -51,7 +52,7 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   }
   await expect(row.locator(".directory-product > .evidence-badge > small")).toHaveCount(0);
   await expect(row.locator(".directory-preview .evidence-badge")).toHaveCount(0);
-  await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-directory-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`product-evidence-directory-${testInfo.project.name}.png`), fullPage: true });
   await row.click();
   const warnings = page.locator("#warning-summary");
   await expect(warnings.locator('li:not([data-severity="info"])')).toHaveCount(2);
@@ -77,7 +78,7 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   testing.public_ingress.summary = "The previous public route returned a failure.";
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
   await expect(privateLane).toContainText(testing.public_ingress.summary);
-  await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-workspace-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`product-evidence-workspace-${testInfo.project.name}.png`), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
@@ -134,5 +135,5 @@ test("directory reasons follow missing private identity and expired observed pla
   await expect(row.locator('[data-lane="prod"] .evidence-badge')).toHaveAttribute("data-state", "stale");
   await expect(publicReason).toContainText(placement.provenance.detail);
   await expect(publicReason).not.toContainText(topology.provider_recorded.provenance.detail);
-  await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-observation-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`product-evidence-observation-${testInfo.project.name}.png`), fullPage: true });
 });

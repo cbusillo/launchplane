@@ -1,7 +1,7 @@
 import { expect, test, setClockTime, waitForState, type ConsoleMessage, type Page, type TestInfo } from "./state";
 import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 interface AllowedHttpFailure {
   pathname: string;
@@ -11,12 +11,6 @@ interface AllowedHttpFailure {
 interface BrowserDiagnosticsOptions {
   allowedHttpFailures?: AllowedHttpFailure[];
 }
-
-const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const screenshotRoot = resolve(
-  frontendRoot,
-  "../tmp/browser-smoke/screenshots",
-);
 
 test.describe("operator journeys", () => {
   test("anonymous operator receives the authentication prompt", { tag: "@layout" }, async ({
@@ -1643,11 +1637,7 @@ async function captureScreenshot(
   testInfo: TestInfo,
   name: string,
 ): Promise<void> {
-  const screenshotPath = resolve(
-    screenshotRoot,
-    testInfo.project.name,
-    `${name}.png`,
-  );
+  const screenshotPath = smokeArtifact("screenshots", testInfo.project.name, `${name}.png`);
   await mkdir(dirname(screenshotPath), { recursive: true });
   await page.evaluate(() => {
     document.querySelector<HTMLElement>("[data-route-heading]")?.focus({
