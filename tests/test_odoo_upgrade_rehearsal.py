@@ -475,29 +475,15 @@ class RehearsalScenario(unittest.TestCase):
                 self.assertEqual(read.call_count, 2)
                 credentials.assert_not_called()
 
-    def test_diagnostic_result_survives_real_marker_budget_and_adapter(self) -> None:
-        import io
-        from contextlib import redirect_stdout
+    def test_legacy_host_diagnostics_withhold_content_and_preserve_binding_and_custody(
+        self,
+    ) -> None:
+        import json
         from control_plane.contracts.canonical_json import canonical_json_sha256
-        from control_plane._odoo_rehearsal_diagnostics import (
-            REHEARSAL_DIAGNOSTIC_FILE_LIMIT,
-            REHEARSAL_DIAGNOSTIC_TEXT_LIMIT,
-        )
-        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
-        from control_plane.contracts.native_operation_evidence import (
-            NATIVE_OPERATION_RESULT_MAX_BYTES,
-        )
 
-        fixture = RehearsalHostSafetyTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
         record = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
         operation = "original-operation"
-        text = (
-            ('é\n"' * REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
-            .encode()[:REHEARSAL_DIAGNOSTIC_TEXT_LIMIT]
-            .decode(errors="ignore")
-        )
+        text = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
         child = {
             "intent_sha256": record.intent_sha256,
             "record_binding_sha256": record.binding_sha256,
@@ -531,7 +517,7 @@ class RehearsalScenario(unittest.TestCase):
                             "modified_at": datetime.now(timezone.utc).isoformat(),
                             "tail": text,
                         }
-                        for index in range(REHEARSAL_DIAGNOSTIC_FILE_LIMIT)
+                        for index in range(2)
                     ],
                     "runtime": [
                         {"service": role, "available": True, "tail": text}
@@ -542,14 +528,7 @@ class RehearsalScenario(unittest.TestCase):
                 },
                 **({"child_failure": child} if with_child else {}),
             }
-            output = io.StringIO()
-            with redirect_stdout(output):
-                fixture.host["emit_rehearsal_result"](result)
-            markers = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
-            self.assertIn("rehearsal_result", markers)
-            self.assertLessEqual(
-                len(bytes.fromhex(markers["rehearsal_result"])), NATIVE_OPERATION_RESULT_MAX_BYTES
-            )
+            markers = {"rehearsal_result": json.dumps(result).encode().hex()}
             adapter = self.adapter("execute")
             with patch.object(adapter, "run_script", return_value=markers):
                 read = cast(
@@ -563,9 +542,14 @@ class RehearsalScenario(unittest.TestCase):
                     ),
                 )
             self.assertEqual(read["custody"]["effect_started"], result["custody"]["effect_started"])
-            self.assertEqual(read.get("child_failure"), child if with_child else None)
+            self.assertEqual(
+                read.get("child_failure"), {**child, "error_text": ""} if with_child else None
+            )
             self.assertTrue(read["retained_upgrade_logs"]["truncated"])
-            self.assertEqual(read["retained_upgrade_logs"]["files"][0]["tail"], text)
+            self.assertEqual(read["retained_upgrade_logs"]["files"], [])
+            self.assertEqual(read["retained_upgrade_logs"]["runtime"], [])
+            self.assertNotIn(text, str(read))
+            self.assertIn(text, json.dumps(result))
 
     def test_host_accepts_only_content_free_mismatch_evidence_for_its_exact_operation(self) -> None:
         import json
@@ -1539,7 +1523,7 @@ class RehearsalScenario(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(logs.call_count, len(events))
         self.assertEqual(events[0]["deployment_id"], current["deploymentId"])
-        self.assertEqual(events[0]["child_failure"], child)
+        self.assertEqual(events[0]["child_failure"], {**child, "error_text": ""})
         self.assertTrue(events[0]["diagnostics_private"])
         for event in events[3:]:
             self.assertNotIn("child_failure", event)
@@ -2396,90 +2380,57 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
-    def test_upgrade_exception_reaches_the_bound_child_diagnostic(self) -> None:
-        import ast
+    def test_child_receipts_withhold_arbitrary_copied_values(self) -> None:
         import sys
-        from control_plane.odoo_testing_restore import rehearsal_copy_runner
-        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
 
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
-        spec["action"] = "execute"
-        (root / "execute.started").touch()
-        spec["workflow"] = {"ODOO_DB_PASSWORD": "synthetic-private-value"}
-        # Real child logging starts with a silent config. The emitted rehearsal
-        # subclass must make its error reach the original-operation receipt.
-        program = ast.parse(rehearsal_copy_runner(sanitize_source_only=False))
-        runner_class = next(
-            node
-            for node in program.body
-            if isinstance(node, ast.ClassDef) and node.name == "CopyRunner"
+        (root / "verify.started").touch()
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        with self.assertRaises(self.host["RehearsalCommandFailure"]):
+            with self.host["command_failure_scope"](spec, root):
+                self.host["command"](
+                    [
+                        sys.executable,
+                        "-c",
+                        f"import sys;print({copied!r});print({copied!r},file=sys.stderr);sys.exit(7)",
+                    ]
+                )
+        failure = self.host["read_command_failure"](spec, root)
+        self.assertNotIn(copied, str(failure))
+        self.assertEqual(failure["exit_status"], 7)
+        self.assertEqual(
+            failure["step"], self.test_child_receipts_withhold_arbitrary_copied_values.__name__
         )
-        child = self.fixture.root / "synthetic-odoo.py"
-        child.write_text("""import argparse, logging, os
-parser = argparse.ArgumentParser()
-parser.add_argument('--logfile', default=os.devnull)
-parser.add_argument('--log-level', default='critical')
-options, _ = parser.parse_known_args()
-logging.basicConfig(filename=options.logfile, level=options.log_level.upper())
-logging.error('RuntimeError: synthetic upgrade failed PASSWORD=synthetic-private-value')
-raise SystemExit(255)
-""")
-        database_marker = "lp_rehearsal_fixture_upgrade"
-        upgrade_command = f"/odoo/odoo-bin --stop-after-init --update all --upgrade-path /opt/openupgrade_scripts/scripts,/opt/project/openupgrade,/opt/extra_addons/openupgrade --addons-path /opt/launchplane/addons,/opt/project/addons,/opt/extra_addons,/odoo/addons,/odoo/odoo/addons --db_host database --db_port 5432 --db_user odoo --database {database_marker} --config /volumes/config/_generated.conf"
-        harness = f"""import shlex, subprocess, sys
-expected_copy_instance = 'rehearsal'
-class OdooRestorerError(Exception):
-    pass
-class OdooDataWorkflowRunner:
-    def run_command(self, command):
-        try:
-            subprocess.run([sys.executable, {str(child)!r}, *shlex.split(command)[1:]], check=True)
-        except subprocess.CalledProcessError as error:
-            raise OdooRestorerError(f'Command failed: {{command}}\\nError: {{error}}') from error
-    def _odoo_shell_command(self):
-        return ['/odoo/odoo-bin', 'shell', '--config', '/volumes/config/_generated.conf']
-    def _run_odoo_shell(self, script, label):
-        try:
-            if label == 'preflight':
-                raise subprocess.CalledProcessError(2, ['fixture', 'shell', '--help'], stderr=b'unrecognized parameters: shell')
-            subprocess.run([sys.executable, {str(child)!r}, *self._odoo_shell_command()[1:]], check=True)
-        except subprocess.CalledProcessError as error:
-            if label == 'preflight':
-                raise OdooRestorerError('Fixture CLI contract unavailable') from error
-            raise OdooRestorerError(f'Failed to execute Odoo shell for {{label}}') from error
-{ast.unparse(runner_class)}
-print('testing_copy_pre_registry_sanitized=true', flush=True)
-if sys.argv[1] == 'upgrade':
-    CopyRunner().run_command(sys.argv[2])
-else:
-    CopyRunner()._run_odoo_shell('fixture', sys.argv[1])
-"""
-        for phase in ("upgrade", "shell", "preflight"):
-            with self.subTest(phase=phase):
-                custody = root / phase
-                custody.mkdir()
-                (custody / "execute.started").touch()
-                with self.assertRaises(self.host["RehearsalCommandFailure"]):
-                    with self.host["command_failure_scope"](spec, custody):
-                        self.host["command"](
-                            [sys.executable, "-c", harness, phase, upgrade_command]
-                        )
-                failure = self.host["read_command_failure"](spec, custody)
-                self.assertIn(
-                    "Fixture CLI contract unavailable"
-                    if phase == "preflight"
-                    else "RuntimeError: synthetic upgrade failed",
-                    failure["error_text"],
-                )
-                self.assertNotIn("synthetic-private-value", str(failure))
-                self.assertNotIn(database_marker, failure["error_text"])
-                self.assertLessEqual(
-                    len(failure["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-                )
-                self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
-                self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+        self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+
+    def test_legacy_child_and_log_content_is_withheld_before_transport(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.host["emit_rehearsal_result"](
+                {
+                    "child_failure": {"step": "clone", "exit_status": 7, "error_text": copied},
+                    "retained_upgrade_logs": {
+                        "files": [{"file": copied + ".log", "tail": copied}],
+                        "runtime": [{"service": "database", "tail": copied}],
+                    },
+                }
+            )
+        marker = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+        result = json.loads(bytes.fromhex(marker["rehearsal_result"]))
+        self.assertNotIn(copied, str(result))
+        self.assertEqual(result["child_failure"]["step"], "clone")
+        self.assertEqual(result["child_failure"]["exit_status"], 7)
+        self.assertNotIn("retained_upgrade_logs", result)
+        self.assertTrue(result["retained_upgrade_logs_unavailable"])
 
     def test_persistence_refusals_keep_bound_child_in_existing_job_output(self) -> None:
         import errno
@@ -2515,11 +2466,11 @@ else:
             self.assertEqual(fallback["attempt_sha256"], spec["attempt_sha256"])
             self.assertEqual(fallback["record_binding_sha256"], spec["record_binding_sha256"])
             self.assertEqual(fallback["exit_status"], 7)
-            self.assertIn("upgrade error", fallback["error_text"])
+            self.assertEqual(fallback["error_text"], "")
             self.assertNotIn("private-value", str(fallback))
             self.assertIsNone(self.host["read_command_failure"](spec, root))
 
-    def test_failed_child_preserves_exit_and_redacted_error_for_readback(self) -> None:
+    def test_failed_child_preserves_exit_and_binding_without_content_for_readback(self) -> None:
         import subprocess
 
         spec, root, _ = self.storage_fixture(
@@ -2554,11 +2505,10 @@ else:
         diagnostic = self.host["read_command_failure"](spec, root)
         self.assertEqual(
             diagnostic["step"],
-            self.test_failed_child_preserves_exit_and_redacted_error_for_readback.__name__,
+            self.test_failed_child_preserves_exit_and_binding_without_content_for_readback.__name__,
         )
         self.assertEqual(diagnostic["exit_status"], 7)
-        self.assertIn(error_text, diagnostic["error_text"])
-        self.assertIn("initialization stopped", diagnostic["error_text"])
+        self.assertEqual(diagnostic["error_text"], "")
         self.assertNotIn("transient startup error", diagnostic["error_text"])
         self.assertNotIn(secret, str(diagnostic))
         spec.update(mode="observe", inspect_capture=True)
@@ -2578,10 +2528,11 @@ else:
         with self.assertRaises(OSError):
             self.run_host(spec)
 
-    def test_optional_log_failures_preserve_child_error_and_custody(self) -> None:
+    def test_legacy_child_readback_withholds_content_without_rewriting_custody(self) -> None:
         import json
+        import os
 
-        spec, root, containers = self.storage_fixture(
+        spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
         spec.update(mode="observe", action="execute", inspect_capture=True)
@@ -2592,156 +2543,34 @@ else:
         (root / source).mkdir()
         (root / source / "receipt.json").write_text(json.dumps({"database": source}))
         self.host["validate_snapshots"] = Mock()
-        self.host["retain_command_failure"](
-            spec,
-            root,
-            {"step": "clone", "exit_status": 1, "error_text": "clone could not complete"},
-        )
-        containers["web"][1]["State"]["Running"] = False
-        for failure in ("inspection", "writer", "logs"):
-            with self.subTest(failure=failure):
-                self.host["inspection"] = Mock(
-                    return_value=containers,
-                    side_effect=RuntimeError("source runtime is still selected")
-                    if failure == "inspection"
-                    else None,
-                )
-                containers["web"][1]["State"]["Running"] = failure == "writer"
-                self.host["retained_upgrade_logs"] = Mock(side_effect=ValueError("log unavailable"))
-                observed = self.run_host(spec)
-                self.assertEqual(
-                    observed["child_failure"]["error_text"], "clone could not complete"
-                )
-                self.assertTrue(observed["custody"]["effect_started"])
-                self.assertTrue(observed["retained_upgrade_logs_unavailable"])
-                self.assertFalse(observed["completed"])
-
-    def test_diagnostic_bounds_redact_known_secrets_and_credential_forms(self) -> None:
-        import subprocess
-        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-
-        error = "ValueError: missing legacy field"
-        text = (
-            "x" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT * 2)
-            + "\n--db_password cli-value\nPASSWORD='quoted value'\nBearer bearer-value"
-            + "\npostgresql://user:uri-value@database/name\nstandalone-known-secret\n"
-            + error
-        )
-        redacted = self.host["diagnostic_text"](text, ["standalone-known-secret"])
-        self.assertLessEqual(len(redacted), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
-        self.assertIn(error, redacted)
-        for secret in (
-            "cli-value",
-            "quoted value",
-            "bearer-value",
-            "uri-value",
-            "standalone-known-secret",
-        ):
-            self.assertNotIn(secret, redacted)
-        unicode_text = self.host["diagnostic_text"]("🙂" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT * 2))
-        self.assertLessEqual(len(unicode_text.encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
-        self.assertEqual(
-            self.host["diagnostic_text"]("password authentication failed"),
-            "password authentication failed",
-        )
-        self.assertNotIn(
-            "client@example.invalid",
-            self.host["diagnostic_text"](
-                "DETAIL: Key (login)=(client@example.invalid) already exists"
-            ),
-        )
-        short = "copy phase stopped\n"
-        long = (
-            "FixtureDatabaseError: "
-            + "x" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 2)
-            + "é" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 8)
-        )
-        for stdout, stderr in ((short, long), (long, short)):
-            diagnostic = self.host["command_diagnostic"](
-                [], subprocess.CompletedProcess([], 1, stdout.encode(), stderr.encode()), {}
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        path = self.host["command_failure_path"](spec, root)
+        path.write_text(
+            json.dumps(
+                {
+                    "intent_sha256": spec["record"]["intent_sha256"],
+                    "attempt_sha256": spec["attempt_sha256"],
+                    "record_binding_sha256": spec["record_binding_sha256"],
+                    "step": "clone",
+                    "exit_status": 1,
+                    "error_text": copied,
+                }
             )
-            self.assertIn(long, diagnostic["error_text"])
-            self.assertIn(short, diagnostic["error_text"])
-            self.assertLessEqual(
-                len(diagnostic["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-            )
-
-    def test_truncated_process_diagnostics_do_not_expose_a_partial_secret(self) -> None:
-        import sys
-        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
-
-        secret = "prefix-private-secret-suffix"
-        suffix = secret[len(secret) // 2 :]
-        marker = b"\n-----BEGIN PRIVATE KEY-----\n"
-        payload = (
-            secret.encode()
-            + marker
-            + b"x" * (REHEARSAL_DIAGNOSTIC_TAIL_LIMIT - len(suffix) - len(marker))
         )
-        available, output = self.host["diagnostic_process_output"](
-            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(" + repr(payload) + ")"]
-        )
-        self.assertTrue(available)
-        self.assertNotIn(suffix, self.host["diagnostic_text"](output, [secret]))
-
-    def test_retained_logs_are_bounded_read_only_and_exclude_symlinks(self) -> None:
-        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-
-        spec, root, containers = self.storage_fixture(
-            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
-        )
-        (root / "verify.started").touch()
-        mount = next(
-            item
-            for item in containers["script-runner"][1]["Mounts"]
-            if item["Name"].endswith("-logs")
-        )
-        logs = Path(self.fixture.volumes[mount["Name"]]["Mountpoint"])
-        mount["Source"] = str(logs)
-        fixture_value = "synthetic-log-redaction-sentinel"
-        containers["script-runner"][1]["Config"]["Env"].append("ODOO_DB_PASSWORD=" + fixture_value)
-        path = logs / "odoo.log"
-        content = (
-            b"old output\n" * REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-            + ("RuntimeError: unknown upgrade module\n" + fixture_value).encode()
-        )
-        path.write_bytes(content)
-        before = path.stat()
-        private = self.fixture.root / "private.log"
-        private.write_text("must never be read")
-        (logs / "alias.log").symlink_to(private)
-        with patch.dict(
-            self.host,
-            diagnostic_process_output=Mock(return_value=(True, b"retained runtime error")),
-        ):
-            result = self.host["retained_upgrade_logs"](spec, containers, root)
-        self.assertTrue(all(log["available"] for log in result["runtime"]))
-        self.assertEqual(len(result["files"]), 1)
-        self.assertIn("RuntimeError: unknown upgrade module", result["files"][0]["tail"])
-        self.assertNotIn(fixture_value, str(result))
-        self.assertNotIn("must never be read", str(result))
-        self.assertEqual(path.read_bytes(), content)
-        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
-        self.assertLessEqual(len(result["files"][0]["tail"]), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+        os.chmod(path, 0o600)
+        original = path.read_bytes()
+        observed = self.run_host(spec)
+        self.assertNotIn(copied, str(observed))
+        self.assertEqual(observed["child_failure"]["step"], "clone")
+        self.assertEqual(observed["child_failure"]["exit_status"], 1)
+        self.assertTrue(observed["custody"]["effect_started"])
+        self.assertFalse(observed["completed"])
+        self.assertEqual(path.read_bytes(), original)
 
     def test_native_subprocess_readers_bound_and_preserve_failure(self) -> None:
         import sys
-        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
 
-        read = self.host["diagnostic_process_output"]
-        self.assertEqual(
-            read([sys.executable, "-c", "print('retained error')"]), (True, b"retained error\n")
-        )
-        available, _ = read([sys.executable, "-c", "raise SystemExit(7)"])
-        self.assertFalse(available)
-        available, _ = read(
-            [
-                sys.executable,
-                "-c",
-                f"import sys; sys.stdout.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT + 1})",
-            ]
-        )
-        self.assertFalse(available)
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
@@ -2752,14 +2581,14 @@ else:
                     [
                         sys.executable,
                         "-c",
-                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT + 1});sys.stderr.write('\\ncapture child error');sys.exit(7)",
+                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
                     ],
                     root / "partial.dump",
                     1024,
                 )
         diagnostic = self.host["read_command_failure"](spec, root)
         self.assertEqual(diagnostic["exit_status"], 7)
-        self.assertIn("capture child error", diagnostic["error_text"])
+        self.assertEqual(diagnostic["error_text"], "")
         self.assertNotIn("private capture bytes", str(diagnostic))
 
     @staticmethod
@@ -4796,7 +4625,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 "attempt_sha256": canonical_json_sha256({"operation_key": "fixture-operation"}),
                 "step": "copy_runner",
                 "exit_status": 7,
-                "error_text": "UndefinedColumn: legacy_code",
+                "error_text": "",
             },
             "retained_upgrade_logs": {
                 "files": [],
