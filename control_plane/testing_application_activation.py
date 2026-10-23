@@ -19,6 +19,7 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRefusedResult,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.testing_activation import TestingApplicationReadiness
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
@@ -274,6 +275,35 @@ def restored_application_route(store: Any, record: TestingActivationRecord) -> A
 
 @dataclass
 class ApplicationActivationAdapter(TestingActivationAdapter):
+    authorize_external: Callable[[], tuple[LaunchplaneProductProfileRecord, ...]] | None = None
+
+    def admit_external_capabilities(
+        self, record: TestingActivationRecord, check: Callable[[], None]
+    ) -> TestingActivationRecord:
+        specification = record.request.application
+        if (
+            specification is None
+            or not specification.external_credentials
+            or record.external_capabilities
+        ):
+            return record
+        if self.authorize_external is None or record.phase != "prepared" or record.project_id:
+            raise TestingActivationRefusal(
+                "Fresh authorized external capability admission is required."
+            )
+        from control_plane.testing_external_capabilities import observe_activation_discord
+
+        proof = observe_activation_discord(
+            self.store,
+            record,
+            authorize=self.authorize_external,
+            check_current=check,
+            actor=self.actor,
+            trace_id=self.trace_id,
+        )
+        check()
+        return self.save(record, external_capabilities=(proof,))
+
     def bindings(self) -> tuple[Any, Any, Any, Any]:
         return bind_testing_recipient(self.store, self.product, self.request.context, "testing")
 
@@ -413,6 +443,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
         super().require_unchanged(record)
+        if record.external_capabilities:
+            from control_plane.testing_external_capabilities import require_discord_capability
+
+            for proof in record.external_capabilities:
+                require_discord_capability(self.store, record, proof)
         specification = record.request.application
         profile = self.store.read_product_profile_record(record.product)
         assert specification is not None
@@ -2182,6 +2217,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                             context=record.context,
                             check=old_check,
                         )
+
+                        def admission_current() -> None:
+                            old_check()
+                            lease.assert_current()
+                            self.require_unchanged(record)
+
+                        record = self.admit_external_capabilities(record, admission_current)
                         if record.phase in {
                             "create_project",
                             "create_environment",

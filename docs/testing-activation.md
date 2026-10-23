@@ -58,6 +58,29 @@ read-only-source sharing evidence; an external writable database, bot token or
 other shared writable capability requires its own independent provider resource.
 Random generation cannot create a new external account.
 
+For a testing Discord bot, `application.external_credentials` supplies the binding
+key and the intended private `guild_ids` in the reviewed application request.
+The managed profile must already declare that exact testing binding as a
+`discord_bot` purpose. An empty intended guild list permits only an account with
+no guilds. This is intent, not provider evidence.
+
+Before the first activation provider effect, the service authorizes the current
+profile comparison reads and observes the bot using the exact managed version.
+It requires complete identity and guild enumeration, no production credential
+match, and actual guilds contained in the reviewed private set. The saved native
+proof binds the original plan and the current testing and production comparison
+inputs. Generation and runtime publication both revalidate that proof. A legacy
+version with no recorded origin may qualify from verified bytes; its origin is
+never rewritten. Planning performs no Discord request, and continuation reuses
+the original saved proof while refusing changed inputs.
+
+A refused observation preserves typed Discord backoff evidence through the
+service error and supported activation caller. No recipient creation or runtime
+credential installation follows an incomplete observation. This admission does
+not prove exclusion of an old testing writer, remove a hold, or replace retained
+application custody and fresh-recipient gates. No new authorization grant is
+created.
+
 Before fresh creation, the fixed inspector attributes the retained application's
 actual service/tasks/containers to its captured original deployment or exact
 captured predecessor. It refuses a Docker socket mount, inherited platform

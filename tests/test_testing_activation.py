@@ -130,6 +130,62 @@ class ComposeQualificationTests(unittest.TestCase):
 
 
 class ActivationTests(unittest.TestCase):
+    def test_native_external_refusal_keeps_backoff_through_http(self) -> None:
+        import asyncio
+        from control_plane.discord_identity import DiscordIdentityResult
+        from control_plane.contracts.testing_external_resources import (
+            DiscordBotResourceObservation,
+            DiscordRateLimitEvidence,
+        )
+        from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        result = DiscordIdentityResult(
+            observation=DiscordBotResourceObservation(
+                started_at="2026-10-23T00:00:00Z",
+                finished_at="2026-10-23T00:00:01Z",
+                http_status=429,
+                rate_limits=(
+                    DiscordRateLimitEvidence(phase="guilds", retry_after=120, global_limit=True),
+                ),
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch.object(
+            TestingActivationAdapter, "current", side_effect=ExternalCapabilityReadRefusal(result)
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "external-refusal",
+                    },
+                    payload=self.request.model_copy(
+                        update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+                    ).model_dump(mode="json"),
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        body = response.json()
+        self.assertEqual(
+            body["error"]["code"], TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        )
+        self.assertEqual(
+            DiscordIdentityResult.model_validate_json(body["records"]["discord_identity"]), result
+        )
+
     database_url = ""
     private_product = True
     local_credential_fixture = False

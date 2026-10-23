@@ -12,12 +12,13 @@ from control_plane.contracts.testing_external_resources import (
     DiscordBotResourceObservation,
     DiscordRateLimitEvidence,
     ExternalResourceReadFailure,
+    DISCORD_GUILD_LIMIT,
+    is_discord_snowflake,
 )
 from control_plane.outbound_http import PublicHttpResponse, request_public_http
 
 DISCORD_API_URL = "https://discord.com/api/v10"
 DISCORD_PAGE_LIMIT = 200
-DISCORD_GUILD_LIMIT = 4000
 DISCORD_PAGE_BUDGET = 48
 DISCORD_PARTITION_LIMIT = 16
 DISCORD_RESPONSE_LIMIT = 256 * 1024
@@ -31,11 +32,7 @@ class DiscordResourceReadError(ValueError):
 
 
 def discord_snowflake(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or re.fullmatch(r"[1-9][0-9]{0,19}", value) is None
-        or int(value) >= 2**64
-    ):
+    if not isinstance(value, str) or not is_discord_snowflake(value):
         raise DiscordResourceReadError("response_invalid")
     return value
 

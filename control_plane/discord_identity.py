@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
@@ -170,13 +171,19 @@ def read_discord_identity(
     profiles: tuple[LaunchplaneProductProfileRecord, ...],
     trace_id: str,
     actor: str,
+    captured_inputs: DiscordIdentityInputs | None = None,
+    purpose: Literal["identity_diagnostic", "activation_admission"] = "identity_diagnostic",
+    activation_plan_sha256: str = "",
+    before_read: Callable[[], None] | None = None,
 ) -> DiscordIdentityResult:
     try:
-        captured = capture_identity_inputs(store, product)
+        captured = captured_inputs or capture_identity_inputs(store, product)
         if captured.profiles != tuple(sorted(profiles, key=lambda item: item.product)):
             raise ExternalResourceInputsChanged()
 
         def check_current() -> None:
+            if before_read is not None:
+                before_read()
             try:
                 if capture_identity_inputs(store, product) == captured:
                     return
@@ -184,6 +191,7 @@ def read_discord_identity(
                 raise ExternalResourceInputsChanged() from None
             raise ExternalResourceInputsChanged()
 
+        check_current()
         value = secrets._decrypt_secret_value(captured.version.ciphertext, captured.version.key_id)
         production_values = tuple(
             secrets._decrypt_secret_value(version.ciphertext, version.key_id)
@@ -216,7 +224,12 @@ def read_discord_identity(
                     "version_id": captured.version.version_id,
                     "binding_id": captured.binding.binding_id,
                     "destination_class": "discord_bot",
-                    "purpose": "identity_diagnostic",
+                    "purpose": purpose,
+                    **(
+                        {"activation_plan_sha256": activation_plan_sha256}
+                        if activation_plan_sha256
+                        else {}
+                    ),
                 },
             )
         )
