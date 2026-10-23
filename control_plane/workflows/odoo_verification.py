@@ -81,6 +81,19 @@ def is_legacy_derived_odoo_health_url(
     return bool(expected) and _normalized_health_url(health_url) == _normalized_health_url(expected)
 
 
+def resolve_odoo_health_url(
+    *, base_url: str, lane_health_url: str, profile_health_path: str
+) -> str:
+    lane_health_url = lane_health_url.strip()
+    if lane_health_url and not is_legacy_derived_odoo_health_url(
+        health_url=lane_health_url,
+        base_url=base_url,
+        profile_health_path=profile_health_path,
+    ):
+        return lane_health_url
+    return default_odoo_health_url(base_url=base_url)
+
+
 def _normalized_health_url(raw_url: str) -> str:
     parsed = urlparse(raw_url.strip())
     path = (parsed.path or "/").rstrip("/") or "/"

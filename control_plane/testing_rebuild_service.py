@@ -29,10 +29,15 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
     is_exclusive_product_context,
     product_context_owner_map,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.workflows.odoo_verification import (
+    DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
+    resolve_odoo_health_url,
+)
 from control_plane.contracts.testing_candidate_application import TestingCandidateApplicationPlan
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
@@ -699,12 +704,24 @@ class NativeTestingRebuildExecution:
         self.publication: TestingPublicationPlan | None = None
 
     @property
-    def base_url(self) -> str:
+    def lane(self) -> ProductLaneProfile:
         return next(
-            item.base_url
+            item
             for item in self.intent.profile.lanes
             if (item.context, item.instance) == (self.operation.context, "testing")
-        ).rstrip("/")
+        )
+
+    @property
+    def base_url(self) -> str:
+        return self.lane.base_url.rstrip("/")
+
+    @property
+    def health_url(self) -> str:
+        return resolve_odoo_health_url(
+            base_url=self.base_url,
+            lane_health_url=self.lane.health_url,
+            profile_health_path=self.intent.profile.health_path,
+        )
 
     def cutover_started(self) -> bool:
         plan = getattr(self, "plan", None)
@@ -1786,9 +1803,7 @@ class NativeTestingRebuildExecution:
             applied=True,
             authoritative_router_count=1,
             observed_at=datetime.now(UTC),
-            public_health=read_public_testing_health(
-                self.base_url, self.intent.profile.health_path
-            ),
+            public_health=read_public_testing_health(self.health_url),
         )
 
     def switch(
@@ -2141,7 +2156,7 @@ class NativeTestingRebuildExecution:
             server_id=self.intent.server_id,
             payload={
                 **self.retained_payload("readiness"),
-                "health_path": self.intent.profile.health_path,
+                "health_path": DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
             },
         )
         if proof.get("healthy") is not True:
@@ -2410,7 +2425,7 @@ def rebuild_result(
 
 
 def read_public_testing_health(
-    base_url: str, path: str, expected_identity: RuntimeIdentity | None = None
+    base_url: str, path: str | None = None, expected_identity: RuntimeIdentity | None = None
 ) -> HealthcheckEvidence:
     """A redirect, timeout or missing identity never proves a healthy origin."""
     from urllib.error import HTTPError, URLError
@@ -2426,7 +2441,7 @@ def read_public_testing_health(
         ) -> None:
             return None
 
-    url = base_url.rstrip("/") + "/" + path.lstrip("/")
+    url = base_url if path is None else base_url.rstrip("/") + "/" + path.lstrip("/")
     try:
         with build_opener(NoRedirect()).open(Request(url, method="GET"), timeout=5) as response:
             if response.geturl() != url:
