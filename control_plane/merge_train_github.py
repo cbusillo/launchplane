@@ -2730,7 +2730,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         if require_client_review and review_reader.client_veto(
             repository=repository_path,
             pull_request_number=entry.pull_request_number,
-            head_sha=head_sha,
         ):
             raise MergeAdmissionDeniedError(
                 f"Client requested changes on pull request #{entry.pull_request_number}.",
@@ -2998,7 +2997,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         if intent.error:
             raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
         if review_reader.client_veto(
-            repository=repository_path, pull_request_number=pull_request_number, head_sha=head_sha
+            repository=repository_path, pull_request_number=pull_request_number
         ):
             raise MergeTrainGitHubStaleHeadError(
                 f"Client requested changes on pull request #{pull_request_number}.", status_code=409
@@ -3887,7 +3886,7 @@ class GitHubMergeTrainSnapshotReader:
         ):
             review_intent = ClientTestNotes(False)
         vetoed = self.client_veto(
-            repository=base_repository, pull_request_number=pull_request_number, head_sha=head_sha
+            repository=base_repository, pull_request_number=pull_request_number
         )
         owner_review_required = review_intent.review_required or vetoed
         ready_handoff = self._ready_handoffs.get(pull_request_number)
@@ -4646,8 +4645,7 @@ class GitHubMergeTrainSnapshotReader:
             labels=labels, repository=repository, body=body
         ).review_required
 
-    def client_veto(self, *, repository: str, pull_request_number: int, head_sha: str) -> bool:
-        """Saved current-head Client decisions survive edited notes and projection lag."""
+    def client_veto(self, *, repository: str, pull_request_number: int) -> bool:
         store = self._branch_refresh_store
         if not isinstance(store, _ClientVetoReadStore):
             return False
@@ -4670,7 +4668,6 @@ class GitHubMergeTrainSnapshotReader:
                         decisions=decisions,
                         profile=profile,
                         pull_request_number=pull_request_number,
-                        head_sha=head_sha,
                     )
                 ),
                 None,

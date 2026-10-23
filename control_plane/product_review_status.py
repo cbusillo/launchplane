@@ -380,7 +380,6 @@ class OwnerReviewStatusPublisher:
                         decisions=decisions,
                         profile=profile,
                         pull_request_number=pull_request_number,
-                        head_sha=facts.head_sha,
                         base_branch=facts.base_branch,
                     )
                 ),
@@ -396,7 +395,7 @@ class OwnerReviewStatusPublisher:
                 status = owner_review_status(
                     profile=profile,
                     pull_request_number=pull_request_number,
-                    head_sha=facts.head_sha,
+                    head_sha=current.head_sha,
                     decisions=decisions,
                     base_branch=facts.base_branch,
                 )

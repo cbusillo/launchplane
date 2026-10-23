@@ -67,7 +67,9 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
         )
 
     def test_saved_veto_blocks_evaluation_and_merge_despite_successful_projection(self) -> None:
-        self.store.write_product_review_decision_record(_decision())
+        self.store.write_product_review_decision_record(
+            _decision().model_copy(update={"head_sha": "2" * 40})
+        )
         for body in (
             "## Client test notes\nTry the changed page.",
             "## Client test notes\nNothing for the Client to test: CI only.",
@@ -146,7 +148,9 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
             self.assertFalse(transport.merge_called)
 
     def test_later_current_head_acceptance_clears_the_saved_veto(self) -> None:
-        self.store.write_product_review_decision_record(_decision())
+        self.store.write_product_review_decision_record(
+            _decision().model_copy(update={"head_sha": "2" * 40})
+        )
         self.store.write_product_review_decision_record(
             _decision(decision="accepted", record_id="accepted", decided_at="2026-10-22T09:00:00Z")
         )
@@ -338,7 +342,6 @@ class TenantAdmissionClientReviewTests(unittest.TestCase):
 
     def test_unrelated_or_superseded_decisions_do_not_veto_the_current_head(self) -> None:
         for override in (
-            {"head_sha": "2" * 40},
             {"owner_github_id": "902"},
             {"product": "other-site"},
             {"decision": "accepted"},

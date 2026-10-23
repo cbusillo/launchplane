@@ -88,18 +88,21 @@ recording a Client decision or sending a review invitation. A later review label
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
-Both acceptance and rejection projections use the newest applicable decision
-for the product's current immutable Client ID, product, repository, pull request
-and current head. A changed login with the same ID keeps the decision applicable.
+Acceptance uses the newest applicable decision for the product's current
+immutable Client ID, product, repository, pull request and current head.
+A changed login with the same ID keeps the decision applicable.
 A former Client's decision stays saved with its feedback, but neither accepts,
 vetoes nor masks the current Client's decision. Carried decisions must also match
 the current base branch. The same Client and target selection applies when
 recording a decision's first base branch or choosing an acceptance to carry.
-The train independently reads saved current-head decisions for the product's
+The train independently reads the latest saved decision for the product's
 current Client at admission and immediately before merging. A Request changes
-decision blocks even after notes are edited to engineering-only or while its
-GitHub projection is stale. A later Accept on that head clears the veto;
-decisions for another head, product or former Client do not veto this change.
+decision blocks even after a base update or new commits, after notes are edited
+to engineering-only, or while its GitHub projection is stale. Engineering-only
+checks also preserve that rejection across heads. Restore Client test notes
+and request review of the current preview to resolve it; a later Accept clears
+the veto. Decisions for another product, pull request or former Client do not
+veto this change. Acceptance remains bound to the reviewed head or proven carry.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.

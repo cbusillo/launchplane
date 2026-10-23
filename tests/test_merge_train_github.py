@@ -3713,12 +3713,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 branch_refresh_store=cast(Any, store),
             )
             self.assertTrue(
-                reader.client_veto(
-                    repository=repository.casefold(), pull_request_number=42, head_sha="head-42"
-                )
+                reader.client_veto(repository=repository.casefold(), pull_request_number=42)
             )
 
-    def test_engineering_only_notes_do_not_clear_current_client_veto(self) -> None:
+    def test_engineering_only_notes_and_new_heads_do_not_clear_client_veto(self) -> None:
         rejection = ProductReviewDecisionRecord(
             record_id="client-veto",
             product="site",
@@ -3733,7 +3731,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         )
         cases = (
             ((rejection,), "fail", True),
-            ((rejection.model_copy(update={"head_sha": "old-head"}),), "pass", False),
+            ((rejection.model_copy(update={"head_sha": "old-head"}),), "fail", True),
             ((rejection.model_copy(update={"owner_github_id": "902"}),), "pass", False),
             ((rejection.model_copy(update={"product": "another-site"}),), "pass", False),
             (
@@ -3759,6 +3757,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 False,
             ),
             ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
+            (
+                (
+                    rejection.model_copy(update={"decision": "accepted"}),
+                    rejection.model_copy(update={"head_sha": "old-head"}),
+                ),
+                "pass",
+                False,
+            ),
             ((), "pass", False),
         )
         for notes in (
@@ -3804,7 +3810,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         pull = _github_pull_request(42)
         pull["body"] = "## Client test notes\nNothing for the Client to test: CI only."
         pull["labels"] = []
-        rejection = _client_veto_record(repository="cbusillo/sellyouroutboard", head_sha="head-42")
+        rejection = _client_veto_record(repository="cbusillo/sellyouroutboard", head_sha="old-head")
         transport = RecordingMergeTrainGitHubTransport(responses=(pull,))
         client = GitHubMergeTrainClient(
             transport=transport, branch_refresh_store=cast(Any, _client_veto_store((rejection,)))
