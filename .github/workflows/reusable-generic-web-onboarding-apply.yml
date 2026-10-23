@@ -82,7 +82,7 @@ jobs:
               type == "object"
               and (keys - ["mode", "idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"] | length == 0)
               and ((has("mode") | not) or .mode == "readback" or .mode == "apply")
-              and (if has("idempotency_key") then (.idempotency_key | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")) else true end)
+              and (if has("idempotency_key") then (.idempotency_key | type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\\z")) else true end)
               and (if has("retain_allocation") then (.retain_allocation | type == "boolean") else true end)
               and (if has("expected_allocation_custody_sha256") then (.expected_allocation_custody_sha256 | type == "string") else true end)
             ' <<< "$ALLOCATION_CONTROL" >/dev/null

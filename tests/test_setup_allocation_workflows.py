@@ -102,6 +102,7 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             {},
             {"idempotency_key": "key", "context": "other"},
             {"idempotency_key": "key\ninjected=value"},
+            {"idempotency_key": "key\n"},
             {"idempotency_key": "key", "retain_allocation": "true"},
             {"idempotency_key": "key", "retain_allocation": True},
         ):
@@ -211,6 +212,7 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         for control in (
             {"mode": "readback", "context": "other"},
             {"mode": "readback", "idempotency_key": "key\ninjected=value"},
+            {"mode": "readback", "idempotency_key": "key\n"},
             {"mode": "readback", "retain_allocation": True},
         ):
             with self.subTest(control=control):

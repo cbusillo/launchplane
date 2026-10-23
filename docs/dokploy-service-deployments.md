@@ -268,7 +268,10 @@ custody digest. Send the same request and key in apply mode with
 `expected_allocation_custody_sha256: <custody_sha256>`, plus the normal exact
 confirmation and reason. The existing retention operation requires an expired
 execution lease. Original Director first-setup allocations require current
-exclusive ownership. An original service-scoped allocation instead requires
+exclusive ownership. If that ownership changes while custody is held, restore
+the original product's exclusive context ownership through the authorized
+`POST /v1/product-profiles` path, then obtain fresh original-key readback and
+reviewed retention; never bypass the ownership fence. An original service-scoped allocation instead requires
 current service setup authorization and its exact original caller, request, key
 and reviewed digest. It may retain its own custody after context registration,
 profile edits or ownership changes, which still prevent provider continuation.

@@ -262,7 +262,7 @@ jobs:
           jq -e '
             type == "object"
             and (keys - ["idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"] | length == 0)
-            and ((.idempotency_key // "") | type == "string" and (length == 0 or test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")))
+            and ((.idempotency_key // "") | type == "string" and (length == 0 or test("\\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\\z")))
             and ((.retain_allocation // false) | type == "boolean")
             and ((.expected_allocation_custody_sha256 // "") | type == "string")
           ' <<< "$control" >/dev/null
