@@ -2156,7 +2156,11 @@ Incident detail also reads the exact opening observation independently of its
 bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
 is returned as absent. Deploy-fence observations expose only canonical opaque
 provider-operation references and opaque reservation record IDs, including IDs retained
-in legacy provider summaries. These are diagnostic links, not proof of settlement
+in legacy provider summaries. For historical service-started testing deploys whose
+summary retained a private key instead of a record ID, the service derives the ID
+with the canonical reservation builder. It accepts only the original summary
+format and an exact product/context/testing key prefix; it never returns the key.
+These are diagnostic links, not proof of settlement
 or authority to recover. Missing reservations and unmatched incarnations remain
 held until their corresponding supported recovery proves disposition.
 The outbox worker sends email and Discord as well as GitHub notifications for
