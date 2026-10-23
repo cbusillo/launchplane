@@ -347,6 +347,13 @@ def validate_identity(result: object) -> dict[str, str]:
         set(result) != keys
         or any(not isinstance(value, str) for value in result.values())
         or (
+            result["status"] == "verified"
+            and any(
+                re.fullmatch(r"[a-f0-9]{64}", result[key]) is None
+                for key in ("domain_sha256", "shop_id_sha256")
+            )
+        )
+        or (
             result["status"] != "verified"
             and result["reason"] not in set(get_args(IdentityReason)) - {""}
         )
@@ -400,48 +407,39 @@ def compare_identity(
                 stage="testing_probe",
                 reason=cast(IdentityReason, observed.get("reason", "probe_unavailable")),
             )
+        if observed["domain_sha256"] != digest(selected.domain):
+            return ShopifyIdentityResult(stage="testing_probe", reason="domain_mismatch")
         reason = "runtime_changed"
         reads.assert_selection_current(store, production_selection)
         stage, reason = "production_probe", "probe_unavailable"
         production = production_identity(production_connection, production_environment)
-        if production.get("status") != "verified" or any(
-            re.fullmatch(r"[a-f0-9]{64}", production.get(key, "")) is None
-            for key in ("domain_sha256", "shop_id_sha256")
-        ):
-            return ShopifyIdentityResult(
-                stage=stage,
-                reason=cast(IdentityReason, production.get("reason", reason)),
-                probe="token_rejected"
-                if production.get("status") == "token_rejected"
-                else "unavailable",
-            )
-        production_domain = production["domain_sha256"]
         stage, reason = "evidence", "authority_changed"
         if authority(store, product).snapshot != selected.snapshot:
             return ShopifyIdentityResult(stage=stage, reason=reason)
         reason = "runtime_changed"
         reads.assert_selection_current(store, production_selection)
-        result = ShopifyIdentityResult(
-            probe=cast(Literal["verified", "token_rejected", "unavailable"], observed["status"]),
-            production_domain_sha256=production_domain,
-            production_shop_id_sha256=production["shop_id_sha256"],
-            stage="complete",
-            reason="",
-        )
-        testing_domain = observed["domain_sha256"]
-        if (
-            testing_domain == production_domain
+        if production["status"] != "verified":
+            failure_reason = cast(IdentityReason, production.get("reason", "probe_unavailable"))
+            retain_testing = failure_reason == "settings_unavailable"
+            return ShopifyIdentityResult(
+                stage="production_probe",
+                reason=failure_reason,
+                probe="token_rejected"
+                if production.get("status") == "token_rejected"
+                else "unavailable",
+                testing_domain_sha256=observed["domain_sha256"] if retain_testing else "",
+                testing_shop_id_sha256=observed["shop_id_sha256"] if retain_testing else "",
+            )
+        same = (
+            observed["domain_sha256"] == production["domain_sha256"]
             or observed["shop_id_sha256"] == production["shop_id_sha256"]
-        ):
-            return result.model_copy(update={"separation": "same"})
-        if testing_domain != digest(selected.domain):
-            return ShopifyIdentityResult(stage="testing_probe", reason="domain_mismatch")
+        )
         return ShopifyIdentityResult(
-            separation="separate",
+            separation="same" if same else "separate",
             probe="verified",
-            testing_domain_sha256=testing_domain,
+            testing_domain_sha256=observed["domain_sha256"],
             testing_shop_id_sha256=observed["shop_id_sha256"],
-            production_domain_sha256=production_domain,
+            production_domain_sha256=production["domain_sha256"],
             production_shop_id_sha256=production["shop_id_sha256"],
             stage="complete",
             reason="",
