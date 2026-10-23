@@ -778,6 +778,35 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
 
+    def test_unhealthy_web_with_missing_docker_route_recovers_before_identity_verification(
+        self,
+    ) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        self.provider.config["State"]["Health"]["Status"] = "unhealthy"
+        record_lane_health(
+            self.store,
+            self.expected.product,
+            self.expected.context,
+            datetime.now(timezone.utc),
+            status=404,
+        )
+        record_safety(
+            self.store,
+            self.expected.product,
+            self.expected.context,
+            "testing",
+            usage="in_use",
+            data="unknown",
+            production_resources="unknown",
+        )
+        self.review()
+        status, response = self.invoke(key="unhealthy-web-recovery")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
     def test_stopped_restart_refuses_known_production_sharing(self) -> None:
         self.provider.config["State"]["Running"] = False
         self.review()
@@ -823,6 +852,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "web"
         self.select_stopped_database()
         self.provider.config["State"]["Running"] = True
+        self.provider.config["State"]["Health"]["Status"] = "healthy"
         self.review()
         status, response = self.invoke(key="database-with-running-web")
         self.assertEqual(status, 409, response)

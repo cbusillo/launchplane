@@ -65,7 +65,10 @@ from control_plane.dokploy.native_copy_stream import (
     native_failure_diagnostic,
     NativeSourceAuthorizationDenied,
 )
-from control_plane.dokploy.testing_retained_copy import retained_copy_operation
+from control_plane.dokploy.testing_retained_copy import (
+    retained_copy_operation,
+    matches_unavailable_web_process,
+)
 from control_plane.dokploy_inventory import read_dokploy_target_placement, InventoryUnavailable
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -559,6 +562,8 @@ def check_testing_rebuild_protection(
         instance="testing",
         usage=reported_usage,
         require_unused=reported_usage != "unknown",
+        runtime_stopped=usage.reason_code == "serving_container_stopped"
+        or isinstance(intent.old, UnavailableTestingPredecessor),
     )
     if decision.protected:
         raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
@@ -1082,6 +1087,8 @@ class NativeTestingRebuildExecution:
                 instance="testing",
                 usage=reported_usage,
                 require_unused=reported_usage != "unknown",
+                runtime_stopped=usage.reason_code == "serving_container_stopped"
+                or isinstance(self.intent.old, UnavailableTestingPredecessor),
             )
             if decision.protected:
                 raise NativeTestingRebuildPending("The retained testing copy is in use.")
@@ -1208,6 +1215,7 @@ class NativeTestingRebuildExecution:
                 "project": self.intent.project,
                 "context": self.operation.context,
                 "allow_unavailable": True,
+                "unavailable_web_process": self.intent.retained.get("web_process"),
             }
         return {
             "mode": mode,
@@ -1932,7 +1940,25 @@ class NativeTestingRebuildExecution:
             disable_auto_deploy,
             recovery=True,
         )
-        if isinstance(plan.old, UnavailableTestingPredecessor):
+        retirement = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":retire-old",
+        )
+        if (
+            isinstance(plan.old, UnavailableTestingPredecessor)
+            and (
+                retirement is None
+                or retirement.state != "completed"
+                and not retirement.provider_effect_started_at
+            )
+            and retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload=self.retained_payload("read"),
+            )["stopped"]
+        ):
             self.require_unavailable_retirement()
             self.run_effect(
                 "retire-old",
@@ -1972,11 +1998,30 @@ class NativeTestingRebuildExecution:
         if self.unavailable_retirement_finished(self.plan):
             return
         self.require_old_quiescent()
-        self.require_current_unavailable(self.transport.read())
+        self.require_unavailable_forward_frame(self.transport.read())
 
-    @staticmethod
-    def require_current_unavailable(frame: dict[str, Any]) -> None:
+    def require_current_unavailable(self, frame: dict[str, Any]) -> None:
         if frame.get("old_availability") == "available":
+            original = self.intent.retained.get("web_process")
+            current = frame.get("old_web_process")
+            if (
+                matches_unavailable_web_process(original, current)
+                and frame.get("old_inventory_sha256") == self.intent.retained["inventory_sha256"]
+            ):
+                proof = retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload=self.retained_payload("read"),
+                )
+                if all(
+                    proof.get(key) == self.intent.retained.get(key)
+                    for key in ("resource_binding", "physical_binding", "identity")
+                ) and (
+                    proof.get("availability") == "stopped"
+                    or matches_unavailable_web_process(original, proof.get("web_process"))
+                ):
+                    return
             raise NativeTestingRebuildAdmissionChanged(
                 "The unavailable predecessor changed before retirement completed."
             )

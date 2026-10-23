@@ -92,6 +92,70 @@ class RetainedTestingCopyTests(unittest.TestCase):
             qualify_retained_copy(self.containers, original)
         self.assertEqual(raised.exception.predicate, ReadbackPredicate.CUSTODY)
 
+    def test_unavailable_web_does_not_need_its_database_to_stop_before_rebuild(self) -> None:
+        self.containers[0]["State"]["Status"] = "exited"
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
+    def test_unhealthy_running_web_uses_the_same_unavailable_copy_path(self) -> None:
+        self.containers[0]["State"]["Health"] = {"Status": "unhealthy"}
+        self.containers[0]["State"]["StartedAt"] = "fixture-original-start"
+        frame, _ = self.run_host(extra={"allow_unavailable": True})
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+        self.assertEqual(
+            frame["web_process"],
+            {
+                "id": self.containers[0]["Id"],
+                "status": "running",
+                "started_at": self.containers[0]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
+
+    def test_removed_web_preserves_database_custody_without_an_original_runtime(self) -> None:
+        self.containers.pop(0)
+        frame, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.assertEqual(frame["type"], "complete")
+        self.assertEqual(frame["availability"], "stopped")
+        self.assertIsNone(frame.get("identity"))
+        self.assertFalse(frame["stopped"])
+        self.assertTrue(frame["physical_binding"])
+
+    def test_admitted_unhealthy_process_can_recover_without_inventing_old_identity(self) -> None:
+        self.containers[0]["State"].update(
+            StartedAt="fixture-original-start", Health={"Status": "unhealthy"}
+        )
+        self.containers[0]["Config"]["Env"] = [
+            item
+            for item in self.containers[0]["Config"]["Env"]
+            if not item.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+        ]
+        admitted, _ = self.run_host(extra={"allow_unavailable": True, "identity": None})
+        self.containers[0]["State"]["Health"]["Status"] = "healthy"
+        current, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(current["type"], "complete")
+        self.assertIsNone(current["identity"])
+        self.assertEqual(current["physical_binding"], admitted["physical_binding"])
+        self.containers[0]["State"]["StartedAt"] = "replacement-start"
+        refused, _ = self.run_host(
+            extra={
+                "allow_unavailable": True,
+                "identity": None,
+                "unavailable_web_process": admitted["web_process"],
+            }
+        )
+        self.assertEqual(refused["type"], "failed")
+
     def test_old_password_knowledge_is_not_a_prerequisite_for_rebuilding_with_local_credentials(
         self,
     ) -> None:
