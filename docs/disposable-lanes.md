@@ -175,13 +175,16 @@ web-availability classifier.
 
 An unavailable predecessor has no invented private endpoint, runtime identity or
 healthy public observation. The candidate route comes from the original recorded
-template or the provider's converted web-router declaration, checked against the
-current proxy listeners, TLS resolver and applied conflicts. Missing placement or
+template or the provider's explicit raw web-router declaration. When that source
+declares no routers, the provider's converted declaration supplies its domain
+routes. Generated aliases do not replace an explicit raw declaration. The same
+selection runs at admission and forward rechecks, and the selected declaration is
+checked against current proxy listeners, TLS resolver and applied conflicts. Missing placement or
 ingress declaration is a record/capability prerequisite; repairing or starting
 the old application is not an admission step. Identical repeated provider labels
 normalize to the same declaration; contradictory values still refuse admission.
-Forward checkpoints retain the
-normalized web-ingress declaration and listener witnesses. Unrelated application
+Forward checkpoints retain the normalized web-ingress declaration and listener
+witnesses. Unrelated application
 environment, image or Compose formatting changes do not change that declaration
 witness. Listener witnesses cover the entrypoints and certificate resolvers used
 by this lane; unrelated proxy logging and other listeners do not change them.

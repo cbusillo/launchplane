@@ -273,6 +273,21 @@ def unavailable_provider_placement(
     )
 
 
+def unavailable_ingress_declaration(
+    *, host: str, token: str, compose_id: str, provider: dict[str, Any]
+) -> str:
+    if provider.get("sourceType") == "raw":
+        configured = provider.get("composeFile")
+        if not isinstance(configured, str):
+            raise ValueError("The provider's raw testing source is unavailable.")
+        labels = declared_testing_ingress(configured)
+        if any(key.startswith("traefik.http.routers.") for key in labels):
+            return configured
+    return compose.fetch_dokploy_converted_compose_file(
+        host=host, token=token, compose_id=compose_id
+    )
+
+
 def capture_rebuild_intent(
     root: Path, store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
 ) -> NativeTestingRebuildIntent:
@@ -388,14 +403,17 @@ def capture_rebuild_intent(
             target_name=before.target.target_name,
             server_id=server,
         )
-        configured = (
-            ""
-            if template is not None
-            else compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=before.target_id.target_id
-            )
-        )
         try:
+            configured = (
+                ""
+                if template is not None
+                else unavailable_ingress_declaration(
+                    host=host,
+                    token=token,
+                    compose_id=before.target_id.target_id,
+                    provider=provider,
+                )
+            )
             route = compile_unavailable_testing_route(
                 product=operation.product,
                 context=operation.context,
@@ -940,11 +958,11 @@ class NativeTestingRebuildExecution:
         )
         if not recovery and target.policies.staff_testing_hold is not None:
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
-        if isinstance(self.intent.old, UnavailableTestingPredecessor):
-            if not recovery:
-                self.old_provider()
-        else:
+        provider = (
             self.old_provider()
+            if not recovery or not isinstance(self.intent.old, UnavailableTestingPredecessor)
+            else {}
+        )
         if not recovery and self.intent.unavailable_route is not None:
             try:
                 placement = unavailable_provider_placement(
@@ -974,8 +992,11 @@ class NativeTestingRebuildExecution:
             assert preimage is not None
             if preimage.declaration_sha256:
                 try:
-                    declared = compose.fetch_dokploy_converted_compose_file(
-                        host=self.host, token=self.token, compose_id=self.intent.old.target_id
+                    declared = unavailable_ingress_declaration(
+                        host=self.host,
+                        token=self.token,
+                        compose_id=self.intent.old.target_id,
+                        provider=provider,
                     )
                     declaration = declared_testing_ingress(declared)
                 except api.DokployRequestFailed:
