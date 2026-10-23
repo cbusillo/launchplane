@@ -6038,6 +6038,15 @@
             "title": "Qualification",
             "type": "string"
           },
+          "rate_limits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DiscordRateLimitEvidence"
+            },
+            "maxItems": 2,
+            "title": "Rate Limits",
+            "type": "array"
+          },
           "started_at": {
             "title": "Started At",
             "type": "string"
@@ -6131,6 +6140,98 @@
           }
         },
         "title": "DiscordIdentityResult",
+        "type": "object"
+      },
+      "DiscordRateLimitEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cloudflare_error_page": {
+            "default": false,
+            "title": "Cloudflare Error Page",
+            "type": "boolean"
+          },
+          "global_limit": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Limit"
+          },
+          "header_global": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Global"
+          },
+          "header_retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Retry After"
+          },
+          "non_json_body": {
+            "default": false,
+            "title": "Non Json Body",
+            "type": "boolean"
+          },
+          "phase": {
+            "enum": [
+              "identity",
+              "application",
+              "gateway",
+              "guilds"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "global",
+                  "shared"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "title": "DiscordRateLimitEvidence",
         "type": "object"
       },
       "DiscussionTopicInput": {

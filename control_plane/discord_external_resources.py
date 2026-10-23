@@ -2,16 +2,18 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from http.client import HTTPException
 import json
+from math import isfinite
 import re
-from time import monotonic
-from typing import Any
+from time import monotonic, sleep
+from typing import Any, Literal, cast
 from urllib.parse import urlencode
 
 from control_plane.contracts.testing_external_resources import (
     DiscordBotResourceObservation,
+    DiscordRateLimitEvidence,
     ExternalResourceReadFailure,
 )
-from control_plane.outbound_http import request_public_http
+from control_plane.outbound_http import PublicHttpResponse, request_public_http
 
 DISCORD_API_URL = "https://discord.com/api/v10"
 DISCORD_PAGE_LIMIT = 200
@@ -38,36 +40,97 @@ def discord_snowflake(value: object) -> str:
     return value
 
 
-def discord_json_read(
-    path: str, token: str, deadline: float, check_current: Callable[[], None]
-) -> Any:
-    check_current()
-    remaining = deadline - monotonic()
-    if remaining <= 0:
-        raise DiscordResourceReadError("collection_budget_exhausted")
+def discord_retry_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
     try:
-        response = request_public_http(
-            DISCORD_API_URL + path,
-            method="GET",
-            headers={
-                "Authorization": "Bot " + token,
-                "Accept": "application/json",
-                "User-Agent": "DiscordBot (https://github.com/cbusillo/launchplane, 1.0)",
-            },
-            timeout_seconds=min(10.0, remaining),
-            max_redirects=0,
-            max_response_body_bytes=DISCORD_RESPONSE_LIMIT + 1,
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if isfinite(seconds) and seconds >= 0 else None
+
+
+def discord_rate_limit(response: PublicHttpResponse, path: str) -> DiscordRateLimitEvidence:
+    non_json_body = len(response.body) > DISCORD_RESPONSE_LIMIT
+    try:
+        payload = (
+            json.loads(response.body) if len(response.body) <= DISCORD_RESPONSE_LIMIT else None
         )
-    except (HTTPException, OSError, RuntimeError, ValueError):
-        raise DiscordResourceReadError("provider_unavailable") from None
-    if response.status_code != 200:
-        raise DiscordResourceReadError("provider_http_refused", response.status_code)
-    if len(response.body) > DISCORD_RESPONSE_LIMIT:
-        raise DiscordResourceReadError("response_too_large")
-    try:
-        return json.loads(response.body)
     except (ValueError, UnicodeError):
-        raise DiscordResourceReadError("response_invalid") from None
+        payload = None
+        non_json_body = True
+    data = payload if isinstance(payload, dict) else {}
+    header_delay = response.header("Retry-After").strip()
+    scope = response.header("X-RateLimit-Scope")
+    header_global = response.header("X-RateLimit-Global").lower()
+    return DiscordRateLimitEvidence(
+        phase="identity"
+        if path == "/users/@me"
+        else "application"
+        if path == "/applications/@me"
+        else "gateway"
+        if path == "/gateway/bot"
+        else "guilds",
+        retry_after=discord_retry_seconds(data.get("retry_after")),
+        global_limit=data.get("global") if type(data.get("global")) is bool else None,
+        scope=cast(Literal["user", "global", "shared"], scope)
+        if scope in {"user", "global", "shared"}
+        else None,
+        header_global={"true": True, "false": False}.get(header_global),
+        header_retry_after=discord_retry_seconds(float(header_delay))
+        if len(header_delay) <= 32 and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", header_delay)
+        else None,
+        non_json_body=non_json_body,
+        cloudflare_error_page=non_json_body and b"cloudflare" in response.body.lower(),
+    )
+
+
+def discord_json_read(
+    path: str,
+    token: str,
+    deadline: float,
+    check_current: Callable[[], None],
+    rate_limits: list[DiscordRateLimitEvidence],
+) -> Any:
+    while True:
+        check_current()
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise DiscordResourceReadError("collection_budget_exhausted")
+        try:
+            response = request_public_http(
+                DISCORD_API_URL + path,
+                method="GET",
+                headers={
+                    "Authorization": "Bot " + token,
+                    "Accept": "application/json",
+                    "User-Agent": "DiscordBot (https://github.com/cbusillo/launchplane, 1.0)",
+                },
+                timeout_seconds=min(10.0, remaining),
+                max_redirects=0,
+                max_response_body_bytes=DISCORD_RESPONSE_LIMIT + 1,
+            )
+        except (HTTPException, OSError, RuntimeError, ValueError):
+            raise DiscordResourceReadError("provider_unavailable") from None
+        if response.status_code == 429:
+            evidence = discord_rate_limit(response, path)
+            rate_limits.append(evidence)
+            delays = [
+                value
+                for value in (evidence.retry_after, evidence.header_retry_after)
+                if value is not None
+            ]
+            if len(rate_limits) == 1 and delays and max(delays) < deadline - monotonic():
+                sleep(max(delays))
+                continue
+        if response.status_code != 200:
+            raise DiscordResourceReadError("provider_http_refused", response.status_code)
+        if len(response.body) > DISCORD_RESPONSE_LIMIT:
+            raise DiscordResourceReadError("response_too_large")
+        try:
+            return json.loads(response.body)
+        except (ValueError, UnicodeError):
+            raise DiscordResourceReadError("response_invalid") from None
 
 
 def discord_guild_partitions(read: Callable[[str], Any]) -> int:
@@ -120,9 +183,10 @@ def observe_discord_bot(
 ) -> DiscordBotResourceObservation:
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     result: dict[str, Any] = {"started_at": started}
+    rate_limits: list[DiscordRateLimitEvidence] = []
 
     def read(path: str) -> Any:
-        return discord_json_read(path, token, deadline, check_current)
+        return discord_json_read(path, token, deadline, check_current, rate_limits)
 
     try:
         user = read("/users/@me")
@@ -146,4 +210,5 @@ def observe_discord_bot(
     except DiscordResourceReadError as error:
         result.update(failure_code=error.code, http_status=error.http_status)
     result["finished_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    result["rate_limits"] = tuple(rate_limits)
     return DiscordBotResourceObservation.model_validate(result)
