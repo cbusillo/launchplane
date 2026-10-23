@@ -79,6 +79,20 @@ def _environment_keys(value: object) -> ApplicationEnvironmentKeys:
     return ApplicationEnvironmentKeys(tuple(sorted(names)), complete)
 
 
+def _task_container_id_present(status: dict[str, object]) -> bool | None:
+    captured = status.get("ContainerStatus")
+    if captured is None:
+        return False
+    if not isinstance(captured, dict):
+        return None
+    identifier = captured.get("ContainerID")
+    if identifier is None or identifier == "":
+        return False
+    if isinstance(identifier, str) and _CONTAINER_ID.fullmatch(identifier):
+        return True
+    return None
+
+
 @dataclass(frozen=True)
 class ApplicationContainerMetadata:
     container_id: str
@@ -93,6 +107,7 @@ class ApplicationTaskObservation:
     state: str
     task_id: str = ""
     desired_state: str = ""
+    container_id_present: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -422,7 +437,14 @@ def _fetch_application_runtime(
             except DokployEvidenceProviderError:
                 task_image, task_record_id = "", ""
             task_observations.append(
-                ApplicationTaskObservation(task_image, task_record_id, state, task_id, desired)
+                ApplicationTaskObservation(
+                    task_image,
+                    task_record_id,
+                    state,
+                    task_id,
+                    desired,
+                    container_id_present=_task_container_id_present(status),
+                )
             )
             if state != "running":
                 pending += desired in {"ready", "running"}

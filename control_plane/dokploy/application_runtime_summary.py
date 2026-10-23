@@ -84,6 +84,7 @@ def summarize_application_runtime(
                 "state": task.state,
                 "image": task.image,
                 "deployment_record_id": task.deployment_record_id,
+                "container_id_present": task.container_id_present,
             }
             for task in observed.tasks[:limit]
         ],
