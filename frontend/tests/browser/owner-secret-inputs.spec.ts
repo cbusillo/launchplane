@@ -40,7 +40,7 @@ test("unavailable Owner request exposes no input", async ({ page }) => {
 
 test("Director saves both service bindings on the existing credential route", { tag: "@layout" }, async ({ page }) => {
   const received = new Set<string>();
-  const serviceRequest = () => ({ ...request, product: "launchplane", environment: "ghcr_artifact_read", display_name: "Artifact scan credentials", fields: ["username", "password"].map((key, index) => ({
+  const serviceRequest = () => ({ ...request, application_required: false, product: "launchplane", environment: "ghcr_artifact_read", display_name: "Artifact scan credentials", fields: ["username", "password"].map((key, index) => ({
     ...request.fields[0], integration: "ghcr_artifact_read", binding_key: key,
     label: key === "username" ? "GHCR pull-only username" : "GHCR pull-only token",
     request_revision: String(index).repeat(64), environments: ["launchplane"],

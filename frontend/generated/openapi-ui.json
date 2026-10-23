@@ -26079,6 +26079,11 @@
       "OwnerSecretInputResponse": {
         "additionalProperties": false,
         "properties": {
+          "application_required": {
+            "default": true,
+            "title": "Application Required",
+            "type": "boolean"
+          },
           "can_submit": {
             "title": "Can Submit",
             "type": "boolean"
@@ -26113,6 +26118,7 @@
           }
         },
         "required": [
+          "application_required",
           "can_submit",
           "display_name",
           "environment",

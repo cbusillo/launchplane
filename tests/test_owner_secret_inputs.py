@@ -11,6 +11,10 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from cryptography.fernet import Fernet
 
 from control_plane import secrets
+from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OwnerControlShadowVerifierConflictError,
+)
 from control_plane.owner_secret_inputs import resolve_owner_secret_submission
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -84,6 +88,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         director = _human("renamed-director", 9004, "admin")
         read = await self.service_read(director)
         self.assertEqual(read.status_code, 200, read.text)
+        self.assertFalse(read.json()["application_required"])
         values = {"username": "synthetic-registry-user", "password": "synthetic-pull-token"}
         for field in read.json()["fields"]:
             value = values.pop(field["binding_key"])
@@ -122,7 +127,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 secrets.resolve_context_secret_value(
-                    integration="ghcr_artifact_read",
+                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
                     context_name="launchplane",
                     binding_key=field["binding_key"],
                     database_url=self.store.database_url,
@@ -133,7 +138,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         for binding in self.store.list_secret_bindings():
             self.assertEqual(
                 (binding.integration, binding.context, binding.instance),
-                ("ghcr_artifact_read", "launchplane", ""),
+                (GHCR_ARTIFACT_READ_INTEGRATION, "launchplane", ""),
             )
             self.assertEqual(self.store.read_secret_record(binding.secret_id).scope, "context")
         reread = await self.service_read(director)
@@ -154,6 +159,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         }
         first = await self.post(payload, human=director)
         self.assertEqual(first.status_code, 200, first.text)
+        payload["request_revision"] = first.json()["fields"][1]["request_revision"]
         second = await self.post({**payload, "value": "synthetic-rotated-token"}, human=director)
         self.assertEqual(second.status_code, 200, second.text)
         self.assertNotEqual(
@@ -161,6 +167,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             second.json()["fields"][1]["submission_version_id"],
         )
         before = self.store.list_secret_records()
+        payload["request_revision"] = second.json()["fields"][1]["request_revision"]
         revoked = LaunchplaneAuthzPolicyRecord(
             record_id="revoked",
             source="test",
@@ -171,9 +178,17 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             refused = await self.post({**payload, "value": "must-not-be-stored"}, human=director)
         self.assertEqual(refused.status_code, 403, refused.text)
         self.assertEqual(self.store.list_secret_records(), before)
+        with patch.object(
+            self.store,
+            "_locked_active_authz_policy_record",
+            side_effect=OwnerControlShadowVerifierConflictError("ambiguous policy"),
+        ):
+            refused = await self.post({**payload, "value": "must-not-be-stored"}, human=director)
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(self.store.list_secret_records(), before)
         self.assertEqual(
             secrets.resolve_context_secret_value(
-                integration="ghcr_artifact_read",
+                integration=GHCR_ARTIFACT_READ_INTEGRATION,
                 context_name="launchplane",
                 binding_key="password",
                 database_url=self.store.database_url,
@@ -205,6 +220,53 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(self.store.list_secret_records(), ())
         self.assertEqual(self.store.list_secret_bindings(), ())
+
+    async def test_service_secret_refuses_stale_tabs_and_changes_during_commit(self) -> None:
+        self.seed_director()
+        director = _human("director", 9004, "admin")
+        write = self.store.write_director_secret_bundle
+        for value in ("concurrent-creation", "concurrent-rotation"):
+            read = await self.service_read(director)
+            self.assertEqual(read.status_code, 200, read.text)
+            payload = {
+                "product": "launchplane",
+                "environment": "ghcr_artifact_read",
+                "request_revision": read.json()["fields"][0]["request_revision"],
+                "value": "stale-paste",
+            }
+
+            def race_then_write(
+                bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
+            ) -> None:
+                secrets.write_secret_value(
+                    record_store=self.store,
+                    scope="context",
+                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                    name="username",
+                    binding_key="username",
+                    context_name="launchplane",
+                    plaintext_value=value,
+                )
+                write(bundle, identity=identity)
+
+            with patch.object(
+                self.store, "write_director_secret_bundle", side_effect=race_then_write
+            ):
+                raced = await self.post(payload, human=director)
+            self.assertEqual(raced.status_code, 409, raced.text)
+            before = self.store.list_secret_records()
+            stale = await self.post(payload, human=director)
+            self.assertEqual(stale.status_code, 409, stale.text)
+            self.assertEqual(self.store.list_secret_records(), before)
+            self.assertEqual(
+                secrets.resolve_context_secret_value(
+                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                    context_name="launchplane",
+                    binding_key="username",
+                    database_url=self.store.database_url,
+                ),
+                value,
+            )
 
     async def test_service_secret_denies_client_scoped_admin_and_login_impersonation(self) -> None:
         self.seed_director()
@@ -357,6 +419,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_submission_is_encrypted_and_has_no_runtime_binding(self) -> None:
         before = await self.read()
+        self.assertTrue(before.json()["application_required"])
         self.assertEqual([field["label"] for field in before.json()["fields"]], ["Mail credential"])
         response = await self.post(await self.submission(), human=_human("renamed-owner"))
         self.assertEqual(response.status_code, 200, response.text)

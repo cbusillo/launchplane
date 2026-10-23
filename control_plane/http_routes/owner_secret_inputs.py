@@ -15,6 +15,9 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OwnerControlShadowVerifierConflictError,
+)
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
@@ -34,6 +37,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductProfileConflictError,
+    SecretRecordConflictError,
 )
 
 OWNER_SECRET_INPUT_ROUTE = "/v1/owner-secret-inputs"
@@ -62,6 +66,7 @@ class OwnerSecretInputResponse(BaseModel):
     display_name: str
     environment: str
     can_submit: bool
+    application_required: bool = True
     fields: tuple[OwnerSecretInputField, ...]
 
 
@@ -127,7 +132,7 @@ def register_owner_secret_input_routes(
                     instructions="Only the Director can save this credential. It is used for artifact reads and is never shown again.",
                     environments=(LAUNCHPLANE_SERVICE_CONTEXT,),
                     request_revision=hashlib.sha256(
-                        f"{LAUNCHPLANE_SERVICE_CONTEXT}:{GHCR_ARTIFACT_READ_INTEGRATION}:{key}".encode()
+                        f"{LAUNCHPLANE_SERVICE_CONTEXT}:{GHCR_ARTIFACT_READ_INTEGRATION}:{key}:{record.current_version_id if record else ''}".encode()
                     ).hexdigest(),
                     submitted_at=record.updated_at if record else "",
                     submission_version_id=record.current_version_id if record else "",
@@ -139,6 +144,7 @@ def register_owner_secret_input_routes(
             display_name="Artifact scan credentials",
             environment=GHCR_ARTIFACT_READ_INTEGRATION,
             can_submit=True,
+            application_required=False,
             fields=tuple(fields),
         )
 
@@ -166,6 +172,15 @@ def register_owner_secret_input_routes(
             )
         try:
             secrets.validate_secret_key_configuration()
+            existing = store.find_secret_record(
+                scope="context",
+                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                name=field.binding_key,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+                instance="",
+            )
+            if (existing.current_version_id if existing else "") != field.submission_version_id:
+                raise SecretRecordConflictError("Credential changed before planning.")
             plan = _plan_product_config_secret_write(
                 record_store=store,
                 scope="context",
@@ -184,15 +199,24 @@ def register_owner_secret_input_routes(
                     secret_versions=tuple(plan["secret_versions"]),
                     secret_bindings=tuple(plan["secret_bindings"]),
                     secret_audit_events=tuple(plan["secret_audit_events"]),
+                    expected_secret_records=(existing,) if existing else (),
+                    absent_secret_ids=() if existing else (plan["secret_id"],),
                 ),
                 identity=identity,
             )
-        except PermissionError as error:
+        except (PermissionError, OwnerControlShadowVerifierConflictError) as error:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="owner_secret_input_unavailable",
                 message="This credential request is unavailable to you.",
+            ) from error
+        except SecretRecordConflictError as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_secret_request_changed",
+                message="This credential request changed. Refresh before submitting.",
             ) from error
         except click.ClickException as error:
             raise common.http_error(
