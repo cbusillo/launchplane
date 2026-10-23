@@ -113,6 +113,15 @@ class TestingReplacementReference:
             return None
 
 
+def canonical_provider_operation_reference(value: str) -> str:
+    reference = (
+        ProviderOperationReference.parse(value)
+        or ProviderOperationAttentionReference.parse(value)
+        or TestingReplacementReference.parse(value)
+    )
+    return reference.encode() if reference is not None else "provider-operation:unavailable"
+
+
 @dataclass(frozen=True)
 class ProviderTargetHold:
     reservation: LaunchplaneIdempotencyRecord

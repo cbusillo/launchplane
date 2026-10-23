@@ -26,6 +26,7 @@ from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
+from tests import test_application_allocation as application_allocation_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
@@ -1611,6 +1612,30 @@ class RealPostgresApplicationTestingHoldTests(
     test_application_continuation_refuses_live_domain_drift = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_refuses_live_domain_drift
 
 
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresApplicationAllocationTests(
+    application_allocation_tests.ApplicationAllocationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    def setUp(self) -> None:
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                source="test:application-allocation",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
+
+
 class RealPostgresHistoricalEffectRepositoryFenceTests(
     historical_storage_tests.HistoricalEffectRepositoryFenceTests
 ):
@@ -2114,6 +2139,48 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
+        from control_plane.storage.postgres import Base
+
+        with _store_for_fresh_head_database() as store:
+            catalog_queries: list[str] = []
+
+            def record_query(
+                _connection: Any,
+                _cursor: Any,
+                statement: str,
+                _parameters: Any,
+                _context: Any,
+                _executemany: bool,
+            ) -> None:
+                if "pg_catalog.pg_attribute" in statement and "pg_catalog.pg_attrdef" in statement:
+                    catalog_queries.append(statement)
+
+            event.listen(store._engine, "before_cursor_execute", record_query)
+            try:
+                table_name, table = next(iter(Base.metadata.tables.items()))
+                with patch.object(Base.metadata, "tables", {table_name: table}):
+                    store.verify_schema()
+                one_table_queries = len(catalog_queries)
+                catalog_queries.clear()
+                store.verify_schema()
+            finally:
+                event.remove(store._engine, "before_cursor_execute", record_query)
+
+            self.assertEqual(len(catalog_queries), one_table_queries)
+
+    def test_schema_column_validation_observes_drift_after_a_passing_check(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE launchplane_artifact_manifests DROP COLUMN payload")
+                )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "missing required column.*launchplane_artifact_manifests.payload",
+            ):
+                store.verify_schema()
+
     def test_lane_health_history_orders_offset_fractional_and_equal_instants(self) -> None:
         from tests.test_lane_health_history import assert_history_time_bounds
 

@@ -275,9 +275,9 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_RESOURCES_ROUTE,
-        "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "Prepare fresh empty Odoo testing resources while preserving the retained target, qualify their actual backing storage or release an unused initial preparation; this never restores data or starts web.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "release"),
         "apply",
         ("reviewed_plan_sha256",),
     ),

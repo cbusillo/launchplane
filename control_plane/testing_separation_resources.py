@@ -10,6 +10,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.idempotency_record import LaunchplaneMutationReservationState
 from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.dokploy import api, post_deploy, source
@@ -96,6 +97,21 @@ class SeparationResourcesResult(SeparationResourcesPlan):
     application: TestingApplicationSpecification | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+
+class SeparationResourcesStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    state: LaunchplaneMutationReservationState | Literal["not_found"]
+    plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    provider_effect_phase: str = Field(default="", pattern=r"^[a-zA-Z0-9_-]{0,128}$")
+    created_at: str = ""
+    updated_at: str = ""
+    lease_expires_at: str = ""
+    provider_effect_started_at: str = ""
 
 
 def preparation_binding(

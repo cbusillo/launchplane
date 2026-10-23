@@ -491,14 +491,13 @@ class SeparationResourceTests(unittest.TestCase):
             schedule.assert_not_called()
         self.assert_retained()
 
-    def test_http_plan_and_apply_use_the_same_identity_and_preserve_replay(self) -> None:
+    async def call_http(self, *, key: str = "http-prepare", **changes: object) -> Response:
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import BearerIdentityConfig
         from tests.support.auth import (
             StubVerifier,
             identity,
             local_operator_policy,
-            scoped_agent_transport,
         )
         from tests.support.http import request
 
@@ -514,14 +513,18 @@ class SeparationResourceTests(unittest.TestCase):
             ),
         )
 
-        async def call(**changes: object) -> Response:
-            return await request(
-                app,
-                "POST",
-                ROUTE.replace("{product}", self.product),
-                headers={"Authorization": "Bearer fixture", "Idempotency-Key": "http-prepare"},
-                payload={**self.body.model_dump(mode="json"), **changes},
-            )
+        return await request(
+            app,
+            "POST",
+            ROUTE.replace("{product}", self.product),
+            headers={"Authorization": "Bearer fixture", "Idempotency-Key": key},
+            payload={**self.body.model_dump(mode="json"), **changes},
+        )
+
+    def test_http_plan_and_apply_use_the_same_identity_and_preserve_replay(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
+        call = self.call_http
 
         plan = asyncio.run(call(mode="dry-run", reviewed_plan_sha256=""))
         self.assertEqual(plan.status_code, 202, plan.text)
@@ -561,4 +564,70 @@ class SeparationResourceTests(unittest.TestCase):
             else:
                 self.assertEqual(result.status_code, 503, result.text)
                 self.assertFalse(self.effects)
+        self.assert_retained()
+
+    def test_http_pending_status_preserves_its_original_reservation(self) -> None:
+        call = self.call_http
+        missing = asyncio.run(call(mode="receipt", key="http-status"))
+        self.assertEqual(missing.status_code, 202, missing.text)
+        self.assertEqual(missing.json()["result"]["state"], "not_found")
+        no_key = asyncio.run(call(mode="receipt", key=""))
+        self.assertEqual(no_key.status_code, 409, no_key.text)
+        from control_plane.http_routes.mutation_support import idempotency_scope
+
+        scope = idempotency_scope(
+            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        )
+        reserved = self.store.reserve_mutation(
+            scope=scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="http-status",
+            request_fingerprint="b" * 64,
+            lease_owner="launchplane_req_original",
+            lease_seconds=300,
+            reconciliation_key=self.body.reviewed_plan_sha256,
+            provider_target_key=self.adapter.target_key(),
+        ).record
+        assert reserved is not None
+        checkpointed = self.store.checkpoint_mutation_provider_effect(
+            reservation=reserved, effect_phase="inspect_retained"
+        ).record
+        assert checkpointed is not None
+        reserved = checkpointed
+        for uncertain in (False, True):
+            if uncertain:
+                updated = self.store.mark_mutation_reconcile_required(
+                    reservation=reserved,
+                    reconciliation_key=reserved.reconciliation_key,
+                ).record
+                assert updated is not None
+                reserved = updated
+            with (
+                patch.object(SeparationResourcesAdapter, "observe") as observe,
+                patch.object(SeparationResourcesAdapter, "binding") as binding,
+            ):
+                pending = asyncio.run(call(mode="receipt", key="http-status"))
+            self.assertEqual(pending.status_code, 202, pending.text)
+            result = pending.json()["result"]
+            self.assertEqual(result["state"], reserved.state)
+            self.assertEqual(result["lease_expires_at"], reserved.lease_expires_at)
+            self.assertEqual(result["plan_sha256"], reserved.reconciliation_key)
+            self.assertEqual(result["provider_effect_phase"], reserved.provider_effect_phase)
+            self.assertEqual(
+                result["provider_effect_started_at"], reserved.provider_effect_started_at
+            )
+            self.assertNotIn("applied", result)
+            self.assertNotIn(reserved.request_fingerprint, pending.text)
+            observe.assert_not_called()
+            binding.assert_not_called()
+            self.assertEqual(
+                self.store.read_idempotency_record(
+                    scope=scope,
+                    route_path=ROUTE.format(product=self.product),
+                    idempotency_key="http-status",
+                ),
+                reserved,
+            )
+        foreign = asyncio.run(call(mode="receipt", key="http-status", context="foreign"))
+        self.assertEqual(foreign.status_code, 409, foreign.text)
         self.assert_retained()

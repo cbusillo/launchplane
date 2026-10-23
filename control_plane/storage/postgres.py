@@ -5612,9 +5612,12 @@ class PostgresRecordStore(HumanSessionStore):
                 "Launchplane shared storage schema is missing required table(s): "
                 f"{missing}. Run Alembic migrations before starting the hosted service."
             )
+        columns_by_table = inspector.get_multi_columns(filter_names=list(Base.metadata.tables))
         missing_columns: list[str] = []
         for table_name, table in sorted(Base.metadata.tables.items()):
-            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            existing_columns = {
+                column["name"] for column in columns_by_table.get((None, table_name), ())
+            }
             for column_name in sorted(table.columns.keys()):
                 if column_name not in existing_columns:
                     missing_columns.append(
@@ -6760,6 +6763,27 @@ class PostgresRecordStore(HumanSessionStore):
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
                 )
+            for orm_type, model_type, expected_records in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, bundle.expected_dokploy_targets),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    bundle.expected_dokploy_target_ids,
+                ),
+            ):
+                for expected in expected_records:
+                    row = session.scalar(
+                        select(orm_type)
+                        .where(
+                            orm_type.context == expected.context,
+                            orm_type.instance == expected.instance,
+                        )
+                        .with_for_update()
+                    )
+                    if row is None or model_type.model_validate(_payload_from_row(row)) != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 current_profile_row = session.scalar(
                     select(LaunchplaneProductProfileRow)

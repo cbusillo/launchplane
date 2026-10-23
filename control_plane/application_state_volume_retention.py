@@ -14,7 +14,12 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 def require_state_volume_retention_eligibility(
-    store: PostgresRecordStore, *, product: str, context: str, application_id: str
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    application_id: str,
+    require_exclusive_owner: bool = True,
 ) -> None:
     """Check current lane ownership and untracked custody under the authority lock."""
     try:
@@ -26,7 +31,8 @@ def require_state_volume_retention_eligibility(
             "application_state_volume_already_adopted",
             "Original allocation is already tracked; use original-key recovery.",
         )
-    require_state_volume_owner(store, product=product, context=context)
+    if require_exclusive_owner:
+        require_state_volume_owner(store, product=product, context=context)
 
 
 def require_state_volume_owner(store: PostgresRecordStore, *, product: str, context: str) -> None:
@@ -152,7 +158,7 @@ def checkpoint_state_volume_progress(
             original.get("plan_id") != plan_id
             or request.operation != "create-application"
             or request.instance != "testing"
-            or not request.state_volume_path
+            or (not request.state_volume_path and original.get("ordinary") is not True)
             or current.provider_target_key != state_volume_target_key(request.context)
             or current.reconciliation_key != original.get("plan_sha256")
             or current.request_fingerprint != original.get("plan_sha256")
@@ -227,8 +233,9 @@ def retain_state_volume_allocation(
         PLAN_ROUTE,
         ROUTE,
         state_volume_target_key,
-        state_volume_allocation_names,
+        application_allocation_names,
         validate_volume_request,
+        validate_ordinary_allocation_request,
     )
     from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
 
@@ -236,11 +243,20 @@ def retain_state_volume_allocation(
         raise ValueError("Review the exact original allocation custody before retention.")
     original = expected_original_intent
     request = DokployTargetSetupEnvelope.model_validate({**original["request"], "mode": "dry-run"})
-    validate_volume_request(request)
+    if request.state_volume_path:
+        validate_volume_request(request)
+    else:
+        validate_ordinary_allocation_request(request)
+        if original.get("ordinary") is not True:
+            raise ValueError("Retention requires the original application allocation.")
     plan_id = original.get("plan_id")
     if not isinstance(plan_id, str):
         raise ValueError("Retention requires an original application state-volume allocation.")
-    names = state_volume_allocation_names(plan_id)
+    names = application_allocation_names(plan_id, state_volume=bool(request.state_volume_path))
+    if request.project_id or request.environment_id:
+        names["project_marker"] = request.project_name
+    if request.environment_id:
+        names["environment_marker"] = request.environment_name
     if (
         reservation.route_path != ROUTE
         or reservation.provider_target_key != state_volume_target_key(request.context)

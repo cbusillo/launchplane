@@ -421,6 +421,48 @@ def _assert_write_bundle_absent(
 
 
 class ProductAuthorityBundleTransactionTests(unittest.TestCase):
+    def test_adopted_target_snapshot_fences_the_entire_bundle(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+
+        for backend in ("sqlite", "filesystem"):
+            for changed in ("target", "identity"):
+                with (
+                    self.subTest(backend=backend, changed=changed),
+                    TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    store = (
+                        PostgresRecordStore(
+                            database_url=f"sqlite+pysqlite:///{root / 'records.sqlite3'}"
+                        )
+                        if backend == "sqlite"
+                        else FilesystemRecordStore(root / "state")
+                    )
+                    if isinstance(store, PostgresRecordStore):
+                        self.addCleanup(store.close)
+                        store.ensure_schema()
+                    target, identity = _dokploy_target(), _dokploy_target_id()
+                    store.write_dokploy_target_record(target)
+                    store.write_dokploy_target_id_record(identity)
+                    bundle = ProductAuthorityBundle(
+                        product_profiles=(_product_profile(),),
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(identity,),
+                        expected_dokploy_targets=(target,),
+                        expected_dokploy_target_ids=(identity,),
+                    )
+                    if changed == "target":
+                        store.write_dokploy_target_record(
+                            target.model_copy(update={"target_name": "changed"})
+                        )
+                    else:
+                        store.write_dokploy_target_id_record(
+                            identity.model_copy(update={"target_id": "changed"})
+                        )
+                    with self.assertRaises(DokployTargetRecordChanged):
+                        store.write_product_authority_bundle(bundle)
+                    self.assertFalse(store.list_product_profile_records())
+
     def test_runtime_environment_write_requires_one_matching_expectation(self) -> None:
         record = _runtime_environment()
 

@@ -555,6 +555,25 @@ class FilesystemRecordStore:
             )
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            for model_type, record_type, expected_records in (
+                (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
+                (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
+            ):
+                for expected in expected_records:
+                    try:
+                        current = self._read_model_locked(
+                            model_type,
+                            record_type,
+                            _context_instance_record_id(expected.context, expected.instance),
+                        )
+                    except FileNotFoundError as error:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target disappeared before onboarding commit."
+                        ) from error
+                    if current != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")

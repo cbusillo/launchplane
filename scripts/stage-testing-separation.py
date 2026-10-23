@@ -11,12 +11,14 @@ import sys
 import urllib.error
 
 from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+from control_plane.operator_error_evidence import public_error_reference
 from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.testing_separation_resources import (
     ROUTE,
     SeparationResourcesRequest,
     SeparationResourcesPlan,
     SeparationResourcesResult,
+    SeparationResourcesStatus,
 )
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
@@ -62,6 +64,7 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    retain_original_key = bool(args.idempotency_key.strip())
     applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
     resources = args.mode.startswith("resources-")
     resource_read = args.mode == "resources-read"
@@ -219,6 +222,22 @@ def main() -> int:
         ):
             raise ValueError("Unexpected deployment result.")
         if resources:
+            if resource_read and "state" in result:
+                observed = SeparationResourcesStatus.model_validate(result)
+                if (observed.product, observed.context) != (args.product, args.context):
+                    raise ValueError("Preparation status belongs to another lane.")
+                print(
+                    json.dumps(
+                        {
+                            "status": "observed",
+                            "mode": args.mode,
+                            "trace_id": transport["public_trace_id"](response["trace_id"]),
+                            "preparation": observed.model_dump(mode="json"),
+                            "retain_original_key": True,
+                        }
+                    )
+                )
+                return 0
             result = (
                 SeparationResourcesResult.model_validate(result)
                 if applying or resource_read
@@ -266,9 +285,17 @@ def main() -> int:
         raw_error = error.read()
         error.close()
         try:
-            code = json.loads(raw_error).get("error", {}).get("code", "")
-        except (ValueError, AttributeError):
-            code = ""
+            payload = json.loads(raw_error)
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        details = payload.get("error")
+        code = public_error_reference(
+            details.get("code", "") if isinstance(details, dict) else "",
+            transport["public_code"],
+            default="unknown",
+        )
         with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw_error)
         ) as error:
@@ -276,10 +303,24 @@ def main() -> int:
                 error.code >= 500
                 or code in {"mutation_reconciliation_required", "mutation_in_progress"}
             ):
-                print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
+                print(
+                    json.dumps(
+                        {
+                            "status": "outcome_unknown",
+                            "retain_original_key": True,
+                            "http_status": error.code,
+                            "error_code": code,
+                            "trace_id": public_error_reference(
+                                payload.get("trace_id", ""), transport["public_trace_id"]
+                            ),
+                        }
+                    )
+                )
             else:
                 transport["emit_http_error_payload"](
-                    operation="testing-separation", request={"mode": args.mode}, exc=error
+                    operation="testing-separation",
+                    request={"mode": args.mode, "retain_original_key": retain_original_key},
+                    exc=error,
                 )
     except (
         KeyError,
@@ -293,7 +334,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "outcome_unknown" if submitted else "unverified",
-                    "retain_original_key": submitted,
+                    "retain_original_key": retain_original_key,
                 }
             )
         )
