@@ -5353,8 +5353,8 @@ Each supported installed producer supplies `PARAMETER_KEYS`,
 bytes it hashed, suppresses producer output and consumes that producer's own
 defaults and parsing. Launchplane contains no copy of the tenant defaults.
 A bounded local PostgreSQL transaction explicitly requests and verifies
-read-only mode, reads only those parameter keys and the three fixed addons'
-installation states, including the shared applier, then rolls back and closes. An addon must be installed
+read-only mode, reads only those parameter keys and the installation states of the fixed
+importers and shared applier, then rolls back and closes. An addon must be installed
 before its effective settings are reported. No source database connection,
 import, synchronization, account, configuration or lifecycle change occurs.
 

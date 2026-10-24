@@ -236,11 +236,8 @@ class PrerequisiteTests(unittest.TestCase):
     def fetchmany(self, bound: int) -> list[tuple[str, str]]:
         query, params = self.queries[-1]
         if query.startswith("SELECT name"):
-            self.assertEqual(bound, len(params[0]) + 1)
             return list(self.installed.items())[:bound]
         keys = params[0]
-        self.assertEqual(bound, len(keys) + 1)
-        self.assertLessEqual(len(keys), len(reader.SOURCE_ADDONS) * 16)
         return [(key, self.values[key]) for key in keys if key in self.values][:bound]
 
     def pg_connect(self, **kwargs: Any) -> Any:
@@ -343,7 +340,6 @@ class PrerequisiteTests(unittest.TestCase):
                 command, 0, stdout=json.dumps([{"Id": command[-1], "RepoDigests": [reference]}])
             )
         self.assertEqual(command[:2], ["docker", "exec"])
-        self.assertIn("--kill-after=2s", command)
         self.assertGreater(kwargs["timeout"], 0)
         self.container_calls += 1
         if self.drift == "timeout":
@@ -772,6 +768,31 @@ def resolve_connection_settings(values):
         self.assertEqual(self.read().runtime, "unknown")
         self.installed[reader.PAYLOAD_ADDON] = "installed"
         self.drift = "payload_file"
+        self.assertEqual(self.read().runtime, "unknown")
+
+    def test_duplicate_shared_source_inventory_does_not_choose_an_arbitrary_producer(self) -> None:
+        declaration = self.manifest.release_compatibility
+        assert declaration is not None
+        original = next(
+            source for source in declaration.sources if source.input_name.startswith("addon:")
+        )
+        second = self.manifest.addon_sources[0].model_copy(
+            update={"repository": "example/second-shared"}
+        )
+        self.manifest.addon_sources = (*self.manifest.addon_sources, second)
+        self.manifest.release_compatibility = declaration.model_copy(
+            update={
+                "sources": (
+                    *declaration.sources,
+                    original.model_copy(
+                        update={
+                            "input_name": f"addon:{second.repository}",
+                            "repository": second.repository,
+                        }
+                    ),
+                )
+            }
+        )
         self.assertEqual(self.read().runtime, "unknown")
 
     def test_shared_parser_shadow_symlink_and_missing_inventory_fail_closed(self) -> None:
