@@ -415,7 +415,10 @@ bootstrap a missing database. No new database marker is needed.
 
 The restore requires complete upstream settings, a non-root reader and an explicit
 dedicated SSH directory. Its source mount is root-only and read-only. The workflow
-must run without root, effective/permitted/ambient capabilities, root-directory
+checks actual runner/web bind mounts before staging an identity: the runner must
+have only the expected source bound read-only at `/root/.ssh`, and web has no
+host bind. Missing, changed or unreadable mounts stop before credential access.
+The workflow must run without root, effective/permitted/ambient capabilities, root-directory
 access or privilege escalation. The existing root broker stages the temporary
 identity; it and upstream environment variables are removed after filestore
 transfer, before addon code. The restricted source remains behind that root

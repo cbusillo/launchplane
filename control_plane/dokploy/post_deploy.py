@@ -866,6 +866,7 @@ def run_compose_post_deploy_update(
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
         preview_restore=run_destructive_restore
         and runtime_key_safety_environment_class(target_definition.instance) == "preview",
+        preview_ssh_source_directory=desired_env_map.get("DATA_WORKFLOW_SSH_DIR", ""),
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         website_settings_instance=target_definition.instance.strip().lower()
@@ -2728,6 +2729,7 @@ def _build_dokploy_data_workflow_script(
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
     preview_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
@@ -2743,6 +2745,8 @@ def _build_dokploy_data_workflow_script(
         raise ValueError("Only a maintenance run can bootstrap a missing database.")
     if preview_restore and workflow_mode != "restore":
         raise ValueError("Preview restore requires the restore workflow.")
+    if preview_restore and not preview_ssh_source_directory:
+        raise ValueError("Preview restore requires its explicit SSH source directory.")
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
     quoted_database_name = shlex.quote(database_name)
@@ -3027,6 +3031,13 @@ fi
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
 if [ "{int(preview_restore)}" = "1" ]; then
+    reader_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{script_runner_container_id}}")
+    web_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{web_container_id}}")
+    if [ "${{reader_binds}}" != {shlex.quote(preview_ssh_source_directory + "|/root/.ssh|false")} ] || [ -n "${{web_binds}}" ]; then
+        echo "Preview source mount does not match its dedicated read-only root-only binding." >&2
+        exit 1
+    fi
+    echo "odoo_preview_reader_mount_verified=true"
     docker exec "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_source_process_program())}
 fi
 

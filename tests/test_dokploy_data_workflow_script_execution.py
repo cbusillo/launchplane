@@ -108,6 +108,14 @@ def main(argv):
                 if row["kind"] == kind and row["id"] in argv[3:]:
                     print(json.dumps(row))
             return 42 if os.environ.get("FAKE_METADATA_READ_FAILURE") == "1" else 0
+        if ".Mounts" in template:
+            if os.environ.get("FAKE_READER_MOUNT_READ_FAILURE") == "1":
+                return 42
+            if container_id == "script-runner-id":
+                print(os.environ.get("FAKE_READER_BINDS", "/srv/preview-source-ssh|/root/.ssh|false"))
+            elif container_id == "web-id":
+                print(os.environ.get("FAKE_WEB_BINDS", ""))
+            return 0
         if ".State.Running" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"
@@ -517,6 +525,7 @@ def _render_post_deploy_script(
                     """\
                     ODOO_DB_NAME=example_testing
                     ODOO_INSTALL_MODULES=base
+                    DATA_WORKFLOW_SSH_DIR=/srv/preview-source-ssh
                     ODOO_UPSTREAM_HOST=source.example.com
                     ODOO_UPSTREAM_USER=backup
                     ODOO_UPSTREAM_DB_NAME=source
@@ -1310,6 +1319,23 @@ def main(arguments: list[str]) -> int:
         run = self._run(script)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+
+    def test_preview_refuses_wrong_or_unreadable_actual_source_mount_before_staging(self) -> None:
+        script = _render_post_deploy_script(None, instance="pr-45", run_destructive_restore=True)
+        for overrides in (
+            {"FAKE_READER_BINDS": "/root/.ssh|/root/.ssh|false"},
+            {"FAKE_READER_BINDS": "/srv/preview-source-ssh|/root/.ssh|true"},
+            {"FAKE_READER_BINDS": "/srv/preview-source-ssh|/home/ubuntu/.ssh|false"},
+            {"FAKE_READER_BINDS": ""},
+            {"FAKE_WEB_BINDS": "/root/.ssh|/root/.ssh|false"},
+            {"FAKE_READER_MOUNT_READ_FAILURE": "1"},
+        ):
+            with self.subTest(overrides=overrides):
+                run = self._run(script, **overrides)
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertNotIn("Normalizing filestore ownership", run.stdout)
+                self.assertNotIn("exec workflow", run.docker_log)
+                self.assertFalse(run.web_restarted)
 
     def test_preview_capture_cleanup_failure_keeps_web_stopped(self) -> None:
         run = self._run(
