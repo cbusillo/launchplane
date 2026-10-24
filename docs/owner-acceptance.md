@@ -18,7 +18,10 @@ when the PR only has test notes. The Director's standing direction supplies
 acceptance; note validation and engineering checks still apply. The product's
 review label is an explicit hold: with it, the change waits for the recorded
 Client's preview review like any other product, and the label still requires
-real test notes. Remove the label to return the change to standing acceptance.
+real test notes. A product without a serving preview cannot record that
+acceptance, so its labeled change stays held until the request is withdrawn
+through [pending request withdrawal](#withdrawing-a-pending-request). Withdrawal
+returns the change to standing acceptance; a saved Client rejection still vetoes it.
 Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
@@ -121,8 +124,8 @@ the veto. Decisions for another product, pull request or former Client do not
 veto this change. Acceptance remains bound to the reviewed head or proven carry.
 For a Director-standing product, the Director signs in as the recorded Client,
 opens the change's `/ui/owner-review` page and accepts its current serving preview.
-Standing acceptance suppresses invitations; it does not prevent that explicit
-decision. A serving preview remains required by the normal review path.
+Without the review label, standing acceptance suppresses invitations; it does
+not prevent that explicit decision. A serving preview remains required by the normal review path.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
