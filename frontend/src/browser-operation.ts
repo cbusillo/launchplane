@@ -468,7 +468,7 @@ function normalizeRequestValue(value: unknown): unknown {
   return value;
 }
 
-function browserOperationSessionStorage(): BrowserOperationStorage | null {
+export function browserOperationSessionStorage(): BrowserOperationStorage | null {
   if (typeof window === "undefined") {
     return null;
   }
