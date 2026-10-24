@@ -85,7 +85,7 @@ def read_testing_prerequisites(
             read()
         except TestingPathHoldActive:
             state, code = "blocked", TESTING_HOLD_ACTIVE
-            description = "The testing hold prevents this action-admission check; use the provision prerequisite read for current-copy evidence."
+            description = "The testing hold prevents this action-admission check; inspect its recorded purpose and supported continuation."
         except TestingCredentialsOverlap:
             state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."

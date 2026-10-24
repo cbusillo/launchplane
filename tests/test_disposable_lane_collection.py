@@ -339,7 +339,15 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 previous = getattr(dependency, field)
                 setattr(dependency, field, failure)
                 try:
-                    self.assertFalse(self.collect())
+                    facts = self.collect()
+                    if dependency is self.credentials:
+                        self.assertEqual(facts, {})
+                        with patch.object(
+                            self.store, "read_fresh_odoo_testing_generation", return_value=None
+                        ):
+                            self.assertEqual(self.collect(), {})
+                    else:
+                        self.assertFalse(facts)
                     self.inspection.assert_not_called()
                 finally:
                     setattr(dependency, field, previous)

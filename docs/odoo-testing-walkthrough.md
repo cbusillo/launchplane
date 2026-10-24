@@ -98,6 +98,8 @@ native-published copy reads or cleanup. Generation-preparation checks identify t
 protective hold without claiming a resource or usage defect; use the provision read
 for current-copy evidence. None of these observations qualifies a hold lift,
 inherited credentials or upstream-source capability.
+An unavailable credential comparison during collection discards inherited resource
+positives even when the legacy generation row is missing.
 
 Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It
