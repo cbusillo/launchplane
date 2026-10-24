@@ -56,31 +56,6 @@ SYO_RUNTIME_KEYS = (
 )
 
 
-def _run_runtime_key_safety_generator(
-    temporary_directory: Path,
-    *,
-    extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    output_directory = temporary_directory / "runtime-key-safety"
-    github_output = temporary_directory / "github-output.txt"
-    env = {
-        **os.environ,
-        "GITHUB_SHA": "test-sha",
-        "GITHUB_OUTPUT": str(github_output),
-        "LAUNCHPLANE_RUNTIME_KEY_SAFETY_OUTPUT_DIR": str(output_directory),
-    }
-    if extra_env:
-        env.update(extra_env)
-    return subprocess.run(
-        ["bash", "scripts/deploy/render-runtime-key-safety-policy.sh"],
-        check=False,
-        cwd=Path.cwd(),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-
 def _read_github_outputs(temporary_directory: Path) -> dict[str, str]:
     output_path = temporary_directory / "github-output.txt"
     outputs: dict[str, str] = {}
@@ -692,83 +667,6 @@ class ProductOnboardingTests(unittest.TestCase):
                 preserve_payload["deploy"]["supersedes_deployment_marker"],
                 "github-actions:12345:2:deploy",
             )
-
-    def test_runtime_key_safety_accepts_configured_rules(
-        self,
-    ) -> None:
-        configured_rules = [
-            {
-                "binding_key": "EXAMPLE_API_TOKEN",
-                "secret_class": "testing",
-                "allowed_targets": [{"context": "example-testing", "instances": ["testing"]}],
-                "description": "Example testing token.",
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules)
-                },
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            policy_payload = json.loads(
-                (
-                    temporary_directory / "runtime-key-safety" / "runtime-key-safety-policy.json"
-                ).read_text(encoding="utf-8")
-            )
-            policy_idempotency = _read_github_outputs(temporary_directory)[
-                "runtime_key_safety_idempotency_key"
-            ]
-
-        self.assertEqual(policy_payload["product"], "launchplane")
-        self.assertEqual(policy_payload["source_label"], "deploy:runtime-key-safety-rules")
-        self.assertRegex(
-            policy_idempotency,
-            r"launchplane-runtime-key-safety-rules:test-sha:[0-9a-f]{64}",
-        )
-        self.assertNotIn("EXAMPLE_API_TOKEN", policy_idempotency)
-        self.assertEqual(policy_payload["rules"][0]["binding_key"], "EXAMPLE_API_TOKEN")
-        self.assertEqual(policy_payload["rules"][0]["secret_class"], "testing")
-        self.assertEqual(
-            policy_payload["rules"][0]["allowed_targets"],
-            [{"context": "example-testing", "instances": ["testing"]}],
-        )
-        self.assertEqual(policy_payload["rules"][0]["description"], "Example testing token.")
-
-    def test_runtime_key_safety_rejects_incomplete_rules(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
-                        [{"binding_key": "EXAMPLE_API_TOKEN"}]
-                    )
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("binding_key and secret_class", result.stderr)
-
-    def test_runtime_key_safety_rejects_unknown_secret_class(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
-                        [{"binding_key": "EXAMPLE_API_TOKEN", "secret_class": "production"}]
-                    )
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("secret_class must be one of", result.stderr)
 
     def test_reonboarding_preserves_product_config_public_hosts(self) -> None:
         with TemporaryDirectory() as directory:

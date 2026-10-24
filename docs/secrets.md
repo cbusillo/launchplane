@@ -542,11 +542,11 @@ decryption key state denies the reveal or resolution.
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
-- Deploy-time runtime key-safety reconciliation accepts admin-supplied
-  `LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON` metadata for runtime secret
-  bindings that need Launchplane-managed storage. It writes binding key,
-  `secret_class`, and target-scope metadata only; admins still supply or
-  rotate secret values through product-config managed secret writes.
+- The active DB policy record is the only source of key-safety rules. Deploys
+  do not import rules. Admins change a rule through
+  `POST /v1/runtime-key-safety/policies/apply`, or declare a lane secret's class
+  in product-config; secret values still go through product-config managed
+  secret writes.
 - Shared and production runtime mutations must execute through the deployed
   Launchplane service API or a Launchplane UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
@@ -679,11 +679,9 @@ decryption key state denies the reveal or resolution.
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
   workflow mutates runtime keys.
-- The Launchplane deploy workflow may reconcile known runtime binding
-  classifications through `POST /v1/runtime-key-safety/policies/apply`. That
-  service path is OIDC-authenticated, DB-backed, additive by binding key, and
-  carries only binding metadata such as class, context, and instance scope. It
-  must not carry secret plaintext or provider env dumps.
+- `POST /v1/runtime-key-safety/policies/apply` is DB-backed, additive by
+  binding key, and carries only binding metadata such as class, context, and
+  instance scope. It must not carry secret plaintext or provider env dumps.
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
