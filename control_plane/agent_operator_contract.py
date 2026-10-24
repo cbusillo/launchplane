@@ -252,7 +252,7 @@ OPERATION_SPECS = (
         TESTING_GENERATION_RETIREMENT_ROUTE,
         "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "inspect"),
         "apply",
         ("reviewed_plan_sha256",),
     ),

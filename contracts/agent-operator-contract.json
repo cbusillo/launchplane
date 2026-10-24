@@ -506,7 +506,8 @@
         "modes": [
           "dry-run",
           "apply",
-          "readback"
+          "readback",
+          "inspect"
         ],
         "operation_id": "retire_incomplete_testing_generation",
         "path": "/v1/products/{product}/testing-generation-retirement",
@@ -522,7 +523,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "a647fa4ac57158aebdfc4fecde23df3299549aea436c09259b8c1ab0746e0e81",
+        "schema_fingerprint_sha256": "9a480ac84f0cbadc885ff981e9c42e04affa7e3f7a04d83434203b38dcef9395",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1104,8 +1105,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "7b9845be913c694282f0d097392a075bb932af12"
+    "source_commit_sha": "bdc4a1071f447e2501dcb32633ef1447a016ba08"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "40247269e34f4056475a988d6367c4d543ffc8207715f8203e5f4f9bfd266c65"
+  "semantic_digest_sha256": "9c115c988f15d8667da33aca574b136fc9724de7074dced918097a06f84c327f"
 }

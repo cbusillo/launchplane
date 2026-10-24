@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     from control_plane.stored_record_snapshot import SnapshotAuthorization
     from control_plane.testing_generation_retirement import (
         RetainedTestingGeneration,
+        RetainedTestingHostnameReservation,
         TestingGenerationRetirementRequest,
     )
     from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
@@ -15149,15 +15150,19 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
-    def _retained_disposable_hostnames(
+    def _retained_disposable_hostname_reservations(
         self,
         session: Session,
         *,
         current_target: DokployTargetRecord | None = None,
         target_id: str | None = None,
-    ) -> frozenset[str]:
-        hosts: set[str] = set()
-        from control_plane.testing_generation_retirement import RetainedTestingGeneration
+    ) -> tuple[RetainedTestingHostnameReservation, ...]:
+        from control_plane.testing_generation_retirement import (
+            RetainedTestingGeneration,
+            RetainedTestingHostnameReservation,
+        )
+
+        reservations: list[RetainedTestingHostnameReservation] = []
 
         for payload in session.scalars(select(LaunchplaneRetainedTestingGenerationRow.payload)):
             retained_generation = RetainedTestingGeneration.model_validate(payload)
@@ -15182,7 +15187,17 @@ class PostgresRecordStore(HumanSessionStore):
                         # Preserve an existing route on its exact original recipient.
                         # A new ID in this same bundle must never inherit that host.
                         continue
-            hosts.add(generation.domain_host)
+            reservations.append(
+                RetainedTestingHostnameReservation(
+                    source_kind="retained_generation",
+                    product=generation.product,
+                    context=generation.context,
+                    operation_id=retained_generation.plan.operation_id,
+                    target_id=generation.target_id,
+                    hostname=generation.domain_host,
+                    custody_sha256=canonical_json_sha256(payload),
+                )
+            )
         for allocation, custody in session.execute(
             select(
                 LaunchplaneDisposableTestingResourceAllocationRow,
@@ -15222,14 +15237,67 @@ class PostgresRecordStore(HumanSessionStore):
                         # Writing a hold or metadata on the unchanged original
                         # recipient cannot transfer its hostname to a fresh target.
                         continue
-                hosts.update(
-                    (
-                        *retained.domains,
-                        *retained.public_hosts,
-                        *(effect.host for effect in retained.pending_public_host_effects),
-                    )
+                product = custody.payload.get("product") if custody is not None else None
+                retained_target_id = (
+                    custody.payload.get("retained_target_id") if custody is not None else None
                 )
-        return frozenset(hosts)
+                for hostname in sorted(
+                    set(
+                        (
+                            *retained.domains,
+                            *retained.public_hosts,
+                            *(effect.host for effect in retained.pending_public_host_effects),
+                        )
+                    )
+                ):
+                    reservations.append(
+                        RetainedTestingHostnameReservation(
+                            source_kind="retained_allocation",
+                            product=product if isinstance(product, str) else None,
+                            context=retained.context,
+                            operation_id=allocation.operation_id,
+                            target_id=retained_target_id
+                            if isinstance(retained_target_id, str)
+                            else None,
+                            hostname=hostname,
+                            custody_sha256=canonical_json_sha256(
+                                {
+                                    "preparation": custody.payload if custody else None,
+                                    "retained_target_record": snapshot,
+                                }
+                            ),
+                        )
+                    )
+        return tuple(
+            sorted(
+                reservations,
+                key=lambda item: (item.context, item.hostname, item.source_kind, item.operation_id),
+            )
+        )
+
+    def _retained_disposable_hostnames(
+        self,
+        session: Session,
+        *,
+        current_target: DokployTargetRecord | None = None,
+        target_id: str | None = None,
+    ) -> frozenset[str]:
+        return frozenset(
+            entry.hostname
+            for entry in self._retained_disposable_hostname_reservations(
+                session, current_target=current_target, target_id=target_id
+            )
+        )
+
+    def read_retained_testing_hostname_reservations(
+        self, context: str
+    ) -> tuple[RetainedTestingHostnameReservation, ...]:
+        with self._session_factory() as session:
+            return tuple(
+                entry
+                for entry in self._retained_disposable_hostname_reservations(session)
+                if entry.context == context
+            )
 
     def retained_disposable_hostnames(self) -> frozenset[str]:
         with self._session_factory() as session:
