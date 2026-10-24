@@ -157,13 +157,13 @@ before any protected plan/apply run or provider mutation is possible.
 
 Each public action pin carries the exact release tag in an inline comment, for
 example `actions/checkout@<full-sha> # v7.0.0`. The comment makes a pin directly
-reviewable and lets Dependabot update the SHA and tag together in a normal pull
-request. Dependabot tracks third-party GitHub Actions weekly through
-`.github/dependabot.yml`; it does not update same-repository first-party action
-pins. Launchplane maintains those pins through the required content check and
+reviewable and lets Renovate update the SHA and tag together in a normal pull
+request. Renovate tracks third-party GitHub Actions weekly through
+`renovate.json`; it skips same-repository first-party action pins, which carry
+no release tag. Launchplane maintains those pins through the required content check and
 `action-pins update` command instead.
 
-Dependabot does not update container references embedded in workflow scripts.
+Renovate does not update container references embedded in workflow scripts.
 For those images, resolve the reviewed release manifest with
 `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`,
 update the tag and digest together, and let the policy test reject omissions or
@@ -171,7 +171,7 @@ unclassified sources.
 
 Review each update PR as a supply-chain change: verify the repository, release
 or reviewed source commit, action provenance, and the workflow permissions that
-will execute it. This repository treats Dependabot updates as normal pull
+will execute it. This repository treats Renovate updates as normal pull
 requests subject to code review, required checks, and branch protection.
 
 Committed pin verification takes an explicit repository root, revision and

@@ -30,24 +30,6 @@ def read_branch_revision(
     return SourceRevision(commit=commit, committed_at=_text(committer.get("date")))
 
 
-def revision_contains(
-    *, repository: str, ancestor: str, head: str, read: SourceControlRead
-) -> bool | None:
-    if ancestor == head:
-        return True
-    comparison = _object(
-        read(
-            f"/repos/{_path(repository)}/compare/{quote(ancestor, safe='')}...{quote(head, safe='')}"
-        )
-    )
-    status = comparison.get("status")
-    if status in {"ahead", "identical"}:
-        return True
-    if status in {"behind", "diverged"}:
-        return False
-    return None
-
-
 def change_fingerprint(
     *,
     repository: str,

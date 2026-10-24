@@ -10,6 +10,7 @@ from typing import Protocol, cast
 
 import click
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -17,7 +18,11 @@ from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
 )
-from control_plane.contracts.promotion_record import BackupGateEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import (
+    BackupGateEvidence,
+    PromotionRecord,
+    RecordFailure,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -209,7 +214,11 @@ def require_production_promotion_backup(
         if (
             promotion.deploy.status == "fail"
             and promotion.failure is not None
-            and promotion.failure.code == "lane_movement.source_order_unavailable"
+            and promotion.failure.code
+            in {
+                "lane_movement.source_order_unavailable",
+                GenericWebPromotionSourceRefused.failure_code,
+            }
             and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
         ):
             # The guard recorded a temporary read refusal before its first
@@ -333,6 +342,11 @@ def production_promotion_backup_guard(
                 and not effects_started
             ):
                 failed.failure = error.record_failure()
+            elif isinstance(error, GenericWebPromotionSourceRefused) and not effects_started:
+                failed.failure = RecordFailure(
+                    code=error.failure_code,
+                    description="Testing did not qualify the accepted source before production admission.",
+                )
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

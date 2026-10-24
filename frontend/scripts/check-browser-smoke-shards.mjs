@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { smokeArtifact } from "../browser-smoke-paths.mjs";
 
 function testsIn(report) {
   if (report.errors?.length) throw new Error("Browser report contains errors");
@@ -54,7 +55,7 @@ export function checkBrowserShardCoverage(inventory, reports) {
 
 async function main() {
   const frontendRoot = fileURLToPath(new URL("../", import.meta.url));
-  const directory = resolve(frontendRoot, "../tmp/browser-smoke/reports");
+  const directory = smokeArtifact("reports");
   const filenames = (await readdir(directory)).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
   if (!filenames.length || filenames.some((name, index) => name !== `shard-${index + 1}.json`)) {
     throw new Error("Browser reports do not match the required shards");

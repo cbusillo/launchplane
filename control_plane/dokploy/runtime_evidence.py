@@ -39,6 +39,7 @@ _RUNTIME_LOG_PROVIDER_ERROR_MARKERS = (
 type DokployEvidenceProviderOperation = Literal[
     "provider-config",
     "target-inspect",
+    "lane-binding",
     "container-list",
     "service-select",
     "container-config",
@@ -185,26 +186,6 @@ def fetch_compose_service_runtime(
         "immutable_image_reference": immutable_image_reference,
         "image_reference_immutable": bool(immutable_image_reference),
     }
-
-
-def fetch_compose_running_container_images(
-    *,
-    host: str,
-    token: str,
-    app_name: str,
-    server_id: str = "",
-) -> tuple[str, ...]:
-    """Return the configured image of every running service container of one compose app."""
-
-    return tuple(
-        image
-        for image, _deployment_record_id in fetch_compose_running_container_runtime(
-            host=host,
-            token=token,
-            app_name=app_name,
-            server_id=server_id,
-        )
-    )
 
 
 def fetch_compose_running_container_runtime(
@@ -480,6 +461,11 @@ def summarize_runtime_log_lines(lines: tuple[str, ...]) -> RuntimeLogClassificat
 def _normalize_container_config(
     raw_config: dokploy_api.JsonValue,
 ) -> dokploy_api.JsonObject | None:
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except ValueError:
+            return None
     container_config = dokploy_api.as_json_object(raw_config)
     if container_config is not None:
         return container_config

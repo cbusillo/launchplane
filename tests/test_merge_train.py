@@ -20,7 +20,6 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     build_merge_train_wait_result,
     discover_merge_train_stack,
-    reread_merge_train_after_branch_update,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -89,7 +88,7 @@ class _FakeSnapshotReader:
 class MergeTrainDryRunTests(unittest.TestCase):
     def test_unavailable_check_observation_preserves_queue_admission(self) -> None:
         reason = "actions_read_not_granted"
-        for status in ("fail", "pass"):
+        for status in ("fail", "pass", "pending", "unknown"):
             with self.subTest(status=status):
                 pr = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
                     update={
@@ -121,7 +120,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 )
                 self.assertEqual(result.intended_next_action, baseline.intended_next_action)
                 self.assertEqual(result.queue[0].required_checks_observation_error, reason)
-                if status == "fail":
+                if status != "pass":
                     self.assertIn(reason, result.next_action_detail)
 
     def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
@@ -224,7 +223,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-dry-run",
                     "--snapshot-file",
                     str(snapshot_file),
@@ -691,7 +689,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-dry-run",
                     "--snapshot-file",
                     str(snapshot_file),
@@ -718,11 +715,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ) as transport_class,
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ) as reader_class,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -731,7 +728,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -793,21 +789,20 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
-            patch("control_plane.cli_work_graph.GitHubMergeTrainClient", _FakeGitHubClient),
+            patch("control_plane.cli_merge_train.GitHubMergeTrainClient", _FakeGitHubClient),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -833,7 +828,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -858,11 +852,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -870,7 +864,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "merge-train-run-once", "--policy-file", str(policy_file)],
+                ["merge-train-run-once", "--policy-file", str(policy_file)],
             )
 
         self.assertNotEqual(result.exit_code, 0)
@@ -1233,79 +1227,6 @@ class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
         self.assertEqual(result.status, "skipped")
         self.assertFalse(result.reread_required)
         self.assertEqual(branch_client.updated_branches, [])
-
-
-class MergeTrainRereadTests(unittest.TestCase):
-    def test_reread_after_branch_update_re_evaluates_fresh_snapshot(self) -> None:
-        policy = build_test_merge_train_policy()
-        stale_result = build_merge_train_dry_run_result(
-            policy=policy,
-            snapshot=MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(_pull_request(51, branch_update_required=True),),
-            ),
-        )
-        branch_update_result = apply_merge_train_branch_update_intent(
-            dry_run_result=stale_result, branch_client=_FakeBranchClient()
-        )
-        snapshot_reader = _FakeSnapshotReader(
-            MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(
-                    _pull_request(
-                        51,
-                        created_at="2026-05-08T10:00:00Z",
-                        required_checks_status="pending",
-                    ),
-                ),
-            )
-        )
-
-        result = reread_merge_train_after_branch_update(
-            branch_update_result=branch_update_result,
-            policy=policy,
-            snapshot_reader=snapshot_reader,
-        )
-
-        self.assertEqual(result.status, "reread")
-        self.assertEqual(snapshot_reader.reads, [("cbusillo/sellyouroutboard", "main")])
-        self.assertIsNotNone(result.refreshed_result)
-        refreshed_result = result.refreshed_result
-        assert refreshed_result is not None
-        self.assertEqual(refreshed_result.intended_next_action, "wait_for_checks")
-
-    def test_reread_skips_when_branch_update_was_not_required(self) -> None:
-        policy = build_test_merge_train_policy()
-        dry_run_result = build_merge_train_dry_run_result(
-            policy=policy,
-            snapshot=MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(_pull_request(52),),
-            ),
-        )
-        branch_update_result = apply_merge_train_branch_update_intent(
-            dry_run_result=dry_run_result, branch_client=_FakeBranchClient()
-        )
-        snapshot_reader = _FakeSnapshotReader(
-            MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(),
-            )
-        )
-
-        result = reread_merge_train_after_branch_update(
-            branch_update_result=branch_update_result,
-            policy=policy,
-            snapshot_reader=snapshot_reader,
-        )
-
-        self.assertEqual(result.status, "skipped")
-        self.assertIsNone(result.refreshed_result)
-        self.assertEqual(snapshot_reader.reads, [])
 
 
 class MergeTrainWaitTests(unittest.TestCase):

@@ -17,7 +17,7 @@ from control_plane.contracts.solo_administration_confirmation import (
     expire_solo_administration_confirmation,
     issue_solo_administration_confirmation,
     revoke_solo_administration_confirmation,
-    solo_administration_acknowledgement_sha256,
+    solo_administration_confirmation_acknowledgement_sha256,
     solo_administration_confirmation_human_session_id_sha256,
     verify_solo_administration_acknowledgement,
 )
@@ -29,7 +29,7 @@ _CANDIDATE_POLICY_SHA256 = "b" * 64
 _PLAN_SHA256 = "c" * 64
 _SCOPE_SHA256 = "d" * 64
 _KEY_SHA256 = "e" * 64
-_ACKNOWLEDGEMENT_SHA256 = solo_administration_acknowledgement_sha256(
+_ACKNOWLEDGEMENT_SHA256 = solo_administration_confirmation_acknowledgement_sha256(
     "I acknowledge solo administration"
 )
 _SESSION_SHA256 = solo_administration_confirmation_human_session_id_sha256("human-session-1")

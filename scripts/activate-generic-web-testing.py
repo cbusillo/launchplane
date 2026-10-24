@@ -14,7 +14,11 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRequest,
     TestingActivationPlan,
     TestingActivationResult,
+    TestingActivationRefusedResult,
+    TestingActivationRefusalCode,
 )
+from control_plane.discord_identity import DiscordIdentityResult
+from control_plane.operator_error_evidence import public_error_reference
 from control_plane.testing_activation import ROUTE
 
 
@@ -35,6 +39,19 @@ def save(path: Path, payload: object) -> None:
         json.dump(payload, output)
 
 
+def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
+    try:
+        payload = json.loads(raw)
+        if (
+            payload.get("error", {}).get("code")
+            == TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        ):
+            return DiscordIdentityResult.model_validate_json(payload["records"]["discord_identity"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt"))
@@ -48,6 +65,7 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    retain_original_key = bool(args.idempotency_key.strip())
     submitted = False
     try:
         for path in (args.request_file, args.evidence_file):
@@ -97,11 +115,14 @@ def main() -> int:
         )
         if response["status"] != "accepted":
             raise ValueError("Activation was not accepted.")
-        result = (
-            (TestingActivationPlan if args.mode == "dry-run" else TestingActivationResult)
-            .model_validate(response["result"])
-            .model_dump(mode="json")
+        result_model = (
+            TestingActivationRefusedResult
+            if response["result"].get("outcome") == "refused"
+            else TestingActivationPlan
+            if args.mode == "dry-run"
+            else TestingActivationResult
         )
+        result = result_model.model_validate(response["result"]).model_dump(mode="json")
         output = (
             args.evidence_file
             if args.mode == "dry-run"
@@ -130,14 +151,30 @@ def main() -> int:
     except urllib.error.HTTPError as error:
         raw = error.read()
         error.close()
+        observed = external_refusal(raw)
+        if observed is not None:
+            payload = json.loads(raw)
+            print(
+                json.dumps(
+                    {
+                        "status": "rejected",
+                        "trace_id": public_error_reference(
+                            payload.get("trace_id", ""), transport["public_trace_id"]
+                        ),
+                        "external_identity": observed.model_dump(mode="json"),
+                        "retain_original_key": retain_original_key,
+                    }
+                )
+            )
+            return 1
         with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw)
         ) as replay:
             transport["emit_http_error_payload"](
-                operation="testing-activation", request={"mode": args.mode}, exc=replay
+                operation="testing-activation",
+                request={"mode": args.mode, "retain_original_key": retain_original_key},
+                exc=replay,
             )
-        if submitted:
-            print(json.dumps({"retain_original_key": True}))
     except (
         ValueError,
         KeyError,
@@ -150,7 +187,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "outcome_unknown" if submitted else "unverified",
-                    "retain_original_key": submitted,
+                    "retain_original_key": retain_original_key,
                 }
             )
         )

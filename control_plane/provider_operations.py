@@ -20,14 +20,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 from threading import Event, Lock, Thread
-from typing import Callable, Literal, NamedTuple, Protocol, runtime_checkable
+from typing import Callable, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
+from pydantic import BaseModel
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import (
+    MutationEffectAdmissionRefusedError,
     MutationReconciliationSupersessionResult,
     MutationReservationAdoptionResult,
     MutationReservationCompletionResult,
@@ -49,6 +52,7 @@ DurableProviderOperationStatus = Literal[
     "target_busy",
     "in_progress",
     "reconcile_required",
+    "checkpointed",
 ]
 
 
@@ -89,6 +93,17 @@ class ProviderMutationUnknownError(Exception):
     """
 
 
+class ProviderMutationCheckpoint(Exception):
+    """An adapter can relinquish an independently running, durably identified job."""
+
+    def __init__(
+        self,
+        persist: Callable[[LaunchplaneIdempotencyRecord], LaunchplaneIdempotencyRecord],
+    ) -> None:
+        super().__init__("The original provider job is checkpointed for service replacement.")
+        self.persist = persist
+
+
 @dataclass(frozen=True)
 class ProviderMutationOutcome:
     response_status_code: int
@@ -104,6 +119,7 @@ class ProviderObservation:
     response_payload: dict[str, object] = field(default_factory=dict)
     retry_safe: bool = False
     preserve_effect_checkpoint: bool = False
+    expected_binding_evidence: tuple[BaseModel, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +180,20 @@ class ProviderEffectTimestampObserver(Protocol):
         """Observe a provider effect using its authoritative checkpoint time."""
 
 
+class _OriginIntentArguments(TypedDict, total=False):
+    provider_target_origin: ProviderTargetOrigin
+    original_intent: dict[str, object]
+
+
+class _SupersessionOriginIntentArguments(_OriginIntentArguments, total=False):
+    expected_original_intent: dict[str, object] | None
+
+
+@runtime_checkable
+class ProviderTargetOriginAdapter(Protocol):
+    def provider_target_origin(self) -> ProviderTargetOrigin | None: ...
+
+
 class DurableProviderOperationStore(Protocol):
     def read_original_mutation_intent(
         self, reservation: LaunchplaneIdempotencyRecord
@@ -180,6 +210,7 @@ class DurableProviderOperationStore(Protocol):
         lease_seconds: int = ...,
         reconciliation_key: str = ...,
         provider_target_key: str = ...,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, object] | None = ...,
     ) -> MutationReservationResult: ...
 
@@ -219,6 +250,7 @@ class DurableProviderOperationStore(Protocol):
         response_trace_id: str,
         response_payload: dict[str, object],
         expected_original_intent: dict[str, object] | None = None,
+        expected_binding_evidence: tuple[BaseModel, ...] = (),
     ) -> MutationReservationAdoptionResult: ...
 
     def supersede_expired_reconciled_mutation_and_reserve(
@@ -237,6 +269,7 @@ class DurableProviderOperationStore(Protocol):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, object] | None = None,
         expected_original_intent: dict[str, object] | None = None,
     ) -> MutationReconciliationSupersessionResult: ...
@@ -349,6 +382,11 @@ class _ReservationHeartbeat:
                     effect_phase=normalized_phase,
                     lease_seconds=self._lease_seconds,
                 )
+            except MutationEffectAdmissionRefusedError as refusal:
+                # Let the adapter settle its original domain refusal. This
+                # proposed checkpoint never dispatched; earlier effects still
+                # belong to the exact reservation and the runner's release gate.
+                raise refusal.cause from None
             except Exception as error:
                 self._failure_status = "error"
                 raise _ProviderOperationLeaseLostError(
@@ -440,12 +478,23 @@ def run_durable_provider_operation(
     provider_target_key = adapter.target_key().strip()
     if not provider_target_key:
         raise ValueError("Durable provider operations require a provider target key.")
+    origin = (
+        adapter.provider_target_origin()
+        if isinstance(adapter, ProviderTargetOriginAdapter)
+        else None
+    )
     reconciliation_key = adapter.reconciliation_key().strip()
     if not reconciliation_key:
         raise ValueError("Durable provider operations require a reconciliation key.")
     normalized_response_trace_id = response_trace_id.strip()
     if not normalized_response_trace_id:
         raise ValueError("Durable provider operations require a response trace id.")
+
+    origin_arguments: _OriginIntentArguments = {}
+    if origin is not None:
+        origin_arguments["provider_target_origin"] = origin
+    if original_intent:
+        origin_arguments["original_intent"] = original_intent
 
     def reserve() -> MutationReservationResult:
         return store.reserve_mutation(
@@ -457,7 +506,7 @@ def run_durable_provider_operation(
             lease_seconds=lease_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
-            **({"original_intent": original_intent} if original_intent else {}),
+            **origin_arguments,
         )
 
     reservation_result = reserve()
@@ -484,6 +533,12 @@ def run_durable_provider_operation(
         and target_supersession is not None
         and target_supersession.quiescence_check(reservation)
     ):
+        supersession_arguments: _SupersessionOriginIntentArguments = {}
+        if origin is not None:
+            supersession_arguments["provider_target_origin"] = origin
+        if original_intent:
+            supersession_arguments["original_intent"] = original_intent
+            supersession_arguments["expected_original_intent"] = superseded_intent
         supersession = store.supersede_expired_reconciled_mutation_and_reserve(
             reservation=reservation,
             response_status_code=target_supersession.response_status_code,
@@ -498,11 +553,7 @@ def run_durable_provider_operation(
             minimum_expired_seconds=target_supersession.minimum_expired_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
-            **(
-                {"original_intent": original_intent, "expected_original_intent": superseded_intent}
-                if original_intent
-                else {}
-            ),
+            **supersession_arguments,
         )
         if supersession.status == "acquired" and supersession.record is not None:
             decision = "acquired"
@@ -636,6 +687,33 @@ def _apply_acquired(
     heartbeat.start()
     try:
         outcome = adapter.apply(provider_operation_key, heartbeat)
+    except ProviderMutationCheckpoint as checkpoint:
+        current_reservation, _ = heartbeat.stop()
+        try:
+            held = checkpoint.persist(current_reservation)
+        except Exception:
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+        except BaseException:
+            _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+            raise
+        return DurableProviderOperationResult(
+            "checkpointed",
+            held,
+            202,
+            provider_operation_response_payload(
+                trace_id=response_trace_id,
+                records={"operation": held.record_id},
+                result={"state": "checkpointed", "original_key_required": True},
+            ),
+        )
     except _ProviderOperationLeaseLostError:
         current_reservation, _ = heartbeat.stop()
         return _mark_reconcile_required(
@@ -725,6 +803,11 @@ def _apply_acquired(
     )
 
 
+class _AdoptionEvidenceOptions(TypedDict, total=False):
+    expected_original_intent: dict[str, object]
+    expected_binding_evidence: tuple[BaseModel, ...]
+
+
 def _adopt_reconciled_result(
     *,
     store: DurableProviderOperationStore,
@@ -733,13 +816,19 @@ def _adopt_reconciled_result(
     response_trace_id: str,
     response_payload: dict[str, object],
     original_intent: dict[str, object] | None = None,
+    expected_binding_evidence: tuple[BaseModel, ...] = (),
 ) -> tuple[DurableProviderOperationResult | None, LaunchplaneIdempotencyRecord | None]:
+    options: _AdoptionEvidenceOptions = {}
+    if original_intent is not None:
+        options["expected_original_intent"] = original_intent
+    if expected_binding_evidence:
+        options["expected_binding_evidence"] = expected_binding_evidence
     adoption = store.adopt_reconciled_mutation(
         reservation=reservation,
         response_status_code=response_status_code,
         response_trace_id=response_trace_id,
         response_payload=response_payload,
-        **({"expected_original_intent": original_intent} if original_intent is not None else {}),
+        **options,
     )
     if adoption.status == "adopted":
         return (
@@ -901,6 +990,7 @@ def _reconcile(
         response_trace_id=response_trace_id,
         response_payload=observation.response_payload,
         original_intent=original_intent,
+        expected_binding_evidence=observation.expected_binding_evidence,
     )
     if adoption_result is not None:
         return adoption_result

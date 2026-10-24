@@ -1,3 +1,5 @@
+from tests.support.runtime_environments import _parse_runtime_environment_definition
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 import os
 import json
 import tomllib
@@ -12,7 +14,6 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import cli as control_plane_cli
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import (
@@ -378,10 +379,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        for (
-            record
-        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
-            control_plane_runtime_environments._parse_runtime_environment_definition(
+        for record in build_runtime_environment_records_from_definition(
+            _parse_runtime_environment_definition(
                 tomllib.loads(payload),
                 source_file=control_plane_root / "config" / "runtime-environments.toml",
             ),

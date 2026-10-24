@@ -30,6 +30,7 @@ from control_plane.contracts.odoo_testing_source import (
 )
 from control_plane.dokploy import native_copy_stream as transport
 from control_plane.dokploy import api
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.odoo_testing_native_source import (
     capture_native_testing_source,
     prepare_native_testing_delivery,
@@ -89,10 +90,38 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_failed_frame_keeps_only_registered_predicates_and_closed_observations(self) -> None:
+        for predicate, kind in (
+            (ReadbackPredicate.RUNNER_RUNNING, "refused"),
+            (ReadbackPredicate.DATABASE_READ, "unavailable"),
+            ("private-password", "private-provider-value"),
+            ("private-password", "refused"),
+        ):
+            with self.subTest(predicate=predicate):
+                connection = Connection({"type": "failed", "predicate": predicate, "kind": kind})
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        connection,
+                        program="fixture",
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(
+                    error.has_diagnostic,
+                    predicate in ReadbackPredicate and kind in {"refused", "unavailable"},
+                )
+                self.assertIn(error.predicate, ReadbackPredicate)
+                self.assertEqual(
+                    error.unavailable, predicate not in ReadbackPredicate or kind != "refused"
+                )
+                self.assertNotIn("private-", json.dumps(error.evidence))
+
     def test_failed_frame_is_distinct_from_missing_transport_evidence(self) -> None:
         connection = Connection()
         connection.frame = {"type": "failed"}
-        with self.assertRaises(transport.NativeProgramFailed):
+        with self.assertRaises(transport.NativeProgramFailed) as raised:
             transport._read_program(
                 connection,
                 program="fixture read-only probe",
@@ -100,6 +129,7 @@ class NativeSourceTransportTests(unittest.TestCase):
                 timeout_seconds=5,
                 receive=lambda frame: None,
             )
+        self.assertFalse(raised.exception.has_diagnostic)
 
     def test_dispatch_guard_can_refuse_after_handshake_without_sending_the_program(self) -> None:
         connection = Connection()

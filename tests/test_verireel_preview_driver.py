@@ -7,9 +7,11 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import click
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
@@ -73,6 +75,9 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
+        )
         self.lifecycle = MagicMock()
         self.lifecycle_factory = self.enterContext(
             patch(
@@ -239,6 +244,20 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             destroy_resource.assert_called_once()
             self.assertEqual(result.destroy_status, "pass")
             self.assertEqual(result.error_message, "")
+
+            with patch(
+                "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
+                return_value=PreviewResourceDestroyResult(
+                    status="fail",
+                    cleanup_errors=(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: shared target",),
+                ),
+            ):
+                drop.reset_mock()
+                refused = execute_verireel_preview_destroy(
+                    control_plane_root=Path(temporary_directory_name), request=request
+                )
+                self.assertEqual(refused.destroy_status, "fail")
+                drop.assert_not_called()
 
             for application in (None, {"applicationId": "app-preview"}):
                 with (
@@ -1089,26 +1108,32 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             status_code=503,
             detail="provider unavailable",
         )
-        with (
-            patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command",
-                side_effect=[transient_error, None],
-            ) as run_command,
-            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
-        ):
-            _run_application_command_with_retries(
-                host="https://dokploy.example.com",
-                token="secret-token",
-                application_id="application-123",
-                schedule_name="preview-migrate",
-                command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
-                timeout_seconds=60,
-                attempts=2,
-                retry_delay_seconds=1.5,
-            )
+        with patch.object(dokploy_api, "dokploy_request", side_effect=transient_error):
+            with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                dokploy_api.read_dokploy_schedule_baseline(
+                    host="https://provider.invalid", token="fixture", schedule_id="fixture"
+                )
+        for error in (transient_error, caught.exception):
+            with (
+                patch(
+                    "control_plane.workflows.verireel_preview_driver._run_application_command",
+                    side_effect=[error, None],
+                ) as run_command,
+                patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+            ):
+                _run_application_command_with_retries(
+                    host="https://dokploy.example.com",
+                    token="secret-token",
+                    application_id="application-123",
+                    schedule_name="preview-migrate",
+                    command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
+                    timeout_seconds=60,
+                    attempts=2,
+                    retry_delay_seconds=1.5,
+                )
 
-        self.assertEqual(run_command.call_count, 2)
-        sleep.assert_called_once_with(1.5)
+            self.assertEqual(run_command.call_count, 2)
+            sleep.assert_called_once_with(1.5)
 
     def test_run_application_command_with_retries_does_not_repeat_deterministic_failure(
         self,

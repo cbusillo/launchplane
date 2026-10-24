@@ -1,6 +1,7 @@
 """Exercise testing hostname creation against real records and fake providers."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -282,6 +283,22 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
+        from control_plane import http_error_evidence
+
+        private = "private-provider-diagnostic-sentinel"
+        self.factory.side_effect = ValueError(private)
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(evidence["sites"])
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def test_historical_cleanup_receipt_requires_exact_successful_ownership(self) -> None:
         self.create()
         receipt = self.store.list_ingress_route_audit_records()[0]
@@ -844,6 +861,18 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         deploy = Mock()
         deploy.target_key.return_value = dokploy_generic_web_provider_target_key(self.provider)
         deploy.reconciliation_key.return_value = "next-testing-image"
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        deploy.provider_target_origin = Mock(
+            return_value=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.provider.context,
+                instance=self.provider.instance,
+                provider_id=self.provider.provider_id,
+                target_type=self.provider.target_category,
+                target_id=self.provider.target_id,
+            )
+        )
 
         def complete_deploy(key: str, lease: ProviderOperationLease) -> ProviderMutationOutcome:
             lease.checkpoint_effect("deploy_testing_image")

@@ -24,7 +24,14 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
     route_binding_record_sha256,
 )
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    is_native_testing_binding,
+)
+from control_plane.contracts.text_fields import require_text
 
+
+NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
 
 _EVIDENCE_SCAN_LIMIT = 1000
 _EVIDENCE_FRESHNESS_WINDOW = timedelta(hours=24)
@@ -119,13 +126,13 @@ class RouteBindingReconcileRequest(BaseModel):
     def _validate_request(self) -> "RouteBindingReconcileRequest":
         if self.schema_version != 1:
             raise ValueError("Unsupported route binding reconcile schema version")
-        self.product = _required_text(self.product, "route binding reconcile requires product")
-        self.context = _required_text(self.context, "route binding reconcile requires context")
-        self.instance = _required_text(self.instance, "route binding reconcile requires instance")
-        self.source_label = _required_text(
+        self.product = require_text(self.product, "route binding reconcile requires product")
+        self.context = require_text(self.context, "route binding reconcile requires context")
+        self.instance = require_text(self.instance, "route binding reconcile requires instance")
+        self.source_label = require_text(
             self.source_label, "route binding reconcile requires source_label"
         )
-        self.evaluated_at = _required_text(
+        self.evaluated_at = require_text(
             self.evaluated_at, "route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
@@ -156,6 +163,7 @@ class RouteBindingReconcilePlan(BaseModel):
     findings: tuple[RouteBindingReconcileFinding, ...] = ()
     review_target_id: str = Field(default="", exclude=True)
     review_sources: RouteBindingReviewSources | None = Field(default=None, exclude=True)
+    native_review_sources: TestingRouteRefreshSources | None = Field(default=None, exclude=True)
     current_record_sha256: str = ""
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
@@ -200,6 +208,18 @@ def plan_route_binding_reconcile(
         return _conflict_plan(
             code="expected_current_changed",
             detail=("The current route-binding record changed after the caller inspected it."),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+
+    if current_record is not None and is_native_testing_binding(current_record):
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code=NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
+                    detail="The Odoo testing route refresh controller owns this published binding; run that controller to observe and renew its route.",
+                ),
+            ),
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
@@ -924,10 +944,3 @@ def _normalized_domains(
         if domain not in domains:
             domains.append(domain)
     return tuple(domains), None
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

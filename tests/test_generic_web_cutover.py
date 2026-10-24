@@ -6,9 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 import unittest
-from unittest.mock import patch
 
-from control_plane.contracts.deployment_record import DeploymentRecord
+import click
+from unittest.mock import Mock, patch
+
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.generic_web_cutover import (
     GenericWebCutoverLane,
     GenericWebCutoverPlan,
@@ -345,7 +347,10 @@ class WebCutoverTests(unittest.TestCase):
 
 
 class WebCutoverDeploymentTests(unittest.TestCase):
-    def seed(self, root: Path, target: str) -> tuple[Any, Any, Any]:
+    @staticmethod
+    def seed(
+        root: Path, target: str
+    ) -> tuple[FilesystemRecordStore, GenericWebCutoverPlan, Provider]:
         intent = plan(target)
         production_manifest, candidate_manifest = (
             intent.production.model_copy(deep=True),
@@ -416,6 +421,124 @@ class WebCutoverDeploymentTests(unittest.TestCase):
         )
         return store, intent, Provider(intent)
 
+    def test_promotion_checkpoint_keeps_logical_artifact_when_cutover_resolves_image_digest(
+        self,
+    ) -> None:
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+        from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+        from control_plane.provider_operations import (
+            run_durable_provider_operation,
+            ProviderMutationUnknownError,
+        )
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            recorded, intent, _ = self.seed(root, "compose")
+            profile = recorded.read_product_profile_record("fixture")
+            lane = profile.lanes[0]
+            profile = profile.model_copy(
+                update={
+                    "lanes": (ProductLaneProfile(context=lane.context, instance="testing"), lane)
+                }
+            )
+            manifest = intent.candidate.model_copy(deep=True)
+            logical = manifest.image.repository + ":sha-" + manifest.source_commit
+            manifest.artifact_id = logical
+            assert manifest.source_build is not None
+            manifest.source_build.manifest_artifact_id = logical
+            identity = intent.new.runtime_identity.model_copy(
+                update={
+                    "instance": "testing",
+                    "artifact_id": logical,
+                    "deployment_record_id": "testing-logical",
+                }
+            )
+            testing = DeploymentRecord(
+                record_id=identity.deployment_record_id,
+                context=lane.context,
+                instance="testing",
+                artifact_identity=ArtifactIdentityReference(artifact_id=logical),
+                source_git_ref=manifest.source_commit,
+                runtime_identity=identity,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="testing-target", target_name="testing"
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="testing",
+                    target_type="application",
+                    deploy_mode="fixture",
+                    status="pass",
+                ),
+            )
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'native.db'}")
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(profile)
+            store.write_artifact_manifest(manifest)
+            store.write_deployment_record(testing)
+            store.write_environment_inventory(
+                build_environment_inventory(
+                    deployment_record=testing, updated_at=profile.updated_at
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=lane.context,
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    provider_target_type="application",
+                    target_id="testing-target",
+                    display_name="testing",
+                    updated_at=profile.updated_at,
+                )
+            )
+            adapter = GenericWebProdPromotionProviderMutationAdapter(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                lane=lane,
+                promotion_request=GenericWebProdPromotionEnvelope(
+                    product=profile.product,
+                    promotion=GenericWebProdPromotionRequest(
+                        product=profile.product,
+                    ),
+                ),
+                trace_id="cutover-source",
+                validate_before_effect=lambda _: None,
+                deploy_provider=Mock(provider_id="dokploy"),
+            )
+            admitted: list[str] = []
+
+            def stop_after_checkpoint(**kwargs: Any) -> Any:
+                kwargs["provider_effect_checkpoint"]("cutover_first_effect")
+                admitted.append(kwargs["request"].promotion.artifact_id)
+                raise ProviderMutationUnknownError(
+                    "Controlled stop after admission, before provider I/O."
+                )
+
+            with patch(
+                "control_plane.generic_web_promotion_provider_adapter.execute_generic_web_prod_promotion_result",
+                side_effect=stop_after_checkpoint,
+            ):
+                result = run_durable_provider_operation(
+                    store=store,
+                    scope="cutover-source",
+                    route_path="/fixture/promotion",
+                    idempotency_key="logical-cutover",
+                    request_fingerprint="f" * 64,
+                    lease_owner="fixture",
+                    response_trace_id="cutover-source",
+                    adapter=adapter,
+                )
+            self.assertEqual(admitted, [logical])
+            assert result.record is not None
+            self.assertTrue(result.record.provider_effect_started_at)
+
     def test_existing_deploy_entrypoint_uses_inactive_slot_and_publishes_inventory(self) -> None:
         for target in ("application", "compose"):
             with self.subTest(target=target), TemporaryDirectory() as folder:
@@ -447,10 +570,11 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                 current = store.read_environment_inventory(
                     context_name="fixture", instance_name="prod"
                 )
+                assert current.runtime_identity is not None
                 self.assertEqual(current.runtime_identity.slot, "new")
-                self.assertEqual(
-                    store.read_deployment_record("release").generic_web_cutover.step, "complete"
-                )
+                completed = store.read_deployment_record("release").generic_web_cutover
+                assert completed is not None
+                self.assertEqual(completed.step, "complete")
                 rolled = execute_generic_web_deploy(
                     control_plane_root=Path(folder),
                     record_store=store,
@@ -465,10 +589,12 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                     deployment_record_id="rollback",
                 )
                 self.assertEqual(rolled.deploy_status, "pass")
+                current = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                assert current.runtime_identity is not None
                 self.assertEqual(
-                    store.read_environment_inventory(
-                        context_name="fixture", instance_name="prod"
-                    ).runtime_identity.slot,
+                    current.runtime_identity.slot,
                     "old",
                 )
 
@@ -704,9 +830,9 @@ class WebCutoverCallerRegressionTests(unittest.TestCase):
             self.assertEqual(rolled.deploy_status, "pass")
             self.assertEqual(store.read_deployment_record("failed").deploy.status, "fail")
             self.assertNotIn("switch-old", provider.actions)
-            self.assertEqual(
-                store.read_deployment_record("failed").generic_web_cutover.step, "rolled_back"
-            )
+            failed = store.read_deployment_record("failed").generic_web_cutover
+            assert failed is not None
+            self.assertEqual(failed.step, "rolled_back")
 
     def test_unknown_release_finalizes_failure_without_provider_or_legacy_effects(self) -> None:
         with TemporaryDirectory() as folder:
@@ -729,6 +855,7 @@ class WebCutoverCallerRegressionTests(unittest.TestCase):
                     )
             blocked = store.read_deployment_record("unknown")
             self.assertEqual(blocked.deploy.status, "fail")
+            assert blocked.generic_web_cutover is not None
             self.assertEqual(blocked.generic_web_cutover.step, "blocked")
             self.assertTrue(blocked.deploy.finished_at)
 
@@ -896,6 +1023,62 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                     timeout_seconds=None,
                 )
 
+    @staticmethod
+    def promotion_fixture(
+        root: Path, target: str
+    ) -> tuple[FilesystemRecordStore, GenericWebCutoverPlan, Provider]:
+        store, intent, provider = WebCutoverDeploymentTests.seed(root, target)
+        profile = store.read_product_profile_record("fixture")
+        profile.lanes = (
+            ProductLaneProfile(context="fixture", instance="testing"),
+            *profile.lanes,
+        )
+        store.write_product_profile_record(profile)
+        old_inventory = store.read_environment_inventory(
+            context_name="fixture", instance_name="prod"
+        )
+        testing_record = DeploymentRecord(
+            record_id="qualified-testing",
+            context="fixture",
+            instance="testing",
+            artifact_identity=ArtifactIdentityReference(artifact_id=intent.candidate.artifact_id),
+            source_git_ref=intent.candidate.source_commit,
+            runtime_identity=intent.new.runtime_identity.model_copy(
+                update={"instance": "testing", "deployment_record_id": "qualified-testing"}
+            ),
+            deploy=DeploymentEvidence(
+                deploy_mode="seed",
+                status="pass",
+                target_name="testing",
+                target_type="application",
+            ),
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application", target_id="testing-target", target_name="testing"
+            ),
+        )
+        from control_plane.contracts.deploy_target import ProviderTargetRecord
+
+        assert testing_record.deployed_target is not None
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing_record.context,
+                instance=testing_record.instance,
+                provider_id=testing_record.deployed_target.provider_id,
+                target_category=testing_record.deployed_target.target_category,
+                provider_target_type=testing_record.deployed_target.provider_target_type,
+                target_id=testing_record.deployed_target.target_id,
+                display_name=testing_record.deployed_target.display_name,
+                updated_at=old_inventory.updated_at,
+            )
+        )
+        store.write_deployment_record(testing_record)
+        store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=testing_record, updated_at=old_inventory.updated_at
+            )
+        )
+        return store, intent, provider
+
     def test_promotion_failure_after_switch_runs_automatic_switch_back_and_finalizes(self) -> None:
         from control_plane.workflows.generic_web_promotion import (
             GenericWebProdPromotionRequest,
@@ -907,26 +1090,7 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
         for failure in ("handoff", "drain"):
             with self.subTest(failure=failure), TemporaryDirectory() as folder:
                 root = Path(folder)
-                store, intent, provider = WebCutoverDeploymentTests().seed(root, "application")
-                profile = store.read_product_profile_record("fixture")
-                profile.lanes = (
-                    ProductLaneProfile(context="fixture", instance="testing"),
-                    *profile.lanes,
-                )
-                store.write_product_profile_record(profile)
-                old_inventory = store.read_environment_inventory(
-                    context_name="fixture", instance_name="prod"
-                )
-                testing = old_inventory.model_copy(
-                    update={
-                        "instance": "testing",
-                        "artifact_identity": ArtifactIdentityReference(
-                            artifact_id=intent.candidate.artifact_id
-                        ),
-                        "source_git_ref": intent.candidate.source_commit,
-                    }
-                )
-                store.write_environment_inventory(testing)
+                store, intent, provider = self.promotion_fixture(root, "application")
                 original_handoff = provider.handoff_writers
 
                 def handoff(p: GenericWebCutoverPlan, slot: WebSlot) -> None:
@@ -968,17 +1132,224 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
                 self.assertEqual(provider.writer_slot.slot_id, intent.old.slot_id)
                 attempt = store.read_deployment_record("promotion-attempt")
+                assert attempt.generic_web_cutover is not None
                 self.assertEqual(attempt.generic_web_cutover.step, "rolled_back")
                 self.assertEqual(attempt.deploy.status, "fail")
                 self.assertEqual(
                     store.read_promotion_record(result.promotion_record_id).deploy.status, "fail"
                 )
+                restored = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                assert restored.runtime_identity is not None
                 self.assertEqual(
-                    store.read_environment_inventory(
-                        context_name="fixture", instance_name="prod"
-                    ).runtime_identity.slot,
+                    restored.runtime_identity.slot,
                     intent.old.slot_id,
                 )
+
+    def test_cutover_receipt_storage_failure_never_marks_effect_or_calls_provider(self) -> None:
+        with TemporaryDirectory() as folder:
+            intent = plan()
+            provider = Provider(intent)
+            store = WebDeploymentCutoverStore(
+                FilesystemRecordStore(Path(folder)), deployment(intent)
+            )
+            checkpoint = Mock()
+            with patch.object(store, "save", side_effect=OSError("receipt storage unavailable")):
+                with self.assertRaises(OSError):
+                    execute_web_cutover(
+                        intent, store, provider, record_id="release", checkpoint=checkpoint
+                    )
+            checkpoint.assert_not_called()
+            self.assertEqual(provider.actions, [])
+
+    def test_first_checkpoint_refusal_never_rolls_back_a_new_cutover(self) -> None:
+        self.cutover_checkpoint_failure(prior_dispatch=False)
+
+    def test_non_source_first_checkpoint_refusal_does_not_hold_next_release(self) -> None:
+        from control_plane.workflows.generic_web_promotion import (
+            GenericWebProdPromotionRequest,
+            execute_generic_web_prod_promotion,
+        )
+        from tests.support.promotion_backup import stub_verified_promotion_backup
+
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        for target in ("application", "compose"):
+            with self.subTest(target=target), TemporaryDirectory() as folder:
+                root = Path(folder)
+                store, intent, provider = self.promotion_fixture(root, target)
+                selected = DokployGenericWebDeployProvider(
+                    cutover_provider_factory=lambda _p: provider
+                )
+                request = GenericWebProdPromotionRequest(
+                    product="fixture",
+                    artifact_id=intent.candidate.artifact_id,
+                    deploy_reference=intent.new.deploy_reference,
+                    source_git_ref=intent.candidate.source_commit,
+                    backup_record_id="infrastructure-example",
+                    verify_health=False,
+                )
+
+                def refuse(_phase: str) -> None:
+                    raise ValueError("Synthetic current authority changed")
+
+                with (
+                    patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
+                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                ):
+                    with self.assertRaises(ValueError):
+                        execute_generic_web_prod_promotion(
+                            control_plane_root=root,
+                            record_store=store,
+                            request=request,
+                            deploy_provider=selected,
+                            deployment_record_id="refused-attempt",
+                            provider_effect_checkpoint=refuse,
+                        )
+                    saved = store.read_deployment_record("refused-attempt")
+                    assert saved.generic_web_cutover is not None
+                    self.assertEqual(saved.generic_web_cutover.step, "blocked")
+                    self.assertEqual(saved.deploy.status, "fail")
+                    self.assertEqual(provider.actions, [])
+                    result = execute_generic_web_deploy(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=GenericWebDeployRequest(
+                            product="fixture",
+                            instance="prod",
+                            artifact_id=intent.candidate.artifact_id,
+                            deploy_reference=intent.new.deploy_reference,
+                            source_git_ref=intent.candidate.source_commit,
+                        ),
+                        deploy_provider=selected,
+                        deployment_record_id="next-attempt",
+                    )
+                    self.assertEqual(result.deploy_status, "pass")
+
+    def test_preexisting_preparing_cutover_keeps_recovery_after_checkpoint_refusal(self) -> None:
+        self.cutover_checkpoint_failure(prior_dispatch=True)
+
+    def cutover_checkpoint_failure(self, *, prior_dispatch: bool) -> None:
+        from control_plane.workflows.generic_web_promotion import (
+            GenericWebProdPromotionRequest,
+            execute_generic_web_prod_promotion,
+        )
+        from tests.support.promotion_backup import stub_verified_promotion_backup
+
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        for target in ("application", "compose"):
+            with self.subTest(target=target), TemporaryDirectory() as folder:
+                root = Path(folder)
+                store, intent, provider = self.promotion_fixture(root, target)
+                baseline = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                selected = DokployGenericWebDeployProvider(
+                    cutover_provider_factory=lambda _p: provider
+                )
+                with (
+                    patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
+                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                ):
+                    if prior_dispatch:
+                        prepare = provider.prepare_candidate
+
+                        def dispatched(p: GenericWebCutoverPlan) -> None:
+                            prepare(p)
+                            raise TimeoutError("original prepare reply lost")
+
+                        with patch.object(provider, "prepare_candidate", side_effect=dispatched):
+                            with self.assertRaises(
+                                (ValueError, TimeoutError, click.ClickException)
+                            ):
+                                execute_generic_web_deploy(
+                                    control_plane_root=root,
+                                    record_store=store,
+                                    request=GenericWebDeployRequest(
+                                        product="fixture",
+                                        instance="prod",
+                                        artifact_id=intent.candidate.artifact_id,
+                                        source_git_ref=intent.candidate.source_commit,
+                                        deploy_reference=intent.new.deploy_reference,
+                                    ),
+                                    deploy_provider=selected,
+                                    deployment_record_id="promotion-attempt",
+                                )
+                        saved = store.read_deployment_record("promotion-attempt")
+                        assert saved.generic_web_cutover is not None
+                        self.assertEqual(saved.generic_web_cutover.step, "preparing")
+                        self.assertEqual(provider.actions, ["prepare"])
+
+                    qualified = store.read_deployment_record("qualified-testing")
+                    refuse_source = True
+
+                    def fail_testing(_evidence: HealthcheckEvidence) -> HealthcheckEvidence:
+                        if not refuse_source:
+                            return _evidence
+                        record = store.read_deployment_record("qualified-testing")
+                        store.write_deployment_record(
+                            record.model_copy(
+                                update={
+                                    "deploy": record.deploy.model_copy(update={"status": "fail"})
+                                }
+                            )
+                        )
+                        return _evidence
+
+                    request = GenericWebProdPromotionRequest(
+                        product="fixture",
+                        artifact_id=intent.candidate.artifact_id,
+                        deploy_reference=intent.new.deploy_reference,
+                        source_git_ref=intent.candidate.source_commit,
+                        backup_record_id="infrastructure-example",
+                        verify_health=False,
+                    )
+                    with patch(
+                        "control_plane.workflows.generic_web_promotion._verify_health_evidence",
+                        side_effect=fail_testing,
+                    ):
+                        if prior_dispatch:
+                            result = execute_generic_web_prod_promotion(
+                                control_plane_root=root,
+                                record_store=store,
+                                request=request,
+                                deploy_provider=selected,
+                                deployment_record_id="promotion-attempt",
+                            )
+                            self.assertEqual(result.rollback_status, "pass")
+                            self.assertIn("writers-" + intent.old.slot_id, provider.actions)
+                            self.assertIn("drain-" + intent.new.slot_id, provider.actions)
+                        else:
+                            for _ in range(2):
+                                store.write_deployment_record(qualified)
+                                with self.assertRaises((ValueError, click.ClickException)):
+                                    execute_generic_web_prod_promotion(
+                                        control_plane_root=root,
+                                        record_store=store,
+                                        request=request,
+                                        deploy_provider=selected,
+                                        deployment_record_id="promotion-attempt",
+                                    )
+                                self.assertEqual(provider.actions, [])
+                                with self.assertRaises(FileNotFoundError):
+                                    store.read_deployment_record("promotion-attempt")
+                                self.assertEqual(
+                                    store.read_environment_inventory(
+                                        context_name="fixture", instance_name="prod"
+                                    ),
+                                    baseline,
+                                )
+                            store.write_deployment_record(qualified)
+                            refuse_source = False
+                            result = execute_generic_web_prod_promotion(
+                                control_plane_root=root,
+                                record_store=store,
+                                request=request,
+                                deploy_provider=selected,
+                                deployment_record_id="promotion-attempt",
+                            )
+                            self.assertEqual(result.promotion_status, "pass")
+                            self.assertEqual(provider.slot.slot_id, intent.new.slot_id)
 
 
 class WebCutoverRefusalObservationTests(unittest.TestCase):
@@ -1105,6 +1476,7 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
                             with self.assertRaises(TimeoutError):
                                 run(reverse=reverse, record_id=result_id)
                     held = store.read_deployment_record("release").generic_web_cutover
+                    assert held is not None
                     self.assertEqual(held.step, "rolled_back" if reverse else "complete")
                     self.assertFalse(held.records_committed)
                     actions = tuple(provider.actions)
@@ -1144,15 +1516,16 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             store, intent, provider = WebCutoverDeploymentTests().seed(Path(folder), "application")
             profile = store.read_product_profile_record("fixture")
-            args = dict(
-                lane=profile.lanes[0],
-                artifact_id=intent.candidate.artifact_id,
-                source_git_ref=intent.candidate.source_commit,
-                deploy_reference="",
-            )
             with self.assertRaises(ValueError):
                 resolve_web_cutover_target(
-                    store, profile=profile, provider_id="dokploy", timeout_seconds=10, **args
+                    store,
+                    profile=profile,
+                    provider_id="dokploy",
+                    timeout_seconds=10,
+                    lane=profile.lanes[0],
+                    artifact_id=intent.candidate.artifact_id,
+                    source_git_ref=intent.candidate.source_commit,
+                    deploy_reference="",
                 )
             with self.assertRaises(ValueError):
                 execute_web_cutover_deployment(
@@ -1160,7 +1533,10 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
                     product=profile.product,
                     record_id="release",
                     factory=lambda _p: provider,
-                    **args,
+                    lane=profile.lanes[0],
+                    artifact_id=intent.candidate.artifact_id,
+                    source_git_ref=intent.candidate.source_commit,
+                    deploy_reference="",
                 )
             with self.assertRaises(FileNotFoundError):
                 store.read_deployment_record("release")

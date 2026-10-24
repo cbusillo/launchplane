@@ -1,22 +1,18 @@
 import {
   ArrowRight,
   Boxes,
-  GitPullRequestArrow,
   KeyRound,
-  Network,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
 
 import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
-import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { EngineeringGitHubDeliveryRoute } from "./EngineeringGitHubDeliveryRoute";
-import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
 import {
   AppLink,
   engineeringPath,
@@ -40,22 +36,6 @@ const ENGINEERING_SURFACES = [
     label: "Read only",
     title: "Governance evidence",
     view: "governance-projection" as const,
-  },
-  {
-    detail:
-      "Rank the current Launchplane-assembled snapshot and inspect recommendation evidence.",
-    icon: Network,
-    label: "Read + rank",
-    title: "Work graph",
-    view: "work-graph" as const,
-  },
-  {
-    detail:
-      "Review the issue inbox and its source status.",
-    icon: GitPullRequestArrow,
-    label: "Read only",
-    title: "Issue inbox",
-    view: "issue-inbox" as const,
   },
   {
     detail:
@@ -105,12 +85,6 @@ export function EngineeringOpsRoute({
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
   }
-  if (view === "work-graph") {
-    return <EngineeringWorkGraphRoute fixtureMode={fixtureMode} />;
-  }
-  if (view === "issue-inbox") {
-    return <EngineeringIssueInboxRoute fixtureMode={fixtureMode} />;
-  }
   if (view === "every-code") {
     return <EngineeringEveryCodeRoute fixtureMode={fixtureMode} />;
   }
@@ -138,7 +112,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Eight independent evidence routes</strong>
+        <strong>Delivery evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

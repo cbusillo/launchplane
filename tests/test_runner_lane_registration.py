@@ -29,7 +29,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationTokenRecord
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_lane_registration_executor import (
@@ -907,7 +907,6 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-lane-registration-executor",
                     "--repository",
                     "cbusillo/odoo-tenant-cm-website",
@@ -955,7 +954,6 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-lane-registration-executor",
                     "--repository",
                     "cbusillo/odoo-tenant-cm-website",

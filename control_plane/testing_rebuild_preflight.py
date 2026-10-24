@@ -28,6 +28,7 @@ from control_plane.dokploy import post_deploy, api
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
+    native_failure_diagnostic,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_service import (
@@ -102,7 +103,7 @@ def inspect_testing_rebuild(
     except NativeSourceUnavailable as error:
         raise TestingRebuildRefused(
             "testing_rebuild_observation_unavailable",
-            "The retained testing observation is unavailable.",
+            "The retained testing observation is unavailable." + native_failure_diagnostic(error),
         ) from error
     except (NativeSourceAuthorizationDenied, TestingRebuildRefused):
         raise

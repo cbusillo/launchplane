@@ -12,6 +12,7 @@ from control_plane.dokploy.testing_route import (
     compile_testing_route,
     observe_testing_route,
     route_document,
+    select_testing_route_raw,
 )
 
 
@@ -67,6 +68,32 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
+    def test_scoped_observation_ignores_unreferenced_redirects(self) -> None:
+        before = select_testing_route_raw(self.raw, self.host, ("web", "websecure"))
+        self.raw["middlewares"]["another-lane@file"] = {
+            "status": "enabled",
+            "redirectScheme": {"scheme": "https"},
+        }
+        self.assertEqual(
+            select_testing_route_raw(self.raw, self.host, ("web", "websecure")), before
+        )
+
+    def test_disabled_serving_routers_are_terminal_refusals(self) -> None:
+        plan = self.plan()
+        document = route_document(plan, self.new)
+        for owned in (False, True):
+            with self.subTest(owned=owned):
+                raw = self.apply(plan, self.new)
+                name = (
+                    next(name for name in raw["routers"] if name.endswith("@file"))
+                    if owned
+                    else "old-http@docker"
+                )
+                raw["routers"][name]["status"] = "disabled"
+                with self.assertRaises(ValueError) as raised:
+                    observe_testing_route(plan, raw, document)
+                self.assertNotIsInstance(raised.exception, TestingRoutePending)
+
     def setUp(self) -> None:
         self.host = "testing.example.invalid"
         self.old = "http://testing-old-web-1:8069"
@@ -131,6 +158,68 @@ class TestingRouteTests(unittest.TestCase):
             raw["services"].pop("old@docker", None)
             raw["middlewares"].pop("old-connections@docker", None)
         return raw
+
+    def test_application_file_defaults_preserve_behavior_and_refuse_real_drift(self) -> None:
+        import hashlib
+        import json
+
+        document: dict[str, Any] = {"http": {"routers": {}, "services": {}, "middlewares": {}}}
+        for section, values in self.raw.items():
+            for name, value in values.items():
+                configured = {key: deepcopy(item) for key, item in value.items() if key != "status"}
+                if section == "routers":
+                    configured.pop("priority", None)
+                    configured["service"] = configured["service"].removesuffix("@docker")
+                    configured["middlewares"] = [
+                        reference.removesuffix("@docker") for reference in configured["middlewares"]
+                    ]
+                document["http"][section][name.removesuffix("@docker")] = configured
+        applied: dict[str, Any] = {"routers": {}, "services": {}, "middlewares": {}}
+        for section, values in document["http"].items():
+            for name, value in values.items():
+                observed = deepcopy(value)
+                if section == "routers":
+                    observed["priority"] = len(observed["rule"].encode("utf-8"))
+                    observed["service"] += "@file"
+                    observed["middlewares"] = [
+                        reference + "@file" for reference in observed["middlewares"]
+                    ]
+                elif section == "services":
+                    observed["loadBalancer"].update(
+                        strategy="wrr", responseForwarding={"flushInterval": "100ms"}
+                    )
+                applied[section][name + "@file"] = {**observed, "status": "enabled"}
+
+        def plan() -> TestingLaneRoute:
+            self.raw = applied
+            return self.plan(
+                application_document=document,
+                application_file_name="old-app.yml",
+                application_file_sha256=hashlib.sha256(json.dumps(document).encode()).hexdigest(),
+            )
+
+        self.assertEqual(plan().legacy_backend, self.old_address)
+        document["http"]["routers"]["old-http"]["priority"] = 123
+        applied["routers"]["old-http@file"]["priority"] = 123
+        self.assertEqual(plan().legacy_backend, self.old_address)
+        for field in ("priority", "backend", "strategy", "forwarding", "tls"):
+            original = deepcopy(applied)
+            with self.subTest(field=field):
+                if field == "priority":
+                    applied["routers"]["old-http@file"]["priority"] += 1
+                elif field == "tls":
+                    applied["routers"]["old-https@file"]["tls"] = {"certResolver": "different"}
+                else:
+                    balancing = applied["services"]["old@file"]["loadBalancer"]
+                    if field == "backend":
+                        balancing["servers"] = [{"url": "http://foreign:8069"}]
+                    elif field == "strategy":
+                        balancing["strategy"] = "p2c"
+                    else:
+                        balancing["responseForwarding"]["flushInterval"] = "5ms"
+                with self.assertRaises(ValueError):
+                    plan()
+            applied = original
 
     def test_migration_file_uses_the_verified_container_alias_instead_of_its_ip(self) -> None:
         plan = self.plan()

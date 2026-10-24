@@ -82,13 +82,16 @@ class TestingHoldRehearsal(BaseModel):
     target_source_label: str
 
 
+TestingHoldPurpose = Literal["staff_testing", "isolation_staging"]
+
+
 class DokployTargetStaffTestingHold(BaseModel):
     """A deployment interlock for staff testing or resource-isolation staging."""
 
     model_config = ConfigDict(extra="forbid")
 
     reason: str
-    purpose: Literal["staff_testing", "isolation_staging"] = Field(
+    purpose: TestingHoldPurpose = Field(
         default="staff_testing",
         exclude_if=lambda purpose: purpose == "staff_testing",
         json_schema_extra={"x-launchplane-optional-response": True},

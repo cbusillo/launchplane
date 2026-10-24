@@ -1,5 +1,6 @@
 import { waitForState, expect, test, type Page } from "./state";
 import type { PreviewGenerationRecord, PreviewRecord, ProductReconcileRequestView } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 async function setup(page: Page) {
   await page.goto("/ui/products?fixture=products");
@@ -102,7 +103,7 @@ test("recorded previews show pending, held cleanup and distinct serving/latest p
   await expect(serving).not.toContainText(fixture.latest.anchor_summary.head_sha);
   await expect(inventory).not.toContainText("RAW PROVIDER LOG");
   await latest.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `../tmp/browser-smoke/preview-records-generations-${testInfo.project.name}.png` });
+  await page.screenshot({ path: smokeArtifact(`preview-records-generations-${testInfo.project.name}.png`) });
   fixture.mode("fail");
   await inventory.getByRole("button", { name: "Refresh preview evidence" }).click();
   await expect(inventory).toContainText("Showing the last recorded response");
@@ -120,7 +121,7 @@ test("recorded previews show pending, held cleanup and distinct serving/latest p
   await expect(inventory.getByRole("link", { name: "Inspect lifecycle activity" })).toHaveAttribute("href", `/ui/products/${fixture.product.product}/activity`);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("heading", { name: "Inspect individual previews" }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `../tmp/browser-smoke/preview-records-blocked-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`preview-records-blocked-${testInfo.project.name}.png`), fullPage: true });
   expect(fixture.mutations).toEqual([]);
   expect(fixture.pageErrors).toEqual([]);
 });

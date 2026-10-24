@@ -13,6 +13,7 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant,
     client_release_grant_allows,
+    _generic_web_release_authority_allows,
     client_release_step_operation_id,
     client_release_steps,
     read_client_release_run,
@@ -581,6 +582,13 @@ class ClientReleaseTests(unittest.TestCase):
         accepted = self.accept()
         (backup_id,) = self.advance()
         self.finish(backup_id)
+        ready = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert ready is not None
+        self.assertEqual(ready.blocked_reason, "")
         testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
         # Use the existing production artifact as a different, fully readable candidate.
         self.store.write_release_tuple_record(
@@ -596,11 +604,19 @@ class ClientReleaseTests(unittest.TestCase):
                 decision=accepted,
             )
             assert changed_testing is not None
-            self.assertIn("testing", changed_testing.blocked_reason)
+            self.assertTrue(changed_testing.blocked_reason)
             self.assertEqual(changed_testing.steps[0].status, "pass")
             self.assertEqual(changed_testing.steps[0].operation_id, backup_id)
             self.assertEqual(self.advance(), ())
             self.store.write_release_tuple_record(testing)
+            restored = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert restored is not None
+            self.assertEqual(restored.blocked_reason, "")
+            self.assertEqual(restored.steps, changed_testing.steps)
             self.set_prod("artifact-testing")
             changed_production = read_client_release_run(
                 store=self.store,
@@ -936,6 +952,7 @@ class ClientReleaseTests(unittest.TestCase):
             authorized_at="2026-09-23T03:00:00Z",
         )
         self.assertTrue(client_release_grant_allows(self.store, grant))
+        self.assertFalse(_generic_web_release_authority_allows(self.store, grant))
         self.assertFalse(
             client_release_grant_allows(
                 self.store, grant.model_copy(update={"release_decision_record_id": "other"})

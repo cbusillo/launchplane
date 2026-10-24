@@ -124,6 +124,20 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
             },
             raw_body=b"not-json",
         )
+        from tests.test_reviewed_workflow_rule_retirement import (
+            retirement_policy,
+            retirement_proposal,
+        )
+
+        retirement_response = await _asgi_request(
+            github_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=retirement_proposal(retirement_policy())
+            .reconcile_request()
+            .model_dump(mode="json"),
+        )
 
         terminal_policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -192,6 +206,10 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
 
         self.assertEqual(github_response.status_code, 400)
         self.assertEqual(github_response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(retirement_response.status_code, 400)
+        self.assertEqual(
+            retirement_response.json()["error"]["code"], "reviewed_policy_proposal_required"
+        )
         self.assertEqual(terminal_response.status_code, 403)
         self.assertEqual(terminal_response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(local_response.status_code, 403)
@@ -2000,75 +2018,89 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_onboarding_runtime_conflict_replays_matching_committed_request(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            app_store = PostgresRecordStore(database_url=database_url)
-            app_store.ensure_schema()
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_product_config_policy(
-                    action="product_onboarding.apply",
-                    product="launchplane",
-                    context="launchplane",
-                ),
-                record_store_factory=lambda: app_store,
-            )
-            original_write = app_store.write_product_authority_bundle
+    async def test_onboarding_profile_conflict_replays_winner_or_returns_conflict(self) -> None:
+        for completed in (True, False):
+            with self.subTest(completed=completed):
+                with TemporaryDirectory() as temporary_directory_name:
+                    database_url = _sqlite_database_url(
+                        Path(temporary_directory_name) / "launchplane.sqlite3"
+                    )
+                    app_store = PostgresRecordStore(database_url=database_url)
+                    app_store.ensure_schema()
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_config_policy(
+                            action="product_onboarding.apply",
+                            product="launchplane",
+                            context="launchplane",
+                        ),
+                        record_store_factory=lambda: app_store,
+                    )
+                    original_write = app_store.write_product_authority_bundle
 
-            def commit_matching_request_before_attempt(bundle: ProductAuthorityBundle) -> None:
-                original_write(bundle)
-                original_write(bundle)
+                    def commit_matching_request_before_attempt(
+                        bundle: ProductAuthorityBundle,
+                    ) -> None:
+                        original_write(
+                            bundle
+                            if completed
+                            else bundle.model_copy(update={"idempotency_record": None})
+                        )
+                        original_write(bundle)
 
-            with patch.object(
-                app_store,
-                "write_product_authority_bundle",
-                side_effect=commit_matching_request_before_attempt,
-            ):
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/product-onboarding/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "concurrent-onboarding",
-                    },
-                    payload={
-                        "product": "launchplane",
-                        "manifest": {
-                            "product": "example-site",
-                            "display_name": "Example site",
-                            "repository": "example/example-site",
-                            "image_repository": "ghcr.io/example/example-site",
-                            "lanes": [{"context": "example-site", "instance": "testing"}],
-                            "runtime_environments": [
-                                {
-                                    "scope": "instance",
-                                    "context": "example-site",
-                                    "instance": "testing",
-                                    "env": {"SITE_MODE": "concurrent-private-value"},
-                                }
-                            ],
-                        },
-                    },
-                )
-            runtime_records = app_store.list_runtime_environment_records()
-            completion = app_store.read_idempotency_record(
-                scope=idempotency_scope(_identity()),
-                route_path="/v1/product-onboarding/apply",
-                idempotency_key="concurrent-onboarding",
-            )
-            app_store.close()
+                    with patch.object(
+                        app_store,
+                        "write_product_authority_bundle",
+                        side_effect=commit_matching_request_before_attempt,
+                    ):
+                        response = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-onboarding/apply",
+                            headers={
+                                "Authorization": "Bearer valid-token",
+                                "Idempotency-Key": "concurrent-onboarding",
+                            },
+                            payload={
+                                "product": "launchplane",
+                                "manifest": {
+                                    "product": "example-site",
+                                    "display_name": "Example site",
+                                    "repository": "example/example-site",
+                                    "image_repository": "ghcr.io/example/example-site",
+                                    "lanes": [{"context": "example-site", "instance": "testing"}],
+                                    "runtime_environments": [
+                                        {
+                                            "scope": "instance",
+                                            "context": "example-site",
+                                            "instance": "testing",
+                                            "env": {"SITE_MODE": "concurrent-private-value"},
+                                        }
+                                    ],
+                                },
+                            },
+                        )
+                    runtime_records = app_store.list_runtime_environment_records()
+                    completion = app_store.read_idempotency_record(
+                        scope=idempotency_scope(_identity()),
+                        route_path="/v1/product-onboarding/apply",
+                        idempotency_key="concurrent-onboarding",
+                    )
+                    app_store.close()
 
-        self.assertEqual(response.status_code, 202, msg=response.text)
-        self.assertTrue(response.json()["replayed"])
-        assert completion is not None
-        self.assertEqual(response.json()["original_trace_id"], completion.response_trace_id)
-        self.assertEqual(len(runtime_records), 1)
-        self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
-        self.assertNotIn("concurrent-private-value", response.text)
+                if completed:
+                    self.assertEqual(response.status_code, 202, msg=response.text)
+                    self.assertTrue(response.json()["replayed"])
+                    assert completion is not None
+                    self.assertEqual(
+                        response.json()["original_trace_id"], completion.response_trace_id
+                    )
+                else:
+                    self.assertEqual(response.status_code, 409, msg=response.text)
+                    self.assertIsNone(completion)
+                self.assertEqual(len(runtime_records), 1)
+                self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
+                self.assertNotIn("concurrent-private-value", response.text)
 
     async def test_stale_runtime_apply_returns_conflict_and_preserves_concurrent_update(
         self,

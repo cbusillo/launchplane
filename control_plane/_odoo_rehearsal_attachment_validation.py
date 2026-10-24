@@ -42,7 +42,7 @@ def valid_attachment_mismatch(value):
 """
 )
 
-ATTACHMENT_VALIDATION_PROGRAM = (
+ATTACHMENT_VALIDATION_LIBRARY = (
     ATTACHMENT_MISMATCH_LIBRARY
     + r"""
 import hashlib
@@ -146,7 +146,12 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
                 os.close(descriptor)
     return 'verified'
 
+"""
+)
 
+ATTACHMENT_VALIDATION_PROGRAM = (
+    ATTACHMENT_VALIDATION_LIBRARY
+    + r"""
 def attachment_validation_main(*, failure_reference=None, mismatch=None):
     try:
         import psycopg2

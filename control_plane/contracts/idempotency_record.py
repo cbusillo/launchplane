@@ -5,6 +5,7 @@ import hashlib
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 LaunchplaneMutationReservationState = Literal[
@@ -40,23 +41,23 @@ class LaunchplaneIdempotencyRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneIdempotencyRecord":
-        self.record_id = _normalize_required(
+        self.record_id = require_text(
             self.record_id,
             "Mutation reservation requires record_id.",
         )
-        self.scope = _normalize_required(
+        self.scope = require_text(
             self.scope,
             "Mutation reservation requires scope.",
         )
-        self.route_path = _normalize_required(
+        self.route_path = require_text(
             self.route_path,
             "Mutation reservation requires route_path.",
         )
-        self.idempotency_key = _normalize_required(
+        self.idempotency_key = require_text(
             self.idempotency_key,
             "Mutation reservation requires idempotency_key.",
         )
-        self.request_fingerprint = _normalize_required(
+        self.request_fingerprint = require_text(
             self.request_fingerprint,
             "Mutation reservation requires request_fingerprint.",
         )
@@ -160,12 +161,12 @@ def build_launchplane_mutation_reservation_id(
     route_path: str,
     idempotency_key: str,
 ) -> str:
-    normalized_scope = _normalize_required(scope, "Mutation reservation requires scope.")
-    normalized_route_path = _normalize_required(
+    normalized_scope = require_text(scope, "Mutation reservation requires scope.")
+    normalized_route_path = require_text(
         route_path,
         "Mutation reservation requires route_path.",
     )
-    normalized_idempotency_key = _normalize_required(
+    normalized_idempotency_key = require_text(
         idempotency_key,
         "Mutation reservation requires idempotency_key.",
     )
@@ -193,12 +194,12 @@ def build_launchplane_mutation_reservation(
     reconciliation_key: str = "",
     provider_target_key: str = "",
 ) -> LaunchplaneIdempotencyRecord:
-    normalized_scope = _normalize_required(scope, "Mutation reservation requires scope.")
-    normalized_route_path = _normalize_required(
+    normalized_scope = require_text(scope, "Mutation reservation requires scope.")
+    normalized_route_path = require_text(
         route_path,
         "Mutation reservation requires route_path.",
     )
-    normalized_idempotency_key = _normalize_required(
+    normalized_idempotency_key = require_text(
         idempotency_key,
         "Mutation reservation requires idempotency_key.",
     )
@@ -244,13 +245,6 @@ def complete_launchplane_mutation_reservation(
         }
     )
     return LaunchplaneIdempotencyRecord.model_validate(payload)
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def format_launchplane_mutation_timestamp(value: datetime) -> str:

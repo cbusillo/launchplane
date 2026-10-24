@@ -360,6 +360,33 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["latest_decision"]["decision"], "accepted")
 
+    async def test_director_standing_client_can_accept_after_an_older_head_rejection(self) -> None:
+        self._write_product()
+        self.store.write_product_profile_record(
+            _profile().model_copy(update={"release_on_acceptance": "director_standing"})
+        )
+        self.store.write_product_review_decision_record(
+            _decision(record_id="earlier-rejection", decided_at="2026-09-20T10:00:00Z").model_copy(
+                update={
+                    "head_sha": "1" * 40,
+                    "decision": "changes_requested",
+                    "reason": "The page needs correction.",
+                }
+            )
+        )
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        app = self._app()
+
+        response = await self._post(app, owner, decision="accepted")
+        readback = await self._get(app, owner)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readback.json()["latest_decision"]["decision"], "accepted")
+        self.assertEqual(
+            readback.json()["latest_decision"]["head_sha"],
+            self._reviewed_preview()["reviewed_head_sha"],
+        )
+
     async def test_saved_decision_link_reads_history_only_for_the_visible_pull_request(
         self,
     ) -> None:

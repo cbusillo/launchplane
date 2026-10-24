@@ -71,6 +71,14 @@ current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
 does not replace that evidence. The trial does not change CI workflows or
 required checks.
 
+Each gate checks the change's entire contribution; missing or unprovable
+history fails. An already protected candidate proves an empty contribution,
+but its scanner/audit and independent required gates still run. PR comment checks
+exclude protected changes newer than the event base. The
+[CI comment step](../../.github/workflows/ci.yml) and
+[transitional config-authority workflow](../../.github/workflows/reusable-product-repo-config-authority.yml)
+own event-range selection and validation.
+
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes keep their safety classification. Credential handling falls under safety
 and authorization; shared test helpers, shard tooling, and CI runner selection
@@ -136,21 +144,35 @@ It verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
 for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
 business-write completion and rollback, operation claims, stale lease holders,
-lease recovery, and active-operation partial uniqueness. Same-repo CI provides
+lease recovery, and active-operation partial uniqueness. Column validation reads
+catalog metadata in a batch for each verification, keeping repeated runtime
+resolution from adding one query per required table. Each verification reads
+fresh metadata, including after a previous passing check. Same-repo CI provides
 the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
 fork PRs keep the SQLite/unittest path only. Same-repo CI partitions the existing
-integration inventory into three parallel jobs using the unittest shard planner.
+integration inventory into one job per workflow matrix entry using the unittest
+shard planner.
 Each job discovers the CLI's canonical module/class inventory, runs its
 disjoint test IDs in one process, and retains one migrated template database in
 its own PostgreSQL service. `fail-fast: false` lets every shard finish after a
 failure; `ci-gate` requires the whole matrix to succeed. Each log records selected
-test IDs and elapsed test time. The default local command still runs the complete
-serial inventory; reproduce one CI job with `--shard-count 3 --shard-index 0`
-(or index 1 or 2). Invalid, empty, or unloadable selections fail before execution.
-Keep the integration module focused: target runtime is under 2 minutes in CI,
-and any flake should be
-treated as a storage or harness bug rather than hidden with a retry loop.
+test IDs, discovery time, complete subprocess time, and unittest's per-case
+durations (including fixture setup and cleanup). The default local command still
+runs the complete serial inventory; reproduce one CI job by passing the
+`--shard-count` and `--shard-index` recorded in its log. Invalid, empty, or
+unloadable selections fail before execution.
+
+Normal test work and job cleanup must leave headroom before the existing
+20-minute job guard, which bounds stuck lock waits. The CLI emits a live Actions
+warning when its subprocess exceeds `--warn-after-seconds` (see CLI help for
+the default), then keeps waiting for the original result. It never terminates,
+retries, or accepts tests because of that warning. Review it before inventory
+growth or runner variance consumes the remaining guard; the aggregate CI warning
+alone arrives after prerequisite jobs finish. Increasing the matrix uses more
+existing runner slots; it does not reduce total test work or increase the job
+deadline. Treat any flake as a storage or harness bug rather than hiding it with
+a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:
 
@@ -311,18 +333,22 @@ Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
-pnpm --dir frontend exec playwright install chromium
-pnpm --dir frontend test:browser
-pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
+(cd frontend && pnpm exec playwright install chromium)
+(cd frontend && pnpm test:browser)
+(cd frontend && pnpm exec node --test tests/browser-support/server-isolation.test.mjs)
 ```
 
 The Playwright suite starts its own Vite development server on an OS-assigned
 loopback port. Playwright captures the listener URL from Vite's startup output
 and passes it to workers; overlapping runner jobs never reuse another job's
-server. The isolation test holds two focused browser probes open together using
-the smoke configuration and checks that their origins differ. It runs as part
-of `test:browser`; the standalone command above is for focused diagnosis.
-It writes only task-local test artifacts.
+server. Each smoke server process also owns its temporary dependency-optimizer
+caches, removed when that process exits after teardown or startup failure.
+The isolation test holds two focused browser probes open together, proves their
+actual caches and origins differ, and checks that one server's cleanup preserves
+its peer's serving cache.
+It runs as part of `test:browser`; the standalone command above is for focused
+diagnosis. Its scratch folders live under the OS temp directory and are removed
+after the run.
 
 CI uses a bounded worker count in `frontend/playwright.config.ts`, including
 self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
@@ -332,9 +358,9 @@ option for a measured diagnostic comparison.
 CI divides the unchanged suite into two jobs with Playwright's built-in
 `--shard` option. Each job retains four workers, zero retries, the isolation
 probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
-partition through `pnpm --dir frontend test:browser`; without that variable,
+partition through `(cd frontend && pnpm test:browser)`; without that variable,
 the local command still runs the whole browser suite and checks all screenshots.
-Sharded runs write Playwright JSON reports under `tmp/browser-smoke/reports`.
+Sharded runs write Playwright JSON reports under the artifact folder's `reports/`.
 After both jobs succeed, CI downloads their evidence into a freshly cleared
 directory, independently discovers the complete current suite and requires
 each discovered test to pass exactly once across the reports. Missing,
@@ -376,7 +402,7 @@ behind an explicit release gate until the test observes the intermediate
 screen, rather than consuming one response and assuming only one request.
 Development remounts can read a session more than once.
 
-`pnpm --dir frontend check:browser-timing` rejects sleeps, timer aliases,
+`(cd frontend && pnpm check:browser-timing)` rejects sleeps, timer aliases,
 test-specific timeouts/retries and unmanaged clock/context creation. Both
 frontend validation and browser smoke run this check. Shared Playwright
 failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
@@ -393,13 +419,13 @@ suite under representative sibling host load. Record the revision, worker
 count, load samples and pass/fail totals on the owning issue or PR. For example:
 
 ```bash
-CI=true pnpm --dir frontend exec playwright test --repeat-each=5 --workers=4 --retries=0
+(cd frontend && CI=true pnpm exec playwright test --repeat-each=5 --workers=4 --retries=0)
 ```
 
 Use a focused repetition for diagnosis:
 
 ```bash
-CI=true pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30
+(cd frontend && CI=true pnpm exec playwright test sidebar-freshness --repeat-each=30)
 ```
 
 The suite uses only repo-local
@@ -428,19 +454,27 @@ required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
 as representative layout tests, alongside focused responsive and spacing cases.
 Unmarked journeys retain desktop coverage; narrow-width defects in those
 journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
-`pnpm --dir frontend exec playwright test --list --project=desktop` and
-`pnpm --dir frontend exec playwright test --list --project=narrow`.
+`(cd frontend && pnpm exec playwright test --list --project=desktop)` and
+`(cd frontend && pnpm exec playwright test --list --project=narrow)`.
 
 The core admin journeys check route-heading and keyboard focus behavior, reject
 duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
-Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
-job. Every run clears prior evidence first and verifies the complete desktop and
-narrow screenshot set before passing. These screenshots are review evidence
-rather than pixel-diff baselines, so intentional visual changes do not require
+Screenshots, traces, and failure evidence go to a per-checkout folder under the
+OS temp directory, outside the checkout, so a finished worktree holds no smoke
+output. `pnpm test:browser` prints the folder when it ends.
+`BROWSER_SMOKE_ARTIFACT_DIR` overrides it; a relative value resolves against
+the checkout. A smoke run owns the folder it creates and replaces everything in
+it on the next run, so do not keep other files there. It refuses to clear a
+folder it did not create; point the override at a new or empty folder. CI sets
+it to a workspace folder in the top-level workflow env and uploads that folder
+from the dedicated browser job. Vite's per-server optimizer caches and the
+isolation test's scratch folders also live under the OS temp directory. Every
+run clears prior evidence first and verifies the complete desktop and narrow
+screenshot set before passing. These screenshots are review evidence rather
+than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 
 The browser job runs Vite and Chromium together inside a per-job Docker container
@@ -450,7 +484,11 @@ observer; OS-assigned Vite ports still isolate overlapping suite processes.
 The digest-pinned Playwright image supplies browser system libraries. Browser
 execution runs inside the container, with private shared memory and the job's
 actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
-installs frontend dependencies; the container uses the job's Node executable
+installs frontend dependencies and exports the manifest-selected pnpm with
+`corepack pack`, reusing its cache or filling a missing entry on the host.
+The container hydrates its own cache from that read-only temporary archive with
+Corepack network access disabled. Cleanup removes the archive after success or failure.
+The container uses the job's Node executable
 and the image's Chromium. Every frontend CI job selects a pnpm store under its
 own checkout before cache restore and install. The helper publishes a relative
 cache target so runner slots share cache versions and archives; each restore
@@ -465,8 +503,8 @@ image's Playwright version to the frontend dependency when updating it. Preserve
 the same suite, diagnostics, timeouts and zero retries when qualifying changes
 under normal sibling CI load.
 
-Development fixtures remain excluded from production authority. `pnpm --dir
-frontend validate` still runs the independent production build and
+Development fixtures remain excluded from production authority.
+`(cd frontend && pnpm validate)` still runs the independent production build and
 `assert-production-fixtures.mjs` scan; browser smoke does not weaken or replace
 that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather

@@ -1,4 +1,5 @@
 import { setClockTime, expect, test } from "./state";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 test("declared no website stays reviewable and a failed private check still turns red", async ({ page }) => {
   await page.goto("/ui/products?fixture=products");
@@ -54,7 +55,7 @@ test("declared no website stays reviewable and a failed private check still turn
   await expect(page.locator("#tls-evidence")).toContainText("Public TLS is not applicable");
   await expect(page.getByText("TLS evidence missing", { exact: true })).toHaveCount(0);
   await expect(page.locator(".diagnosis-callout")).toHaveCount(0);
-  await page.screenshot({ path: `../tmp/browser-smoke/no-website-${test.info().project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`no-website-${test.info().project.name}.png`), fullPage: true });
   products[0].environments.find((lane: {environment: string}) => lane.environment === "testing")!.health_monitoring.checks[0].status = "fail";
   await page.goto(`/ui/products/${detail.product}`);
   await expect(signal).toHaveAttribute("data-tone", "danger");

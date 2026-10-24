@@ -20,7 +20,6 @@ from control_plane.preview_lifecycle_scheduler import (
     PreviewLifecycleScheduler,
     _ROUTE,
     _SCOPE,
-    sweep_slot,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _generic_site_profile_payload
@@ -56,12 +55,13 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
         # Start exactly at a slot boundary so tests can step across it.
-        self.now = float(sweep_slot(datetime.now(timezone.utc).timestamp()) + 1)
+        self.sweep = Mock(return_value=_sweep_result())
+        self.now = datetime.now(timezone.utc).timestamp()
+        self.now = float(self.make_scheduler().slot() + 1)
         self.now = (
             self.now * SWEEP_INTERVAL_SECONDS
             + preview_lifecycle_scheduler.SWEEP_SLOT_OFFSET_SECONDS
         )
-        self.sweep = Mock(return_value=_sweep_result())
 
     def make_scheduler(self) -> PreviewLifecycleScheduler:
         return PreviewLifecycleScheduler(
@@ -73,7 +73,7 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
 
     def receipt(self) -> dict[str, object]:
         record = self.store.read_idempotency_record(
-            scope=_SCOPE, route_path=_ROUTE, idempotency_key=str(sweep_slot(self.now))
+            scope=_SCOPE, route_path=_ROUTE, idempotency_key=str(self.make_scheduler().slot())
         )
         assert record is not None
         return dict(record.response_payload)
@@ -216,7 +216,7 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
             self.assertFalse(scheduler.run_once())
         self.assertIsNone(
             self.store.read_idempotency_record(
-                scope=_SCOPE, route_path=_ROUTE, idempotency_key=str(sweep_slot(self.now))
+                scope=_SCOPE, route_path=_ROUTE, idempotency_key=str(self.make_scheduler().slot())
             )
         )
         self.assertTrue(self.make_scheduler().run_once())

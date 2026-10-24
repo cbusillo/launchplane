@@ -1,5 +1,3 @@
-"""Durable exclusion of one original request, without manufacturing an operation."""
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.idempotency_record import (

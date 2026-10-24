@@ -11,6 +11,11 @@ import urllib.error
 from urllib.parse import quote
 
 from control_plane.product_config_http import ProductConfigApplyResponse
+from control_plane.discord_identity import (
+    DiscordIdentityResponse,
+    ROUTE as DISCORD_IDENTITY_ROUTE,
+    observation_complete,
+)
 from control_plane.testing_local_credentials import (
     TestingCredentialAudit,
     TestingCredentialAuditResponse,
@@ -36,6 +41,8 @@ def main() -> int:
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product")
     parser.add_argument("--context")
+    parser.add_argument("--external-resources", action="store_true")
+    parser.add_argument("--discord-identity", action="store_true")
     parser.add_argument("--reason", default="")
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
@@ -44,6 +51,12 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    if args.discord_identity and (
+        args.mode != "audit" or not args.product or args.external_resources
+    ):
+        parser.error("Discord identification requires a product audit without external-resources.")
+    if args.external_resources and args.mode != "audit":
+        parser.error("External resource observation is an audit option.")
     if args.mode != "audit" and (not args.product or not args.context):
         parser.error("Select one product and testing context.")
     if args.mode in {"dry-run", "apply"} and (not args.reason.strip() or not args.evidence_file):
@@ -70,6 +83,24 @@ def main() -> int:
     accepted = False
     trace = ""
     try:
+        if args.discord_identity:
+            raw = transport["request_launchplane_read"](
+                service_url=settings["service_url"],
+                path=DISCORD_IDENTITY_ROUTE.format(
+                    product=quote(args.product, safe=""), environment="testing"
+                ),
+                settings=settings,
+                query={},
+                timeout=120,
+            )
+            identification = DiscordIdentityResponse.model_validate(raw)
+            print(identification.model_dump_json())
+            return (
+                0
+                if identification.result.status == "observed"
+                and observation_complete(identification.result.observation)
+                else 1
+            )
 
         def read() -> TestingCredentialAuditResponse | TestingCredentialInventoryResponse:
             path = (
@@ -81,7 +112,7 @@ def main() -> int:
                 service_url=settings["service_url"],
                 path=path,
                 settings=settings,
-                query={},
+                query={"include_external_resources": True} if args.external_resources else {},
                 timeout=120,
             )
             model = (
@@ -96,7 +127,16 @@ def main() -> int:
         if args.mode == "audit":
             print(report.model_dump_json())
             return (
-                1 if any(lane.status in {"unavailable", "overlap"} for lane in report.lanes) else 0
+                1
+                if any(lane.status in {"unavailable", "overlap"} for lane in report.lanes)
+                or (
+                    args.external_resources
+                    and (
+                        report.external_resources is None
+                        or report.external_resources.status != "observed"
+                    )
+                )
+                else 0
             )
         lane = next(lane for lane in report.lanes if lane.context == args.context)
         if args.mode == "readback":

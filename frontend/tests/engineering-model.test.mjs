@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import {
-  filterWorkGraphItems,
   mergeTrainControllerTone,
   mergeTrainStatusScopeKey,
   mergeTrainTargetSelection,
   mergeTrainTargetOptions,
-  scalarEvidence,
-  workGraphRankScopeKey,
 } from "../src/engineering-model.ts";
 import {
   cancelledEngineeringResource,
@@ -86,18 +82,6 @@ test("partial merge train target queries fail closed", () => {
       key: "example/control-plane:release/stable",
     },
   );
-});
-
-test("work graph filters preserve generated recommendation evidence", () => {
-  const items = [
-    { state: "ready", recommendation: "quick_win", title: "Ready" },
-    { state: "blocked", recommendation: "attention_needed", title: "Blocked" },
-  ];
-  assert.deepEqual(
-    filterWorkGraphItems(items, "ready", "quick_win").map((item) => item.title),
-    ["Ready"],
-  );
-  assert.deepEqual(filterWorkGraphItems(items, "all", "all"), items);
 });
 
 test("controller reconciliation and stale policy evidence fail closed", () => {
@@ -218,22 +202,6 @@ test("dependent resource data is hidden before a new scope settles", () => {
 });
 
 test("dependent route scope keys change with every accepted parent scope", () => {
-  const rankScope = workGraphRankScopeKey(
-    "2026-07-15T04:00:00Z",
-    "trace-one",
-    "2026-07-15T03:59:00Z",
-    "products",
-  );
-  assert.notEqual(
-    rankScope,
-    workGraphRankScopeKey(
-      "2026-07-15T04:01:00Z",
-      "trace-one",
-      "2026-07-15T03:59:00Z",
-      "products",
-    ),
-  );
-
   const statusScope = mergeTrainStatusScopeKey(
     "example/control-plane:main",
     "2026-07-15T04:00:00Z",
@@ -257,16 +225,5 @@ test("dependent route scope keys change with every accepted parent scope", () =>
       "policy-two",
       "products",
     ),
-  );
-});
-
-test("snapshot source evidence exposes scalar facts only", () => {
-  assert.deepEqual(
-    scalarEvidence({ count: 2, enabled: true, nested: { hidden: true }, name: "project" }),
-    [
-      { label: "count", value: "2" },
-      { label: "enabled", value: "yes" },
-      { label: "name", value: "project" },
-    ],
   );
 });

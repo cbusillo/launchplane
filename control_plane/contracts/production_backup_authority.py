@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 ProductionBackupAuthorityRecordStatus = Literal["active", "superseded", "retired"]
@@ -19,7 +20,6 @@ PRODUCTION_BACKUP_AUTHORITY_WRITE_ACTION = "production_backup_authority.write"
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _PROVIDER_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def production_backup_snapshot_prefix_valid(value: str) -> bool:
@@ -432,6 +432,6 @@ def _normalize_utc_timestamp(value: str, label: str) -> str:
 
 def _normalize_sha256(value: str, label: str) -> str:
     normalized = _required_value(value, label).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"production backup {label} must be a lowercase SHA-256")
     return normalized

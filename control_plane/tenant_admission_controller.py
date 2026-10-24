@@ -4,7 +4,7 @@ from collections.abc import Callable
 import hashlib
 import json
 from typing import Literal, Protocol, cast
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -21,18 +21,28 @@ from control_plane.contracts.tenant_merge_eligibility import (
     _normalize_utc_timestamp,
 )
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
+from control_plane.github_required_checks import (
+    check_run_state,
+    commit_status_state,
+    evaluate_required_checks,
+)
 from control_plane.merge_train_controller_run_once import (
     DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
     MergeTrainControllerLeaseContext,
     MergeTrainControllerStateRecordStore,
     merge_train_controller_lease_owner,
 )
+from control_plane.merge_train_branch_refresh import require_merge_train_client_review_read_store
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
+    MergeTrainGitHubPolicyUnavailableError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    _list_check_runs,
+    _list_commit_statuses,
+    _required_branch_check_policy,
 )
 from control_plane.tenant_admission_status import (
     TENANT_ADMISSION_STATUS_CONTEXT,
@@ -271,9 +281,31 @@ TransportFactory = Callable[[str], MergeTrainGitHubTransport]
 
 
 class TenantAdmissionControllerGitHubClient:
-    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+    def __init__(
+        self,
+        *,
+        transport: MergeTrainGitHubTransport,
+        review_store: object | None = None,
+    ) -> None:
         self.transport = transport
+        self.review_store = review_store
         self.merge_client = GitHubMergeTrainClient(transport=transport)
+
+    def require_current_client_review(self, *, candidate: TenantMergeCandidate) -> None:
+        if not callable(getattr(self.review_store, "list_product_review_decision_records", None)):
+            raise TenantAdmissionControllerError(
+                "Tenant admission requires readable saved Client decisions."
+            )
+        review_store = require_merge_train_client_review_read_store(
+            self.review_store, route="Tenant admission"
+        )
+        GitHubMergeTrainClient(
+            transport=self.transport, branch_refresh_store=review_store
+        ).require_current_client_review(
+            repository=candidate.repository,
+            pull_request_number=candidate.pull_request_number,
+            head_sha=candidate.head_sha,
+        )
 
     def read_pull_request(
         self,
@@ -476,7 +508,25 @@ class TenantAdmissionControllerGitHubClient:
             if error.status_code != 404:
                 raise
             required_checks_payload = {"strict": False, "checks": [], "contexts": []}
-        strict, required_checks = _required_technical_checks(required_checks_payload)
+        strict, _ = _required_technical_checks(required_checks_payload)
+        try:
+            policy = _required_branch_check_policy(
+                transport=self.transport, repository_path=repository_path, base_branch=base_branch
+            )
+        except MergeTrainGitHubPolicyUnavailableError:
+            return TenantAdmissionTechnicalChecks(
+                head_sha=head_sha,
+                base_sha=base_sha,
+                strict=strict,
+                base_up_to_date=False if strict else None,
+                status="unavailable",
+                evaluated_at=evaluated_at,
+            )
+        required_checks = tuple(
+            TenantAdmissionRequiredTechnicalCheck(name=name, app_id=app_id)
+            for name, app_id in policy.checks
+            if not _is_excluded_technical_context(name)
+        )
         return read_technical_checks_for_requirements(
             transport=self.transport,
             merge_client=self.merge_client,
@@ -484,7 +534,7 @@ class TenantAdmissionControllerGitHubClient:
             base_sha=base_sha,
             head_sha=head_sha,
             evaluated_at=evaluated_at,
-            strict=strict,
+            strict=strict or policy.ruleset_strict,
             required_checks=required_checks,
         )
 
@@ -538,14 +588,14 @@ def read_technical_checks_for_requirements(
         if strict
         else None
     )
-    status_payload = json_object(
-        transport.request(
-            method="GET",
-            path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status",
-        ),
-        "GitHub combined status response",
-        error_type=TenantAdmissionControllerError,
-    )
+    try:
+        status_payload = _list_commit_statuses(
+            transport=transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
+        )
+    except MergeTrainGitHubStaleHeadError as error:
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
     current_status_sha = required_string_text(
         status_payload.get("sha"),
         "GitHub combined status response requires sha.",
@@ -556,31 +606,21 @@ def read_technical_checks_for_requirements(
             "GitHub commit status response does not match the expected head."
         )
     signals = list(_technical_status_signals(status_payload))
-    page = 1
-    while True:
-        query = urlencode({"filter": "latest", "per_page": "100", "page": str(page)})
-        check_runs_payload = json_object(
-            transport.request(
-                method="GET",
-                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
-            ),
-            "GitHub check runs response",
-            error_type=TenantAdmissionControllerError,
+    try:
+        check_runs_payload = _list_check_runs(
+            transport=transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
+            required_checks=tuple((check.name, check.app_id) for check in required_checks),
         )
-        raw_check_runs = check_runs_payload.get("check_runs")
-        if not isinstance(raw_check_runs, list):
-            raise TenantAdmissionControllerError(
-                "GitHub check runs response must include check_runs."
-            )
-        signals.extend(
-            _technical_check_run_signals(
-                raw_check_runs,
-                expected_head_sha=head_sha,
-            )
+    except MergeTrainGitHubStaleHeadError as error:
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
+    signals.extend(
+        _technical_check_run_signals(
+            cast(list[object], check_runs_payload["check_runs"]),
+            expected_head_sha=head_sha,
         )
-        if len(raw_check_runs) < 100:
-            break
-        page += 1
+    )
     normalized_signals = tuple(
         sorted(
             signals,
@@ -652,7 +692,9 @@ def evaluate_tenant_admission_candidate(
 ) -> TenantAdmissionControllerRunOnceResult:
     if request.mutate:
         raise ValueError("Tenant admission evaluation requires mutate=false.")
-    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
+    client = TenantAdmissionControllerGitHubClient(
+        transport=transport_factory(token), review_store=store
+    )
     return _evaluate_tenant_admission_candidate(
         request=request,
         store=store,
@@ -678,7 +720,9 @@ def execute_tenant_admission_controller_run_once(
             transport_factory=transport_factory,
         )
 
-    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
+    client = TenantAdmissionControllerGitHubClient(
+        transport=transport_factory(token), review_store=store
+    )
     operation_id = tenant_admission_controller_operation_id(request)
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     controller_state = store.acquire_merge_train_controller_state_record(
@@ -851,9 +895,11 @@ def _execute_tenant_admission_merge(
         merge_commit_sha = client.merge_pull_request(request=request)
     except MergeTrainGitHubStaleHeadError as error:
         lease.release()
-        raise TenantAdmissionControllerStaleCandidateError(
-            "GitHub rejected the merge because the exact pull request head moved."
-        ) from error
+        raise TenantAdmissionControllerStaleCandidateError(str(error)) from error
+    except MergeTrainGitHubError as error:
+        if error.status_code in {403, 404, 405, 409, 422}:
+            lease.release()
+        raise
     checkpoint = checkpoint.model_copy(update={"merge_commit_sha": merge_commit_sha})
     lease.checkpoint(
         active_phase="confirm_merge",
@@ -988,6 +1034,19 @@ def _evaluate_tenant_admission_candidate(
             technical_checks=checks,
             detail=f"Technical checks are {checks.status} for the exact current head.",
         )
+    try:
+        client.require_current_client_review(candidate=request.candidate)
+    except MergeTrainGitHubStaleHeadError as error:
+        return TenantAdmissionControllerRunOnceResult(
+            outcome="blocked",
+            candidate=request.candidate,
+            base_branch=request.base_branch,
+            merge_method=request.merge_method,
+            pull_request_facts=facts,
+            admission=admission,
+            technical_checks=checks,
+            detail=str(error),
+        )
     return TenantAdmissionControllerRunOnceResult(
         outcome="ready",
         candidate=request.candidate,
@@ -996,7 +1055,7 @@ def _evaluate_tenant_admission_candidate(
         pull_request_facts=facts,
         admission=admission,
         technical_checks=checks,
-        detail="Tenant admission and technical checks are current for the exact head.",
+        detail="Tenant admission, technical checks, and Client review are current for the exact head.",
     )
 
 
@@ -1109,7 +1168,7 @@ def _technical_check_run_signals(
                 source="check_run",
                 name=name,
                 app_id=app_id,
-                state=_check_run_state(check_run),
+                state=check_run_state(check_run),
             )
         )
     return tuple(signals)
@@ -1146,7 +1205,9 @@ def _required_technical_checks(
         if _is_excluded_technical_context(context):
             continue
         raw_app_id = check.get("app_id")
-        if raw_app_id is None:
+        if raw_app_id is None or (
+            isinstance(raw_app_id, int) and not isinstance(raw_app_id, bool) and raw_app_id == -1
+        ):
             app_id = None
         else:
             app_id = required_positive_int(
@@ -1203,48 +1264,7 @@ def _is_excluded_technical_context(name: str) -> bool:
 
 
 def _commit_status_state(value: str) -> TenantAdmissionTechnicalCheckState:
-    normalized = value.strip().lower()
-    if normalized == "success":
-        return "pass"
-    if normalized == "pending":
-        return "pending"
-    if normalized in {"failure", "error"}:
-        return "fail"
-    return "unavailable"
-
-
-def _check_run_state(check_run: dict[str, object]) -> TenantAdmissionTechnicalCheckState:
-    status = str(check_run.get("status") or "").strip().lower()
-    if status != "completed":
-        return "pending" if status in {"queued", "in_progress", "pending"} else "unavailable"
-    conclusion = str(check_run.get("conclusion") or "").strip().lower()
-    if conclusion in {"success", "neutral", "skipped"}:
-        return "pass"
-    if conclusion in {
-        "failure",
-        "timed_out",
-        "cancelled",
-        "action_required",
-        "startup_failure",
-        "stale",
-    }:
-        return "fail"
-    return "unavailable"
-
-
-def _combine_technical_check_states(
-    signals: tuple[TenantAdmissionTechnicalCheckSignal, ...],
-) -> TenantAdmissionTechnicalCheckState:
-    if not signals:
-        return "unavailable"
-    states = {signal.state for signal in signals}
-    if "fail" in states:
-        return "fail"
-    if "pending" in states:
-        return "pending"
-    if "unavailable" in states:
-        return "unavailable"
-    return "pass"
+    return commit_status_state(value)
 
 
 def _required_technical_check_state(
@@ -1258,22 +1278,7 @@ def _required_technical_check_state(
         return "unavailable"
     if strict and not base_up_to_date:
         return "fail"
-    required_states: list[TenantAdmissionTechnicalCheckState] = []
-    for required_check in required_checks:
-        matches = tuple(
-            signal
-            for signal in signals
-            if signal.name.casefold() == required_check.name.casefold()
-            and (required_check.app_id is None or signal.app_id == required_check.app_id)
-        )
-        required_states.append(_combine_technical_check_states(matches))
-    if "fail" in required_states:
-        return "fail"
-    if "pending" in required_states:
-        return "pending"
-    if "unavailable" in required_states:
-        return "unavailable"
-    return "pass"
+    return evaluate_required_checks(requirements=required_checks, signals=signals).status
 
 
 def _controller_scope_sha256(request: TenantAdmissionControllerRunOnceEnvelope) -> str:

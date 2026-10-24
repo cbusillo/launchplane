@@ -462,6 +462,12 @@ the first migrated provider routes; both require an `Idempotency-Key` and a
 database store. Provider-specific observation and reconciliation stay behind
 the adapter boundary.
 
+An admission refusal inside the atomic effect checkpoint reaches the adapter as
+its original domain error, so it can settle a pre-effect refusal normally. The
+checkpoint refusal says only that this proposed dispatch did not start; any
+earlier effect marker and the exact reservation identity still govern release.
+Storage failures and lost leases retain their existing reconciliation behavior.
+
 The `launchplane_idempotency_active_reconciliation_idx` partial unique index
 fences each provider target while its reservation is `running` or
 `reconcile_required`, regardless of caller idempotency key, using the promoted
@@ -480,6 +486,47 @@ provider supplies the exact deployment id and start/finish timestamps. Fresh
 completion has the same evidence requirement as restart adoption; completed
 means the provider outcome is durable and replayable, not that the external
 deployment passed.
+
+Fresh reservations for shared physical-parent keys in the
+`generic-web-provider-target:*` namespace also require an original provider
+recipient captured from the same recipient used to compute the existing key.
+Suffixed child-effect keys keep their separate operation-fence semantics. The typed identity contains product, context, instance,
+provider, target type and target ID. Product is captured explicitly because the
+physical key does not include it. Storage verifies the existing key and retains
+that identity with a random operation nonce as the `provider_target_origin`
+sibling in the existing original-mutation-intent receipt, in the acquisition or
+supersession transaction. The family's `original_intent` dictionary and equality
+stay unchanged, including an empty dictionary for origin-only receipts.
+
+Retries, adoption and recovery never replace that capsule or infer it from
+current lane records. A safe release followed by fresh acquisition receives a
+new nonce even when the deterministic reservation ID and database timestamp are
+unchanged. Existing rows without custody remain readable and recoverable through
+their existing guards; they are never backfilled. Internal origin reads require
+the completed receipt, matching request fingerprint and reservation ID, a valid
+capsule and the same physical key. Missing or mismatched evidence is unavailable.
+The capsule is attention identity only: it grants no authorization, exclusion,
+effect-completion, retry, supersession or lane-separation proof.
+
+The common internal held-parent projection retains every operation and groups
+proved origins by captured product/context/instance. Legacy encoded origins
+must include product and rehash to the admitted physical key; they have no
+strong incarnation reference. Missing or corrupt custody remains unavailable.
+The current provider record is separate match metadata and cannot establish
+historical product ownership. Suffixed child effects and other namespaces stay
+outside this projection.
+
+Provider incidents store only opaque reservation-ID/nonce references inside
+`route_authority.target_keys`. Older material without these keys keeps its
+existing parser and canonical hash. Operation-set changes are material;
+ordering, summaries and heartbeats alone are not. Internal primary-key batch
+reads validate the same bound capsule and agreement between indexed row columns
+and the typed payload before accepting a completed reference. Contradictory
+parent projection is unavailable, as with malformed parent records; a corrupt
+receipt remains explicit unavailable custody without changing family-intent reads.
+Absence or a different nonce is never settlement. The projection and source
+witness contain private reservation/physical/configuration data; they are not
+public response models and their hashes must not be exposed.
 
 ## ORM Query Boundary
 
@@ -594,10 +641,13 @@ an ORM column/table or remains only in the evidence payload.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
 - Human session: the DB-backed payload includes the GitHub identity snapshot,
-  creation/expiry timestamps, and CSRF generation. Hosted authorization
-  revalidates roles against the current DB policy on every request and rejects
-  OAuth-derived organization/team claims after 24 hours, forcing a fresh GitHub
-  sign-in before those mutable claims can authorize another hosted request.
+  creation/expiry timestamps, CSRF generation and provider-verification time.
+  When retained, admin/read-only OAuth credentials include provider expiry
+  metadata inside the authenticated ciphertext, bound to the session and GitHub
+  identity; Client sessions hold none.
+  The [human auth/session contract](service-boundary.md#service-route-checklist)
+  owns verification and renewal; [credential retirement](service-boundary.md#human-oauth-credential-retirement)
+  distinguishes local removal from provider validity and historical backups.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed
@@ -835,8 +885,9 @@ an ORM column/table or remains only in the evidence payload.
   overwrite.
   Native FastAPI
   `POST /v1/route-bindings/odoo-testing/controller/run-once` performs bounded
-  testing-only discovery from product profiles and invokes this same planner for
-  each active service-owned binding. Its contract contains no target selectors,
+  testing-only discovery from product profiles. Legacy service-owned bindings use
+  the reconcile planner; published native testing bindings use fresh managed-route
+  observation joined to their original publication custody. Its contract contains no target selectors,
   caps discovery at 25 records, pre-authorizes every exact instance, and applies
   due refreshes sequentially. Absent, disabled, admin-owned, non-Odoo, and
   production records are not candidates. No schema migration is required.
@@ -887,6 +938,128 @@ customers see for that product, identified by immutable numeric GitHub id with
 the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
+
+A product that Launchplane does not deploy can record its repository, Client,
+standing acceptance and lifecycle metadata when an authorized signed-in admin
+explicitly attests that its Client is the Director. The service verifies the
+Client's GitHub identity and records that attestation through `director_standing`;
+it does not independently determine who the Director is. Other-Client review is
+unsupported here and requires a preview-independent flow before registration.
+Its explicit `classification` is
+`active_awareness`, `support_dependency` or `out_of_scope`, from the existing
+repository-mapping vocabulary. Omitted classification means `managed_runtime`
+and keeps existing serialized profiles unchanged. A non-runtime profile has no
+driver, image, lanes, historical contexts, preview configuration, runtime config
+requirements or business-hours policy. Acceptance metadata does not grant runtime
+authority. Repository mappings retain its real product id and classification;
+ambiguous active repositories are named in `ambiguous_repositories` and omitted
+from the mapping, including its work-request fallback. Other entries stay available.
+
+Before reviewing a registration, confirm that the canonical repository has one
+current tracked [repository-inventory record](#repository-inventory) and that the
+configured [Delivery App](operations.md#github-delivery-identity) already has the
+required read capabilities for that repository. Planning and apply use this
+repository-scoped credential to verify the Client's GitHub identity. Inventory
+records do not install the App or grant access. Missing inventory or unavailable
+installation credentials stops registration; use the existing
+[repository-inventory administration](operations.md#repository-inventory) and
+Delivery App procedures rather than another credential source.
+
+In Product Ops, a signed-in admin opens **Register a Director product**, enters
+its key, name, repository and Client GitHub identity, and explicitly confirms
+that the Client is the Director. **Review registration** writes nothing;
+**Register product** applies that reviewed input and reads the saved profile
+back. Editing the draft invalidates its review. An interrupted apply preserves
+the original draft and operation key for an explicit same-request retry after
+reload. The service verifies the Client login and numeric ID on both planning
+and apply. That verifies the GitHub identity, not whether that person is the
+Director; the signed-in admin's explicit attestation supplies Director standing,
+as on the existing runtime production-use setting.
+If the apply's outcome is known but readback fails, **Review registration again**
+clears only the tab's saved review and keeps its draft for a fresh dry run. If
+that key is already registered, another registration needs a new product key and
+an unclaimed repository; this action does not edit the saved product. Matching
+readback proves the current product matches the reviewed registration, not which
+request created it.
+An uncertain apply retains its original same-request retry even after a later
+refusal. **Open separate registration** opens a fresh tab for another product
+without copying or clearing the original tab's reviewed request or key. Keep the
+original tab open for its same-request retry: closing it or clearing its storage
+loses local recovery information and does not cancel or settle the service
+request. The separate tab uses the existing signed-in session and requires its
+own valid input, fresh review and explicit apply. Its result does not prove the
+earlier registration's outcome.
+
+The existing `POST /v1/product-onboarding/apply` surface uses
+`product_onboarding.plan` for planning (existing apply callers may also plan)
+and `product_onboarding.apply` for apply. A non-runtime manifest carries its
+classification, identity, Client and explicit `director_standing`; its omitted
+driver defaults empty and it has no runtime resources. Apply additionally needs
+a CSRF-checked signed-in admin, the reviewed `plan_sha256` and an
+`Idempotency-Key`. It atomically rechecks product absence and repository
+ownership; committed same-key requests replay their original result. The
+browser form uses this same audited surface. Runtime onboarding retains its
+existing bearer route and bounded Client/acceptance settings.
+
+Runtime-manifest plans and generic-web dry runs also preflight the same profile
+classification and known repository collisions. Runtime planning checks before
+building its resource bundle. A generic-web dry run checks only its planned
+profile with the placeholder target;
+it does not require an already created provider target or a full resource bundle.
+The reviewed digest remains bound to the generic-web intent, and apply retains
+its serialized commit-time ownership check.
+
+Full-profile writes cannot transfer standing acceptance to another repository
+or copied repository identity. Hold acceptance through the existing reviewed
+production-use setting before changing repository fields, then have a signed-in
+admin attest standing again for the new identity. For a non-runtime product,
+retire it first; restore standing before reactivating it. The same retired
+continuation permits changing the recorded Client identity. Reactivation requires
+the same recorded Director-standing attestation.
+
+The ordinary full-profile write cannot create a non-runtime product. Neither
+onboarding nor another profile writer can change an existing profile's
+classification. This registration path cannot convert or hide an existing
+runtime, its resources or its recovery evidence. Runtime webhook/reconcile,
+build, deploy, preview, promotion and health admissions do not activate a
+non-runtime record. Lifecycle activity continues to control repository and
+Client visibility independently of runtime classification.
+
+To replace an inert record with a managed runtime, first read the inert profile
+and submit that complete profile to `POST /v1/product-profiles` with only its
+`lifecycle_state` changed to `retired`, using the existing `product_profile.write`
+authorization and an `Idempotency-Key`. Read it back to verify that its Client
+and acceptance evidence remain, and verify its removal from the active repository
+mapping. Then use existing runtime onboarding with a new product key. Set that
+new record's Client and acceptance mode through their existing bounded routes;
+they are not inherited. An attempted classification change on the old key returns
+`product_classification_change_blocked`. This lifecycle-only replacement applies
+to an inert profile, which cannot own runtime configuration. Retiring runtime
+resources still requires the existing resource-retirement service.
+
+Active mixed/runtime and non-runtime profile writes always refuse equal normalized
+repository names or equal nonempty copied repository IDs. Creating or activating
+an active profile, or changing its repository name or copied IDs, also compares
+known immutable IDs from the highest revision of each inventory stream. This
+includes possible matches from tied revisions and retired inventory as negative
+collision evidence. If no highest-revision stream names a profile's repository,
+retained inventory history for that name supplies possible negative IDs instead.
+A current name claim takes precedence over that history, so reuse of an old name
+does not reserve every repository that previously used it. Existing copied IDs
+remain negative evidence. This also detects an unclaimed historical name when
+both profiles omit copied IDs. Retired profiles do not retain active repository
+ownership.
+
+Missing or ambiguous inventory does not prove distinctness or complete alias
+coverage; only known intersections refuse the acquisition. An unrelated profile's
+stale inventory cannot block ordinary settings writes or add a new inventory
+prerequisite to runtime onboarding. Canonical inventory/profile administration
+remains the supported way to correct stale identity metadata. Inventory evidence
+does not authorize runtime activation or repair names, copied IDs, Client
+acceptance, credentials or enrollment. Mapping still suppresses known
+profile-name/copied-ID conflicts without choosing a winner. The comparison
+snapshot does not serialize PostgreSQL inventory changes with profile writes or
+establish ownership against future inventory changes.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
@@ -1197,6 +1370,14 @@ product repo authority. It enforces the same fail-closed historical-context
 transition rule as service and manifest writes, so it cannot reactivate a
 retired context.
 
+On creation, omitted driver, lane and preview options use the command's defaults.
+On update, omitted options preserve the stored values; explicitly supplied
+options replace them, including `--preview-disabled` and `--lanes-json '[]'`.
+Preview changes preserve omitted preview fields and validate the combined
+configuration. Fields outside the command's supported options also remain
+unchanged. Each successful write refreshes the timestamp and source unless
+explicit overrides are supplied, and refuses a concurrent profile change.
+
 ### Product Repository Identity
 
 Launchplane's repository inventory is the authority for a product's immutable
@@ -1276,6 +1457,67 @@ and GitHub outbox writes. If monitoring authority changed after target
 discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
+
+### Lane health and identity history
+
+`GET /v1/products/{product}/environments/{environment}/health-history` reads
+retained observations using the same lane-scoped `product_environment.read`
+authority as environment detail (or `preview.read` for a preview). It never runs
+a probe or changes an incident. Supply timezone-aware `since` and `until` for
+an increasing window of at most eight days, with `until` no later than now.
+The interval is `[since, until)`. Each page returns at most 500 observations;
+follow `next_cursor` with the same lane and window until it is null. The cursor
+orders equal-time observations by record id, so passing records without any
+incident and records sharing a timestamp remain reachable. URLs, image
+locations, provider details and free-text diagnostics are omitted. Artifact,
+deployment and source references accompany the expected and observed identity
+result. A stored `match` is rechecked against its own expected/observed payloads.
+
+The read includes up to two hours of lookback for evidence covering the start
+of the requested window. Save every response in cursor order and run:
+
+```bash
+uv run launchplane ingress health-history-summary --page first.json --page second.json \
+  --check public_http:health --identity-check public_http:health
+```
+
+The offline command rejects incomplete, mixed or skipped page chains. Its real
+denominator is the requested elapsed seconds for this lane and each of its
+check streams, never scheduler completions or a pooled fleet sample. Each observation
+covers time forward until the next observation or the existing freshness
+deadline, whichever comes first. Failure, missing/expired evidence and verified
+identity time are reported separately. Reconciliation is administrative evidence
+and stops the prior probe's coverage; it cannot contribute a pass. Conflicting
+equal-time records cannot select a pass by record-id spelling. Missing time
+remains in the denominator. No observations means no measured check streams,
+not a healthy lane.
+
+`health_pass_percent` and `health_and_identity_percent` are conservative
+percentages of retained verified time. They do not establish physical outage
+durations. Provider delivery/source-warning streams stay separate from actual
+HTTP health streams. Supply the complete reviewed required check set with
+repeated `--check KIND:NAME`, and the checks that must verify runtime identity
+with `--identity-check KIND:NAME`.
+The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
+outside the health set. Every observed stream must be required or explicitly
+excluded; an unaccounted-for stream refuses the calculation. Required and
+excluded sets cannot overlap. The report prints all three sets, every stream
+row, and required checks with zero measured pass/fail coverage. Provider
+`monitor-cadence:...` and monitor-source warning streams are event-only
+diagnostics for `--exclude-check`; their incident and cadence qualification
+remains separate. Lane totals intersect required streams in time, so disjoint
+failures cannot hide behind individually passing percentages. A required check
+with no records contributes unknown time, not a pass. TLS or dependency checks
+can belong to the health set without being runtime-identity witnesses. The
+`lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
+those intersections. These observations do not reconstruct past profile
+declarations,
+check applicability, incident-open intervals or the historical Live roster.
+Those qualifications and the no-open-warning closing condition remain separate;
+this read cannot certify the Q419 milestone, reset a clock or retroactively
+declare missing evidence healthy. Pagination is a read of retained rows, not a
+transactional snapshot across requests; use a settled historical cutoff and
+repeat collection if older observations can still be arriving.
 
 ### TLS observation reader compatibility
 
@@ -1446,7 +1688,8 @@ A material change clears acknowledgement and remains immediately deliverable.
 Silenced incidents preserve observations and events but suppress update and
 reminder delivery only until their required `silenced_until`; expiry reactivates
 delivery and the next unchanged failure may emit the current overdue reminder.
-Resolution is always deliverable so external issue sinks can close. A recovery
+Resolution remains recorded; durable deliveries for resolved incidents are
+superseded without contacting external sinks. A recovery
 observation resolves only after the health check's configured consecutive-pass
 threshold and writes one `resolved` event with `resolution_reason = recovered`.
 If monitoring authority makes a check ineligible, a typed reconciliation
@@ -1918,6 +2161,36 @@ provider message or rollback health exception is embedded in the detail.
   records by themselves.
 
 ## Deployment Record
+
+In-place application testing retains a cumulative typed receipt in
+`post_deploy_update.evidence.generic_web_original_execution`. The original
+deployment and reservation identify its product, lane, artifact, source and
+provider target. The receipt records intent before dispatch, the complete
+pre-dispatch schedule-history identifiers, bounded acknowledgements and
+attributable terminal facts. It also binds the pre-attempt inventory by digest.
+An optional application lifecycle snapshot retains the original schedule
+baseline; executor-only testing does not manufacture a snapshot.
+
+Only the current original provider execution can create or advance these
+facts. Supported deployment-evidence corrections can preserve them exactly and
+correct other evidence, but cannot replace the captured lifecycle baseline or
+turn unknown work into completed work. Cleanup appends evidence; it never
+replaces earlier unresolved effects. Terminal execution and testing
+qualification remain separate: a healthy image with failed product assertions
+can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. Its lease, exact record/inventory CAS and
+current target binding protect that unqualified fact. Current profile and captured
+input qualification are checked again after its commit, before more work.
+That projection contains no previous qualification verdict. The executor receives
+the prior inventory captured before publication, so bounded qualification retries
+retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
 
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes
@@ -2975,8 +3248,8 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, work graph snapshot,
-  Every Code summary, and preview readiness projections, then reports each
+  context. It aggregates the existing repo-product mapping, Every Code summary,
+  preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
 - Agent-consumer authorization diagnostics use a compact subject model for

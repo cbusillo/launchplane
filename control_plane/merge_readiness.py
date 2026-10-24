@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from control_plane.github_required_checks import evaluate_required_checks
+
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.engineering_review_decision import EngineeringReviewDecisionRecord
 from control_plane.contracts.engineering_review_run import EngineeringReviewRunRecord
@@ -549,37 +551,8 @@ def _required_technical_check_state(
         return "unknown"
     if strict and not base_up_to_date:
         return "fail"
-    required_states: list[MergeReadinessTechnicalCheckStatus] = []
-    for required_check in required_checks:
-        matches = tuple(
-            signal
-            for signal in signals
-            if signal.name.casefold() == required_check.name.casefold()
-            and (required_check.app_id is None or signal.app_id == required_check.app_id)
-        )
-        required_states.append(_combined_signal_state(matches))
-    if "fail" in required_states:
-        return "fail"
-    if "pending" in required_states:
-        return "pending"
-    if "unknown" in required_states:
-        return "unknown"
-    return "pass"
-
-
-def _combined_signal_state(
-    signals: tuple[TenantAdmissionTechnicalCheckSignal, ...],
-) -> MergeReadinessTechnicalCheckStatus:
-    if not signals:
-        return "unknown"
-    states = {signal.state for signal in signals}
-    if "fail" in states:
-        return "fail"
-    if "pending" in states:
-        return "pending"
-    if "unavailable" in states:
-        return "unknown"
-    return "pass"
+    status = evaluate_required_checks(requirements=required_checks, signals=signals).status
+    return "unknown" if status == "unavailable" else status
 
 
 def _parse_timestamp(value: str) -> datetime:

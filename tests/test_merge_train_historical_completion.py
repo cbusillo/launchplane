@@ -46,10 +46,8 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     execute_merge_train_controller_with_client,
 )
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once

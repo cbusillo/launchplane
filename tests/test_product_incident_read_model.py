@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import hashlib
 import os
+from uuid import uuid4
 from unittest.mock import patch
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
@@ -158,7 +159,9 @@ class _Store:
             self.open_incident,
             self.resolved_incident,
         )
-        self.observations = (_observation(self.open_incident),)
+        self.observations: tuple[PublicIngressObservationRecord, ...] = (
+            _observation(self.open_incident),
+        )
         self.events = (
             PublicIngressIncidentEventRecord(
                 event_id=self.open_incident.latest_material_event_id,
@@ -234,6 +237,14 @@ class _Store:
             if incident.incident_id == incident_id:
                 return incident
         raise FileNotFoundError(incident_id)
+
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        for record in self.observations:
+            if record.record_id == record_id:
+                return record
+        raise FileNotFoundError(record_id)
 
     def list_public_ingress_incident_records(
         self, **kwargs: object
@@ -450,6 +461,200 @@ class ProductIncidentReadModelTests(unittest.TestCase):
         self.assertNotIn("policy-1", serialized)
         self.assertNotIn("secret-bearing", serialized)
         self.assertNotIn("payload", payload["outbox_deliveries"][0])
+
+    def test_fence_detail_retains_opening_reservation_after_recent_window_moves(self) -> None:
+        from control_plane.provider_target_holds import (
+            ProviderOperationAttentionReference,
+            ProviderOperationReference,
+            TestingReplacementReference,
+        )
+
+        store = _Store()
+        reservation_id = "mutation-reservation-" + hashlib.sha256(b"original").hexdigest()
+        reference = ProviderOperationReference(reservation_id, uuid4()).encode()
+        attention = ProviderOperationAttentionReference(reservation_id).encode()
+        replacement = TestingReplacementReference(
+            "testing-operation", store.profile.product, "example-product-prod", "prod", NOW
+        ).encode()
+        fingerprint = PublicIngressIncidentMaterialFingerprint.model_validate(
+            {
+                "check_kind": "provider",
+                "failure_code": "deploy_fence_held",
+                "failure_layer": "provider",
+                "severity": "warning",
+                "affected_targets": ("provider",),
+                "route_authority": {
+                    "kind": "provider",
+                    "provider": "launchplane",
+                    "provider_check": "launchplane-deploy-fence",
+                    "target_keys": (
+                        reference,
+                        attention,
+                        replacement,
+                        "provider-operation:private-secret",
+                    ),
+                },
+            }
+        )
+        opening = _observation(store.open_incident).model_copy(
+            update={
+                "record_id": store.open_incident.opened_observation_id,
+                "check_name": "launchplane-deploy-fence",
+                "check_kind": "provider",
+                "failure_code": "deploy_fence_held",
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
+                    fingerprint
+                ),
+                "targets": (
+                    PublicIngressTargetObservation(
+                        target="provider",
+                        url="provider://launchplane/launchplane-deploy-fence",
+                        status="fail",
+                        failure_code="deploy_fence_held",
+                        summary=f"Operation {reservation_id} started. private-secret",
+                    ),
+                ),
+            }
+        )
+        store.incidents = (
+            store.open_incident.model_copy(
+                update={"check_name": opening.check_name, "check_kind": opening.check_kind}
+            ),
+        )
+        store.observations = (opening,)
+        with patch.object(store, "list_public_ingress_observation_records", return_value=()):
+            detail = build_product_environment_incident_detail(
+                record_store=store,
+                product=store.profile.product,
+                environment="prod",
+                incident_id=store.open_incident.incident_id,
+            )
+        self.assertIsNotNone(detail.opening_observation)
+        assert detail.opening_observation is not None
+        self.assertEqual(
+            set(detail.opening_observation.provider_operation_references),
+            {reference, attention, replacement, "provider-operation:unavailable"},
+        )
+        self.assertEqual(detail.opening_observation.provider_reservation_ids, (reservation_id,))
+        self.assertNotIn("private-secret", detail.model_dump_json())
+
+        store.observations = (
+            opening.model_copy(
+                update={"material_fingerprint": None, "material_fingerprint_sha256": ""}
+            ),
+        )
+        legacy = build_product_environment_incident_detail(
+            record_store=store,
+            product=store.profile.product,
+            environment="prod",
+            incident_id=store.open_incident.incident_id,
+        )
+        assert legacy.opening_observation is not None
+        self.assertEqual(legacy.opening_observation.provider_operation_references, ())
+        self.assertEqual(legacy.opening_observation.provider_reservation_ids, (reservation_id,))
+
+        store.observations = (opening.model_copy(update={"context": "foreign-context"}),)
+        foreign = build_product_environment_incident_detail(
+            record_store=store,
+            product=store.profile.product,
+            environment="prod",
+            incident_id=store.open_incident.incident_id,
+        )
+        self.assertIsNone(foreign.opening_observation)
+        store.observations = ()
+        missing = build_product_environment_incident_detail(
+            record_store=store,
+            product=store.profile.product,
+            environment="prod",
+            incident_id=store.open_incident.incident_id,
+        )
+        self.assertIsNone(missing.opening_observation)
+
+    def test_legacy_testing_fence_exposes_only_derived_original_reservation_id(self) -> None:
+        from control_plane.contracts.idempotency_record import (
+            build_launchplane_mutation_reservation_id,
+        )
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+        from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        store = _Store()
+        lane = ProductLaneProfile(instance="testing", context="example-testing")
+        store.profile = store.profile.model_copy(update={"lanes": (lane,)})
+        incident = store.open_incident.model_copy(
+            update={
+                "context": lane.context,
+                "instance": lane.instance,
+                "check_kind": "provider",
+                "check_name": "launchplane-deploy-fence",
+            }
+        )
+        store.incidents = (incident,)
+        prefix = f"{RECONCILE_SOURCE}:{incident.product}:{lane.context}:{lane.instance}:"
+        key = prefix + "private-artifact:'quoted':started at:token"
+        reservation_id = build_launchplane_mutation_reservation_id(
+            scope=reconcile_reservation_scope(incident.product),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=key,
+        )
+        for candidate, expected in (
+            (repr(key), (reservation_id,)),
+            (repr(key.replace(lane.context, "foreign-context")), ()),
+            (repr(key.replace(":testing:", ":prod:")), ()),
+            ("__import__('os').getcwd()", ()),
+        ):
+            with self.subTest(candidate=candidate):
+                summary = (
+                    f"Deploy {candidate} started at {incident.opened_at} "
+                    "and holds this target (reconcile_required, last at post_deploy_fixture_signup, "
+                    f"since {incident.opened_at}). Every later deploy is refused until "
+                    "it is recovered with the generic-web deploy recovery dry-run."
+                )
+                opening = _observation(incident).model_copy(
+                    update={
+                        "record_id": incident.opened_observation_id,
+                        "failure_code": "deploy_fence_held",
+                        "material_fingerprint": None,
+                        "material_fingerprint_sha256": "",
+                        "targets": (
+                            PublicIngressTargetObservation(
+                                target="provider",
+                                url="provider://launchplane/launchplane-deploy-fence",
+                                status="fail",
+                                failure_code="deploy_fence_held",
+                                summary=summary,
+                            ),
+                        ),
+                    }
+                )
+                store.observations = (opening,)
+                detail = build_product_environment_incident_detail(
+                    record_store=store,
+                    product=incident.product,
+                    environment=lane.instance,
+                    incident_id=incident.incident_id,
+                )
+                assert detail.opening_observation is not None
+                self.assertEqual(detail.opening_observation.provider_reservation_ids, expected)
+                self.assertEqual(detail.opening_observation.provider_operation_references, ())
+                self.assertNotIn(key, detail.model_dump_json())
+                self.assertNotIn("private-artifact", detail.model_dump_json())
+
+    def test_unreadable_opening_preserves_recent_incident_evidence(self) -> None:
+        store = _Store()
+        with patch.object(
+            store, "read_public_ingress_observation_record", side_effect=ValueError("unreadable")
+        ):
+            detail = build_product_environment_incident_detail(
+                record_store=store,
+                product=store.profile.product,
+                environment="prod",
+                incident_id=store.open_incident.incident_id,
+            )
+        self.assertIsNone(detail.opening_observation)
+        self.assertEqual(detail.observations[0].record_id, store.observations[0].record_id)
 
     def test_open_incident_limit_prioritizes_older_critical_incidents(self) -> None:
         store = _Store()

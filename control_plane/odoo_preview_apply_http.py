@@ -2,6 +2,8 @@ from contextlib import AbstractContextManager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import base64
+import binascii
 import hashlib
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +19,12 @@ from control_plane import runtime_platform_credentials
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.odoo_addon_settings_override import (
+    OdooAddonSettingsStore,
+    _protected_store_keys,
+    _validate_store_key,
+)
 from control_plane.odoo_preview_import_source import (
     PreviewImportSourceStore,
     PreviewImportSourceError,
@@ -46,6 +54,15 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_execution import (
+    ODOO_PREVIEW_DESTROY_REASON_PREFIX as _ODOO_PREVIEW_DESTROY_REASON_PREFIX,
+    odoo_preview_destroy_issued_at,
+    matches_odoo_preview_service_destroy,
+)
+from control_plane.legacy_preview_completion import (
+    ReconciliationReceiptStore,
+    reconciliation_completion_time,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.drivers.dispatch import (
@@ -86,7 +103,6 @@ from control_plane.workflows.launchplane import (
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
 ODOO_PREVIEW_PLAN_TTL_SECONDS = 30 * 60
-_ODOO_PREVIEW_DESTROY_REASON_PREFIX = "odoo_preview_destroy"
 
 
 class OdooPreviewApplyProductMismatchError(ValueError):
@@ -486,6 +502,8 @@ def execute_odoo_preview_apply_result(
         }
     )
     driver_result = execute_odoo_preview_dokploy_apply(
+        record_store=record_store,
+        preview_context=profile.preview.context,
         control_plane_root=control_plane_root_path,
         request=service_apply_request,
         database_url=database_url,
@@ -568,7 +586,9 @@ def apply_odoo_preview_lifecycle_evidence(
             plan_id=provenance.plan_id,
             issued_at=requested_at,
         )
-        if existing_preview is not None and existing_preview.destroy_reason == destroy_reason:
+        if existing_preview is not None and matches_odoo_preview_service_destroy(
+            existing_preview, destroy_reason
+        ):
             return _odoo_preview_lifecycle_records(
                 preview=existing_preview,
                 status="replayed",
@@ -578,6 +598,7 @@ def apply_odoo_preview_lifecycle_evidence(
             record_store=typed_record_store,
             preview=existing_preview,
             issued_at=requested_at,
+            product=profile.product,
         ):
             return _odoo_preview_lifecycle_records(
                 preview=existing_preview,
@@ -604,7 +625,7 @@ def apply_odoo_preview_lifecycle_evidence(
             preview=preview_record,
             destroyed_at=completed_at,
             destroy_reason=destroy_reason,
-        )
+        ).model_copy(update={"reconciliation_receipt_id": ""})
         preview_path = typed_record_store.write_preview_record(transitioned_preview)
         return {
             **_odoo_preview_lifecycle_records(
@@ -655,6 +676,7 @@ def apply_odoo_preview_lifecycle_evidence(
         record_store=typed_record_store,
         preview=existing_preview,
         issued_at=requested_at,
+        product=profile.product,
     ):
         return _odoo_preview_lifecycle_records(
             preview=existing_preview,
@@ -758,7 +780,7 @@ def validate_odoo_preview_lifecycle_response_current(
             plan_id=provenance.plan_id,
             issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
         )
-        if preview.state == "destroyed" and preview.destroy_reason == expected_destroy_reason:
+        if matches_odoo_preview_service_destroy(preview, expected_destroy_reason):
             return
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_operation_superseded",
@@ -898,10 +920,12 @@ def _odoo_preview_operation_is_stale(
     record_store: LaunchplaneMutationStore,
     preview: PreviewRecord,
     issued_at: str,
+    product: str = "",
 ) -> bool:
     existing_issued_at = _odoo_preview_existing_operation_issued_at(
         record_store=record_store,
         preview=preview,
+        product=product,
     )
     if not existing_issued_at:
         return True
@@ -909,10 +933,13 @@ def _odoo_preview_operation_is_stale(
         issued_at,
         field_name="Odoo preview lifecycle issued_at",
     )
-    parsed_existing_issued_at = parse_launchplane_mutation_timestamp(
-        existing_issued_at,
-        field_name="existing preview lifecycle issued_at",
-    )
+    try:
+        parsed_existing_issued_at = parse_launchplane_mutation_timestamp(
+            existing_issued_at,
+            field_name="existing preview lifecycle issued_at",
+        )
+    except ValueError:
+        return True
     return current_issued_at <= parsed_existing_issued_at
 
 
@@ -920,14 +947,14 @@ def _odoo_preview_existing_operation_issued_at(
     *,
     record_store: LaunchplaneMutationStore,
     preview: PreviewRecord,
+    product: str = "",
 ) -> str:
     if preview.state == "destroyed":
-        prefix = f"{_ODOO_PREVIEW_DESTROY_REASON_PREFIX}:"
-        if preview.destroy_reason.startswith(prefix):
-            _token, separator, issued_at = preview.destroy_reason[len(prefix) :].partition(":")
-            if separator:
-                return issued_at
-        return ""
+        if preview.reconciliation_receipt_id:
+            return reconciliation_completion_time(
+                cast(ReconciliationReceiptStore, record_store), preview, product=product
+            )
+        return odoo_preview_destroy_issued_at(preview.destroy_reason)
     generation_id = preview.serving_generation_id or preview.latest_generation_id
     if not generation_id:
         return ""
@@ -1144,12 +1171,77 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
+    _merge_preview_addon_settings(environment_values, profile=profile, record_store=record_store)
     return _OdooPreviewServiceEnvironment(
         values=environment_values,
         omitted_integration_credential_keys=omitted_keys,
         integration_allowances=(import_source.allowance,) if import_source else (),
         fishbowl_source_sha256=import_source.authority_sha256 if import_source else "",
     )
+
+
+def _merge_preview_addon_settings(
+    environment: dict[str, str], *, profile: LaunchplaneProductProfileRecord, record_store: object
+) -> None:
+    key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    encoded_preview = profile.preview.override_env.get(key, "")
+    if not encoded_preview.strip() or environment.get(key) == encoded_preview:
+        return
+    try:
+        preview = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(encoded_preview, validate=True)
+        )
+        if not preview.addon_settings:
+            return
+        generated = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(environment[key], validate=True)
+        )
+        pairs = [(item.addon, item.setting) for item in preview.addon_settings]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("Conflicting preview addon settings")
+        if any(item.addon == "shopify" for item in preview.addon_settings):
+            if control_plane_odoo_instance_overrides.odoo_instance_is_production(
+                profile.preview.template_instance
+            ):
+                raise ValueError("Preview Shopify settings require a non-production template")
+            protected = _protected_store_keys(
+                record_store=cast(OdooAddonSettingsStore, record_store),
+                product=profile.product,
+                context=profile.preview.context,
+                instance=profile.preview.template_instance,
+            )
+            for item in preview.addon_settings:
+                if (
+                    item.addon == "shopify"
+                    and item.setting in control_plane_odoo_instance_overrides.SHOPIFY_STORE_SETTINGS
+                ):
+                    if item.value.source != "literal" or not isinstance(item.value.value, str):
+                        raise ValueError("Shopify store selection requires a literal")
+                    _validate_store_key(
+                        shop_url_key=item.value.value.strip().lower(),
+                        protected_store_keys=protected,
+                    )
+        for item in preview.addon_settings:
+            if (
+                item.value.source == "secret_binding"
+                and item.value.environment_variable
+                != control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
+                    addon_name=item.addon, setting_name=item.setting
+                )
+            ):
+                raise ValueError("Preview addon secret requires canonical transport")
+        if any(
+            not environment.get(name, "").strip()
+            for name in preview.required_container_environment_keys
+        ):
+            raise ValueError("Preview addon secret is not delivered")
+    except (ValueError, binascii.Error):
+        raise click.ClickException("Invalid preview addon settings payload.") from None
+    merged = generated.model_copy(update={"addon_settings": preview.addon_settings})
+    environment[key] = base64.b64encode(merged.to_wire_json_bytes()).decode("ascii")
+    environment[
+        control_plane_odoo_instance_overrides.LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
+    ] = "true"
 
 
 # The preview runs unmerged code against whatever its copied environment reaches, so a

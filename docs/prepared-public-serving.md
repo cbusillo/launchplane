@@ -93,8 +93,8 @@ mode and `reduced_service=true`. The interval includes public-write blocking,
 fence/drain, backup coordination, maintenance, readiness, switch and writer
 resumption. Zero 5xx means readers stayed served, not full application service.
 Use these typed records in #3266's DB-backed release integration. The provided
-`FilePublicPauseStore` and bundle JSON utilities are for an explicit isolated
-state directory/rehearsal only; shared production truth remains DB-backed.
+`tests.support.prepared_public_storage.FilePublicPauseStore` and its bundle JSON
+utilities are isolated proof fixtures; shared production truth remains DB-backed.
 Provider adapters must enforce exclusive/idempotent operations on a release;
 these file utilities are not a distributed lock or production record store.
 

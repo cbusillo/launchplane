@@ -1,5 +1,6 @@
 import { setClockTime, expect, test, type Page } from "./state";
 import type { ProductSiteOverview } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 async function installInventoryReads(page: Page, product: ProductSiteOverview, identity: unknown) {
   await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
@@ -39,7 +40,7 @@ for (const mode of ["missing", "stale", "fresh", "disabled", "inapplicable"] as 
       await expect(overview).not.toContainText("incomplete");
       await expect(overview).toContainText(mode === "fresh" ? "All incident-eligible health checks returned" : "No incident-eligible health checks are effective");
     }
-    await page.screenshot({ path: `../tmp/browser-smoke/monitoring-${mode}-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`monitoring-${mode}-${testInfo.project.name}.png`), fullPage: true });
     check.probe_effective = true;
     check.incident_eligible = true;
     check.trust_state = "verified";

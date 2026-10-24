@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -968,6 +969,17 @@ def run_odoo_stable_operation_worker_loop(
     config_scan_thread: Thread | None = None
     standing_review_backoff = StandingReleaseReviewBackoff()
     invitation_backoff = ReleaseInvitationBackoff()
+    rehearsal_resume_thread: Thread | None = None
+    last_rehearsal_resume_at: float | None = None
+
+    def resume_rehearsals() -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals as sweep
+
+        try:
+            if isinstance(record_store, PostgresRecordStore):
+                sweep(record_store, control_plane_root_path, stop_event=worker_stop_event)
+        except Exception:
+            logging.exception("Rehearsal checkpoint sweep unavailable.")
 
     def advance_releases() -> None:
         try:
@@ -1005,6 +1017,19 @@ def run_odoo_stable_operation_worker_loop(
         while not worker_stop_event.is_set():
             if max_iterations is not None and iterations >= max_iterations:
                 break
+            if (
+                isinstance(record_store, PostgresRecordStore)
+                and (
+                    last_rehearsal_resume_at is None
+                    or monotonic() - last_rehearsal_resume_at >= poll_seconds
+                )
+                and (rehearsal_resume_thread is None or not rehearsal_resume_thread.is_alive())
+            ):
+                last_rehearsal_resume_at = monotonic()
+                rehearsal_resume_thread = Thread(
+                    target=resume_rehearsals, name="rehearsal-checkpoint-resume", daemon=False
+                )
+                rehearsal_resume_thread.start()
             if hasattr(record_store, "request_product_reconcile") and (
                 last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
             ):
@@ -1012,7 +1037,9 @@ def run_odoo_stable_operation_worker_loop(
                 last_sweep_at = monotonic()
                 try:
                     request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                        cast(ProductReconcileStore, record_store),
+                        _utc_now_timestamp(),
+                        control_plane_root=control_plane_root_path,
                     )
                 except Exception:
                     logging.exception("Product reconcile sweep failed.")
@@ -1090,6 +1117,8 @@ def run_odoo_stable_operation_worker_loop(
             invitation_thread.join()
         if config_scan_thread is not None:
             config_scan_thread.join()
+        if rehearsal_resume_thread is not None:
+            rehearsal_resume_thread.join()
     return OdooStableOperationWorkerLoopResult(
         status="stopped" if worker_stop_event.is_set() else "completed",
         iterations=iterations,
@@ -2230,6 +2259,11 @@ def _execute_target_replacement_with_checkpoint(
     heartbeat_seconds: int,
     execution_checkpoint: Callable[[str], None] | None = None,
 ) -> bool:
+    from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.testing_rebuild_authorization import (
+        director_testing_rebuild_authorization_allows,
+    )
+
     stop_event = Event()
     heartbeat_lost_event = Event()
     heartbeat_thread = _start_target_replacement_heartbeat(
@@ -2252,6 +2286,14 @@ def _execute_target_replacement_with_checkpoint(
                 context=operation.context,
                 instances=(operation.instance,),
                 record_store=record_store,
+            )
+        ),
+        director_testing_rebuild_allows=lambda authorization: (
+            director_testing_rebuild_authorization_allows(
+                authorization=authorization,
+                operation=operation,
+                store=record_store,
+                config=_bearer_identity_config_from_env(),
             )
         ),
     )
@@ -2356,27 +2398,27 @@ def _execute_target_replacement_with_checkpoint(
                 ),
             }
         )
-    except DurableOperationAuthorizationDeniedError as error:
+    except (DurableOperationAuthorizationDeniedError, ScheduleMaterializationTooLarge) as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
+            "Odoo stable target replacement operation %s was refused at a provider boundary: %s",
             operation.operation_id,
             error,
         )
         finished_at = _utc_now_timestamp()
-        held_native_effects = (
+        held_native_rebuild = (
             operation.is_native_testing_rebuild
             and isinstance(record_store, PostgresRecordStore)
-            and native_rebuild_effects_started(record_store, operation)
+            and record_store.native_testing_rebuild_requires_reconciliation(operation)
         )
         terminal_operation = operation.model_copy(
             update={
-                "status": "reconciliation_required" if held_native_effects else "fail",
-                "phase": operation.phase if held_native_effects else "failed",
+                "status": "reconciliation_required" if held_native_rebuild else "fail",
+                "phase": operation.phase if held_native_rebuild else "failed",
                 "updated_at": finished_at,
-                "finished_at": "" if held_native_effects else finished_at,
-                "lease_owner": "" if held_native_effects else lease_owner,
-                "lease_expires_at": "" if held_native_effects else operation.lease_expires_at,
-                "heartbeat_at": "" if held_native_effects else operation.heartbeat_at,
+                "finished_at": "" if held_native_rebuild else finished_at,
+                "lease_owner": "" if held_native_rebuild else lease_owner,
+                "lease_expires_at": "" if held_native_rebuild else operation.lease_expires_at,
+                "heartbeat_at": "" if held_native_rebuild else operation.heartbeat_at,
                 "error_code": error.code,
                 "error_message": str(error),
             }
@@ -2392,6 +2434,12 @@ def _execute_target_replacement_with_checkpoint(
                 isinstance(record_store, PostgresRecordStore)
                 and native_rebuild_effects_started(record_store, operation)
             )
+        )
+        rebuild_held = (
+            not rebuild_pending
+            and operation.is_native_testing_rebuild
+            and isinstance(record_store, PostgresRecordStore)
+            and record_store.native_testing_rebuild_requires_reconciliation(operation)
         )
         rebuild_message = (
             str(error)
@@ -2428,11 +2476,13 @@ def _execute_target_replacement_with_checkpoint(
             if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable"
             else operation.model_copy(
                 update={
-                    "status": "fail",
-                    "phase": "failed",
+                    "status": "reconciliation_required" if rebuild_held else "fail",
+                    "phase": operation.phase if rebuild_held else "failed",
                     "updated_at": _utc_now_timestamp(),
-                    "finished_at": _utc_now_timestamp(),
-                    "lease_owner": lease_owner,
+                    "finished_at": "" if rebuild_held else _utc_now_timestamp(),
+                    "lease_owner": "" if rebuild_held else lease_owner,
+                    "lease_expires_at": "" if rebuild_held else operation.lease_expires_at,
+                    "heartbeat_at": "" if rebuild_held else operation.heartbeat_at,
                     "error_code": _unexpected_error_code(error),
                     "error_message": str(error),
                     "error_detail_keys": (

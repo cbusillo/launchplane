@@ -4,14 +4,22 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+import click
+
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.dokploy import api, source
-from control_plane.dokploy.sandbox_placement import create_isolated_placement, created_placement
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.dokploy.network_capacity import require_bridge_network_capacity
+from control_plane.dokploy.sandbox_placement import (
+    IsolatedPlacementObservationRequired,
+    create_isolated_placement,
+    created_placement,
+)
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.odoo_testing_resources import OdooTestingResources
-from control_plane.provider_operations import ProviderOperationLease
+from control_plane.provider_operations import ProviderMutationRejectedError, ProviderOperationLease
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_resources import (
     IncompleteTestingResources,
@@ -66,8 +74,14 @@ def observe_candidate_storage(
         require_candidate_target_custody(store, allocation)
 
     checkpoint()
-    lease.checkpoint_effect("independent_storage_readback")
-    _run_candidate_storage(root, store, allocation, "readback", checkpoint)
+    _run_candidate_storage(
+        root,
+        store,
+        allocation,
+        "readback",
+        checkpoint,
+        lambda _phase: lease.checkpoint_effect("independent_storage_readback"),
+    )
     checkpoint()
     updated = allocation.model_copy(
         update={"resources_binding_sha256": candidate_resources(allocation).binding_sha256}
@@ -82,6 +96,7 @@ def _run_candidate_storage(
     record: TestingCandidateAllocation,
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
+    before_provider_mutation: Callable[[str], None],
 ) -> None:
     run_resource_schedule(
         root=root,
@@ -89,6 +104,7 @@ def _run_candidate_storage(
         resources=candidate_resources(record),
         mode=mode,
         checkpoint=checkpoint,
+        before_provider_mutation=before_provider_mutation,
         candidate_target=DokployTargetDefinition(
             context=record.context,
             instance="testing",
@@ -136,7 +152,6 @@ def prepare_candidate_storage(
             or allocation.resources_binding_sha256
         ):
             raise ValueError("Candidate allocation must begin before any provider effect.")
-        store.compare_and_write_testing_candidate(None, allocation)
         record = allocation
     else:
         record = existing
@@ -145,6 +160,30 @@ def prepare_candidate_storage(
         record, record.effect
     ):
         raise ValueError("Candidate creation is uncertain; use original-key observation.")
+
+    if not any((record.effect, record.project_id, record.environment_id, record.compose_id)):
+        # Only a fresh, independently empty placement can release a refused
+        # admission. Partial/uncertain creates keep their original recovery path.
+        try:
+            if any(created_placement(root, record.namespace)):
+                raise IsolatedPlacementObservationRequired(
+                    "Existing isolated placement requires original-key observation."
+                )
+            host, token = source.read_dokploy_config(control_plane_root=root)
+            require_bridge_network_capacity(
+                host=host, token=token, server_id=record.server_id, required_networks=1
+            )
+        except (
+            ValueError,
+            OSError,
+            click.ClickException,
+            api.DokployRequestFailed,
+            NativeSourceAuthorizationDenied,
+        ) as error:
+            raise ProviderMutationRejectedError(error) from error
+        checkpoint()
+    if existing is None:
+        store.compare_and_write_testing_candidate(None, allocation)
 
     def save(**updates: str) -> None:
         nonlocal record
@@ -175,7 +214,12 @@ def prepare_candidate_storage(
         # turn storage qualification into a deployment of the existing lane.
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported candidate storage operation.")
-        _run_candidate_storage(root, store, record, mode, checkpoint)
+
+        def before_dispatch(_phase: str) -> None:
+            save(effect="storage")
+            lease.checkpoint_effect("independent_storage")
+
+        _run_candidate_storage(root, store, record, mode, checkpoint, before_dispatch)
 
     if record.effect == "storage":
         try:
@@ -186,8 +230,6 @@ def prepare_candidate_storage(
         else:
             save(resources_binding_sha256=resources.binding_sha256)
             return record
-    save(effect="storage")
-    lease.checkpoint_effect("independent_storage")
     run("prepare")
     save(resources_binding_sha256=resources.binding_sha256)
     return record

@@ -1,5 +1,6 @@
 import { setClockTime, waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 function setDeadlines(value: unknown, deadline: number) {
   if (!value || typeof value !== "object") return;
@@ -85,7 +86,7 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
     releaseRead!();
     await expect(page.getByText("Topology evidence read unavailable", { exact: false }).first()).toBeVisible();
     await assertState(true);
-    await page.screenshot({ path: `../tmp/browser-smoke/${evidence}-${environmentView ? "environment" : "workspace"}-expired-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`${evidence}-${environmentView ? "environment" : "workspace"}-expired-${testInfo.project.name}.png`), fullPage: true });
     mode = "pending";
     releaseRead = undefined;
     await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }));

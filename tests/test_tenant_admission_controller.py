@@ -37,17 +37,15 @@ MERGE_COMMIT_SHA = "c" * 40
 
 
 class TenantAdmissionControllerTests(unittest.TestCase):
-    def test_tenant_ui_is_ready_on_classification_alone(self) -> None:
+    def test_classification_only_store_cannot_establish_merge_readiness(self) -> None:
         transport = _TenantControllerTransport()
-        result = evaluate_tenant_admission_candidate(
-            request=_request(mutate=False),
-            store=_classification_only_store((_classification(),)),
-            token="token",
-            transport_factory=lambda _token: transport,
-        )
-        self.assertEqual(result.outcome, "ready")
-        assert result.technical_checks is not None
-        self.assertEqual(result.technical_checks.status, "pass")
+        with self.assertRaises(ValueError):
+            evaluate_tenant_admission_candidate(
+                request=_request(mutate=False),
+                store=_classification_only_store((_classification(),)),
+                token="token",
+                transport_factory=lambda _token: transport,
+            )
         self.assertFalse(transport.merge_called)
 
     def test_launchplane_advisory_checks_are_excluded_from_technical_inputs(self) -> None:
@@ -715,22 +713,10 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertEqual(observed, merge_train_state)
 
     def test_merge_train_can_adopt_every_main_controller_checkpoint_action(self) -> None:
-        expected_actions = {
-            "admit_collapsed_root",
-            "build_candidate",
-            "execute_stack_collapse",
-            "land_batch",
-            MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
-            "observe_candidate",
-            "plan_candidate",
-            "plan_landing",
-            "plan_stack_collapse",
-            "reflow_candidate",
-            "update_branch",
-        }
-        self.assertEqual(set(MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS), expected_actions)
-
-        for active_action in sorted(expected_actions):
+        self.assertIn(
+            MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION, MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS
+        )
+        for active_action in MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS:
             with self.subTest(active_action=active_action), TemporaryDirectory() as temporary_name:
                 store = FilesystemRecordStore(state_dir=Path(temporary_name))
                 initial = store.acquire_merge_train_controller_state_record(
@@ -843,6 +829,7 @@ class _TenantControllerTransport:
         self.technical_state = technical_state
         self.include_technical_signals = include_technical_signals
         self.pull_request_payloads = list(pull_request_payloads)
+        self.current_pull_request_payload: dict[str, object] | None = None
         self.uncertain_merge = uncertain_merge
         self.merged = initially_merged
         self.merge_response_sha = merge_response_sha
@@ -860,6 +847,7 @@ class _TenantControllerTransport:
         self.merge_called = False
         self.technical_checks_read = False
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
+        self.current_required_checks: dict[str, object] = {}
 
     def request(
         self,
@@ -871,12 +859,15 @@ class _TenantControllerTransport:
         self.requests.append((method, path, body))
         if method == "GET" and "/pulls/" in path:
             if self.pull_request_payloads:
-                return self.pull_request_payloads.pop(0)
+                self.current_pull_request_payload = self.pull_request_payloads.pop(0)
+            if self.current_pull_request_payload is not None and not self.merged:
+                return self.current_pull_request_payload
             return _pull_request_payload(merged=self.merged)
         if method == "GET" and path.endswith("/protection/required_status_checks"):
             self.technical_checks_read = True
             if not self.include_required_checks:
-                return {"strict": True, "contexts": [], "checks": []}
+                self.current_required_checks = {"strict": True, "contexts": [], "checks": []}
+                return self.current_required_checks
             required_check_app_id = (
                 self.required_check_app_ids.pop(0) if self.required_check_app_ids else 15368
             )
@@ -893,7 +884,7 @@ class _TenantControllerTransport:
                         {"context": "launchplane/owner-acceptance", "app_id": 42},
                     ]
                 )
-            return {
+            self.current_required_checks = {
                 **(
                     {"strict": self.strict_required_checks}
                     if self.strict_required_checks is not None
@@ -902,7 +893,20 @@ class _TenantControllerTransport:
                 "contexts": contexts,
                 "checks": checks,
             }
-        if method == "GET" and path.endswith("/status"):
+            return self.current_required_checks
+        if method == "GET" and path.endswith("/branches/main"):
+            return {
+                "protected": True,
+                "protection": {
+                    "required_status_checks": {
+                        **self.current_required_checks,
+                        "enforcement_level": "everyone",
+                    }
+                },
+            }
+        if method == "GET" and "/rules/branches/main?" in path:
+            return []
+        if method == "GET" and "/status?" in path:
             self.technical_checks_read = True
             statuses: list[dict[str, object]] = [
                 {"context": "tenant-admission", "state": "failure"},

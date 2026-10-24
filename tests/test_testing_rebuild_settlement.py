@@ -1,5 +1,3 @@
-"""One original actor/key has either an admitted operation or durable exclusion."""
-
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory

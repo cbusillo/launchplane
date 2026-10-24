@@ -20,7 +20,6 @@ from control_plane.contracts.promotion_record import (
 from control_plane.production_delivery_monitor import (
     DELIVERY_EVIDENCE_PAGE_SIZE,
     _candidate_key,
-    _write_receipt,
     _SCOPE,
     _ROUTE,
     monitor_production_delivery_once,
@@ -28,6 +27,7 @@ from control_plane.production_delivery_monitor import (
     _observe,
     REFUSED_REQUEST_CHECK_PREFIX,
 )
+from tests.support.delivery_receipts import _write_receipt
 from control_plane.storage.delivery_evidence import sources
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore

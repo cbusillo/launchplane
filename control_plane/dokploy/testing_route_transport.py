@@ -28,14 +28,26 @@ from control_plane.dokploy.testing_route_execution import (
     TestingRouteWriterAttempt,
     parse_testing_route_fence,
 )
+from control_plane.testing_application_capabilities import retained_application_inventory_header
 from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
-    route_document,
+    route_document_content,
+    route_document_digest,
     redirects_to_https,
+    select_testing_route_raw,
+    canonical_acme_challenge,
+    router_configuration,
+    testing_route_static_sha256,
+)
+from control_plane.dokploy.testing_retained_copy import (
+    retained_inventory_sha256,
+    retained_copy_availability,
+    retained_web_process,
+    require_complete_container_inventory,
 )
 
 TRAEFIK_DYNAMIC_DIRECTORY = "/etc/dokploy/traefik/dynamic"
@@ -68,13 +80,21 @@ def testing_route_host_program() -> str:
     return (
         "import base64,hashlib,json,os,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.parse import urlsplit\n"
+        + retained_application_inventory_header()
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
+        + inspect.getsource(router_configuration)
+        + inspect.getsource(canonical_acme_challenge)
+        + inspect.getsource(select_testing_route_raw)
         + "\n"
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
         + inspect.getsource(parse_testing_route_fence)
+        + inspect.getsource(retained_inventory_sha256)
+        + inspect.getsource(retained_copy_availability)
+        + inspect.getsource(retained_web_process)
+        + inspect.getsource(require_complete_container_inventory)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
         + "\nSTATIC="
@@ -101,34 +121,6 @@ def docker(*arguments, stdin=None):
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
 
-def selected_raw(raw, host, points):
-    routers=raw.get('routers')
-    if not isinstance(routers,dict):
-        raise RuntimeError('Applied router inventory is unavailable')
-    selected={}
-    services={}
-    middlewares={}
-    for name,item in routers.items():
-        if not isinstance(item,dict) or not isinstance(item.get('entryPoints'),list):
-            raise RuntimeError('Applied router inventory is incomplete')
-        if (points and not set(item['entryPoints']) & set(points)) or not host_rule_may_match(str(item.get('rule') or ''),host):
-            continue
-        selected[name]={key:item[key] for key in ('rule','ruleSyntax','service','entryPoints','priority','middlewares','tls','status') if key in item}
-        provider=name.rsplit('@',1)[-1]
-        service=str(item.get('service') or '')
-        service=service if '@' in service else service+'@'+provider
-        value=raw.get('services',{}).get(service)
-        if not isinstance(value,dict):
-            raise RuntimeError('Applied backend inventory is incomplete')
-        services[service]={'status':value.get('status'),'loadBalancer':value.get('loadBalancer')}
-        for reference in item.get('middlewares',[]):
-            qualified=reference if '@' in reference else reference+'@'+provider
-            middleware=raw.get('middlewares',{}).get(qualified)
-            if not isinstance(middleware,dict):
-                raise RuntimeError('Applied middleware inventory is incomplete')
-            middlewares[qualified]={key:middleware[key] for key in ('headers','redirectScheme','status') if key in middleware}
-    return {'routers':selected,'services':services,'middlewares':middlewares}
-
 WRITE_STARTED=False
 
 def proxy_dns_names(container, proxy_networks):
@@ -142,6 +134,199 @@ def proxy_dns_names(container, proxy_networks):
         if container_name:
             names.add(container_name.casefold())
     return names
+
+def application_container(containers, binding, proxy_networks):
+    service=json.loads(docker('service','inspect',binding['name']))
+    if not isinstance(service,list) or len(service)!=1 or service[0].get('Spec',{}).get('Name')!=binding['name']:
+        raise RuntimeError('Application service ownership is unavailable')
+    service=service[0]
+    if binding.get('service_id') and service['ID']!=binding['service_id']:
+        raise RuntimeError('Application service changed')
+    if service['Spec'].get('Mode',{}).get('Replicated',{}).get('Replicas')!=1 or service.get('Endpoint',{}).get('Ports'):
+        raise RuntimeError('Application endpoint topology changed')
+    identifiers=docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()
+    tasks=[json.loads(docker('inspect','--type','task',identifier))[0] for identifier in identifiers]
+    active=[task for task in tasks if task.get('DesiredState')=='running']
+    if len(active)!=1 or active[0].get('ServiceID')!=service['ID'] or active[0].get('Status',{}).get('State')!='running':
+        raise RuntimeError('Application task ownership is unavailable')
+    task=active[0]
+    if binding.get('task_id') and task['ID']!=binding['task_id']:
+        raise RuntimeError('Application task changed')
+    matching=[item for item in containers if item['Id']==task.get('Status',{}).get('ContainerStatus',{}).get('ContainerID')]
+    if len(matching)!=1:
+        raise RuntimeError('Application container is unavailable')
+    container=matching[0]
+    labels=container.get('Config',{}).get('Labels') or {}
+    if (container.get('State',{}).get('Status')!='running' or labels.get('com.docker.swarm.service.id')!=service['ID']
+        or labels.get('com.docker.swarm.task.id')!=task['ID'] or labels.get('com.docker.swarm.service.name')!=binding['name']):
+        raise RuntimeError('Application container ownership changed')
+    values=dict(item.split('=',1) for item in container['Config'].get('Env',[]) if '=' in item)
+    identity=json.loads(values.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+    if not isinstance(identity,dict): raise RuntimeError('Application runtime identity is unavailable')
+    expected=binding.get('deployments')
+    if expected is not None:
+        original=expected.get(identity.get('deployment_record_id'))
+        if (not isinstance(original,dict) or (identity.get('product'),identity.get('context'),identity.get('instance'))
+            !=(binding['product'],binding['context'],'testing') or identity.get('artifact_id')!=original['artifact']
+            or identity.get('source_git_ref')!=original['source']):
+            raise RuntimeError('Application does not identify the retained original')
+    attached=container.get('NetworkSettings',{}).get('Networks',{})
+    shared={key:value for key,value in attached.items() if key in proxy_networks and (value.get('IPAddress') or value.get('GlobalIPv6Address'))}
+    if not shared or not isinstance(binding.get('port'),int) or not 0<binding['port']<65536:
+        raise RuntimeError('Application ingress network or port is unavailable')
+    network_ids={value.get('NetworkID') for value in shared.values() if value.get('NetworkID')}
+    attachments=service.get('Spec',{}).get('TaskTemplate',{}).get('Networks')
+    if not network_ids or not isinstance(attachments,list) or not any(item.get('Target') in network_ids for item in attachments):
+        raise RuntimeError('Application service network ownership is unavailable')
+    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
+    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+        raise RuntimeError('Application service inventory is incomplete')
+    for identifier in service_ids:
+        if identifier==service['ID']: continue
+        metadata=json.loads(docker('service','inspect','--format','{"name":{{json .Spec.Name}},"networks":{{json .Spec.TaskTemplate.Networks}}}',identifier))
+        networks=metadata.get('networks')
+        if networks is None and 'networks' in metadata: networks=[]
+        if not isinstance(networks,list): raise RuntimeError('Application network aliases are unavailable')
+        for attachment in networks:
+            if attachment.get('Target') in network_ids and binding['name'].casefold() in {value.casefold() for value in attachment.get('Aliases') or []}:
+                raise RuntimeError('Application private name aliases another service')
+    for item in containers:
+        if item['Id']!=container['Id'] and binding['name'].casefold() in proxy_dns_names(item,proxy_networks):
+            raise RuntimeError('Application private name is shared')
+    if (json.loads(docker('service','inspect',binding['name']))[0]!=service or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
+        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids):
+        raise RuntimeError('Application service changed during route observation')
+    return container,identity,shared
+
+def retained_application_backend(containers, binding, proxy_networks):
+    local_nodes=single_local_swarm_node(docker)
+    service=json.loads(docker('service','inspect',binding['name']))
+    if not isinstance(service,list) or len(service)!=1 or not isinstance(service[0],dict):
+        raise RuntimeError('Retained service is unavailable')
+    service=service[0]
+    specification=service.get('Spec',{})
+    if (not isinstance(service.get('ID'),str) or not service['ID'] or specification.get('Name')!=binding['name']
+        or specification.get('Mode',{}).get('Replicated',{}).get('Replicas')!=1 or service.get('Endpoint',{}).get('Ports')):
+        raise RuntimeError('Retained service ownership or topology changed')
+    template=specification.get('TaskTemplate')
+    configuration=template.get('ContainerSpec') if isinstance(template,dict) else None
+    if not isinstance(configuration,dict) or not isinstance(configuration.get('Env'),list):
+        raise RuntimeError('Retained service template is unavailable')
+    template_sha256=canonical_json_sha256(template)
+    if ((binding.get('service_id') and service['ID']!=binding['service_id'])
+        or (binding.get('task_template_sha256') and template_sha256!=binding['task_template_sha256'])):
+        raise RuntimeError('The admitted retained service template changed')
+    def environment(items):
+        if not isinstance(items,list): raise RuntimeError('Retained environment is unavailable')
+        values={}
+        for item in items:
+            if not isinstance(item,str) or '=' not in item or item.split('=',1)[0] in values:
+                raise RuntimeError('Retained service environment is incomplete')
+            key,value=item.split('=',1)
+            values[key]=value
+        return values
+    values=environment(configuration['Env'])
+    identity=json.loads(values.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+    if not isinstance(identity,dict): raise RuntimeError('Retained service identity is unavailable')
+    original=binding['deployments'].get(identity.get('deployment_record_id'))
+    if (not isinstance(original,dict) or (identity.get('product'),identity.get('context'),identity.get('instance'))
+        !=(binding['product'],binding['context'],'testing') or identity.get('artifact_id')!=original['artifact']
+        or identity.get('source_git_ref')!=original['source']):
+        raise RuntimeError('The current template does not identify the retained original')
+    artifact=original['artifact']
+    reference=configuration.get('Image')
+    def repository(value):
+        return docker_image_repository(value.split('@',1)[0])
+    if not isinstance(reference,str) or not docker_image_digest(artifact) or repository(reference)!=repository(artifact):
+        raise RuntimeError('Retained template image is unavailable')
+    pinned=bool(docker_image_digest(reference))
+    if pinned and docker_image_digest(reference)!=docker_image_digest(artifact):
+        raise RuntimeError('Retained template image differs from the admitted artifact')
+    proxy_ids={value.get('NetworkID') for value in proxy_networks.values() if value.get('NetworkID')}
+    attachments=template.get('Networks')
+    if not isinstance(attachments,list) or any(not isinstance(item,dict) for item in attachments):
+        raise RuntimeError('Retained service networks are unavailable')
+    network_ids={item.get('Target') for item in attachments if item.get('Target') in proxy_ids}
+    if not network_ids or not isinstance(binding.get('port'),int) or not 0<binding['port']<65536:
+        raise RuntimeError('Retained service is not attached to the managed proxy')
+    identifiers=docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()
+    if len(identifiers)>10000 or len(identifiers)!=len(set(identifiers)) or any(not item for item in identifiers):
+        raise RuntimeError('Retained task inventory is incomplete')
+    tasks={}
+    for identifier in identifiers:
+        found=json.loads(docker('inspect','--type','task',identifier))
+        if (not isinstance(found,list) or len(found)!=1 or found[0].get('ID')!=identifier
+            or found[0].get('ServiceID')!=service['ID']):
+            raise RuntimeError('Retained task ownership is unavailable')
+        task=found[0]
+        if task.get('NodeID') and task['NodeID']!=local_nodes[0]['ID']:
+            raise RuntimeError('Retained task is outside the local inventory')
+        if task.get('DesiredState') not in {'shutdown','remove'} and task.get('Spec',{}).get('ContainerSpec')!=configuration:
+            raise RuntimeError('Retained task inputs differ from the current template')
+        tasks[identifier]=task
+    owned=[]
+    actual_image=False
+    exact_endpoints=[]
+    for container in containers:
+        labels=container.get('Config',{}).get('Labels') or {}
+        if labels.get('com.docker.swarm.service.id')!=service['ID'] and labels.get('com.docker.swarm.service.name')!=binding['name']:
+            continue
+        if labels.get('com.docker.swarm.service.id')!=service['ID'] or labels.get('com.docker.swarm.service.name')!=binding['name']:
+            raise RuntimeError('Retained container belongs to another service object')
+        owned.append(container)
+        task=tasks.get(labels.get('com.docker.swarm.task.id'))
+        matches=(task is not None and task.get('Spec',{}).get('ContainerSpec')==configuration
+            and task.get('Status',{}).get('ContainerStatus',{}).get('ContainerID')==container['Id'])
+        image_reference=container.get('Config',{}).get('Image')
+        if matches:
+            if not isinstance(container.get('Image'),str) or not _SHA256_DIGEST_RE.fullmatch(container['Image']):
+                raise RuntimeError('Retained actual image identity is unavailable')
+            if image_reference!=reference:
+                raise RuntimeError('Retained actual container image differs from its captured task')
+            image=json.loads(docker('image','inspect',container.get('Image','')))
+            if (not isinstance(image,list) or len(image)!=1 or image[0].get('Id')!=container.get('Image')
+                or not isinstance(image[0].get('RepoDigests'),list) or not any(isinstance(value,str)
+                    and repository(value)==repository(artifact) and docker_image_digest(value)==docker_image_digest(artifact)
+                    for value in image[0]['RepoDigests'])):
+                raise RuntimeError('Retained actual image proof is unavailable')
+            merged=environment(image[0].get('Config',{}).get('Env') or [])
+            merged.update(values)
+            if environment(container.get('Config',{}).get('Env'))!=merged:
+                raise RuntimeError('Retained actual container inputs differ from image and task')
+            actual_image=True
+        elif container.get('State',{}).get('Status')=='running':
+            raise RuntimeError('A running retained container differs from the current template')
+        if container.get('State',{}).get('Status')=='running':
+            attached=container.get('NetworkSettings',{}).get('Networks',{})
+            for name,endpoint in attached.items():
+                if name in proxy_networks and endpoint.get('NetworkID') in network_ids:
+                    if endpoint.get('IPAddress'): exact_endpoints.append('http://'+endpoint['IPAddress']+':'+str(binding['port']))
+            exact_endpoints.extend('http://'+alias+':'+str(binding['port']) for alias in proxy_dns_names(container,proxy_networks))
+    if not pinned and not actual_image:
+        raise RuntimeError('A tag-only retained template has no actual immutable image proof')
+    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
+    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+        raise RuntimeError('Application service inventory is incomplete')
+    for identifier in service_ids:
+        if identifier==service['ID']: continue
+        metadata=json.loads(docker('service','inspect','--format','{"name":{{json .Spec.Name}},"networks":{{json .Spec.TaskTemplate.Networks}}}',identifier))
+        networks=metadata.get('networks')
+        if networks is None and 'networks' in metadata: networks=[]
+        if not isinstance(networks,list): raise RuntimeError('Application network aliases are unavailable')
+        for attachment in networks:
+            if attachment.get('Target') in network_ids and binding['name'].casefold() in {value.casefold() for value in attachment.get('Aliases') or []}:
+                raise RuntimeError('Application private name aliases another service')
+    for container in containers:
+        if container not in owned and binding['name'].casefold() in proxy_dns_names(container,proxy_networks):
+            raise RuntimeError('Application private name is shared')
+    if (json.loads(docker('service','inspect',binding['name']))[0]!=service
+        or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
+        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids
+        or sorted(docker('ps','-aq').decode().splitlines())!=sorted(item['Id'] for item in containers)
+        or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
+        or single_local_swarm_node(docker)!=local_nodes):
+        raise RuntimeError('Retained inventory changed during route observation')
+    return identity,sorted(set(['http://'+binding['name']+':'+str(binding['port']),*exact_endpoints])),service['ID'],template_sha256
 
 def read_fence(proxy_id, name, filesystem):
     return parse_testing_route_fence(docker('exec',proxy_id,'sh','-c',FENCE_READER,'_',DIRECTORY,name,filesystem).decode())
@@ -167,10 +352,12 @@ def main(spec):
     global WRITE_STARTED
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
-    identifiers=docker('ps','-aq').decode().splitlines()
+    identifiers=docker('ps','-aq','--no-trunc').decode().splitlines()
     containers=json.loads(docker('inspect',*identifiers)) if identifiers else []
-    if not isinstance(containers,list) or any(not isinstance(item,dict) for item in containers):
+    if not isinstance(containers,list) or any(not isinstance(item,dict) for item in containers) or len(set(identifiers))!=len(identifiers) or len(containers)!=len(identifiers) or {item.get('Id') for item in containers}!=set(identifiers):
         raise RuntimeError('Managed container inventory is incomplete')
+    if spec.get('unavailable_predecessor') is not None:
+        require_complete_container_inventory(containers)
     proxies=[item for item in containers if item.get('State',{}).get('Status')=='running' and (item.get('Name')=='/dokploy-traefik' or (item.get('Config',{}).get('Labels') or {}).get('com.docker.swarm.service.name')=='dokploy-traefik')]
     if len(proxies)!=1:
         raise RuntimeError('Exactly one running managed proxy is required')
@@ -242,7 +429,7 @@ def main(spec):
     if len(response)>MAX_API_BYTES:
         raise RuntimeError('Managed proxy API response exceeds its bound')
     raw=json.loads(response)
-    raw=selected_raw(raw,spec['host'],spec['entrypoints'])
+    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'),discover_external_redirects=spec.get('unavailable_predecessor') is not None and 'external_middlewares' not in spec)
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
     presence, separator, content=file_read.partition('\n')
@@ -250,11 +437,37 @@ def main(spec):
         raise RuntimeError('Testing route file presence is unverified')
     observed=content if presence=='present' else None
     digest=hashlib.sha256(observed.encode()).hexdigest() if observed is not None else 'absent'
+    application_file=None
+    application_file_name=''
+    application_file_sha256=''
+    if spec.get('old_application') is not None:
+        application_file_name=spec['old_application'].get('route_file_name') or spec['old_application']['name']+'.yml'
+        if not re.fullmatch(r'[A-Za-z0-9_-]+\.yml',application_file_name):
+            raise RuntimeError('Retained application route filename is invalid')
+        value=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; head -c 262145 "$p"; else printf "absent\\n"; fi','_',DIRECTORY,application_file_name).decode()
+        present,separator,body=value.partition('\n')
+        if not separator or present not in {'present','absent'} or len(body.encode())>262144 or (present=='absent' and body):
+            raise RuntimeError('Retained application route file is unavailable')
+        if present=='present':
+            application_file=body
+            application_file_sha256=hashlib.sha256(body.encode()).hexdigest()
+        expected=spec.get('expected_application_file_sha256')
+        if expected and expected!=application_file_sha256:
+            raise RuntimeError('The original application route file changed')
     old_project=spec['old_project']
+    old_availability=retained_copy_availability(containers,{'project':old_project})
+    old_inventory_sha256=retained_inventory_sha256(containers,{'project':old_project})
+    old_web_process=retained_web_process(containers,{'project':old_project})
+    unavailable=spec.get('unavailable_predecessor')
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
     endpoints=[]
     old_identity=None
-    if len(old)==1 and old[0].get('State',{}).get('Status')=='running':
+    old_service_id=''
+    old_task_template_sha256=''
+    application=spec.get('old_application')
+    if application is not None:
+        old_identity,endpoints,old_service_id,old_task_template_sha256=retained_application_backend(containers,application,proxy_networks)
+    elif unavailable is None and len(old)==1 and old[0].get('State',{}).get('Status')=='running':
         environment=dict(item.split('=',1) for item in old[0]['Config'].get('Env',[]) if '=' in item)
         if environment.get('PLATFORM_INSTANCE')!='testing':
             raise RuntimeError('The retained web process is not a testing copy')
@@ -282,29 +495,59 @@ def main(spec):
         custody_matches=same_physical_root(spec['execution_custody'],custody)
         if not custody_matches or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']):
             raise RuntimeError('The original route execution custody changed')
-        if spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest():
+        if unavailable is not None and spec['desired_backend'] is not None and (unavailable.get('project')!=old_project or unavailable.get('availability')!=old_availability or unavailable.get('inventory_sha256')!=old_inventory_sha256 or old_availability not in {'stopped','absent'}):
+            raise RuntimeError('The unavailable testing predecessor changed before forward publication')
+        if unavailable is None and (spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()):
             raise RuntimeError('The retained physical testing copy changed')
-        desired=urlsplit(spec['desired_backend'])
-        if spec['desired_backend']!=spec['retained_backend']:
-            matching=[item for item in containers if desired.hostname.casefold() in proxy_dns_names(item,proxy_networks)]
-            if len(matching)!=1:
-                raise RuntimeError('The candidate testing alias is absent or shared')
-            candidate=matching[0]
-            labels=candidate.get('Config',{}).get('Labels') or {}
-            if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired.hostname or labels.get('com.docker.compose.service')!='web':
-                raise RuntimeError('The candidate testing alias changed ownership')
-            environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
-            port=environment.get('ODOO_HTTP_PORT') or '8069'
-            if not port.isdigit() or not 0<int(port)<65536 or desired.port!=int(port):
-                raise RuntimeError('The candidate testing port changed')
-            identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
-            if not isinstance(identity,dict) or environment.get('PLATFORM_INSTANCE')!='testing':
-                raise RuntimeError('The candidate testing runtime is unavailable')
-            identity.pop('deployed_at',None)
-            if hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=spec['expected_desired_identity_sha256']:
-                raise RuntimeError('The candidate testing runtime changed')
-        elif spec['expected_desired_identity_sha256']!=hashlib.sha256(json.dumps({key:value for key,value in old_identity.items() if key!='deployed_at'},sort_keys=True,separators=(',',':')).encode()).hexdigest():
+        desired=urlsplit(spec['desired_backend']) if spec['desired_backend'] is not None else None
+        if spec['desired_backend'] is not None and spec['desired_backend']!=spec['retained_backend']:
+            assert desired is not None
+            desired_application=spec.get('new_application')
+            if desired_application is not None:
+                candidate,identity,_shared=application_container(containers,desired_application,proxy_networks)
+                if desired.hostname!=desired_application['name'] or desired.port!=desired_application['port']:
+                    raise RuntimeError('The candidate application origin changed')
+                identity.pop('deployed_at',None)
+                if hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=spec['expected_desired_identity_sha256']:
+                    raise RuntimeError('The candidate application runtime changed')
+            else:
+                matching=[item for item in containers if desired.hostname.casefold() in proxy_dns_names(item,proxy_networks)]
+                if len(matching)!=1:
+                    raise RuntimeError('The candidate testing alias is absent or shared')
+                candidate=matching[0]
+                labels=candidate.get('Config',{}).get('Labels') or {}
+                desired_project=spec.get('desired_compose_project') or desired.hostname
+                if not isinstance(desired_project,str) or not re.fullmatch(re.escape(desired.hostname)+r'(?:-[a-z0-9]{6})?',desired_project):
+                    raise RuntimeError('The candidate testing project crossed its namespace')
+                if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired_project or labels.get('com.docker.compose.service')!='web':
+                    raise RuntimeError('The candidate testing alias changed ownership')
+                environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
+                port=environment.get('ODOO_HTTP_PORT') or '8069'
+                if not port.isdigit() or not 0<int(port)<65536 or desired.port!=int(port):
+                    raise RuntimeError('The candidate testing port changed')
+                identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+                if not isinstance(identity,dict) or environment.get('PLATFORM_INSTANCE')!='testing':
+                    raise RuntimeError('The candidate testing runtime is unavailable')
+                identity.pop('deployed_at',None)
+                if hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=spec['expected_desired_identity_sha256']:
+                    raise RuntimeError('The candidate testing runtime changed')
+        elif unavailable is None and spec['expected_desired_identity_sha256']!=hashlib.sha256(json.dumps({key:value for key,value in old_identity.items() if key!='deployed_at'},sort_keys=True,separators=(',',':')).encode()).hexdigest():
             raise RuntimeError('The inverse does not identify its original retained runtime')
+        if spec['desired_backend'] is None:
+            if unavailable is None or spec.get('document_content')!=spec.get('preimage_content'):
+                raise RuntimeError('An unavailable inverse must restore its exact original file')
+            content=spec['document_content']
+            if content is not None and not isinstance(content,str):
+                raise RuntimeError('The unavailable route preimage is invalid')
+            document=content.encode() if content is not None else b''
+            desired_digest=hashlib.sha256(document).hexdigest() if content is not None else 'absent'
+            if spec.get('document_sha256')!=desired_digest:
+                raise RuntimeError('The original unavailable route digest changed')
+            if spec['expected_static_sha256']!=hashlib.sha256(static.encode()).hexdigest() or spec['expected_state_sha256']!=hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(',',':')).encode()).hexdigest() or spec['expected_file_sha256']!=digest:
+                raise RuntimeError('Testing route authority changed before inverse publication')
+            WRITE_STARTED=True
+            outcome=fenced_call(proxy['Id'],spec,custody,'publish',document).strip()
+            return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':desired_digest,'execution_custody':custody,'writer_outcome':outcome}
         document=spec['document']
         http=document.get('http',{})
         if set(document)!={'http'} or set(http)-{'routers','services','middlewares'} or set(http.get('services',{}))!={spec['route_id']}:
@@ -327,7 +570,7 @@ def main(spec):
         return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem)}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_web_process':old_web_process,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
 
 if __name__=='__main__':
     payload={}
@@ -359,18 +602,31 @@ class DokployTestingRouteTransport:
         context: str,
         public_host: str,
         entrypoints: tuple[str, ...],
-        old_runtime_identity: RuntimeIdentity,
+        old_runtime_identity: RuntimeIdentity | None,
+        unavailable_predecessor: dict[str, Any] | None = None,
+        external_middlewares: tuple[str, ...] | None = None,
+        old_application: dict[str, object] | None = None,
+        new_application: dict[str, object] | None = None,
     ) -> None:
         from control_plane.dokploy.testing_route import testing_route_id
 
         self.host, self.token, self.server_id = host, token, server_id
         self.old_runtime_identity = old_runtime_identity
+        self.product, self.context = product, context
         self.payload: dict[str, object] = {
             "route_id": testing_route_id(product, context),
             "host": public_host,
             "old_project": old_project,
             "entrypoints": entrypoints,
         }
+        if old_application is not None:
+            self.payload.update(old_application=old_application, new_application=new_application)
+        elif old_runtime_identity is None and unavailable_predecessor is None:
+            raise ValueError("Compose routes require their captured runtime identity.")
+        if unavailable_predecessor is not None:
+            self.payload["unavailable_predecessor"] = unavailable_predecessor
+        if external_middlewares is not None:
+            self.payload["external_middlewares"] = external_middlewares
 
     def _run(
         self,
@@ -428,16 +684,47 @@ class DokployTestingRouteTransport:
                 "The managed proxy does not watch its directory mount.",
             )
         observed_identity = parse_runtime_identity_payload(frame.get("old_identity"))
-        if observed_identity is not None and observed_identity.model_dump(
-            exclude={"deployed_at"}
-        ) != self.old_runtime_identity.model_dump(exclude={"deployed_at"}):
+        if self.old_runtime_identity is None and self.payload.get("old_application") is not None:
+            if observed_identity is None:
+                raise TestingRouteObservationRefused(
+                    "testing_route_identity_changed",
+                    "The retained application runtime is unavailable.",
+                )
+            self.old_runtime_identity = observed_identity
+        application = self.payload.get("old_application")
+        if isinstance(application, dict):
+            for key, field in (
+                ("service_id", "old_service_id"),
+                ("task_template_sha256", "old_task_template_sha256"),
+            ):
+                value = frame.get(field)
+                if not value or application.get(key) and application[key] != value:
+                    raise TestingRouteObservationRefused(
+                        "testing_route_identity_changed", "The retained service witness changed."
+                    )
+                application[key] = value
+        if (
+            "unavailable_predecessor" not in self.payload
+            and self.old_runtime_identity is not None
+            and observed_identity is not None
+            and observed_identity.model_dump(exclude={"deployed_at"})
+            != self.old_runtime_identity.model_dump(exclude={"deployed_at"})
+        ):
             raise TestingRouteObservationRefused(
                 "testing_route_identity_changed", "Retained testing runtime identity changed."
             )
         return frame
 
+    def unavailable_predecessor_matches(self, frame: dict[str, Any]) -> bool:
+        expected = self.payload.get("unavailable_predecessor")
+        return isinstance(expected, dict) and (
+            frame.get("old_availability") == expected["availability"]
+            and frame.get("old_inventory_sha256") == expected["inventory_sha256"]
+            and frame.get("old_availability") in {"stopped", "absent"}
+        )
+
     def execution_intent(
-        self, plan: TestingLaneRoute, backend: str, *, operation_id: str
+        self, plan: TestingLaneRoute, backend: str | None, *, operation_id: str
     ) -> TestingRouteExecutionIntent:
         if (plan.route_id, plan.host) != (
             self.payload["route_id"],
@@ -451,7 +738,7 @@ class DokployTestingRouteTransport:
             route_id=plan.route_id,
             route_digest=plan.digest,
             backend=backend,
-            document_sha256=canonical_json_sha256(route_document(plan, backend)),
+            document_sha256=route_document_digest(plan, backend),
             custody=TestingRouteExecutionCustody.model_validate(frame["execution_custody"]),
         )
 
@@ -606,15 +893,18 @@ class DokployTestingRouteTransport:
     def publish(
         self,
         plan: TestingLaneRoute,
-        backend: str,
+        backend: str | None,
         *,
-        expected_backend: str,
+        expected_backend: str | None,
         dispatch_guard: Callable[[Callable[[], None]], None],
-        desired_runtime_identity: RuntimeIdentity,
+        desired_runtime_identity: RuntimeIdentity | None,
         execution: TestingRouteExecutionIntent,
         execution_key: str,
         writer_attempt: TestingRouteWriterAttempt,
+        desired_compose_project: str | None = None,
     ) -> Literal["applied", "excluded", "busy", "unknown", "superseded"]:
+        if plan.unavailable_preimage is None and self.old_runtime_identity is None:
+            raise ValueError("Publication requires the originally observed retained runtime.")
         if not self.payload["entrypoints"]:
             raise ValueError("Testing publication requires its discovered entrypoints to be bound.")
         if (plan.route_id, plan.host) != (
@@ -622,13 +912,16 @@ class DokployTestingRouteTransport:
             self.payload["host"],
         ) or expected_backend not in {plan.old_backend, plan.new_backend}:
             raise ValueError("Testing route publication crossed its admitted lane or copy.")
-        if (
+        if desired_runtime_identity is None:
+            if backend is not None or plan.unavailable_preimage is None:
+                raise ValueError("Only an unavailable inverse may omit its runtime identity.")
+        elif (
             desired_runtime_identity.product,
             desired_runtime_identity.context,
             desired_runtime_identity.instance,
         ) != (
-            self.old_runtime_identity.product,
-            self.old_runtime_identity.context,
+            self.product,
+            self.context,
             "testing",
         ):
             raise ValueError("The desired testing runtime belongs to another lane.")
@@ -643,12 +936,27 @@ class DokployTestingRouteTransport:
             plan.route_id,
             plan.digest,
             backend,
-            canonical_json_sha256(route_document(plan, backend)),
+            route_document_digest(plan, backend),
         ):
             raise ValueError("The original route execution intent changed.")
         if writer_attempt.execution != execution or writer_attempt.key != execution_key:
             raise ValueError("The physical writer attempt changed its original intent.")
         frame = self.read()
+        if (
+            plan.unavailable_preimage is not None
+            and backend is not None
+            and not self.unavailable_predecessor_matches(frame)
+        ):
+            raise TestingRouteWriteNotStarted("The predecessor changed before the forward write.")
+        if (
+            plan.unavailable_preimage is not None
+            and backend is not None
+            and testing_route_static_sha256(frame["static_configuration"], plan.template)
+            != plan.unavailable_preimage.static_sha256
+        ):
+            raise TestingRouteWriteNotStarted(
+                "The original managed testing listener configuration changed."
+            )
         custody = TestingRouteExecutionCustody.model_validate(frame["execution_custody"])
         custody_matches = custody.physical_sha256 == writer_attempt.custody.physical_sha256
         if not custody_matches:
@@ -656,13 +964,21 @@ class DokployTestingRouteTransport:
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
-        observed = observe_testing_route(plan, frame["raw"], owned)
-        if observed not in {expected_backend, backend}:
-            raise ValueError("Testing route no longer identifies its admitted previous copy.")
-        intended = route_document(plan, backend)
-        if owned == intended:
+        content = route_document_content(plan, backend)
+        intended = json.loads(content) if content is not None else None
+        if backend is None and plan.unavailable_preimage is not None:
+            if frame["owned_file"] not in {
+                content,
+                route_document_content(plan, plan.new_backend),
+            }:
+                raise ValueError("The inverse cannot overwrite a foreign testing route file.")
+        else:
+            observed = observe_testing_route(plan, frame["raw"], owned)
+            if observed not in {expected_backend, backend}:
+                raise ValueError("Testing route no longer identifies its admitted previous copy.")
+        if (backend is not None and owned == intended) or frame["owned_file"] == content:
             return "applied"
-        if (
+        if plan.unavailable_preimage is None and (
             plan.old_backend not in frame["old_endpoints"]
             or parse_runtime_identity_payload(frame.get("old_identity")) is None
         ):
@@ -674,24 +990,51 @@ class DokployTestingRouteTransport:
             or frame["file_sha256"] != writer_attempt.expected_file_sha256
         ):
             raise TestingRouteWriteNotStarted("The original route attempt is no longer current.")
+        desired_identity = (
+            desired_runtime_identity.model_dump(mode="json", exclude={"deployed_at"})
+            if desired_runtime_identity is not None
+            else None
+        )
+        if plan.unavailable_preimage is None and backend == plan.old_backend:
+            observed_identity = parse_runtime_identity_payload(frame["old_identity"])
+            if (
+                observed_identity is None
+                or observed_identity.model_dump(mode="json", exclude={"deployed_at"})
+                != desired_identity
+            ):
+                raise ValueError("The inverse desired identity differs from its captured original.")
+            # Bind the native comparison to the same observed representation.
+            # Accepted omitted defaults are already normalized by the host model.
+            desired_identity = {
+                key: value for key, value in frame["old_identity"].items() if key != "deployed_at"
+            }
         receipt = self._run(
             {
                 "mode": "publish_v2",
                 "execution_key": execution_key,
                 "execution_custody": writer_attempt.custody.model_dump(mode="json"),
                 "document": intended,
+                "document_content": content,
+                "document_sha256": execution.document_sha256,
+                "preimage_content": plan.unavailable_preimage.file_content
+                if plan.unavailable_preimage
+                else None,
                 "retained_backend": plan.old_backend,
                 "desired_backend": backend,
+                "desired_compose_project": desired_compose_project,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
                 "expected_old_identity_sha256": canonical_json_sha256(frame["old_identity"]),
-                "expected_desired_identity_sha256": canonical_json_sha256(
-                    desired_runtime_identity.model_dump(mode="json", exclude={"deployed_at"})
-                ),
+                "expected_desired_identity_sha256": canonical_json_sha256(desired_identity),
                 "expected_file_sha256": frame["file_sha256"],
                 "expected_static_sha256": hashlib.sha256(
                     frame["static_configuration"].encode()
                 ).hexdigest(),
                 "expected_state_sha256": canonical_json_sha256(frame["raw"]),
+                **(
+                    {"expected_application_file_sha256": plan.application_file_sha256}
+                    if plan.application_file_sha256
+                    else {}
+                ),
                 "generation": writer_attempt.fence.generation,
                 "fence": writer_attempt.fence.model_dump(mode="json"),
             },

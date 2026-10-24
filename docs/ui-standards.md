@@ -39,9 +39,10 @@ as evidence around it.
 
 Product Ops is the default top-level surface. Merge-train control and platform
 maintenance belong to a separate Engineering Ops navigation area. Sharing a
-shell does not justify mixing the two jobs on one first screen. The work-graph,
-issue-inbox, Every Code, and ordinary-agent views still in Engineering Ops are
-retired (see [DIRECTION.md](../DIRECTION.md)) and get no new UI work.
+shell does not justify mixing the two jobs on one first screen. The unused
+Work graph and Issue inbox have been removed. The Every Code and ordinary-agent
+views still in Engineering Ops are retired (see [DIRECTION.md](../DIRECTION.md))
+and get no new UI work.
 
 The top-level picker chooses a product workspace, not a raw Launchplane context.
 Use display names such as `SellYourOutboard`, `VeriReel`, `Odoo CM`, and

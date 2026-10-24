@@ -16,8 +16,11 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     is_exclusive_product_context,
     product_context_owner_map,
+    product_profiles_share_repository,
     product_target_owner_products,
+    validate_product_profile_classification_transition,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -81,6 +84,98 @@ class OdooInstanceOverrideWrite(BaseModel):
 
 class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
+
+
+class ProductRepositoryOwnershipError(ValueError):
+    code = "repository_owned_by_other_product"
+
+
+def _known_repository_collision_ids(
+    profile: LaunchplaneProductProfileRecord,
+    inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]],
+    inventory_history: tuple[RepositoryInventoryRecord, ...],
+) -> set[str]:
+    repository = profile.repository.strip().lower()
+    current_ids = {
+        record.repository_id
+        for current in inventory_streams.values()
+        for record in current
+        if record.repository == repository
+    }
+    known_ids = current_ids or {
+        record.repository_id for record in inventory_history if record.repository == repository
+    }
+    return ({profile.repository_id} if profile.repository_id else set()) | known_ids
+
+
+def require_product_profile_writes(
+    records: Iterable[LaunchplaneProductProfileRecord],
+    current_profiles: Iterable[LaunchplaneProductProfileRecord],
+    *,
+    inventory_records: Iterable[RepositoryInventoryRecord],
+    absent_product_ids: tuple[str, ...] = (),
+) -> None:
+    profiles = {profile.product: profile for profile in current_profiles}
+    if any(product in profiles for product in absent_product_ids):
+        raise ProductProfileConflictError("Product was registered before commit.")
+    inventory_streams: dict[str, tuple[RepositoryInventoryRecord, ...]] | None = None
+    inventory_history: tuple[RepositoryInventoryRecord, ...] = ()
+    for record in records:
+        record = LaunchplaneProductProfileRecord.model_validate(record.model_dump(mode="json"))
+        current = profiles.get(record.product)
+        validate_product_profile_classification_transition(
+            existing_profile=current, replacement_profile=record
+        )
+        if record.is_active:
+            peers = tuple(
+                other
+                for other in profiles.values()
+                if other.product != record.product
+                and other.is_active
+                and not (record.is_managed_runtime and other.is_managed_runtime)
+            )
+            if any(product_profiles_share_repository(record, other) for other in peers):
+                raise ProductRepositoryOwnershipError(
+                    "Repository already belongs to another product."
+                )
+            ownership_changed = (
+                current is None
+                or not current.is_active
+                or record.repository.strip().lower() != current.repository.strip().lower()
+                or record.repository_id != current.repository_id
+                or record.repository_owner_id != current.repository_owner_id
+            )
+            if ownership_changed and peers:
+                if inventory_streams is None:
+                    inventory_streams = {}
+                    inventory_history = tuple(inventory_records)
+                    for inventory in inventory_history:
+                        current_inventory = inventory_streams.get(inventory.repository_id, ())
+                        if (
+                            not current_inventory
+                            or inventory.inventory_revision
+                            > current_inventory[0].inventory_revision
+                        ):
+                            inventory_streams[inventory.repository_id] = (inventory,)
+                        elif (
+                            inventory.inventory_revision == current_inventory[0].inventory_revision
+                        ):
+                            inventory_streams[inventory.repository_id] = (
+                                *current_inventory,
+                                inventory,
+                            )
+                known_ids = _known_repository_collision_ids(
+                    record, inventory_streams, inventory_history
+                )
+                if any(
+                    known_ids
+                    & _known_repository_collision_ids(other, inventory_streams, inventory_history)
+                    for other in peers
+                ):
+                    raise ProductRepositoryOwnershipError(
+                        "Repository already belongs to another product."
+                    )
+        profiles[record.product] = record
 
 
 class PublicHostAuthorityBusy(RuntimeError):
@@ -234,6 +329,9 @@ class ProductAuthorityBundle(BaseModel):
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    absent_product_ids: tuple[str, ...] = ()
+    expected_dokploy_targets: tuple[DokployTargetRecord, ...] = ()
+    expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
@@ -266,6 +364,20 @@ class ProductAuthorityBundle(BaseModel):
     # (product, context, instance); an empty instance checks the whole context.
     # This also covers authorized admins configuring Launchplane itself.
     required_product_config_target: tuple[str, str, str] | None = None
+
+    @model_validator(mode="after")
+    def validate_profile_absence(self) -> "ProductAuthorityBundle":
+        written = {profile.product for profile in self.product_profiles}
+        expected = {profile.product for profile in self.expected_product_profiles}
+        if len(set(self.absent_product_ids)) != len(self.absent_product_ids) or any(
+            not product
+            or product != product.strip()
+            or product not in written
+            or product in expected
+            for product in self.absent_product_ids
+        ):
+            raise ValueError("Absent product expectations require unique newly written products.")
+        return self
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:

@@ -19,6 +19,7 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import secrets as control_plane_secrets
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
     EveryCodeNotificationDestination,
@@ -2828,6 +2829,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("test:discord-blue-onboarding", json.dumps(payload, sort_keys=True))
 
     def test_generic_web_onboarding_dry_run_binds_apply_and_repository_identity(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2902,38 +2906,133 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
+            applied_request: dict[str, object] = {
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": "apply",
+                "reviewed_plan_sha256": plan_sha256,
+                "resolved_target_id": "app-demo-web",
+                "generic_web": generic_web,
+            }
+            store = PostgresRecordStore(database_url=database_url)
+            adopted_target = DokployTargetRecord(
+                context="demo-web-testing",
+                instance="testing",
+                target_type="application",
+                project_name="generated-project",
+                target_name="generated-target",
+                updated_at="2026-10-23T00:00:00Z",
+                source_label="test:adopted",
+            )
+            adopted_id = DokployTargetIdRecord(
+                context=adopted_target.context,
+                instance=adopted_target.instance,
+                target_id="app-demo-web",
+                updated_at=adopted_target.updated_at,
+                source_label=adopted_target.source_label,
+            )
+            store.write_dokploy_target_record(adopted_target)
+            store.write_dokploy_target_id_record(adopted_id)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=adopted_target,
+                    target_id_record=adopted_id,
+                )
+            )
+            write_bundle = PostgresRecordStore.write_product_authority_bundle
+
+            with patch.object(
+                PostgresRecordStore,
+                "read_dokploy_target_id_record",
+                side_effect=FileNotFoundError("fixture missing identity"),
+            ):
+                missing_status, missing_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(missing_status, 400, missing_payload)
+            self.assertFalse(store.list_product_profile_records())
+
+            def race_target(current_store: PostgresRecordStore, bundle: Any) -> None:
+                concurrent = adopted_target.model_copy(update={"target_name": "concurrent-target"})
+                store.write_dokploy_target_record(concurrent)
+                store.write_provider_target_record(
+                    ProviderTargetRecord.from_dokploy_records(
+                        target_record=concurrent,
+                        target_id_record=adopted_id,
+                    )
+                )
+                write_bundle(current_store, bundle)
+
+            with patch.object(PostgresRecordStore, "write_product_authority_bundle", race_target):
+                race_status, race_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(race_status, 409, race_payload)
+            self.assertFalse(store.list_product_profile_records())
+            store.close()
             apply_status, apply_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             replay_status, replay_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
+                first_lookup = True
+                read_receipt = PostgresRecordStore.read_idempotency_record
+
+                def delayed_receipt(
+                    current_store: PostgresRecordStore,
+                    *,
+                    scope: str,
+                    route_path: str,
+                    idempotency_key: str,
+                ) -> LaunchplaneIdempotencyRecord | None:
+                    nonlocal first_lookup
+                    if first_lookup and route_path == "/v1/product-onboarding/apply":
+                        first_lookup = False
+                        return None
+                    return read_receipt(
+                        current_store,
+                        scope=scope,
+                        route_path=route_path,
+                        idempotency_key=idempotency_key,
+                    )
+
+                with patch.object(PostgresRecordStore, "read_idempotency_record", delayed_receipt):
+                    raced_status, raced_payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/product-onboarding/apply",
+                        payload=applied_request,
+                        headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                    )
+                self.assertEqual(raced_status, 202, raced_payload)
+                self.assertEqual(raced_payload["original_trace_id"], apply_payload["trace_id"])
+                self.assertEqual(raced_payload["result"], apply_payload["result"])
                 profiles = store.list_product_profile_records()
                 profile = store.read_product_profile_record("demo-web")
+                registered_target = store.read_dokploy_target_record(
+                    context_name="demo-web-testing", instance_name="testing"
+                )
+                self.assertEqual(registered_target.target_name, "concurrent-target")
+                self.assertEqual(registered_target.project_name, adopted_target.project_name)
                 runtime_environments = store.list_runtime_environment_records(
                     context_name="demo-web-preview"
                 )
@@ -3902,7 +4001,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 domain_routes.append((domain_host, runtime_port))
                 return "domain-123"
 
+            from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
             with (
+                patch(
+                    "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                    return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+                ),
                 patch(
                     "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
