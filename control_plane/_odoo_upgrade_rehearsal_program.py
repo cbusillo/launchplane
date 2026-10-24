@@ -858,7 +858,7 @@ def main():
     if root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Rehearsal custody path is aliased')
     action=spec['action']
-    if action in {'retire-incomplete','abandon-validation'}:
+    if action in {'retire-incomplete','abandon-validation'} or retaining_final_recovery(spec):
         incomplete_retirement(spec,root)
         return
     if action in {'rebuild-final','validate-business'}:

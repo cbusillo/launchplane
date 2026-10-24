@@ -3392,10 +3392,59 @@ key and new evidence file:
    network, stops the disposable web writer, and preserves the final upgraded
    database/filestore tuple. Product business validation remains part of the
    consuming rehearsal; health/login proof is not Client acceptance.
-5. `retire` stops web, runner and database and preserves all recovery custody.
+5. Without a consumer confirmation, `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
    volumes, provider placement, snapshots or keys. Their custodian carries them
-   into the rollback rehearsal before a separately reviewed physical disposal.
+   into the rollback rehearsal or use the confirmed-final-input cleanup below.
+
+#### Retire working copies while retaining final recovery inputs
+
+After ordinary preserving `retire` completes, the same `retire` action can free
+the working runtime/storage and initial source snapshot while keeping
+`final_source` and `final_upgrade`. First confirm with the downstream consumer
+that those two are its only required database/filestore inputs. Record that
+confirmation and retain the receipt/lineage metadata. This operation admits
+only a retired generation with exactly the initial source and both final tuples;
+`retire-incomplete` still refuses verified or retired final recovery custody.
+
+Keep the original rehearsal intent and add:
+
+```json
+"consumer_confirmation": {
+  "evidence": "https://example.invalid/recovery-input-confirmation",
+  "preserving_retire_key": "<completed-preserving-retire-key>"
+}
+```
+
+The existing admin attests that the reference records the consumer's
+confirmation. Launchplane binds it to the reviewed record, original preserving
+journal and exact native inventory; it does not fetch or validate the linked
+discussion. No tenant identity or issue is runtime authority in code.
+
+Use `scripts/odoo-upgrade-rehearsal.py dry-run` with this payload, a **new**
+stable `--idempotency-key` and a new private `--evidence-file`. Review the
+inventory and retained tuples before `apply --reviewed-dry-run` with that same
+new key and evidence file. The preserving key is only an attribution reference:
+its completed journal and fixed retire receipt remain unchanged. A different new
+key cannot adopt an admitted or uncertain cleanup. After any timeout, use
+`readback` with the confirmed payload and the cleanup's original new key before
+continuing its supported recovery.
+
+The guarded retirement proves exclusive custody, idle execs, exact container,
+volume and network identities, and resource absence before releasing source
+bytes. Its durable manifest supports partial deletion under the original key.
+Both final tuples, `capture.json`, phase receipts and other metadata remain in
+managed custody; the final tuples are hash-verified again after cleanup and by
+independent confirmed-retire readback. A changed or aliased final tuple refuses.
+
+`copies` remains the historical receipt inventory. In `host_disposal`,
+`recovery_snapshots` identifies the released initial snapshot and
+`retained_snapshots` identifies the two surviving byte inputs. They are not
+interchangeable. The result reports `resources_preserved: false` for the removed
+working resources, without releasing the final snapshots. Ordinary ungated
+readback cannot inspect a removed placement; use confirmed-retire readback.
+Replaying the old preserving apply still returns its historical preserving
+result, which is not a current byte inventory.
 
 #### UTC rehearsal timing
 

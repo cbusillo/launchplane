@@ -155,11 +155,15 @@ def register_odoo_upgrade_rehearsal_routes(
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
-            if body.action in {"retire-incomplete", "abandon-validation"}:
+            if body.action in {"retire-incomplete", "abandon-validation"} or (
+                body.action == "retire" and body.consumer_confirmation is not None
+            ):
                 from control_plane.odoo_incomplete_rehearsal_retirement import (
                     IncompleteRehearsalRetirement,
                 )
 
+                if body.consumer_confirmation is not None and not idempotency_key.strip():
+                    refuse(400, "idempotency_key_required")
                 retirement = IncompleteRehearsalRetirement(adapter, idempotency_key)
                 if body.mode == "apply":
                     return await run_provider_mutation(
