@@ -1,7 +1,9 @@
 import unittest
+from inspect import signature
 from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -13,6 +15,7 @@ from control_plane.contracts.product_reconcile import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_reconcile_read import _MAX_TEXT_LENGTH, product_reconcile_request_view
+from control_plane.product_path_check import build_product_path_check, read_path_check_inputs
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _product_profile_read_policy
 from tests.support.auth import StubVerifier, identity
@@ -97,6 +100,73 @@ async def _read_requests(*, product: str, read_product: str) -> tuple[int, str, 
 
 
 class ProductReconcileRequestsRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_testing_evidence_stays_visible_beyond_preview_history(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=sqlite_database_url(Path(directory) / "lp.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("sellyouroutboard")
+        )
+        store.write_product_profile_record(profile)
+        default_limit = signature(store.list_product_reconcile_requests).parameters["limit"].default
+        preview_count = default_limit + 1 if isinstance(default_limit, int) else 2
+        for number in range(preview_count):
+            _write_request(store, product=profile.product, number=number + 1)
+        target = ProductReconcileTarget(product=profile.product, target_kind="testing")
+        store.request_product_reconcile(target, "2026-10-01T00:00:00Z")
+        claimed = store.claim_next_product_reconcile_request("worker", 60)
+        assert claimed is not None
+        artifact_id = f"ghcr.io/example/site@{_DIGEST}"
+        completed = store.complete_product_reconcile_request(
+            claimed.target_key,
+            "worker",
+            "done",
+            {
+                "action": "none",
+                "reason": "already_deployed",
+                "held": False,
+                "current_artifact_id": artifact_id,
+                "desired_artifact_id": artifact_id,
+                "current_commit": _COMMIT,
+                "desired_commit": _COMMIT,
+                "current_image_digest": _DIGEST,
+                "desired_image_digest": _DIGEST,
+            },
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(identity()),
+            authz_policy=_product_profile_read_policy(product=profile.product),
+            record_store_factory=lambda: store,
+        )
+        response = await _asgi_get(
+            app,
+            _ROUTE.format(product=profile.product),
+            headers={"Authorization": "Bearer valid-token"},
+        )
+        with self.subTest(read="reconcile"):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn(
+                completed.target_key,
+                [request["target_key"] for request in response.json()["requests"]],
+            )
+        with self.subTest(read="testing_path"):
+            inputs = read_path_check_inputs(
+                path="testing",
+                profile=profile,
+                record_store=store,
+                action_allowed=Mock(),
+                caller_is_admin=lambda: False,
+                read_release_review=Mock(),
+                generated_at=completed.updated_at,
+            )
+            check = build_product_path_check(product=profile.product, path="testing", inputs=inputs)
+            testing_step = next(step for step in check.steps if step.step_id == "testing_deploy")
+            self.assertEqual(testing_step.state, "clear")
+            self.assertEqual(testing_step.record_ids, (artifact_id,))
+
     async def test_returns_the_products_decisions_without_secret_values(self) -> None:
         status, text, payload = await _read_requests(
             product="sellyouroutboard", read_product="sellyouroutboard"
