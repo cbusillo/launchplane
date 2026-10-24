@@ -171,6 +171,7 @@ _DRILL_STEPS = (
     ClientReleaseStep("backup", 2),
     ClientReleaseStep("promote", 2),
 )
+ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T15:00:00Z"
 
 
 class ClientReleaseFailureView(BaseModel):
@@ -308,9 +309,23 @@ def _product_drill_passed(store: object, profile: LaunchplaneProductProfileRecor
     for decision in record_store.list_release_review_decision_records(product=profile.product):
         if decision.release_start != "promote_with_rollback_drill":
             continue
+        if _drill_predates_rollback_code(decision):
+            continue
         if _step_status(record_store, profile, decision, final_step)[0] == "pass":
             return True
     return False
+
+
+def _drill_predates_rollback_code(decision: ReleaseReviewDecisionRecord) -> bool:
+    try:
+        decided_at = parse_launchplane_mutation_timestamp(
+            decision.decided_at, field_name="decided_at"
+        )
+    except ValueError:
+        return True
+    return decided_at < parse_launchplane_mutation_timestamp(
+        ROLLBACK_DRILL_CODE_CHANGED_AT, field_name="rollback_drill_code_changed_at"
+    )
 
 
 def client_release_grant(

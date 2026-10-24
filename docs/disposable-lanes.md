@@ -2148,6 +2148,19 @@ and key; the client never retries automatically. `readback` reads retained
 custody without a review file. It reports unverified original authority and
 unknown historical effects; it never returns a safe-release assertion.
 
+The same client's `inspect` mode attributes each reserved hostname in that context
+to its retained generation or allocation, original target ID, operation and custody
+digest. It uses the reservation guard's own enumeration. It requires the original
+product, context, operation and reason, but no key or review file. It makes no provider call or
+record change and leaves the original receipt and hostname reservations intact.
+These coordinates let the supported exact-target inspector read the preserved
+recipients. Missing preparation custody leaves its product and target ID null,
+while preserving the hostname reservation. The result is
+`qualification=not_evaluated` and `hostname_release_authorized=false`: it proves
+recorded custody, not physical route absence, executor exclusion, non-use or
+permission to transfer the name. A canonical hostname amendment still requires
+those current observations and a separately reviewed supported continuation.
+
 Retirement sends no provider command and never cancels, changes a journal digest,
 recaptures, restores, edits credentials, starts web or queues reconciliation.
 The archive preserves the entire generation, held operation snapshot, target

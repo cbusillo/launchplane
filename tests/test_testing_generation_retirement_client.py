@@ -12,7 +12,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.testing_generation_retirement import TestingGenerationRetirementPlan
+from control_plane.testing_generation_retirement import (
+    TestingGenerationRetirementPlan,
+    TestingGenerationCustodyInspection,
+    RetainedTestingHostnameReservation,
+)
 
 
 class TestingGenerationRetirementClientTests(unittest.TestCase):
@@ -94,6 +98,43 @@ class TestingGenerationRetirementClientTests(unittest.TestCase):
                 request.call_args_list[0].kwargs["body"]["reviewed_plan_sha256"], plan.plan_sha256
             )
             self.assertEqual(request.call_args_list[1].kwargs["body"]["mode"], "readback")
+            self.assertEqual(evidence.read_bytes(), saved)
+            request.reset_mock()
+            inspection = TestingGenerationCustodyInspection(
+                plan=plan.model_copy(update={"applied": True}),
+                reservations=(
+                    RetainedTestingHostnameReservation(
+                        source_kind="retained_generation",
+                        product=plan.product,
+                        context=plan.context,
+                        operation_id=plan.operation_id,
+                        target_id="original-recipient",
+                        hostname="testing.example.invalid",
+                        custody_sha256=canonical_json_sha256({"fixture": "custody"}),
+                    ),
+                ),
+            )
+            request.return_value = {**receipt(True), "result": inspection.model_dump(mode="json")}
+            status, observed = call("inspect")
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                observed["reservations"], inspection.model_dump(mode="json")["reservations"]
+            )
+            self.assertFalse(observed["hostname_release_authorized"])
+            self.assertEqual(request.call_count, 1)
+            self.assertNotIn("idempotency_key", request.call_args.kwargs)
+            self.assertEqual(evidence.read_bytes(), saved)
+            request.return_value = {
+                **receipt(True),
+                "result": inspection.model_copy(
+                    update={
+                        "reservations": (
+                            inspection.reservations[0].model_copy(update={"context": "another"}),
+                        )
+                    }
+                ).model_dump(mode="json"),
+            }
+            self.assertEqual(call("inspect")[0], 1)
             self.assertEqual(evidence.read_bytes(), saved)
             request.reset_mock()
             request.side_effect = http.client.IncompleteRead(b"", 1)
