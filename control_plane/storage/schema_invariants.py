@@ -83,6 +83,26 @@ class SchemaCheckInspectorProtocol(SchemaInspectorProtocol, Protocol):
         raise NotImplementedError
 
 
+@dataclass(frozen=True)
+class _BatchedSchemaInspector:
+    columns: Mapping[tuple[str | None, str], Sequence[Mapping[str, object]]]
+    indexes: Mapping[tuple[str | None, str], Sequence[Mapping[str, object]]]
+    primary_keys: Mapping[tuple[str | None, str], Mapping[str, object]]
+    checks: Mapping[tuple[str | None, str], Sequence[Mapping[str, object]]]
+
+    def get_columns(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        return self.columns.get((None, table_name), ())
+
+    def get_indexes(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        return self.indexes.get((None, table_name), ())
+
+    def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
+        return self.primary_keys.get((None, table_name), {})
+
+    def get_check_constraints(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        return self.checks.get((None, table_name), ())
+
+
 def _schema_metadata_text(value: Any) -> str:
     return str(value)
 
@@ -1688,19 +1708,36 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
     _verify_alembic_head(engine)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+    metadata = _BatchedSchemaInspector(
+        columns=inspector.get_multi_columns(
+            filter_names=sorted({item.table_name for item in CRITICAL_POSTGRES_COLUMN_TYPES})
+        ),
+        indexes=inspector.get_multi_indexes(
+            filter_names=sorted({item.table_name for item in CRITICAL_SCHEMA_INDEXES} & table_names)
+        ),
+        primary_keys=inspector.get_multi_pk_constraint(
+            filter_names=sorted({item.table_name for item in CRITICAL_PRIMARY_KEYS} & table_names)
+        ),
+        checks=inspector.get_multi_check_constraints(
+            filter_names=sorted(
+                {item.table_name for item in ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS}
+                & table_names
+            )
+        ),
+    )
     errors = [
-        *critical_column_type_errors(inspector),
+        *critical_column_type_errors(metadata),
         *critical_index_errors(
-            inspector=inspector,
+            inspector=metadata,
             table_names=table_names,
             index_definitions=postgres_index_definitions(engine),
         ),
         *critical_primary_key_errors(
-            inspector,
+            metadata,
             table_names=table_names,
         ),
         *critical_check_constraint_errors(
-            inspector,
+            metadata,
             table_names=table_names,
             expected_checks=ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS,
         ),
