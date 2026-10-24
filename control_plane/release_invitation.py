@@ -42,6 +42,10 @@ from control_plane.workflows.launchplane import (
 # How often a worker confirms that a decision on unchanged lane versions still covers
 # the current checklist. Changed test notes can invalidate it without a new candidate.
 SETTLED_DECISION_RECHECK_SECONDS = 1800
+WEBSITE_SETTINGS_REVIEW_NOTE = (
+    "- Website settings: review the prepared search indexing, analytics and cookie "
+    "consent settings on the release page. They apply only after you accept."
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -380,14 +384,12 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    identity: tuple[str, ...] = (
+    identity = (
         product,
         candidate.artifact_id,
         candidate.source_commit,
         candidate.shared_addons_digest,
     )
-    if candidate.website_settings_sha256:
-        identity += (candidate.website_settings_sha256,)
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
 
@@ -682,7 +684,9 @@ def publish_release_invitation(
     receipt = (
         profile.product,
         profile.repository,
-        request_marker + release_invitation_marker(profile.product, candidate),
+        request_marker
+        + release_invitation_marker(profile.product, candidate)
+        + candidate.website_settings_sha256,
     )
     receipt_due = False
     if backoff is not None:
@@ -767,10 +771,7 @@ def publish_release_invitation(
         change_links = {key: _change_link(change) for key, change in client_changes.items()}
         notification_links = {key: change_links[key] for key in notification_changes}
         if settings_key:
-            change_links[settings_key] = (
-                "- Website settings: review the prepared search indexing, analytics and cookie "
-                "consent settings on the release page. They apply only after you accept."
-            )
+            change_links[settings_key] = WEBSITE_SETTINGS_REVIEW_NOTE
             notification_links[settings_key] = change_links[settings_key]
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
@@ -877,10 +878,13 @@ def publish_release_invitation(
             # An unchanged candidate can still have a request from before release
             # steps were displayed, or corrected notes on its source PR. Refresh
             # that content silently before trusting or reminding from the receipt.
-            release_steps_changed = request is not None and any(
-                link not in _comment_lines(request)
-                for key, link in change_links.items()
-                if key == settings_key or client_changes[key].release_test_notes
+            release_steps_changed = request is not None and (
+                (WEBSITE_SETTINGS_REVIEW_NOTE in _comment_lines(request)) != bool(settings_key)
+                or any(
+                    link not in _comment_lines(request)
+                    for key, link in change_links.items()
+                    if key == settings_key or client_changes[key].release_test_notes
+                )
             )
             if (
                 request
@@ -968,12 +972,16 @@ def publish_release_invitation(
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
-                "review the prepared website settings on the release page, then press **Accept** or **Request changes**."
-                if settings_key
-                else "check the changes on the testing site, then press **Accept** or **Request changes**."
+                "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
+            if settings_key:
+                action = (
+                    "review the prepared website settings on the release page"
+                    + (" and check the changes on the testing site" if client_changes else "")
+                    + ", then press **Accept** or **Request changes**."
+                )
             body = (
                 f"{request_marker}\n{marker}\n{receipts}\n\n"
                 "**Release review** — is the site working with these changes, so they can go live?\n\n"

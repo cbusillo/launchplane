@@ -57,6 +57,7 @@ from control_plane.merge_train_historical_disposition import (
 )
 from control_plane.release_invitation import (
     SETTLED_DECISION_RECHECK_SECONDS,
+    WEBSITE_SETTINGS_REVIEW_NOTE,
     ReleaseInvitationBackoff,
     main,
     publish_release_invitation,
@@ -1196,6 +1197,26 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.prepare_settings(key="G-NEXT456")
         self.assertTrue(self.publish(ReleaseInvitationBackoff()))
         self.assertEqual(len(self.comments), 3)
+
+    def test_withdrawing_settings_refreshes_mixed_request_without_a_ping(self) -> None:
+        self.prepare_settings()
+        backoff = ReleaseInvitationBackoff()
+        self.assertTrue(self.publish(backoff))
+        body = self.comments[-1]["body"]
+        self.assertIn(WEBSITE_SETTINGS_REVIEW_NOTE, body)
+        assert self.review.checklist is not None
+        self.assertIn(self.review.checklist.items[0].owner_test_notes, body)
+        stored = self.store.read_odoo_instance_override_record(
+            context_name="example-site", instance_name="prod"
+        )
+        self.store.write_odoo_instance_override_record(
+            stored.model_copy(update={"website_settings": None})
+        )
+        self.refresh_settings_review()
+        self.assertTrue(self.publish(backoff))
+        self.assertEqual(len(self.comments), 1)
+        self.assertNotIn(WEBSITE_SETTINGS_REVIEW_NOTE, self.comments[-1]["body"])
+        self.assertNotIn(f"@{self.profile.owner.github_login}", self.comments[-1]["body"])
 
     def test_settings_request_recovers_lost_response_without_a_duplicate(self) -> None:
         self.make_engineering_only()
