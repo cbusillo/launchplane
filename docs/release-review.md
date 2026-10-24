@@ -14,12 +14,14 @@ retain their existing qualification path.
 
 The notification worker posts a short outcome on each saved release record and
 closes its issue once the release's persisted operations have passed, failed or
-been cancelled. A successful rejection rollback says **Rolled back**; a stopped
-forward release says **Failed**, including one whose automatic recovery restored
-the previous version. Pending, running and reconciliation-required operations
+been cancelled. The outcome distinguishes a successful rejection rollback from a released
+version or a failed forward release, including one whose automatic recovery
+restored the previous version. Pending, running and reconciliation-required operations
 keep the record open. This also settles older completed releases after a worker
 restart or deployment, independently of the current lane versions or invitation.
-The saved decision and original issue body remain unchanged. Retries reuse the
+Temporary-hotfix review requests remain open for the Client to decide. Already
+closed records are left alone. The saved decision and original issue body remain
+unchanged. Retries reuse the
 outcome receipt and the invitation's confirmed issue-closure path.
 
 ## Odoo business hours

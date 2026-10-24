@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
@@ -52,6 +53,10 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             ),
             ("control_plane.release_invitation.publish_release_invitation", lambda **kwargs: False),
             (
+                "control_plane.release_invitation.resolve_delivery_github_app_id",
+                lambda **kwargs: 77,
+            ),
+            (
                 "control_plane.client_release.read_client_release_run",
                 lambda **kwargs: self.release_run,
             ),
@@ -66,7 +71,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             return self.comments.copy() if "/comments?" in path else self.issue.copy()
         assert body is not None
         if method == "POST":
-            result = {"id": len(self.comments) + 1, **body}
+            result = {"id": len(self.comments) + 1, "performed_via_github_app": {"id": 77}, **body}
             self.comments.append(result)
         else:
             self.issue.update(body)
@@ -82,7 +87,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
-        self.assertIn("released", self.comments[0]["body"].lower())
+        self.assertTrue("\n".join(self.comments[0]["body"].splitlines()[1:]).strip())
         self.assertNotIn("@", self.comments[0]["body"])
         calls = self.calls.copy()
         self.advance()
@@ -126,6 +131,25 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.advance()
         self.assertEqual(self.issue["state"], "open")
 
+    def test_failed_promotion_waits_for_its_recovery(self) -> None:
+        failed = ClientReleaseStepView(
+            step="promote-1", kind="promote", status="fail", operation_id="promotion"
+        )
+        for status in ("running", "reconciliation_required", "pass"):
+            self.release_run = ClientReleaseRunView(
+                decision_record_id=self.decision.record_id,
+                rollback_drill=False,
+                state="stopped",
+                steps=(
+                    failed,
+                    ClientReleaseStepView(
+                        step="recovery-1", kind="recovery", status=status, operation_id="recovery"
+                    ),
+                ),
+            )
+            self.advance()
+            self.assertEqual(self.issue["state"], "closed" if status == "pass" else "open")
+
     def test_lost_comment_or_close_response_and_concurrent_ticks_do_not_duplicate_outcomes(
         self,
     ) -> None:
@@ -155,6 +179,10 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.assertEqual(self.comments, [])
 
     def test_successful_rejection_rollback_closes_with_rollback_outcome(self) -> None:
+        self.advance()
+        forward_outcome = self.comments[0]["body"].splitlines()[1:]
+        self.comments.clear()
+        self.issue["state"] = "open"
         rollback = self.decision.model_copy(
             update={
                 "record_id": "rollback",
@@ -171,7 +199,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         )
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
-        self.assertIn("rolled back", self.comments[0]["body"].lower())
+        self.assertNotEqual(forward_outcome, self.comments[0]["body"].splitlines()[1:])
 
     def test_newer_decision_does_not_hide_completed_release(self) -> None:
         newer = self.decision.model_copy(
@@ -199,6 +227,74 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             self.advance()
         self.assertEqual(self.issue["state"], "open")
         self.assertEqual(self.comments, [])
+
+    def test_bad_record_does_not_interrupt_other_records_or_invitations(self) -> None:
+        bad = self.decision.model_copy(
+            update={
+                "record_id": "bad",
+                "decided_at": "2026-09-25T01:00:00Z",
+                "release_issue_url": "https://github.com/other/repo/issues/99",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(bad)
+        assert self.release_run is not None
+        run = self.release_run
+        with (
+            patch(
+                "control_plane.client_release.read_client_release_run",
+                side_effect=lambda **kwargs: run.model_copy(
+                    update={"decision_record_id": kwargs["decision"].record_id}
+                ),
+            ),
+            patch("control_plane.release_invitation.publish_release_invitation") as publish,
+        ):
+            self.advance()
+            publish.assert_called_once()
+        self.assertEqual(self.issue["state"], "closed")
+
+    def test_temporary_hotfix_keeps_its_pending_client_review_open(self) -> None:
+        hotfix = self.decision.model_copy(
+            update={
+                "record_id": "hotfix",
+                "decision": "temporary_hotfix",
+                "reason": "Repair live breakage",
+                "actor_github_id": "7001",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(hotfix)
+        self.issue["body"] = release_decision_marker(hotfix.record_id)
+        assert self.release_run is not None
+        self.release_run = self.release_run.model_copy(
+            update={"decision_record_id": hotfix.record_id}
+        )
+        self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(self.calls, [])
+
+    def test_foreign_receipt_cannot_suppress_outcome(self) -> None:
+        self.advance()
+        foreign = self.comments[0].copy()
+        foreign["performed_via_github_app"] = {"id": 88}
+        self.comments[:] = [foreign]
+        self.issue["state"] = "open"
+        self.advance()
+        self.assertEqual(len(self.comments), 2)
+        self.assertEqual(self.issue["state"], "closed")
+
+    def test_stop_between_records_leaves_remaining_records_untouched(self) -> None:
+        stop = Event()
+        original = self.store.list_release_review_decision_records
+
+        def stop_after_listing(**kwargs: Any) -> Any:
+            records = original(**kwargs)
+            stop.set()
+            return records
+
+        with patch.object(self.store, "list_release_review_decision_records", stop_after_listing):
+            advance_release_invitations(
+                store=self.store, control_plane_root=self.root, stop_event=stop
+            )
+        self.assertEqual(self.calls, [])
 
     def test_completion_backoff_avoids_repeated_github_reads(self) -> None:
         backoff = ReleaseInvitationBackoff()
