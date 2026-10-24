@@ -979,19 +979,17 @@ through 30 days without requiring typed record IDs, digests, issue IDs, or
 free-form reasons. The planner rejects any setup expiry beyond 30 days.
 
 This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, and derives no guarded readiness. The schema-v3
-write transition is separately mediated: a complete reviewed policy candidate
-may add or change exactly one ordinary rule only when it matches a current,
-unrevoked typed activation and its executed setup provenance. Exact ordinary-rule
-removal and unrelated schema-v3 maintenance remain possible after activation
-revocation or expiry; raw schema-v3 seed and unbound replacement stay fenced.
-Runtime capability evidence records installed schema and compiled
-parser/storage/write-handler support. `policy_v3_write_supported` reports the
-presence of this mediated typed handler and is not itself authority or a raw
-write bypass. Qualification and guarded-worker support remain separate.
+registers no ordinary worker, and derives no guarded readiness. New setups and
+revocations are refused, and the activation writers are deleted; stored
+activation records remain readable history.
 
-Activation remains a separately Director-approved DB-native administration event;
-it is not authorized by landing code.
+A schema-v3 policy write that adds or changes any ordinary rule, including a
+v2-to-v3 migration, is refused with `ordinary_authority_retired`, at both the
+service and the storage compare-and-write. Exact ordinary-rule removal and
+other schema-v3 maintenance remain possible with maintenance evidence; raw
+schema-v3 seed and unbound replacement stay fenced. Historical
+`runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
+records are history only, not authority.
 
 ### Preparing Agent Delivery Administration
 
