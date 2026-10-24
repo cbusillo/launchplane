@@ -680,7 +680,6 @@ def run_compose_post_deploy_update(
         run_destructive_restore
         or fresh_testing_generation is not None
         or runtime_key_safety_environment_class(target_definition.instance) != "preview"
-        or clean_preview_snapshot.context != target_definition.context
     ):
         raise ValueError("Clean preview restore requires its own snapshot and no upstream source.")
     if fresh_testing_generation is not None:

@@ -1,9 +1,14 @@
 import unittest
 import json
+from types import SimpleNamespace
+from datetime import datetime, timezone
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.odoo_preview_apply_execution import OdooPreviewProviderMutationAdapter
 from email.message import Message
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal, cast
 from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -1743,6 +1748,21 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             previous_source=marker,
         )
 
+    def test_snapshot_restore_uses_the_same_schedule_binding_as_preview_exclusion(self) -> None:
+        snapshot = CleanTestingSnapshot(
+            product=_runtime_plan().product,
+            context="independent-context",
+            snapshot_id="a" * 64,
+            server_id="server-nonprod",
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        self._assert_refresh_readback_allowances((), snapshot=snapshot)
+
     def _assert_refresh_readback_allowances(
         self,
         allowances: tuple[DokployTargetIntegrationAllowance, ...],
@@ -1750,6 +1770,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         previous_source: str = "",
         source_environment: dict[str, str] | None = None,
         restore_upstream: bool = False,
+        snapshot: CleanTestingSnapshot | None = None,
     ) -> str:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1761,6 +1782,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 domain_certificate_type="letsencrypt",
             )
         )
+        dry_run.clean_snapshot = snapshot
         requests: list[dict[str, object]] = []
 
         def _fake_dokploy_request(**kwargs: object) -> object:
@@ -1834,6 +1856,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
                 restore_upstream=restore_upstream,
+                restore_clean_snapshot=snapshot is not None,
                 integration_allowances=allowances,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
@@ -1907,6 +1930,32 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
+        if snapshot is not None:
+            adapter = SimpleNamespace(
+                _apply_request=SimpleNamespace(apply=SimpleNamespace(dry_run_plan=dry_run)),
+                _control_plane_root=Path("."),
+                _database_url=None,
+                schedule_binding=None,
+            )
+            with (
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch.object(dokploy_api, "fetch_dokploy_target_payload", return_value={}),
+                patch.object(
+                    dokploy_post_deploy,
+                    "_resolve_dokploy_schedule_runtime",
+                    return_value=("server", "fixture-lookup", "fixture-app", "server-nonprod"),
+                ),
+            ):
+                OdooPreviewProviderMutationAdapter.capture_schedule_binding(cast(Any, adapter))
+                actual = dokploy_post_deploy.compose_data_workflow_binding(
+                    host="https://dokploy.example",
+                    token="token",
+                    target_definition=module_update.call_args.kwargs["target_definition"],
+                )
+            self.assertEqual(actual.model_dump(mode="json"), adapter.schedule_binding)
         self.assertEqual(
             module_update.call_args.kwargs.get("run_destructive_restore", False),
             restore_upstream,
@@ -1942,6 +1991,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             {
                 **_module_update_evidence(),
                 "upstream_restore_requested": str(restore_upstream).lower(),
+                **({"clean_snapshot_restore_requested": "true"} if snapshot is not None else {}),
             },
         )
         self.assertIn("module_install_update", [step.name for step in result.steps])

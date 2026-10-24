@@ -1830,9 +1830,7 @@ def _execute_refresh(
             host=host,
             token=token,
             target_definition=dokploy_source.DokployTargetDefinition(
-                context=plan.clean_snapshot.context
-                if plan.clean_snapshot is not None
-                else plan.product,
+                context=plan.product,
                 instance=plan.preview_slug,
                 target_id=compose_id,
                 target_name=plan.compose_name,

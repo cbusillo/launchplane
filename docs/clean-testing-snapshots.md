@@ -28,6 +28,9 @@ A missed slot can catch up when the scheduler resumes. The same
 existing worker executes the operation.
 
 Capture occurs after sanitization and readback, while testing web is stopped.
+A failed capture keeps that new generation held rather than opening it to
+staff before its clean checkpoint exists. Previews keep their previous
+qualified source. Existing guarded recovery owns retry and storage admission.
 The host saves a bounded PostgreSQL dump and an independent filestore copy
 outside every application volume. It verifies their hashes and atomically
 renames the completed directory. It uses the existing clone-or-copy behavior
