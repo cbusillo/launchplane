@@ -167,13 +167,13 @@ def _change_link(change: InvitationChange) -> str:
 def _announced_changes(
     request: dict[str, object] | None,
     changes: dict[str, InvitationChange],
-    candidate_marker: str,
+    candidate_markers: set[str],
     settings_key: str = "",
 ) -> set[str]:
     if request is None:
         return set()
     lines = _comment_lines(request)
-    if candidate_marker in lines and not any(
+    if candidate_markers.intersection(lines) and not any(
         line.startswith("<!-- launchplane:release-request:") for line in lines
     ):
         # A manually adopted receipt for this exact candidate already requested
@@ -384,14 +384,25 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    identity = (
+    identity: tuple[str, ...] = (
         product,
         candidate.artifact_id,
         candidate.source_commit,
         candidate.shared_addons_digest,
     )
+    if candidate.website_settings_sha256:
+        identity += (candidate.website_settings_sha256,)
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
+
+
+def _release_invitation_markers(product: str, candidate: ReleaseVersion) -> set[str]:
+    return {
+        release_invitation_marker(product, candidate),
+        release_invitation_marker(
+            product, candidate.model_copy(update={"website_settings_sha256": ""})
+        ),
+    }
 
 
 def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord) -> bool:
@@ -542,6 +553,7 @@ def _settle_completed_invitation(
             )
             comments = [comment for comment in comments if comment.get("id") not in preserved]
             marker = release_invitation_marker(profile.product, production)
+            candidate_markers = _release_invitation_markers(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
             )
@@ -554,7 +566,7 @@ def _settle_completed_invitation(
                 # without another invitation. Settle only its newest open receipt.
                 for comment in reversed(comments):
                     lines = _comment_lines(comment)
-                    if marker not in lines or REPLACED_MARKER in lines:
+                    if not candidate_markers.intersection(lines) or REPLACED_MARKER in lines:
                         continue
                     if any(line.startswith(COMPLETED_PREFIX) for line in lines):
                         continue
@@ -580,7 +592,7 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                if marker not in lines or (
+                if not candidate_markers.intersection(lines) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
                     and comment is not continued_request
@@ -684,9 +696,7 @@ def publish_release_invitation(
     receipt = (
         profile.product,
         profile.repository,
-        request_marker
-        + release_invitation_marker(profile.product, candidate)
-        + candidate.website_settings_sha256,
+        request_marker + release_invitation_marker(profile.product, candidate),
     )
     receipt_due = False
     if backoff is not None:
@@ -866,7 +876,12 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, notification_changes, marker, settings_key)
+            announced = _announced_changes(
+                request,
+                notification_changes,
+                _release_invitation_markers(profile.product, review.checklist.candidate),
+                settings_key,
+            )
             added = {key: link for key, link in notification_links.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
@@ -1087,7 +1102,9 @@ def adopt_release_invitation(
                 or original.get("id") != comment_id
                 or original.get("issue_url") != f"https://api.github.com{path}/{issue_number}"
                 or issue_marker not in _receipt_lines(issue)
-                or candidate_marker not in _receipt_lines(original)
+                or not _release_invitation_markers(
+                    profile.product, review.checklist.candidate
+                ).intersection(_receipt_lines(original))
                 or REPLACED_MARKER in _receipt_lines(original)
                 or any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(original))
                 or (

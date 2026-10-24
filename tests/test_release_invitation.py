@@ -89,7 +89,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         release_test_change = self.add_release_test_change()
         assert self.review.checklist is not None
         candidate_marker = release_invitation_marker(
-            self.profile.product, self.review.checklist.candidate
+            self.profile.product,
+            self.review.checklist.candidate.model_copy(update={"website_settings_sha256": ""}),
         )
         self.issues.append(
             {
@@ -1198,6 +1199,28 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertTrue(self.publish(ReleaseInvitationBackoff()))
         self.assertEqual(len(self.comments), 3)
 
+    def test_withdrawn_settings_request_is_not_settled_by_an_earlier_release(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.assertFalse(self.publish())
+        self.now += timedelta(minutes=1)
+        self.make_engineering_only()
+        self.prepare_settings()
+        self.assertTrue(self.publish())
+        pending = self.comments[-1]["body"]
+        posts = len(self.posts)
+        stored = self.store.read_odoo_instance_override_record(
+            context_name="example-site", instance_name="prod"
+        )
+        self.store.write_odoo_instance_override_record(
+            stored.model_copy(update={"website_settings": None})
+        )
+        self.refresh_settings_review()
+        self.assertFalse(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(self.comments[-1]["body"], pending)
+        self.assertEqual(len(self.posts), posts)
+        self.assertEqual(self.issues[0]["state"], "open")
+
     def test_withdrawing_settings_refreshes_mixed_request_without_a_ping(self) -> None:
         self.prepare_settings()
         backoff = ReleaseInvitationBackoff()
@@ -2055,10 +2078,14 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.posts, posts)
 
     def test_completed_manual_receipt_is_preserved_without_another_mention(self) -> None:
+        self.prepare_settings()
         self.publish()
         assert self.review.checklist is not None
         original = (
-            release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+            release_invitation_marker(
+                self.profile.product,
+                self.review.checklist.candidate.model_copy(update={"website_settings_sha256": ""}),
+            )
             + "\n\n@site-owner please review."
         )
         self.comments[0]["body"] = original
