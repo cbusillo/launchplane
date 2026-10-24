@@ -39,6 +39,7 @@ from control_plane.generic_web_testing_exclusion import (
     require_retained_application_custody,
 )
 from control_plane.integration_allowances import target_record_sha256
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.odoo_testing_resources import ApplicationTestingResources
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
@@ -2408,7 +2409,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         try:
             record = self.current()
             if record.plan_sha256 != reconciliation_key:
-                return ProviderObservation("unknown")
+                raise TestingActivationRefusal("The original observation plan changed.")
             if record.failure is not None:
                 return ProviderObservation(
                     "present",
@@ -2434,7 +2435,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if parent is not None and unstarted_application_recipient(record, parent):
                     self.require_unstarted_candidate(record)
                 elif record.application_readiness is None:
-                    return ProviderObservation("unknown")
+                    raise TestingActivationRefusal(
+                        "The original candidate readiness is unavailable."
+                    )
                 elif record.application_readiness.route is None:
                     self.require_terminal_candidate(record, provider_operation_key)
                 return ProviderObservation(
@@ -2466,9 +2469,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 )
                 assert isinstance(resources, ApplicationTestingResources)
                 if not self.mount_matches(record, live, resources):
-                    return ProviderObservation("unknown")
+                    raise TestingActivationRefusal("The original application mount is unverified.")
             return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
-        except Exception:
+        except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             return ProviderObservation("unknown")
 
 

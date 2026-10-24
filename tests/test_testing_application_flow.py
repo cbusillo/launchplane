@@ -3260,6 +3260,11 @@ class ApplicationFlowTests(unittest.TestCase):
         ).values["DB_PASSWORD"]
 
     def test_lost_mount_reply_adopts_provider_row_once_and_fences_conflicts(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
         self.prepare()
         interrupted = False
 
@@ -3283,6 +3288,77 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(record.phase, "create_application_mount")
         original = deepcopy(self.payloads[record.target_id]["mounts"])
         self.assertEqual(len(original), 1)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        original_row = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="activation",
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+
+        def inspect_original() -> Any:
+            return asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=(),
+            ),
+            patch.object(
+                ApplicationActivationAdapter,
+                "candidate_refusal_ready",
+                side_effect=ValueError("private-observer-cause"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence", level="WARNING") as causes,
+        ):
+            inspected = inspect_original()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        cause = json.loads(causes.records[-1].getMessage())
+        self.assertEqual(cause["trace_id"], inspected.json()["trace_id"])
+        self.assertTrue(cause["sites"])
+        self.assertNotIn("private-observer-cause", " ".join(causes.output) + inspected.text)
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=(),
+            ),
+            self.assertLogs(
+                "control_plane.testing_activation_inspection", level="INFO"
+            ) as outcomes,
+        ):
+            inspected = inspect_original()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        outcome = json.loads(outcomes.records[-1].getMessage())
+        self.assertEqual(outcome["trace_id"], inspected.json()["trace_id"])
+        self.assertEqual(outcome["outcome"], "absent")
+        self.assertEqual(inspected.json()["result"]["qualification"], "not_evaluated")
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key="activation",
+            ),
+            original_row,
+        )
         mount = original[0]
         conflicts = [("absent", []), ("duplicate", [mount, deepcopy(mount)])]
         conflicts.extend(
