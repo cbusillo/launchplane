@@ -174,8 +174,9 @@ def register_repository_inventory_write_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> RepositoryInventoryApplyResponse:
         trace_id = dependencies.next_trace_id()
+        # Terminal transport stays read-only for apply; its inert dry run is a plan.
         if (
-            isinstance(identity, TerminalAgentIdentity)
+            (envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity))
             or not dependencies.authorization_allows(
                 identity=identity,
                 action=REPOSITORY_INVENTORY_WRITE_ACTION
@@ -195,7 +196,7 @@ def register_repository_inventory_write_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Terminal agents and unauthorized identities cannot write repository inventory.",
+                message="Terminal agents cannot apply, and unauthorized identities cannot plan or write, repository inventory.",
             )
         if envelope.mode == "apply":
             normalized_idempotency_key = idempotency_key.strip()

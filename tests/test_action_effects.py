@@ -78,6 +78,7 @@ class ActionEffectTests(unittest.TestCase):
                 ("ingress_route.audit", True),
                 ("product_profile.health_monitoring.apply", True),
                 ("product_review.withdraw", True),
+                ("repository_inventory.write", True),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
                 ("dokploy_target.repair_domain_authority", False),

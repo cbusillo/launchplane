@@ -77,7 +77,8 @@ implement that bridge.
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
-defining those actions grants neither one. Active tracked inventory records are
+defining those actions grants neither one to other identities; the Director's
+authenticated agents use the standing permission below. Active tracked inventory records are
 repository-record evidence for the redacted repository-scope read model;
 retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
@@ -116,6 +117,15 @@ transport to its existing browser/bearer mutation path; other terminal mutation
 restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
+
+Repository inventory apply also inherits that standing permission, for tracked
+and retired records alike. A record identifies one immutable GitHub repository;
+it cannot install the Delivery App, widen its installed permissions, grant
+access, accept a release or change merge policy, and token minting still checks
+the exact repository id and name. The Director's `local_operator` may apply;
+terminal transport may dry-run, which is an inert plan, but cannot apply.
+Append-only revisions, current-record comparison, idempotency and PostgreSQL
+storage still govern apply.
 
 The expected-config declaration path remains additive for the authenticated
 Director agent. It may add a positive external-provider purpose to an existing

@@ -9,7 +9,11 @@ from control_plane.contracts.repository_inventory import (
     REPOSITORY_INVENTORY_WRITE_ACTION,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy, TerminalAgentIdentity
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
+    TerminalAgentIdentity,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _asgi_request
@@ -445,3 +449,116 @@ class RepositoryInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_director_operator_applies_without_any_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(Path(temporary_directory_name))
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(
+                    cast(
+                        Any,
+                        LocalOperatorIdentity(
+                            subject="director", token_label="director-token", director_agent=True
+                        ),
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run = await _asgi_request(
+                app,
+                "POST",
+                "/v1/repository-inventory/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_payload(mode="dry_run"),
+            )
+            applied = await _asgi_request(
+                app,
+                "POST",
+                "/v1/repository-inventory/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "director-inventory-apply-1",
+                },
+                payload=_payload(),
+            )
+            records = store.list_repository_inventory_records(repository_id=REPOSITORY_ID)
+            store.close()
+
+        self.assertEqual(dry_run.status_code, 200)
+        self.assertEqual(dry_run.json()["result"]["status"], "would_apply")
+        self.assertEqual(applied.status_code, 200)
+        self.assertEqual(applied.json()["result"]["status"], "applied")
+        self.assertEqual(len(records), 1)
+
+    async def test_director_terminal_agent_plans_but_cannot_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(Path(temporary_directory_name))
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(
+                    cast(
+                        Any,
+                        TerminalAgentIdentity(
+                            subject="director", token_label="director-token", director_agent=True
+                        ),
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+            dry_run = await _asgi_request(
+                app,
+                "POST",
+                "/v1/repository-inventory/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_payload(mode="dry_run"),
+            )
+            denied = await _asgi_request(
+                app,
+                "POST",
+                "/v1/repository-inventory/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "director-terminal-apply-1",
+                },
+                payload=_payload(),
+            )
+            records = store.list_repository_inventory_records(repository_id=REPOSITORY_ID)
+            store.close()
+
+        self.assertEqual(dry_run.status_code, 200)
+        self.assertEqual(dry_run.json()["result"]["status"], "would_apply")
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_unmarked_operator_without_grant_is_denied(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(Path(temporary_directory_name))
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(
+                    cast(Any, LocalOperatorIdentity(subject="agent", token_label="agent-token"))
+                ),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+            responses = [
+                await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/repository-inventory/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "unmarked-operator-apply-1",
+                    },
+                    payload=_payload(mode=mode),
+                )
+                for mode in ("dry_run", "apply")
+            ]
+            records = store.list_repository_inventory_records(repository_id=REPOSITORY_ID)
+            store.close()
+
+        for response in responses:
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
