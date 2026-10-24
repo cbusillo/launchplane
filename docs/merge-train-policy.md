@@ -1024,9 +1024,10 @@ repository lacks the target's enqueue label. The refusal names each missing
 setting and the supported fix: the codex-skills `gh-rulesets.py` standard
 ruleset pair and its `checks-plan`, or the label. If an enrolled branch later
 loses its required checks, the controller reports `target_not_ready` instead
-of waiting: ready pull requests get a blocked comment naming the setting, the
-active batch is kept, and the stall monitor raises `target_not_ready` with the
-same text at once. The train resumes on its own once the setting exists.
+of waiting: ready pull requests get a blocked comment naming the setting, and
+the stall monitor raises `target_not_ready` with the same text at once. A batch
+whose checks were being observed is kept; one whose members can no longer be
+admitted is closed with that reason. The train resumes on its own once the setting exists.
 Every batch pull request the controller closes gets a comment with the reason.
 
 A missing named or pinned check is explicitly pending even after
