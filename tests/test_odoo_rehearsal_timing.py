@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import Mock
 
@@ -13,6 +13,8 @@ from tests import test_odoo_upgrade_rehearsal as rehearsal_tests
 from tests import test_odoo_rehearsal_business_validation as business_tests
 from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
 from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
+from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+from control_plane.odoo_upgrade_rehearsal import RehearsalRefused
 
 
 class RehearsalTimingTests(unittest.TestCase):
@@ -51,25 +53,77 @@ class RehearsalTimingTests(unittest.TestCase):
             with self.subTest(stamp=stamp), self.assertRaises(ValidationError):
                 RehearsalPhaseTiming.model_validate({**payload, "observed": {"before_web": stamp}})
 
-    def test_rebuild_never_inherits_a_freeze_start_from_an_earlier_attempt(self) -> None:
-        timings = tuple(
-            RehearsalPhaseTiming.model_validate(value)
-            for value in (
-                self.timing("simulate-final", "a", {"simulated_quiescent": 0}),
-                self.timing("rebuild-final", "b", {"before_web": 4}),
-                self.timing(
-                    "validate-business", "c", {"product_started": 5, "receipt_observed": 6}
-                ),
-            )
+    def test_evidence_only_readback_preserves_original_timing_without_matching_the_callers_key(
+        self,
+    ) -> None:
+        import json
+        from unittest.mock import patch
+
+        record = self.fixture.record.model_copy(
+            update={
+                "state": "upgraded",
+                "compose_id": "own-compose",
+                "copies": (self.fixture.copy("source"),),
+            }
         )
-        record = self.fixture.record.model_copy(update={"phase_timings": timings})
+        adapter = self.fixture.adapter("execute")
+        timing = self.timing("execute", "a", {"source_captured": 0})
+        receipt = {
+            "intent_sha256": record.intent_sha256,
+            "state": record.state,
+            "copies": [copy.model_dump(mode="json") for copy in record.copies],
+            "elapsed_seconds": {},
+            "resources_preserved": True,
+            "public_route": False,
+            "business_host_frozen": False,
+            "phase_timing": timing,
+        }
+        for key in ("", "earlier-capacity-refusal"):
+            with (
+                self.subTest(key=key),
+                patch.object(
+                    adapter,
+                    "run_script",
+                    return_value={"rehearsal_result": json.dumps(receipt).encode().hex()},
+                ),
+                patch.object(
+                    adapter,
+                    "operation_readback",
+                    return_value={
+                        "_provider_operation_key": "another-operation",
+                        "operation_state": "completed",
+                    },
+                ),
+            ):
+                observed = adapter.native_readback(
+                    record, idempotency_key=key, checkpoint=lambda: None
+                )
+                self.assertTrue(observed["completed"])
+                self.assertEqual(
+                    cast(dict[str, Any], observed["phase_timing"])["attempt_sha256"],
+                    timing["attempt_sha256"],
+                )
+        with patch.object(
+            adapter,
+            "run_script",
+            return_value={"rehearsal_result": json.dumps(receipt).encode().hex()},
+        ):
+            with self.assertRaises(RehearsalRefused):
+                adapter.host(record, "observe", lambda: None, operation_key="another-operation")
+
+    def test_rebuild_never_inherits_a_freeze_start_from_an_earlier_attempt(self) -> None:
+        record = self.measured_record()
+        self.assertIsNotNone(measured_rehearsal_window(record)["upper_bound_seconds"])
+        simulation, business = record.phase_timings
+        inherited = simulation.model_copy(
+            update={"action": "rebuild-final", "attempt_sha256": "b" * 64}
+        )
+        record = record.model_copy(update={"phase_timings": (simulation, inherited, business)})
         window = measured_rehearsal_window(record)
         self.assertIsNone(window["upper_bound_seconds"])
         self.assertTrue(window["reasons"])
 
-    def test_one_lineage_bounds_resume_and_itemizes_dispatch_without_inventing_pre_switch_proof(
-        self,
-    ) -> None:
+    def measured_record(self) -> OdooUpgradeRehearsalRecord:
         source = self.fixture.copy("final_source").model_copy(
             update={"captured_at": self.started + timedelta(seconds=1)}
         )
@@ -108,6 +162,14 @@ class RehearsalTimingTests(unittest.TestCase):
                 "business_validations": (accepted,),
             }
         )
+        return record
+
+    def test_one_lineage_bounds_resume_and_itemizes_dispatch_without_inventing_pre_switch_proof(
+        self,
+    ) -> None:
+        record = self.measured_record()
+        simulation, business = record.phase_timings
+        accepted = record.business_validations[0]
         measured = measured_rehearsal_window(record)
         self.assertEqual(measured["lower_bound_seconds"], 10)
         self.assertEqual(measured["upper_bound_seconds"], 12)

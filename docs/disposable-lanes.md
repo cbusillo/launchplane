@@ -3421,7 +3421,7 @@ published timing history with the existing recovery metadata.
 | `T3` | `before_web`, after the final connection readback and before opening the web gate. `web_started` records the subsequent private web start. |
 | `T4` | Unavailable: the current lifecycle has no distinct pre-switch HTTP verification step. Before-web isolation and post-start health do not supply that missing boundary. |
 | `T5` | `private_switch_verified`, after the private health/identity and login checks pass. |
-| `T6` | Bounded by `product_started` and `receipt_observed` for the first passing, committed product validation. The product verifies its writes through a fresh cursor before returning the receipt. These bounds do not claim the exact commit instant. |
+| `T6` | Bounded by `product_started` and `receipt_observed` for the first committed product validation, which must have passed. The product verifies its writes through a fresh cursor before returning the receipt. These bounds do not claim the exact commit instant. |
 
 For timed records, `measured_window` returns lower and upper bounds for the
 simulated pause and separately itemizes the private-switch-to-product-dispatch
@@ -3429,8 +3429,9 @@ gap. The bounds require one simulation tied to the final source receipt and
 the first committed validation's own timing. A rebuild starts from preserved
 `T1` and therefore has no measured `T0`; abandonment, untimed first commits,
 unaccepted commits, missing boundaries and non-monotonic clocks keep the bounds
-null with a reason. Clock anomalies remain observable instead of stranding a
-completed operation. Production capture and source sanitization remain separate
+null with a reason. Backward clock steps remain observable instead of stranding
+a completed operation; forward clock jumps cannot be detected from UTC stamps
+alone. Production capture and source sanitization remain separate
 `execute` terms and are never added to the simulated pause.
 
 `measured_window.complete` remains false because `T4` is unavailable. Bounded

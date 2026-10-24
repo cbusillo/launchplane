@@ -613,7 +613,6 @@ class OdooRehearsalAdapter:
             and record.credential_bindings_sha256
             and not record.copies
             and not record.elapsed_seconds
-            and not record.phase_timings
             and result.get("prepare_not_started") is True
             and result.get("completed") is False
             and result.get("state") == "planned"
@@ -645,7 +644,6 @@ class OdooRehearsalAdapter:
             and not any((record.project_id, record.environment_id, record.compose_id))
             and not record.copies
             and not record.elapsed_seconds
-            and not record.phase_timings
             or self.request.action == "rebuild-final"
             and preserved_rehearsal_abandonment(record.model_dump(mode="json"))
             and (
@@ -680,7 +678,6 @@ class OdooRehearsalAdapter:
             or record.compose_id
             or record.copies
             or record.elapsed_seconds
-            or record.phase_timings
             or not record.credential_bindings_sha256
             or record.credential_bindings_sha256
             != rehearsal_credential_bindings(self.store, record.rehearsal_id)
@@ -971,6 +968,7 @@ class OdooRehearsalAdapter:
                 "observe",
                 checkpoint,
                 operation_key=operation_key,
+                validate_timing_attempt=False,
                 inspect_capture=(
                     journal_status == "bound"
                     and journal.get("operation_state") in {"running", "reconcile_required"}
@@ -1316,6 +1314,7 @@ class OdooRehearsalAdapter:
         operation_key: str = "",
         prepared_script: str | None = None,
         inspect_capture: bool = False,
+        validate_timing_attempt: bool = True,
     ) -> dict[str, object]:
         script = (
             prepared_script
@@ -1426,7 +1425,8 @@ class OdooRehearsalAdapter:
         timing = result.get("phase_timing")
         if isinstance(timing, dict) and (
             timing["action"] != self.request.action
-            or timing["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
+            or validate_timing_attempt
+            and timing["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result

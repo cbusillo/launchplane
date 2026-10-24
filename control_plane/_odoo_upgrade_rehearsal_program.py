@@ -307,12 +307,11 @@ def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=Fa
         required+=['odoo_module_update_completed','odoo_module_update_modules_configured']
     if any(markers.get(key)!='true' for key in required):
         raise RuntimeError('Copy lacks its sanitization or upgrade proof')
-    if 'action' in spec:
-        for line in result.splitlines():
-            if line.startswith(REHEARSAL_TIMING_MARKER):
-                boundary,at=line.removeprefix(REHEARSAL_TIMING_MARKER).split('=',1)
-                if boundary in {'sql_sanitized','module_update_completed'}:
-                    phase_stamp(spec,boundary,at=at)
+    for line in result.splitlines():
+        if line.startswith(REHEARSAL_TIMING_MARKER):
+            boundary,at=line.removeprefix(REHEARSAL_TIMING_MARKER).split('=',1)
+            if boundary in {'sql_sanitized','module_update_completed'}:
+                phase_stamp(spec,boundary,at=at)
 
 
 def before_web(spec,containers,database):

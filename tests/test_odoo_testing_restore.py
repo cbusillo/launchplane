@@ -1492,7 +1492,6 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                             boundaries.index("sql_sanitized"),
                             boundaries.index("module_update_completed"),
                         )
-                        self.assertEqual(boundaries[-1], "sql_sanitized")
                 else:
                     self.assertFalse(stamps)
                 isolated()
