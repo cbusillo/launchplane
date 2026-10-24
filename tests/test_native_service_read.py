@@ -76,6 +76,7 @@ class StoredDockerServiceReadTests(unittest.TestCase):
     def test_incomplete_ambiguous_and_oversized_replies_never_return_private_inputs(self) -> None:
         length = b"Content-Length: " + str(len(self.body)).encode()
         self.assertEqual(self.read(self.response(self.body, length)), self.payload)
+        partial = b'{"private":"fixture-private-value"'
         replies = [
             self.response(self.body, b"Content-Length: " + str(len(self.body) + 1).encode()),
             self.response(self.body + b"extra", length),
@@ -88,7 +89,7 @@ class StoredDockerServiceReadTests(unittest.TestCase):
                 b"401\r\n" + b"x" * 1025 + b"\r\n0\r\n\r\n", b"Transfer-Encoding: chunked"
             ),
             self.response(b"1\r\n{\r\n", b"Transfer-Encoding: chunked"),
-            self.response(b'{"private":"fixture-private-value"', b"Content-Length: 40"),
+            self.response(partial, b"Content-Length: " + str(len(partial)).encode()),
         ]
         for reply in replies:
             with self.subTest(reply_size=len(reply)), self.assertRaises(RuntimeError) as caught:

@@ -1616,6 +1616,8 @@ class ApplicationFlowTests(unittest.TestCase):
         configuration["Image"] = "ghcr.io/example/site:retained-tag"
         task = self.tasks["old-app-task"]
         task["Spec"]["ContainerSpec"] = deepcopy(configuration)
+        self.containers["old-app-container"]["Config"]["Image"] = configuration["Image"]
+        self.adapter.preflight_application_route(self.planned)
         task["Status"] = {"State": "ready", "ContainerStatus": {}}
         self.containers.pop("old-app-container")
         with self.assertRaises(ValueError) as caught:
