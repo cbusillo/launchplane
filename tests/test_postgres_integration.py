@@ -15742,6 +15742,23 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_private_native_capture_and_cleanup_preserve_serving_generation(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+        from tests.test_testing_candidate_application import CandidateApplicationTests
+
+        with (
+            _head_postgres_database() as url,
+            patch.object(TestingCandidateTests, "database_url", url),
+        ):
+            case = CandidateApplicationTests(
+                "test_prepared_native_copy_removes_raw_cache_and_recovers_a_lost_cleanup_reply"
+            )
+            result = unittest.TestResult()
+            case.run(result)
+            self.assertTrue(
+                result.wasSuccessful() and not result.skipped, (result.failures, result.errors)
+            )
+
     def test_secret_rotation_retains_configured_copy_without_deployment(self) -> None:
         self.run_worker_case(
             "test_secret_rotation_retains_original_configured_copy_without_deployment"
