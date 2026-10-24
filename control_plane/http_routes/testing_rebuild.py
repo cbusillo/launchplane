@@ -48,6 +48,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
 from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.testing_rebuild_resume import TestingRebuildResumeRefused, caller_binding
+from control_plane.testing_rebuild_request_settlement import (
+    TestingRebuildRequestConflict,
+    TestingRebuildRequestExclusion,
+)
 from control_plane.testing_rebuild_authorization import (
     capture_director_testing_rebuild_authorization,
 )
@@ -64,6 +68,7 @@ class TestingRebuildSubmit(BaseModel):
     artifact_id: str = Field(min_length=1)
     source_git_ref: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
     reason: str = Field(min_length=1, max_length=1000)
+    original_scope: str = Field(default="", max_length=1024)
 
     @field_validator("reason")
     @classmethod
@@ -71,6 +76,14 @@ class TestingRebuildSubmit(BaseModel):
         if not value.strip():
             raise ValueError("A concrete rebuild reason is required.")
         return value.strip()
+
+
+class TestingRebuildInspection(TestingRebuildPreflight):
+    original_scope: str
+
+
+class TestingRebuildSettlement(TestingRebuildSubmit):
+    original_scope: str = Field(min_length=1, max_length=1024)
 
 
 class TestingRebuildOperationView(BaseModel):
@@ -99,6 +112,17 @@ class TestingRebuildResponse(BaseModel):
     operation: TestingRebuildOperationView
 
 
+class TestingRebuildSettlementResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    product: str
+    original_key: str
+    original_request: TestingRebuildSettlement
+    outcome: Literal["excluded", "observed"]
+    operation: TestingRebuildOperationView | None
+
+
 @dataclass(frozen=True)
 class TestingRebuildRouteDependencies:
     common: ReadRouteDependencies
@@ -111,6 +135,22 @@ def register_testing_rebuild_routes(
 ) -> None:
     common = dependencies.common
     action = _descriptor_driver_route_authz_action(ODOO_TARGET_REPLACEMENT_APPLY_ROUTE)
+
+    def require_original_scope(
+        identity: LaunchplaneIdentity, payload: TestingRebuildSubmit, trace_id: str
+    ) -> None:
+        if payload.original_scope and payload.original_scope != idempotency_scope(identity):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Sign in as the administrator who made the original request.",
+            )
+
+    def fingerprint(product: str, payload: TestingRebuildSubmit) -> str:
+        return request_fingerprint(
+            {"product": product, **payload.model_dump(mode="json", exclude={"original_scope"})}
+        )
 
     def require_admin(
         identity: LaunchplaneIdentity, record_store: object, trace_id: str
@@ -201,7 +241,7 @@ def register_testing_rebuild_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         data_source_mode: Annotated[TestingRebuildSource, Query()] = "empty",
-    ) -> TestingRebuildPreflight:
+    ) -> TestingRebuildInspection:
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id)
         try:
@@ -219,11 +259,14 @@ def register_testing_rebuild_routes(
                     reason="Inspect testing rebuild",
                 ),
             )
-            return inspect_testing_rebuild(
+            inspection = inspect_testing_rebuild(
                 root=dependencies.root,
                 store=store,
                 request=request,
                 verified_manifest=verified.manifest,
+            )
+            return TestingRebuildInspection(
+                **inspection.model_dump(mode="python"), original_scope=idempotency_scope(identity)
             )
         except (
             NativeSourceAuthorizationDenied,
@@ -244,6 +287,7 @@ def register_testing_rebuild_routes(
     ) -> TestingRebuildResponse:
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id)
+        require_original_scope(identity, payload, trace_id)
         if not idempotency_key.strip():
             raise common.http_error(
                 status_code=400,
@@ -252,7 +296,7 @@ def register_testing_rebuild_routes(
                 message="Testing rebuild requires its original request key.",
             )
         scope = idempotency_scope(identity)
-        fingerprint = request_fingerprint({"product": product, **payload.model_dump(mode="json")})
+        request_digest = fingerprint(product, payload)
         existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
             operation_store=store,
             idempotency_key=idempotency_key.strip(),
@@ -260,7 +304,7 @@ def register_testing_rebuild_routes(
         )
         if existing is not None:
             if (
-                existing.request_fingerprint != fingerprint
+                existing.request_fingerprint != request_digest
                 or existing.product != product
                 or not existing.is_native_testing_rebuild
             ):
@@ -268,7 +312,7 @@ def register_testing_rebuild_routes(
                     status_code=409,
                     trace_id=trace_id,
                     code="idempotency_key_reused",
-                    message="This request key already identifies another operation.",
+                    message="This key cannot admit the supplied intent. Keep its original recovery state.",
                 )
             return response(existing, trace_id)
         try:
@@ -318,7 +362,7 @@ def register_testing_rebuild_routes(
                 context=lane.context,
                 idempotency_key=idempotency_key.strip(),
                 idempotency_scope=scope,
-                request_fingerprint=fingerprint,
+                request_fingerprint=request_digest,
                 created_at=now,
                 authorization=authorization,
             )
@@ -327,7 +371,7 @@ def register_testing_rebuild_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="idempotency_key_reused",
-                message="This request key already identifies another operation.",
+                message="This key cannot admit the supplied intent. Keep its original recovery state.",
             ) from error
         except (
             OdooTargetReplacementApplyCurrentArtifactChangedError,
@@ -380,6 +424,7 @@ def register_testing_rebuild_routes(
         """Read the original request after a denied recovery; never admit or retry it."""
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id)
+        require_original_scope(identity, payload, trace_id)
         if not idempotency_key.strip():
             raise common.http_error(
                 status_code=400,
@@ -397,13 +442,12 @@ def register_testing_rebuild_routes(
                 status_code=404,
                 trace_id=trace_id,
                 code="testing_rebuild_not_observed",
-                message="The original request has no observed operation yet. Keep its key and continue read-only lookup.",
+                message="No original operation is observed. Keep the key; settle explicitly before starting afresh.",
             )
         if (
             original.product != product
             or not original.is_native_testing_rebuild
-            or original.request_fingerprint
-            != request_fingerprint({"product": product, **payload.model_dump(mode="json")})
+            or original.request_fingerprint != fingerprint(product, payload)
         ):
             raise common.http_error(
                 status_code=409,
@@ -412,6 +456,58 @@ def register_testing_rebuild_routes(
                 message="This request key identifies another intent.",
             )
         return response(original, trace_id)
+
+    def settle_original(
+        product: Annotated[str, Path(min_length=1)],
+        payload: TestingRebuildSettlement,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.mutation_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
+        ],
+    ) -> TestingRebuildSettlementResponse:
+        trace_id = common.next_trace_id()
+        store = require_admin(identity, record_store, trace_id)
+        require_original_scope(identity, payload, trace_id)
+        key = idempotency_key.strip()
+        if not key:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="original_request_required",
+                message="Settlement requires the original request key and administrator binding.",
+            )
+        try:
+            settled = store.settle_testing_rebuild_request(
+                TestingRebuildRequestExclusion(
+                    product=product,
+                    original_scope=idempotency_scope(identity),
+                    original_key=key,
+                    request_fingerprint=fingerprint(product, payload),
+                    excluded_at=utc_now_timestamp(),
+                ),
+                trace_id=trace_id,
+            )
+        except TestingRebuildRequestConflict as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="This request cannot be settled with the retained evidence. Keep its recovery state.",
+            ) from error
+        operation = (
+            response(settled, trace_id).operation
+            if isinstance(settled, OdooStableTargetReplacementOperationRecord)
+            else None
+        )
+        return TestingRebuildSettlementResponse(
+            trace_id=trace_id,
+            product=product,
+            original_key=key,
+            original_request=payload,
+            outcome="observed" if operation is not None else "excluded",
+            operation=operation,
+        )
 
     def resume_original(
         product: Annotated[str, Path(min_length=1)],
@@ -531,7 +627,7 @@ def register_testing_rebuild_routes(
         inspect,
         methods=["GET"],
         operation_id="inspect_testing_rebuild",
-        response_model=TestingRebuildPreflight,
+        response_model=TestingRebuildInspection,
     )
     app.add_api_route(
         TESTING_REBUILD_ROUTE,
@@ -539,6 +635,16 @@ def register_testing_rebuild_routes(
         methods=["POST"],
         operation_id="submit_testing_rebuild",
         response_model=TestingRebuildResponse,
+    )
+    app.add_api_route(
+        TESTING_REBUILD_ROUTE + "/settle",
+        settle_original,
+        methods=["POST"],
+        operation_id="settle_testing_rebuild",
+        response_model=TestingRebuildSettlementResponse,
+        responses={
+            status: {"model": common.error_response_model} for status in (400, 401, 403, 409, 503)
+        },
     )
     app.add_api_route(
         TESTING_REBUILD_ROUTE + "/lookup",

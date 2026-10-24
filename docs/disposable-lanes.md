@@ -1535,10 +1535,7 @@ client supplies it through the same supported session path. A new attempt is
 marked dispatched by that client's existing callback after session lookup;
 failures proven before POST dispatch return to inspection. Absence is not proof
 that an earlier request cannot still arrive, so lookup retains the uncertain
-request. Authoritative settlement of an unobserved request is tracked in #4014
-before full activation; clearing browser state alone cannot exclude it. Known operation IDs
-resume with GET after sign-in. A confirmed first-submit denial can be discarded
-locally to refresh inspection, without another submit. Provider 401/403 preflight
+request. Known operation IDs resume with GET after sign-in. Provider 401/403 preflight
 refusals carry a denial trace. Other known pre-admission failures use a fixed
 not-ready response; an uncertain create/commit reply remains uncertain. GitHub
 rate limits and expired artifact-storage URLs stop build selection as unavailable,
@@ -1546,6 +1543,52 @@ without trying an older candidate or misreporting an identity denial.
 The source feature
 requires normal train delivery and service activation; its tests and mocked
 browser journey do not establish CM health or rebuild timing.
+
+The inspection also supplies the original administrator scope, which the browser
+persists before dispatch and submits with its original intent. A different signed-in
+actor cannot submit or settle that bound request. This scope is metadata; adding it
+does not change legacy intent fingerprints. Older saved requests lacking the original
+scope stay observation-only when their dispatch outcome is uncertain. They cannot
+safely be assigned to the current actor. A confirmed first-submit denial still
+supports local discard, because its reply proves refusal before admission; a
+denial during recovery of an earlier uncertain dispatch never gains that disposition.
+That local exit applies only to the refusal observed on the current page. Every
+rehydrated request is uncertain, including saved denial or never-dispatched flags;
+without an operation ID, recovery only looks up the original request.
+
+The browser verifies the saved request by reading it back before its first POST,
+including immediately before dispatch. If either check fails, nothing is sent.
+An unreadable or malformed saved request blocks rebuilding and offers Retry
+recovery without erasing the stored value. After dispatch, the page retains the
+latest original request and observed operation in memory even when later storage
+writes fail. Watching, resuming and settlement use that retained identity. A
+failed storage removal after proved completion may leave an older recovery record
+on reload; it must be observed or settled again before another rebuild.
+The sending tab alone holds this browser recovery handle. A new tab, another
+browser or closing the tab does not settle an uncertain original. Preserve that
+tab until the original is observed or explicitly settled. If saved evidence is
+malformed, unreadable or refers to a missing operation, retain it for service
+investigation; absent evidence does not authorize another rebuild. This flow
+does not provide recovery across browsers after the original handle is lost.
+
+**Settle this request** explicitly calls
+`POST /v1/products/{product}/testing-rebuild/settle` with the same key, inspected
+intent and original scope, using current administrator cookie/CSRF checks. The
+service serializes settlement and queue admission on the original actor/key across
+products and contexts. If the original operation exists, settlement returns its
+bounded view without changing or cancelling it. Otherwise it commits a durable
+exclusion receipt in the existing idempotency table. A delayed original submit
+cannot enqueue after that exclusion. Lookup remains read-only and its 404 is never
+an exclusion. No new schema, grant, provider call, operation or lease is created by
+settlement.
+
+For an uncertain dispatch, the browser clears its saved request only after a
+matching exclusion receipt or
+an observed terminal operation. An observed pending, running or held operation
+retains its ID for watching. A lost settlement reply, denial, prior recovery 409,
+or mismatched receipt retains the original request; an explicit same-key settlement
+can recover a previously committed exclusion. Reload never retries settlement or
+starts a new rebuild. Confirmed first-submit refusals retain their existing local exit.
 
 `POST /v1/products/{product}/testing-rebuild/operations/{operation_id}/resume`
 explicitly resumes a held native rebuild. It requires the original request's
