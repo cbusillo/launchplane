@@ -3115,10 +3115,11 @@ checkpoint and remains resumable after its own checkpoint is written. The archiv
 retains the rebuild's original journal and effect marker. A subsequent rebuild
 ignores only markers belonging to archived attempts; any other started effect
 still refuses before a new restoration starts. New runtime data and log volumes
-receive the same runner ownership as the initial sanitized copy before cloning
-and upgrading the FINAL tuple.
-Interrupted preparation is included even when it stopped before the restoration
-marker; its generation-bound preparation marker remains archived as evidence.
+receive the same runner ownership as the initial sanitized copy during snapshot
+restoration, before cloning and upgrading the FINAL tuple. Abandonment requires
+the original per-attempt restoration marker and a fully inspected idle runtime.
+An earlier interruption without that proof remains held; a preparation marker
+cannot stand in for the original attempt's effects.
 
 After deployment, use `scripts/odoo-upgrade-rehearsal.py` from that deployed
 revision. Derive private intent files by changing only `action` on the saved

@@ -69,7 +69,6 @@ def main() -> None:
     namespace["restore_preserved_snapshot"](
         {"record": {"rehearsal_id": "fixture"}}, root, containers, source.name, source.name
     )
-    namespace["prepare_runner_storage"](containers)
     namespace["clone"]({}, containers, source.name, "destination")
     copied = parent / "destination" / attachment.name
     restored = parent / source.name / attachment.name

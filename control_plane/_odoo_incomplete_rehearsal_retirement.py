@@ -25,16 +25,13 @@ def rehearsal_effect_marker(action: str, attempt: str) -> str:
 
 
 def archived_rehearsal_markers(record: dict[str, Any]) -> set[str]:
-    archived = record.get("abandoned_validations", [])
-    markers = set()
-    for index, item in enumerate(archived):
-        action = item.get("original", {}).get("provider_effect_phase", "validate-business")
-        markers.add(rehearsal_effect_marker(action, item["attempt_sha256"]))
-        if action == "rebuild-final" and index:
-            markers.add(
-                rehearsal_effect_marker("rebuild-prepared", archived[index - 1]["attempt_sha256"])
-            )
-    return markers
+    return {
+        rehearsal_effect_marker(
+            item.get("original", {}).get("provider_effect_phase", "validate-business"),
+            item["attempt_sha256"],
+        )
+        for item in record.get("abandoned_validations", [])
+    }
 
 
 INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = (
@@ -122,11 +119,7 @@ def later_phase_snapshots(spec,root):
     abandoned=(rehearsal_effect_marker(abandoned_action,spec['abandoned_attempt_sha256'])
         if spec['action']=='abandon-validation' else '')
     archived=archived_rehearsal_markers(record)
-    abandoned_preparation=''
-    if rebuilding and record.get('abandoned_validations'):
-        abandoned_preparation=rehearsal_effect_marker('rebuild-prepared',record['abandoned_validations'][-1]['attempt_sha256'])
-    markers=[root/name for name in (abandoned,abandoned_preparation) if name]
-    if abandoned and (not any(path.is_file() for path in markers) or any(path.is_symlink() for path in markers)):
+    if abandoned and (not (root/abandoned).is_file() or (root/abandoned).is_symlink()):
         raise RuntimeError('Missing original validation marker')
     for marker in root.iterdir():
         if marker.name.endswith('.started'):
@@ -134,8 +127,6 @@ def later_phase_snapshots(spec,root):
                 if any((root/(marker.name[:-len('.started')]+suffix)).exists()
                         for suffix in ('.json','.outcome.json','.outcome.pending')):
                     raise RuntimeError('A recorded validation outcome cannot be abandoned')
-                continue
-            if marker.name==abandoned_preparation:
                 continue
             if marker.name in archived:
                 continue

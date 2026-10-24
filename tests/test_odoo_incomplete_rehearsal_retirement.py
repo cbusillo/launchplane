@@ -1923,12 +1923,6 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
 
     def test_rebuild_abandonment_preserves_failed_marker_and_both_snapshots(self) -> None:
-        self._assert_rebuild_abandonment(preparation=False)
-
-    def test_partial_rebuild_preparation_can_be_abandoned_without_restoration_marker(self) -> None:
-        self._assert_rebuild_abandonment(preparation=True)
-
-    def _assert_rebuild_abandonment(self, preparation: bool) -> None:
         copies = self.later_phase()
         self.spec.update(action="abandon-validation", abandoned_action="rebuild-final")
         self.spec["record"]["state"] = "rebuilding"
@@ -1936,10 +1930,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["record"]["abandoned_validations"] = [{"attempt_sha256": generation}]
         attempt = canonical_json_sha256({"attempt": "failed-rebuild"})
         self.spec["abandoned_attempt_sha256"] = attempt
-        marker = self.root / rehearsal_effect_marker(
-            "rebuild-prepared" if preparation else "rebuild-final",
-            generation if preparation else attempt,
-        )
+        marker = self.root / rehearsal_effect_marker("rebuild-final", attempt)
         marker.touch()
         before = {
             copy["database"]: (self.root / copy["database"] / "database.dump").read_bytes()
@@ -1961,6 +1952,30 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertIn(
             marker.name, self.fixture.host["archived_rehearsal_markers"](self.spec["record"])
         )
+
+    def test_preparation_cannot_substitute_for_the_original_rebuild_marker(self) -> None:
+        copies = self.later_phase()
+        self.spec.update(action="abandon-validation", abandoned_action="rebuild-final")
+        self.spec["record"]["state"] = "rebuilding"
+        generation = canonical_json_sha256({"generation": "previous-abandonment"})
+        self.spec["record"]["abandoned_validations"] = [{"attempt_sha256": generation}]
+        self.spec["abandoned_attempt_sha256"] = canonical_json_sha256({"attempt": "not-started"})
+        marker = self.root / rehearsal_effect_marker("rebuild-prepared", generation)
+        marker.touch()
+        before = {
+            copy["database"]: (self.root / copy["database"] / "database.dump").read_bytes()
+            for copy in copies
+        }
+        for settled in (False, True):
+            with self.subTest(settled=settled):
+                if settled:
+                    marker.with_suffix(".json").write_text("{}")
+                with self.assertRaisesRegex(RuntimeError, "Missing original validation marker"):
+                    self.fixture.run_host(self.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+                self.assertEqual(marker.read_bytes(), b"")
+                for database, content in before.items():
+                    self.assertEqual((self.root / database / "database.dump").read_bytes(), content)
 
     def test_abandonment_refuses_changed_custody_or_any_validation_outcome(self) -> None:
         copies = self.later_phase()
@@ -2015,14 +2030,11 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         host = self.fixture.host
         restore = Mock()
         upgrade = Mock()
-        ownership = Mock()
-        upgrade.side_effect = lambda *args, **kwargs: ownership.assert_called_once()
         host.update(
             compose=Mock(),
             command=Mock(),
             sql=Mock(return_value="1"),
             restore_preserved_snapshot=restore,
-            prepare_runner_storage=ownership,
             clone=Mock(),
             copy_runner=upgrade,
             before_web=Mock(),
@@ -2061,14 +2073,16 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         upgrade.assert_not_called()
         prepared_calls = host["compose"].call_count
         self.spec["attempt_sha256"] = canonical_json_sha256({"refused": "unsafe-stage"})
-        prepared = self.root / (
-            "rebuild-prepared-"
-            + self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"]
-            + ".json"
-        )
+        prepared = (
+            self.root
+            / rehearsal_effect_marker(
+                "rebuild-prepared",
+                self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"],
+            )
+        ).with_suffix(".json")
         saved = prepared.read_bytes()
-        unknown = self.root / (
-            "rebuild-final-" + canonical_json_sha256({"unknown": "attempt"}) + ".started"
+        unknown = self.root / rehearsal_effect_marker(
+            "rebuild-final", canonical_json_sha256({"unknown": "attempt"})
         )
         snapshot = self.root / copies[0]["database"] / "database.dump"
         snapshot_bytes = snapshot.read_bytes()
@@ -2150,7 +2164,6 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             [(names["source"], names["source"]), (names["final_source"], names["final_source"])],
         )
         upgrade.assert_called_once()
-        ownership.assert_called_once()
         self.assertEqual(upgrade.call_args.args[2], names["final_upgrade"])
         self.fixture.fixture.containers["web"]["State"]["Running"] = True
         self.spec["mode"] = "observe"
