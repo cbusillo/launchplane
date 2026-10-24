@@ -151,10 +151,7 @@ from control_plane.contracts.solo_administration_confirmation import (
 )
 from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     ordinary_agent_delivery_administration_removed,
-    ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
@@ -165,12 +162,9 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicyGitHubActionsCallerBinding,
     AuthzPolicyImmutableHumanCallerBinding,
-    AuthzPolicySchemaV3MaintenanceEvidence,
-    AuthzPolicySchemaV3OrdinaryEnableEvidence,
     AuthzPolicySchemaV3TransitionDeniedError,
     AuthzPolicySchemaV3WriteEvidence,
     classify_authz_policy_schema_v3_transition,
-    require_authz_policy_source_status,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 
@@ -418,7 +412,6 @@ from control_plane.contracts.product_owner import (
     ProductOwnerRoutingRecord,
 )
 from control_plane.contracts.privileged_operation import (
-    ManagedAuthzPolicySetHumanEvidence,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
@@ -572,11 +565,7 @@ from control_plane.repository_inventory import (
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationEvent,
-    OrdinaryAgentDeliveryActivationExecutionEvidence,
     OrdinaryAgentDeliveryActivationRecord,
-    OrdinaryAgentDeliveryActivationReference,
-    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
-    OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionRecord,
@@ -667,7 +656,6 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
-    ordinary_agent_delivery_activation_schema_capability,
     verify_postgres_schema_invariants,
 )
 
@@ -710,56 +698,6 @@ class _OdooOverridePayloadJson(TypeDecorator[PayloadDict]):
         if not isinstance(x, dict) or not isinstance(y, dict):
             return x is y
         return json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
-
-
-OrdinaryAgentDeliveryActivationWriteStatus = Literal["written", "replayed"]
-
-
-class OrdinaryAgentDeliveryActivationWriteResult(NamedTuple):
-    status: OrdinaryAgentDeliveryActivationWriteStatus
-    record: OrdinaryAgentDeliveryActivationRecord
-    event: OrdinaryAgentDeliveryActivationEvent
-
-
-class OrdinaryAgentDeliveryActivationStore(Protocol):
-    def read_ordinary_agent_delivery_activation_record(
-        self, activation_id: str
-    ) -> OrdinaryAgentDeliveryActivationRecord: ...
-
-    def list_ordinary_agent_delivery_activation_records(
-        self, *, limit: int | None = None
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, ...]: ...
-
-    def read_ordinary_agent_delivery_activation_event(
-        self, event_id: str
-    ) -> OrdinaryAgentDeliveryActivationEvent: ...
-
-    def list_ordinary_agent_delivery_activation_event_records(
-        self, *, activation_id: str = "", limit: int | None = None
-    ) -> tuple[OrdinaryAgentDeliveryActivationEvent, ...]: ...
-
-    def install_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-        *,
-        predecessor: (
-            OrdinaryAgentDeliveryActivationRecord | OrdinaryAgentDeliveryActivationReference | None
-        ) = None,
-        predecessor_event: OrdinaryAgentDeliveryActivationEvent | None = None,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult: ...
-
-    def revoke_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult: ...
-
-    def recover_ordinary_agent_delivery_activation_by_source_operation(
-        self, source_operation_id: str
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, OrdinaryAgentDeliveryActivationEvent]: ...
-
-    def ordinary_agent_delivery_activation_schema_capability(self) -> tuple[str, str, bool]: ...
 
 
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
@@ -27917,64 +27855,6 @@ class PostgresRecordStore(HumanSessionStore):
         return activation_event
 
     @staticmethod
-    def _sync_ordinary_agent_delivery_activation_row(
-        row: LaunchplaneOrdinaryAgentDeliveryActivationRow,
-        record: OrdinaryAgentDeliveryActivationRecord,
-    ) -> None:
-        replacement = PostgresRecordStore._ordinary_agent_delivery_activation_row(record)
-        for column_name in (
-            "desired_state",
-            "effective_state",
-            "revision",
-            "updated_at",
-            "revoked_at",
-            "superseded_by_activation_id",
-            "superseded_at",
-            "activation_sha256",
-            "payload",
-        ):
-            setattr(row, column_name, getattr(replacement, column_name))
-
-    @staticmethod
-    def _ordinary_agent_delivery_activation_scope_filters(
-        record: OrdinaryAgentDeliveryActivationRecord,
-    ) -> tuple[object, ...]:
-        return (
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.repository_id
-            == record.scope.target.repository_id,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.base_branch
-            == record.scope.target.base_branch,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.managed_set_id
-            == record.scope.managed_set_id,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.managed_rule_id
-            == record.scope.managed_rule_id,
-        )
-
-    def _lock_ordinary_agent_delivery_activation_scope(
-        self, session: Any, record: OrdinaryAgentDeliveryActivationRecord
-    ) -> None:
-        if self.database_dialect_name != "postgresql":
-            return
-        scope = record.scope
-        lock_name = ":".join(
-            (
-                "launchplane",
-                "ordinary-agent-delivery-activation",
-                str(scope.target.repository_id),
-                scope.target.base_branch,
-                scope.managed_set_id,
-                scope.managed_rule_id,
-            )
-        )
-        session.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-            {"lock_name": lock_name},
-        )
-
-    def _after_ordinary_agent_delivery_activation_write_step(self, _step_name: str) -> None:
-        return None
-
-    @staticmethod
     def _validate_ordinary_agent_delivery_activation_event_result(
         *,
         record: OrdinaryAgentDeliveryActivationRecord,
@@ -28122,391 +28002,6 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Activation recovery requires source_operation_id.")
         with self._session_factory() as session:
             return self._ordinary_agent_delivery_activation_operation_outcome(session, normalized)
-
-    def install_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-        *,
-        predecessor: (
-            OrdinaryAgentDeliveryActivationRecord | OrdinaryAgentDeliveryActivationReference | None
-        ) = None,
-        predecessor_event: OrdinaryAgentDeliveryActivationEvent | None = None,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult:
-        if (
-            record.revision != 1
-            or record.desired_state != "guarded"
-            or record.effective_state != "qualification_only"
-            or record.revoked_at
-            or record.superseded_at
-            or record.installed_at != event.occurred_at
-            or record.updated_at != event.occurred_at
-            or event.action != "installed"
-            or event.source_operation_id != record.source_setup_operation_id
-        ):
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation setup must install revision one as qualification-only."
-            )
-        self._validate_ordinary_agent_delivery_activation_event_result(record=record, event=event)
-        predecessor_reference = record.predecessor
-        if (predecessor_reference is None) != (predecessor is None):
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation setup predecessor does not match the persisted record."
-            )
-        if isinstance(predecessor, OrdinaryAgentDeliveryActivationReference):
-            if predecessor != predecessor_reference:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation setup predecessor does not match the persisted record."
-                )
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            self._lock_active_authz_policy(session)
-            self._lock_ordinary_agent_delivery_activation_scope(session, record)
-            source_row = session.scalar(
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.source_setup_operation_id
-                    == record.source_setup_operation_id
-                )
-            )
-            if source_row is not None:
-                replay_record, replay_event = (
-                    self._ordinary_agent_delivery_activation_operation_outcome(
-                        session, record.source_setup_operation_id
-                    )
-                )
-                if replay_record != record or replay_event != event:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup replay changed the persisted outcome."
-                    )
-                if predecessor_reference is not None:
-                    replay_predecessor_row = session.get(
-                        LaunchplaneOrdinaryAgentDeliveryActivationRow,
-                        predecessor_reference.activation_id,
-                    )
-                    if replay_predecessor_row is None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup replay lost its predecessor."
-                        )
-                    replay_predecessor = self._ordinary_agent_delivery_activation_from_row(
-                        replay_predecessor_row
-                    )
-                    if replay_predecessor.desired_state == "revoked":
-                        if (
-                            predecessor_event is not None
-                            or replay_predecessor.revision != predecessor_reference.revision
-                            or replay_predecessor.activation_sha256
-                            != predecessor_reference.activation_sha256
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its revoked predecessor."
-                            )
-                    else:
-                        if (
-                            predecessor_event is None
-                            or replay_predecessor.superseded_by_activation_id
-                            != record.activation_id
-                            or predecessor_event.previous_revision != predecessor_reference.revision
-                            or predecessor_event.previous_activation_sha256
-                            != predecessor_reference.activation_sha256
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its superseded predecessor."
-                            )
-                        stored_predecessor_event_row = session.get(
-                            LaunchplaneOrdinaryAgentDeliveryActivationEventRow,
-                            predecessor_event.event_id,
-                        )
-                        if stored_predecessor_event_row is None or (
-                            self._ordinary_agent_delivery_activation_event_from_row(
-                                stored_predecessor_event_row
-                            )
-                            != predecessor_event
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its superseded event."
-                            )
-                        self._validate_ordinary_agent_delivery_activation_event_result(
-                            record=replay_predecessor,
-                            event=predecessor_event,
-                        )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and replay_predecessor != predecessor
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup replay changed its predecessor projection."
-                        )
-                return OrdinaryAgentDeliveryActivationWriteResult(
-                    "replayed", replay_record, replay_event
-                )
-
-            source_operation_row = session.scalar(
-                select(LaunchplanePrivilegedOperationRow).where(
-                    LaunchplanePrivilegedOperationRow.operation_id
-                    == record.source_setup_operation_id
-                )
-            )
-            if source_operation_row is not None:
-                source_operation = self._read_payload(
-                    model_type=PrivilegedOperationRecord,
-                    payload=source_operation_row.payload,
-                )
-                approval = source_operation.approval
-                if (
-                    approval is not None
-                    and approval.managed_set_id
-                    == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
-                ):
-                    active_policy_record = self._locked_active_authz_policy_record(session)
-                    if (
-                        approval.managed_rule_id
-                        != ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID
-                        or ordinary_agent_delivery_administration_state(
-                            active_policy_record.policy,
-                            github_id=approval.approver.github_id,
-                        )
-                        != "active"
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup lost its delivery administration authority."
-                        )
-
-            statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                *cast(Any, self._ordinary_agent_delivery_activation_scope_filters(record))
-            )
-            if self.database_dialect_name == "postgresql":
-                statement = statement.with_for_update()
-            scope_rows = tuple(session.scalars(statement).all())
-            current_rows = tuple(
-                row for row in scope_rows if row.revoked_at is None and row.superseded_at is None
-            )
-            if len(current_rows) > 1:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation scope has multiple current records."
-                )
-            if predecessor_reference is None:
-                if scope_rows or predecessor_event is not None:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation replacement requires an exact predecessor."
-                    )
-            else:
-                scope_records = tuple(
-                    (row, self._ordinary_agent_delivery_activation_from_row(row))
-                    for row in scope_rows
-                )
-                if not scope_records:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation predecessor was not found in the exact scope."
-                    )
-                newest_installed_at = max(
-                    datetime.fromisoformat(stored.installed_at) for _, stored in scope_records
-                )
-                newest = tuple(
-                    (row, stored)
-                    for row, stored in scope_records
-                    if datetime.fromisoformat(stored.installed_at) == newest_installed_at
-                )
-                if len(newest) != 1:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation history does not have one latest predecessor."
-                    )
-                predecessor_row, stored_predecessor = newest[0]
-                if predecessor_row.activation_id != predecessor_reference.activation_id:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup requires the exact latest predecessor."
-                    )
-                if (
-                    predecessor_reference.revision != stored_predecessor.revision
-                    or predecessor_reference.activation_sha256
-                    != stored_predecessor.activation_sha256
-                ):
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation predecessor revision or digest changed."
-                    )
-                if datetime.fromisoformat(record.installed_at) <= newest_installed_at:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup must be installed after its latest predecessor."
-                    )
-                if stored_predecessor.desired_state == "revoked":
-                    if current_rows or predecessor_event is not None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Revoked activation predecessor cannot be rewritten."
-                        )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and predecessor != stored_predecessor
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Revoked activation predecessor projection changed."
-                        )
-                else:
-                    if current_rows != (predecessor_row,) or predecessor_event is None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Current guarded predecessor requires one superseded event."
-                        )
-                    occurred_at = datetime.fromisoformat(
-                        predecessor_event.occurred_at.replace("Z", "+00:00")
-                    )
-                    expires_at = datetime.fromisoformat(
-                        stored_predecessor.activation_expires_at.replace("Z", "+00:00")
-                    )
-                    if occurred_at < expires_at:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Guarded activation predecessor has not expired."
-                        )
-                    superseded_payload = stored_predecessor.model_dump(mode="json")
-                    superseded_payload.update(
-                        {
-                            "revision": stored_predecessor.revision + 1,
-                            "updated_at": predecessor_event.occurred_at,
-                            "superseded_by_activation_id": record.activation_id,
-                            "superseded_at": predecessor_event.occurred_at,
-                            "activation_sha256": "",
-                        }
-                    )
-                    superseded = OrdinaryAgentDeliveryActivationRecord.model_validate(
-                        superseded_payload
-                    )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and predecessor != superseded
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation predecessor projection is not the exact supersession."
-                        )
-                    if (
-                        predecessor_event.action != "superseded"
-                        or predecessor_event.source_operation_id != record.source_setup_operation_id
-                        or predecessor_event.previous_revision != stored_predecessor.revision
-                        or predecessor_event.previous_activation_sha256
-                        != stored_predecessor.activation_sha256
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation predecessor event is not an exact supersession."
-                        )
-                    self._validate_ordinary_agent_delivery_activation_event_result(
-                        record=superseded,
-                        event=predecessor_event,
-                    )
-                    self._sync_ordinary_agent_delivery_activation_row(predecessor_row, superseded)
-                    session.add(
-                        self._ordinary_agent_delivery_activation_event_row(predecessor_event)
-                    )
-                    self._after_ordinary_agent_delivery_activation_write_step(
-                        "superseded_predecessor"
-                    )
-            session.add(self._ordinary_agent_delivery_activation_row(record))
-            self._after_ordinary_agent_delivery_activation_write_step("activation_inserted")
-            session.add(self._ordinary_agent_delivery_activation_event_row(event))
-            self._after_ordinary_agent_delivery_activation_write_step("installed_event_inserted")
-            try:
-                session.commit()
-            except IntegrityError as error:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation setup conflicted with another exact-scope mutation."
-                ) from error
-            return OrdinaryAgentDeliveryActivationWriteResult("written", record, event)
-
-    def revoke_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult:
-        if event.action != "revoked" or event.activation_id != record.activation_id:
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation revocation requires one exact revoked event."
-            )
-        self._validate_ordinary_agent_delivery_activation_event_result(record=record, event=event)
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                LaunchplaneOrdinaryAgentDeliveryActivationRow.activation_id == record.activation_id
-            )
-            if self.database_dialect_name == "postgresql":
-                statement = statement.with_for_update()
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(record.activation_id)
-            current = self._ordinary_agent_delivery_activation_from_row(row)
-            operation_event_rows = tuple(
-                session.scalars(
-                    select(LaunchplaneOrdinaryAgentDeliveryActivationEventRow)
-                    .where(
-                        LaunchplaneOrdinaryAgentDeliveryActivationEventRow.source_operation_id
-                        == event.source_operation_id,
-                        LaunchplaneOrdinaryAgentDeliveryActivationEventRow.action.in_(
-                            ("installed", "revoked")
-                        ),
-                    )
-                    .order_by(LaunchplaneOrdinaryAgentDeliveryActivationEventRow.event_id)
-                    .limit(2)
-                ).all()
-            )
-            if operation_event_rows:
-                if len(operation_event_rows) != 1:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation source operation has multiple terminal outcomes."
-                    )
-                existing_event = self._ordinary_agent_delivery_activation_event_from_row(
-                    operation_event_rows[0]
-                )
-                recovered_record, recovered_event = (
-                    self._ordinary_agent_delivery_activation_operation_outcome(
-                        session, event.source_operation_id
-                    )
-                )
-                if (
-                    existing_event != event
-                    or recovered_event != event
-                    or recovered_record != record
-                ):
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation revocation replay changed the persisted outcome."
-                    )
-                return OrdinaryAgentDeliveryActivationWriteResult(
-                    "replayed", recovered_record, recovered_event
-                )
-            if current.desired_state == "revoked" or current.superseded_at:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation target is already terminal."
-                )
-            if (
-                event.previous_revision != current.revision
-                or event.previous_activation_sha256 != current.activation_sha256
-            ):
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation predecessor revision or digest changed."
-                )
-            expected_payload = current.model_dump(mode="json")
-            expected_payload.update(
-                {
-                    "desired_state": "revoked",
-                    "effective_state": "revoked",
-                    "revision": current.revision + 1,
-                    "updated_at": event.occurred_at,
-                    "revoked_at": event.occurred_at,
-                    "activation_sha256": "",
-                }
-            )
-            expected = OrdinaryAgentDeliveryActivationRecord.model_validate(expected_payload)
-            if expected != record:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation changed fields outside the exact terminal transition."
-                )
-            self._sync_ordinary_agent_delivery_activation_row(row, record)
-            self._after_ordinary_agent_delivery_activation_write_step("activation_revoked")
-            session.add(self._ordinary_agent_delivery_activation_event_row(event))
-            self._after_ordinary_agent_delivery_activation_write_step("revoked_event_inserted")
-            try:
-                session.commit()
-            except IntegrityError as error:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation conflicted with another exact mutation."
-                ) from error
-            return OrdinaryAgentDeliveryActivationWriteResult("written", record, event)
-
-    def ordinary_agent_delivery_activation_schema_capability(self) -> tuple[str, str, bool]:
-        return ordinary_agent_delivery_activation_schema_capability(self._engine)
 
     def _after_ordinary_agent_enrollment_write_step(self, _step_name: str) -> None:
         return None
@@ -28751,48 +28246,14 @@ class PostgresRecordStore(HumanSessionStore):
     def _deny_authz_policy_schema_v3(reason_code: str) -> NoReturn:
         raise AuthzPolicySchemaV3TransitionDeniedError(reason_code)
 
-    def _after_authz_policy_schema_v3_lock_step(self, _step_name: str) -> None:
-        return None
-
-    def _locked_authz_transition_operation(
-        self, session: Any, operation_id: str
-    ) -> PrivilegedOperationRecord:
-        statement = select(LaunchplanePrivilegedOperationRow).where(
-            LaunchplanePrivilegedOperationRow.operation_id == operation_id
-        )
-        if self.database_dialect_name == "postgresql":
-            statement = statement.with_for_update()
-        row = session.scalar(statement)
-        if row is None:
-            self._deny_authz_policy_schema_v3("source_operation_missing")
-        assert row is not None
-        try:
-            record = self._read_payload(model_type=PrivilegedOperationRecord, payload=row.payload)
-        except ValueError:
-            self._deny_authz_policy_schema_v3("source_operation_payload_invalid")
-        if (
-            row.operation_id != record.operation_id
-            or row.descriptor_id != record.descriptor_id
-            or row.status != record.status
-            or row.requester_github_id != getattr(record.requested_by, "github_id", 0)
-            or row.created_at != record.created_at
-            or row.updated_at != record.updated_at
-            or row.expires_at != record.expires_at
-        ):
-            self._deny_authz_policy_schema_v3("source_operation_projection_mismatch")
-        return record
-
-    def _require_authz_policy_schema_v3_write_evidence_locked(
+    def _require_authz_policy_schema_v3_write_evidence(
         self,
         *,
-        session: Any,
         current_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         evidence: AuthzPolicySchemaV3WriteEvidence | None,
-        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> None:
-        # A null replacement is an exact-CAS no-op.  It deliberately performs no
-        # fresh authority decision, including after a schema-3 activation expires.
+        # A null replacement is an exact-CAS no-op; it performs no fresh authority decision.
         if replacement_record is None:
             return
         if (
@@ -28803,12 +28264,7 @@ class PostgresRecordStore(HumanSessionStore):
                 current_record.policy, replacement_record.policy
             )
             return
-        try:
-            transition = classify_authz_policy_schema_v3_transition(
-                current_record.policy, replacement_record.policy
-            )
-        except AuthzPolicySchemaV3TransitionDeniedError:
-            raise
+        classify_authz_policy_schema_v3_transition(current_record.policy, replacement_record.policy)
         if evidence is None:
             self._deny_authz_policy_schema_v3("write_evidence_missing")
         assert evidence is not None
@@ -28858,208 +28314,6 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             self._deny_authz_policy_schema_v3("candidate_administrator_quorum_unsatisfied")
 
-        if transition.kind == "v3_maintenance":
-            if not isinstance(evidence, AuthzPolicySchemaV3MaintenanceEvidence):
-                self._deny_authz_policy_schema_v3("maintenance_evidence_required")
-            return
-        if transition.kind not in {"v2_to_v3_enable", "v3_enable_or_expand"} or not isinstance(
-            evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence
-        ):
-            self._deny_authz_policy_schema_v3("ordinary_enable_evidence_required")
-        assert isinstance(evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence)
-
-        activation_statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.activation_id == evidence.activation_id
-        )
-        if self.database_dialect_name == "postgresql":
-            activation_statement = activation_statement.with_for_update()
-        activation_row = session.scalar(activation_statement)
-        if activation_row is None:
-            self._deny_authz_policy_schema_v3("activation_missing")
-        assert activation_row is not None
-        try:
-            activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-        except (ValueError, OrdinaryAgentDeliveryActivationConflictError):
-            self._deny_authz_policy_schema_v3("activation_projection_mismatch")
-        setup_operation = self._locked_authz_transition_operation(
-            session, activation.source_setup_operation_id
-        )
-        policy_operation = self._locked_authz_transition_operation(
-            session, activation.policy_package.policy_operation_id
-        )
-
-        self._lock_repository_inventory_write(
-            session, repository_id=str(activation.scope.target.repository_id)
-        )
-        inventory_statement = (
-            select(LaunchplaneRepositoryInventoryRow)
-            .where(
-                LaunchplaneRepositoryInventoryRow.repository_id
-                == str(activation.scope.target.repository_id)
-            )
-            .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
-            .limit(1)
-        )
-        if self.database_dialect_name == "postgresql":
-            inventory_statement = inventory_statement.with_for_update()
-        inventory_row = session.scalar(inventory_statement)
-        if inventory_row is None:
-            self._deny_authz_policy_schema_v3("inventory_missing")
-        assert inventory_row is not None
-        try:
-            inventory = self._read_payload(
-                model_type=RepositoryInventoryRecord, payload=inventory_row.payload
-            )
-        except ValueError:
-            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
-        if (
-            inventory_row.record_id != inventory.record_id
-            or inventory_row.repository_id != inventory.repository_id
-            or inventory_row.repository_owner_id != inventory.repository_owner_id
-            or inventory_row.repository != inventory.repository
-            or inventory_row.inventory_state != inventory.inventory_state
-            or inventory_row.inventory_revision != inventory.inventory_revision
-            or inventory.record_id != activation.inventory.record_id
-            or inventory.inventory_revision != activation.inventory.revision
-            or inventory.inventory_digest != activation.inventory.inventory_sha256
-            or inventory.inventory_state != activation.inventory.state
-            or int(inventory.repository_id) != activation.scope.target.repository_id
-            or inventory.repository.casefold() != activation.scope.target.repository.casefold()
-        ):
-            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
-
-        if self.database_dialect_name == "postgresql":
-            versions = tuple(session.scalars(text("select version_num from alembic_version")))
-            if len(versions) != 1 or versions[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
-                self._deny_authz_policy_schema_v3("database_revision_incompatible")
-
-        # Confirmation lifecycle writes lock this row independently. Acquire it
-        # after every activation/source/inventory lock so expiry is evaluated
-        # against a database timestamp sampled after the final mutable lock.
-        if confirmation_consumption is not None:
-            confirmation_statement = (
-                select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
-                .where(
-                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
-                    == confirmation_consumption.confirmation_id
-                )
-                .limit(1)
-            )
-            if self.database_dialect_name == "postgresql":
-                confirmation_statement = confirmation_statement.with_for_update()
-            if session.scalar(confirmation_statement) is None:
-                raise FileNotFoundError(confirmation_consumption.confirmation_id)
-            self._after_authz_policy_schema_v3_lock_step("confirmation")
-        db_now = datetime.fromisoformat(self._database_mutation_timestamp(session))
-
-        expected_key = transition.added_or_changed_ordinary_rule_keys[0].split("\x1f", 1)
-        package = activation.policy_package
-        scope = activation.scope
-        if (
-            activation.activation_id != evidence.activation_id
-            or activation.revision != evidence.activation_revision
-            or activation.activation_sha256 != evidence.activation_sha256
-            or activation.source_setup_operation_id != evidence.source_setup_operation_id
-            or activation.desired_state != "guarded"
-            or activation.effective_state not in {"qualification_only", "guarded"}
-            or activation.revoked_at
-            or activation.superseded_at
-            or db_now >= datetime.fromisoformat(activation.activation_expires_at)
-            or (scope.managed_set_id, scope.managed_rule_id) != tuple(expected_key)
-            or scope.target.repository_id != evidence.repository_id
-            or scope.target.repository.casefold() != evidence.repository.casefold()
-            or scope.target.base_branch != evidence.base_branch
-            or scope.managed_set_id != evidence.managed_set_id
-            or scope.managed_rule_id != evidence.managed_rule_id
-            or package.policy_operation_id != evidence.policy_operation_id
-            or package.request_sha256 != evidence.policy_request_sha256
-            or package.evidence_sha256 != evidence.policy_evidence_sha256
-            or package.plan_sha256 != evidence.policy_plan_sha256
-            or package.desired_set_sha256 != evidence.desired_set_sha256
-            or package.candidate_policy_sha256 != evidence.candidate_policy_sha256
-        ):
-            self._deny_authz_policy_schema_v3("activation_binding_mismatch")
-
-        if (
-            setup_operation.descriptor_id != "ordinary-agent-delivery-activation"
-            or setup_operation.status != "executed"
-            or not isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
-            or not isinstance(
-                setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
-            )
-            or setup_operation.approval is None
-            or not isinstance(
-                setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
-            )
-            or setup_operation.execution.action != "setup"
-            or setup_operation.execution.result_status != "ok"
-            or not setup_operation.execution.changed
-            or setup_operation.execution.reconciliation_required
-        ):
-            self._deny_authz_policy_schema_v3("setup_operation_inadmissible")
-        assert isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
-        assert isinstance(
-            setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
-        )
-        assert setup_operation.approval is not None
-        assert isinstance(
-            setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
-        )
-        setup_evidence = setup_operation.evidence
-        setup_request = setup_operation.request
-        if (
-            canonical_json_sha256(setup_operation.approval.model_dump(mode="json"))
-            != activation.source_setup_approval_sha256
-            or setup_evidence.scope != activation.scope
-            or setup_evidence.policy_package != activation.policy_package
-            or setup_evidence.inventory != activation.inventory
-            or setup_evidence.activation_expires_at != activation.activation_expires_at
-            or setup_evidence.predecessor != activation.predecessor
-            or setup_request.policy_operation_id != activation.policy_package.policy_operation_id
-            or setup_request.repository_inventory_record_id != activation.inventory.record_id
-            or setup_request.activation_expires_at != activation.activation_expires_at
-            or setup_request.predecessor != activation.predecessor
-        ):
-            self._deny_authz_policy_schema_v3("setup_operation_binding_mismatch")
-        try:
-            installed, installed_event = self._ordinary_agent_delivery_activation_operation_outcome(
-                session, activation.source_setup_operation_id
-            )
-        except (FileNotFoundError, ValueError, OrdinaryAgentDeliveryActivationConflictError):
-            self._deny_authz_policy_schema_v3("installed_outcome_invalid")
-        execution = setup_operation.execution
-        if (
-            installed_event.action != "installed"
-            or installed_event.sequence != 1
-            or execution.activation_id != installed.activation_id
-            or execution.activation_revision != installed.revision
-            or execution.activation_sha256 != installed.activation_sha256
-            or execution.desired_state != installed.desired_state
-            or execution.effective_state != installed.effective_state
-            or execution.source_operation_id != activation.source_setup_operation_id
-        ):
-            self._deny_authz_policy_schema_v3("installed_outcome_mismatch")
-
-        try:
-            require_authz_policy_source_status(
-                status=policy_operation.status,
-            )
-        except AuthzPolicySchemaV3TransitionDeniedError:
-            raise
-        if (
-            policy_operation.descriptor_id != "managed-authz-policy-set"
-            or not isinstance(policy_operation.evidence, ManagedAuthzPolicySetHumanEvidence)
-            or canonical_json_sha256(policy_operation.request.model_dump(mode="json"))
-            != package.request_sha256
-            or canonical_json_sha256(policy_operation.evidence.model_dump(mode="json"))
-            != package.evidence_sha256
-            or policy_operation.evidence.plan_digest != package.plan_sha256
-            or policy_operation.evidence.diff.desired_set_sha256 != package.desired_set_sha256
-            or policy_operation.evidence.diff.desired_policy_sha256
-            != package.candidate_policy_sha256
-        ):
-            self._deny_authz_policy_schema_v3("policy_source_binding_mismatch")
-
     def _compare_and_write_authz_policy_locked(
         self,
         *,
@@ -29097,12 +28351,10 @@ class PostgresRecordStore(HumanSessionStore):
                 session.commit()
             return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
 
-        self._require_authz_policy_schema_v3_write_evidence_locked(
-            session=session,
+        self._require_authz_policy_schema_v3_write_evidence(
             current_record=current_record,
             replacement_record=replacement_record,
             evidence=schema_v3_write_evidence,
-            confirmation_consumption=confirmation_consumption,
         )
 
         removes_delivery_administration = (

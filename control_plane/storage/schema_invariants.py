@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Any, Protocol
@@ -118,44 +116,6 @@ class CriticalCheckConstraint:
     constraint_name: str
     expression: str
 
-
-ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES: Mapping[str, tuple[str, ...]] = {
-    ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE: (
-        "activation_id",
-        "repository_id",
-        "repository",
-        "base_branch",
-        "managed_set_id",
-        "managed_rule_id",
-        "source_setup_operation_id",
-        "desired_state",
-        "effective_state",
-        "activation_expires_at",
-        "revision",
-        "installed_at",
-        "updated_at",
-        "revoked_at",
-        "superseded_by_activation_id",
-        "superseded_at",
-        "activation_sha256",
-        "payload",
-    ),
-    ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE: (
-        "event_id",
-        "activation_id",
-        "sequence",
-        "action",
-        "previous_revision",
-        "previous_activation_sha256",
-        "resulting_revision",
-        "resulting_activation_sha256",
-        "resulting_desired_state",
-        "resulting_effective_state",
-        "occurred_at",
-        "source_operation_id",
-        "payload",
-    ),
-}
 
 ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
@@ -1716,126 +1676,6 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
         ("confirmation_id",),
     ),
 )
-
-
-def ordinary_agent_delivery_activation_schema_invariants_sha256() -> str:
-    payload = {
-        "revision": EXPECTED_ALEMBIC_HEAD_REVISION,
-        "columns": {
-            table_name: list(column_names)
-            for table_name, column_names in sorted(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES.items())
-        },
-        "postgres_types": [
-            {
-                "table_name": item.table_name,
-                "column_name": item.column_name,
-                "accepted_type_tokens": list(item.accepted_type_tokens),
-            }
-            for item in ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES
-        ],
-        "indexes": [
-            {
-                "table_name": item.table_name,
-                "index_name": item.index_name,
-                "column_names": list(item.column_names),
-                "unique": item.unique,
-                "predicate_expression": item.predicate_expression,
-            }
-            for item in ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES
-        ],
-        "primary_keys": [
-            {"table_name": item.table_name, "column_names": list(item.column_names)}
-            for item in ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS
-        ],
-        "checks": [
-            {
-                "table_name": item.table_name,
-                "constraint_name": item.constraint_name,
-                "expression": item.expression,
-            }
-            for item in ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS
-        ],
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def ordinary_agent_delivery_activation_schema_invariant_errors(engine: Engine) -> list[str]:
-    inspector = inspect(engine)
-    table_names = set(inspector.get_table_names())
-    required_tables = set(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES)
-    missing_tables = sorted(required_tables - table_names)
-    errors = [f"missing required activation table {table_name}" for table_name in missing_tables]
-    present_tables = required_tables & table_names
-    for table_name in sorted(present_tables):
-        observed_columns = {
-            _schema_metadata_text(column.get("name", ""))
-            for column in inspector.get_columns(table_name)
-        }
-        expected_columns = set(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES[table_name])
-        if observed_columns != expected_columns:
-            errors.append(
-                f"{table_name} columns are {', '.join(sorted(observed_columns)) or '<none>'}; "
-                f"expected {', '.join(sorted(expected_columns))}"
-            )
-    if engine.url.get_backend_name() == "postgresql":
-        errors.extend(
-            critical_column_type_errors(
-                inspector,
-                table_names=present_tables,
-                expected_types=ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES,
-            )
-        )
-        index_definitions = postgres_index_definitions(engine)
-    else:
-        index_definitions = None
-    errors.extend(
-        critical_index_errors(
-            inspector=inspector,
-            table_names=present_tables,
-            expected_indexes=ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES,
-            index_definitions=index_definitions,
-        )
-    )
-    errors.extend(
-        critical_primary_key_errors(
-            inspector,
-            table_names=present_tables,
-            expected_keys=ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS,
-        )
-    )
-    errors.extend(
-        critical_check_constraint_errors(
-            inspector,
-            table_names=present_tables,
-            expected_checks=ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS,
-        )
-    )
-    return errors
-
-
-def ordinary_agent_delivery_activation_schema_capability(
-    engine: Engine,
-) -> tuple[str, str, bool]:
-    expected_digest = ordinary_agent_delivery_activation_schema_invariants_sha256()
-    if engine.url.get_backend_name() == "sqlite":
-        observed_revision = EXPECTED_ALEMBIC_HEAD_REVISION
-        revision_valid = True
-    else:
-        try:
-            observed_revision = _verify_alembic_head(engine)
-            revision_valid = True
-        except RuntimeError:
-            revision_valid = False
-            try:
-                with engine.connect() as connection:
-                    rows = connection.execute(text("select version_num from alembic_version"))
-                    revisions = tuple(str(row[0]).strip() for row in rows if str(row[0]).strip())
-                observed_revision = revisions[0] if len(revisions) == 1 else "incompatible"
-            except SQLAlchemyError:
-                observed_revision = "missing"
-    errors = ordinary_agent_delivery_activation_schema_invariant_errors(engine)
-    return observed_revision, expected_digest, revision_valid and not errors
 
 
 def verify_postgres_schema_invariants(engine: Engine) -> None:
