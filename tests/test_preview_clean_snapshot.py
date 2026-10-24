@@ -220,7 +220,10 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     self.fail("Unexpected preview SQL probe")
             elif arguments[-2:] in (["id", "-u"], ["id", "-g"]):
                 output = b"1000"
-            elif kwargs.get("input") == b"fixture-readback":
+            elif kwargs.get("input") in (
+                b"fixture-readback",
+                post_deploy.INTEGRATION_READBACK_PROGRAM.encode(),
+            ):
                 output = b"integration_readback_ok=true" if self.sanitized else b""
             elif kwargs.get("input"):
                 self.assertFalse(self.paused)
@@ -251,6 +254,19 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     )
                 )
         return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=b"")
+
+    def test_real_readback_program_materializes_with_the_snapshot_transport(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
+        from control_plane.integration_readback import integration_readback_policy
+
+        policy = integration_readback_policy(
+            instance_name="pr-23", policies=DokployTargetPolicies(), workflow_mode="restore"
+        )
+        self.run_script(
+            readback_program=post_deploy.INTEGRATION_READBACK_PROGRAM,
+            readback_spec=policy.encoded_spec(),
+        )
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_preview_clones_only_frozen_bytes_and_sanitizes_before_web(self) -> None:
         output = self.run_script()
