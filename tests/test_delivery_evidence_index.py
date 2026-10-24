@@ -101,6 +101,149 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
     def incidents(self) -> tuple[object, ...]:
         return self.store.list_public_ingress_incident_records(status="open")
 
+    def test_later_rollback_recovers_old_target_and_matching_candidate_incidents(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                original = self.deploy("old-target-rollback", failed=True)
+                self.monitor()
+                record_production_delivery_failure(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    candidate="image@accepted-candidate",
+                    reason="rollback_failed",
+                    trace_id="release-step",
+                    observed_at=self.now.isoformat(),
+                )
+                incidents = self.store.list_public_ingress_incident_records(status="open")
+                self.assertEqual(len(incidents), 2)
+                self.now += timedelta(seconds=10)
+                rollback = self.deploy("new-drill")
+                rollback = rollback.model_copy(
+                    update={
+                        "artifact_identity": ArtifactIdentityReference(
+                            artifact_id="image@accepted-candidate"
+                        ),
+                        "runtime_source": {"deployment_operation": "rollback"},
+                    }
+                )
+                self.store.write_deployment_record(rollback)
+                self.monitor()
+                self.assertFalse(self.incidents())
+                for incident in incidents:
+                    resolved = self.store.read_public_ingress_incident_record(incident.incident_id)
+                    self.assertEqual(resolved.status, "resolved")
+                    self.assertEqual(resolved.resolution_reason, "recovered")
+                self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+                self.monitor()
+                self.assertFalse(self.incidents())
+
+    def test_rollback_recovery_requires_matching_failure_and_later_passing_lane_rollback(
+        self,
+    ) -> None:
+        root = self.root
+        cases = (
+            "forward_failure",
+            "forward_success",
+            "failed_rollback",
+            "unhealthy_rollback",
+            "equal_time",
+            "earlier_rollback",
+            "other_context",
+            "testing",
+            "missing_origin",
+            "unrelated_failure",
+            "old_failure",
+            "future_rollback",
+        )
+        for backend in ("filesystem", "sqlite"):
+            for case in cases:
+                with self.subTest(backend=backend, case=case):
+                    self.root = root / case
+                    self.root.mkdir(exist_ok=True)
+                    self.setup_store(backend)
+                    original = self.deploy("old-target-rollback", failed=True)
+                    if case == "forward_failure":
+                        self.store.write_deployment_record(
+                            original.model_copy(
+                                update={"runtime_source": {"deployment_operation": "deploy"}}
+                            )
+                        )
+                    if case == "old_failure":
+                        self.now += timedelta(seconds=1)
+                        record_production_delivery_failure(
+                            self.store,
+                            self.profile,
+                            self.lane,
+                            candidate="image@old-target-rollback",
+                            reason="later_forward_failure",
+                            trace_id="forward-step",
+                            observed_at=self.now.isoformat(),
+                        )
+                    self.monitor()
+                    incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                    if case in {"missing_origin", "unrelated_failure"}:
+                        record_production_delivery_failure(
+                            self.store,
+                            self.profile,
+                            self.lane,
+                            candidate="request:unknown"
+                            if case == "missing_origin"
+                            else "image@other",
+                            reason="rollback_failed",
+                            trace_id="other-failure",
+                            observed_at=self.now.isoformat(),
+                        )
+                        incident = next(
+                            item
+                            for item in self.store.list_public_ingress_incident_records(
+                                status="open"
+                            )
+                            if item.incident_id != incident.incident_id
+                        )
+                    if case != "equal_time":
+                        self.now += timedelta(seconds=-10 if case == "earlier_rollback" else 10)
+                    rollback = original.model_copy(
+                        update={
+                            "record_id": "later-rollback",
+                            "source_git_ref": "later",
+                            "artifact_identity": ArtifactIdentityReference(
+                                artifact_id="image@later"
+                            ),
+                            "failure": None,
+                            "deploy": original.deploy.model_copy(
+                                update={
+                                    "status": "fail" if case == "failed_rollback" else "pass",
+                                    "finished_at": (
+                                        self.now + timedelta(seconds=10)
+                                        if case == "future_rollback"
+                                        else self.now
+                                    ).isoformat(),
+                                }
+                            ),
+                        }
+                    )
+                    changes: dict[str, object] = {
+                        "runtime_source": {
+                            "deployment_operation": "deploy"
+                            if case == "forward_success"
+                            else "rollback"
+                        }
+                    }
+                    if case == "unhealthy_rollback":
+                        changes["destination_health"] = HealthcheckEvidence(status="fail")
+                    if case == "other_context":
+                        changes["context"] = "other-production-lane"
+                    if case == "testing":
+                        changes["instance"] = "testing"
+                    self.store.write_deployment_record(rollback.model_copy(update=changes))
+                    self.monitor()
+                    self.assertEqual(
+                        self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                        "open",
+                    )
+
     def test_large_history_is_paged_then_idle_and_late_updates_read_only_changed_sources(
         self,
     ) -> None:

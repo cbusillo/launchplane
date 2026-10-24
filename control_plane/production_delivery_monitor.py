@@ -972,6 +972,16 @@ def _recover_delivery_failures(
                 summary="The matching production delivery succeeded.",
                 observed_at=now,
             )
+        elif recovery := _later_passing_rollback(store, lane, incident, now, index):
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=False,
+                summary=f"The failed production rollback recovered through {recovery}.",
+                observed_at=now,
+            )
         elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
@@ -988,6 +998,75 @@ def _recover_delivery_failures(
                 observed_at=now,
                 reason=reason,
             )
+
+
+def _is_rollback_deployment(record: DeploymentRecord) -> bool:
+    operation = record.runtime_source.get("deployment_operation")
+    if operation is not None:
+        return operation == "rollback"
+    return record.deploy.deploy_mode == "atomic-switch-back" or record.record_id.endswith(
+        "-rollback"
+    )
+
+
+def _later_passing_rollback(
+    store: Store,
+    lane: ProductLaneProfile,
+    incident: PublicIngressIncidentRecord,
+    now: str,
+    index: DeliveryEvidenceIndex,
+) -> str:
+    key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
+
+    def read_candidate(record_id: str) -> DeploymentRecord | None:
+        try:
+            record = store.read_deployment_record(record_id)
+        except FileNotFoundError:
+            return None
+        if record.context != lane.context or record.instance != "prod":
+            return None
+        return record if _is_rollback_deployment(record) else None
+
+    failed_rollback = False
+    for record_id in index.deployment_candidates(
+        lane.context, passed=False, key=key, finished_before=incident.opened_at
+    ):
+        record = read_candidate(record_id)
+        if record is None or not record.deploy.finished_at:
+            continue
+        keys = {_candidate_key(record.source_git_ref)}
+        if record.artifact_identity:
+            keys.add(_candidate_key(record.artifact_identity.artifact_id))
+        if (
+            key in keys
+            and _time(record.deploy.finished_at) == _time(incident.opened_at)
+            and (
+                record.failure is not None
+                or "fail"
+                in {
+                    record.deploy.status,
+                    record.post_deploy_update.status,
+                    record.destination_health.status,
+                }
+            )
+        ):
+            failed_rollback = True
+            break
+    if not failed_rollback:
+        return ""
+    for record_id in index.deployment_candidates(
+        lane.context, passed=True, finished_after=incident.opened_at, finished_before=now
+    ):
+        record = read_candidate(record_id)
+        if (
+            record is not None
+            and record.failure is None
+            and deployment_record_passed(record)
+            and record.deploy.finished_at
+            and _time(incident.opened_at) < _time(record.deploy.finished_at) <= _time(now)
+        ):
+            return record.record_id
+    return ""
 
 
 def _monitor_availability(

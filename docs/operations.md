@@ -2013,6 +2013,15 @@ refusal, not a failed delivery: it records a skipped
 notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
+An artifact's later successful production delivery resolves its delivery incident.
+A failed rollback deployment also recovers when a later rollback on the same
+production lane passes, even when its target artifact differs. The original failed
+deployment must match the incident's artifact or source and opening time. New
+generic-web deployment evidence records whether the operation is a forward deploy
+or rollback; older records retain recognition by their rollback record ID suffix.
+Recovery uses the ordinary passing observation and preserves the original failure.
+Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
+rollback, or a rollback on another lane cannot resolve that failure.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching

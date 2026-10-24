@@ -738,6 +738,8 @@ def _execute_generic_web_deploy_unserialized(
                 evidence=prior_attempt.post_deploy_update.evidence
             )
 
+    verified_build_evidence["deployment_operation"] = "rollback" if rollback else "deploy"
+
     try:
         fallback_request = _fallback_ship_request(
             request=request,
