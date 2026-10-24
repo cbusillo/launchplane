@@ -74,6 +74,8 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateResult,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -90,6 +92,11 @@ from control_plane.workflows.odoo_prod_promotion_run import (
 )
 from tests.test_production_backup_provider import _binding
 from tests.test_release_review import BASE, HEAD, decision, github_read, profile, seed
+from tests.test_odoo_website_settings import intent, profile as website_profile
+from tests.test_odoo_post_deploy import _module_update_evidence
+from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+import base64
+import json
 
 PRODUCT = "example-site"
 CONTEXT = "example-site"
@@ -426,6 +433,107 @@ class ClientReleaseTests(unittest.TestCase):
                     ).model_dump(mode="json"),
                 }
             )
+        )
+
+    def test_settings_release_completes_drill_and_reapplies_accepted_settings(self) -> None:
+        self.store.write_product_profile_record(website_profile())
+        self.store.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=CONTEXT,
+                instance="prod",
+                website_settings=intent(),
+                updated_at="2026-09-23T00:00:00Z",
+            )
+        )
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        applied: list[OdooWebsiteSettings] = []
+
+        def apply_settings(**kwargs: Any) -> dict[str, str]:
+            payload = json.loads(
+                base64.b64decode(
+                    kwargs["workflow_environment_overrides"][
+                        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+                    ]
+                )
+            )
+            settings = OdooWebsiteSettings.model_validate(payload["website_settings"])
+            applied.append(settings)
+            return _module_update_evidence(website_settings_sha256=settings.digest)
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                return_value=DokployTargetDefinition(
+                    context=CONTEXT, instance="prod", public_hosts=("site.example",)
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "test-token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                side_effect=apply_settings,
+            ),
+        ):
+            for step in client_release_steps(accepted.release_start):
+                with self.subTest(step=step.name):
+                    queued = self.advance()
+                    self.assertTrue(queued, f"{step.name} stalled")
+                    (operation_id,) = queued
+                    operation = (
+                        self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+                        if step.kind == "backup"
+                        else self.store.read_odoo_prod_rollback_operation_record(operation_id)
+                        if step.kind == "rollback"
+                        else self.store.read_odoo_prod_promotion_operation_record(operation_id)
+                    )
+                    assert operation.authorization is not None
+                    self.assertTrue(
+                        client_release_grant_allows(self.store, operation.authorization)
+                    )
+                    if step.kind != "backup":
+                        rollback = step.kind == "rollback"
+                        version = (
+                            accepted.checklist.production
+                            if rollback
+                            else accepted.checklist.candidate
+                        )
+                        self.set_prod(version.artifact_id)
+                        result = execute_odoo_post_deploy(
+                            control_plane_root=self.root,
+                            record_store=self.store,
+                            request=OdooPostDeployRequest(context=CONTEXT, instance="prod"),
+                            artifact_id=version.artifact_id,
+                            release_operation=True,
+                            rollback=rollback,
+                            release_website_settings=accepted.checklist.production_website_settings
+                            if rollback
+                            else accepted.checklist.website_settings,
+                        )
+                        self.assertEqual(result.post_deploy_status, "pass")
+                        retained = self.store.read_odoo_instance_override_record(
+                            context_name=CONTEXT, instance_name="prod"
+                        )
+                        self.assertTrue(retained.last_apply.website_settings_verified)
+                        assert retained.last_apply.website_settings is not None
+                        self.assertEqual(retained.last_apply.website_settings.settings, applied[-1])
+                    self.finish(operation_id)
+
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(applied[0], intent().settings)
+        self.assertEqual(applied[-1], intent().settings)
+        self.assertFalse(applied[1].public_indexing_enabled)
+        self.assertFalse(applied[1].google_analytics_key)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
         )
 
     def test_client_acceptance_promotes_runs_the_drill_and_repromotes_the_same_artifact(
