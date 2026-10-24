@@ -14,6 +14,8 @@ from control_plane.contracts.runtime_identity import parse_runtime_identity_payl
 from control_plane.dokploy import api, source
 from control_plane.dokploy.application_runtime import fetch_application_runtime
 from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient, _target_reservations
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -276,7 +278,13 @@ def retained_application_capability_program(spec: dict[str, object]) -> str:
 
 
 def capability_program_matches(observed: object, expected: str) -> bool:
-    historical = expected
+    if _capability_program_matches(observed, expected):
+        return True
+    if expected.count(CAPABILITY_FAILURE_REPORT) != 1:
+        return False
+    historical = expected.replace(CAPABILITY_FAILURE_REPORT, LEGACY_CAPABILITY_FAILURE_REPORT, 1)
+    if _capability_program_matches(observed, historical):
+        return True
     for fragment in (
         PREPARED_CONTAINER_CAPABILITY_PROGRAM,
         PREPARED_CONTAINER_LOOKUP,
@@ -288,7 +296,13 @@ def capability_program_matches(observed: object, expected: str) -> bool:
     else:
         if _capability_program_matches(observed, historical):
             return True
-    return _capability_program_matches(observed, expected)
+    return False
+
+
+def capability_program_body(script: str) -> str:
+    _, separator, tail = script.partition("<<'LP_RETAINED_CAPABILITY'\n")
+    body, ending, _ = tail.rpartition("\nLP_RETAINED_CAPABILITY\n")
+    return body if separator and ending else ""
 
 
 def _capability_program_matches(observed: object, expected: str) -> bool:
@@ -340,6 +354,23 @@ def inspect_retained_application_capabilities(
     ) != canonical_json_sha256(spec):
         raise ValueError("Attributable retained application capability remains unknown.")
     return canonical_json_sha256(spec)
+
+
+LEGACY_CAPABILITY_FAILURE_REPORT = """except Exception:
+    print("testing_resources_ok=false")
+    sys.exit(1)
+"""
+CAPABILITY_FAILURE_REPORT = f"""except Exception as error:
+    failure_sites = []
+    failure_traceback = error.__traceback__
+    while failure_traceback is not None:
+        if failure_traceback.tb_frame.f_code.co_filename in ("<stdin>", "<string>"):
+            failure_sites.append(failure_traceback.tb_lineno)
+        failure_traceback = failure_traceback.tb_next
+    print({CAPABILITY_FAILURE_SITES_MARKER!r} + "=" + ",".join(map(str, failure_sites[-{NATIVE_PROGRAM_SOURCE_SITE_LIMIT}:])))
+    print("testing_resources_ok=false")
+    sys.exit(1)
+"""
 
 
 PREPARED_CONTAINER_CAPABILITY_PROGRAM = r"""
@@ -522,8 +553,6 @@ try:
         raise ValueError("retained attribution changed")
     print("testing_resources_binding_sha256=" + hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("testing_resources_ok=true")
-except Exception:
-    print("testing_resources_ok=false")
-    sys.exit(1)
 """
+    + CAPABILITY_FAILURE_REPORT
 )

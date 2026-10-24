@@ -16,6 +16,7 @@ from control_plane.testing_separation_resources import (
     STORAGE_PROGRAM_NAME,
     ProgramLogReadStatus,
 )
+from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
 
 
 def inspect_preparation_programs(
@@ -133,13 +134,25 @@ def inspect_preparation_programs(
             enabled = program.get("enabled")
             observed.disabled = not enabled if isinstance(enabled, bool) else None
             if observed.schedule_id:
-                inspect_program_history(host=host, token=token, observed=observed, binding=binding)
+                program_script = program.get("script")
+                inspect_program_history(
+                    host=host,
+                    token=token,
+                    observed=observed,
+                    binding=binding,
+                    program=program_script if isinstance(program_script, str) else None,
+                )
         result.append(observed)
     return result
 
 
 def inspect_program_history(
-    *, host: str, token: str, observed: SeparationProgramInspection, binding: str | None
+    *,
+    host: str,
+    token: str,
+    observed: SeparationProgramInspection,
+    binding: str | None,
+    program: str | None = None,
 ) -> None:
     try:
         payload = api.dokploy_request(
@@ -195,6 +208,32 @@ def inspect_program_history(
     marker_binding = markers.get("testing_resources_binding_sha256")
     if marker_binding and binding is not None:
         observed.result_binding_matches = marker_binding == binding
+    if (
+        observed.kind not in {"retained_capability", "retained_capability_readback"}
+        or observed.resources_ok is not False
+        or observed.log_read_status != ProgramLogReadStatus.AVAILABLE
+        or program is None
+    ):
+        return
+    from control_plane.testing_application_capabilities import (
+        CAPABILITY_FAILURE_REPORT,
+        capability_program_body,
+    )
+    from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+    sites = markers.get(CAPABILITY_FAILURE_SITES_MARKER, "")
+    if CAPABILITY_FAILURE_REPORT not in program or not post_deploy._safe_odoo_post_deploy_marker(
+        CAPABILITY_FAILURE_SITES_MARKER, sites
+    ):
+        return
+    failure = NativeProgramFailed(
+        "Retained capability refused.",
+        program=capability_program_body(program),
+        program_sites=[int(site) for site in sites.split(",")],
+    )
+    if failure.program_sites:
+        observed.failure_program_sha256 = failure.program_sha256
+        observed.failure_program_sites = failure.program_sites
 
 
 def program_identifier(value: str) -> str:

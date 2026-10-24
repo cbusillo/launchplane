@@ -344,6 +344,14 @@ underlying exception. Preserve the original receipt and choose a fresh evidence
 path for each inspection or readback. The caller rejects an already-used output
 path before making the service read; `--evidence-file` may name a fresh path for
 either read while retaining the original request and key.
+New retained-capability failures also emit bounded numeric locations in the
+generated Python program. Inspection exposes those locations and that recognized
+Python body's SHA-256 only for a matching, disabled, terminal capability run with
+available failure markers. Locations outside the recognized body are discarded.
+No exception text, values or locals are emitted. Historical programs without the
+diagnostic fragment remain recognizable, including the preceding stricter
+prepared-container variant; missing locations remain unknown. These diagnostics
+do not change any capability predicate, custody, retry or qualification rule.
 Public readiness observation and
 publication freshness use the same database clock.
 
