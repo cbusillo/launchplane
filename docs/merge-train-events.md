@@ -43,6 +43,15 @@ pass allows at most 16 actions per target, then yields to the other trains.
 Dry-run and level1 passes still run once. The HTTP controller and GitHub runner remain
 one-action interfaces; this progression belongs to the in-service worker.
 
+When another eligible root is available, new-candidate selection defers unsupported
+stacks using the existing stack-discovery checks. The root's feedback names
+the unfinished child or ambiguous topology; unrelated work can form a candidate
+in the same pass. No hold label or permanent failure is written. Every fresh
+snapshot rechecks the stack, so it can combine again when its children are ready.
+The root's own check or merge conflict is reported first. Existing candidates keep
+their membership checks. Ready handoffs, Client decisions and holds still apply to each PR, and complete
+stacks continue through the existing combination and shared-CI path.
+
 The GitHub Runner defers a pass when the controller returns HTTP 409 with
 `merge_train_controller_lease_held`: another worker owns that train's lease.
 It records the deferral in the job summary, sends no PR feedback, and leaves
