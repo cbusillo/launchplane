@@ -721,7 +721,9 @@ def reconcile_testing_target(
     except (ValueError, FileNotFoundError, click.ClickException):
         plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
         return ReconcileOutcome(plan)
-    if generation is not None and not generation.reconcile_requested_at:
+    if generation is not None and not (
+        generation.completed_at or generation.reconcile_requested_at
+    ):
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
     fresh_generation = generation is not None and not generation.completed_at

@@ -1681,6 +1681,19 @@ class FreshTestingIntentTests(unittest.TestCase):
 
 
 class FreshTestingPlannerModeTests(unittest.TestCase):
+    def test_completed_native_copy_needs_no_legacy_queue_receipt(self) -> None:
+        from control_plane.odoo_testing_restore import fresh_testing_mode_refusal
+
+        for completed in (False, True):
+            current = generation().model_copy(update={"completed_at": "done" if completed else ""})
+            with self.subTest(completed=completed):
+                refusal = fresh_testing_mode_refusal(current, "existing")
+                if completed:
+                    self.assertIsNone(refusal)
+                else:
+                    self.assertIsNotNone(refusal)
+                self.assertIsNotNone(fresh_testing_mode_refusal(current, "upstream_restore"))
+
     def test_planner_requires_copy_first_and_keeps_later_existing_data_deploys_supported(
         self,
     ) -> None:
