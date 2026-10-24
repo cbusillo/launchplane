@@ -91,6 +91,38 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_container_field_diagnostics_are_closed_and_never_change_failure_authority(
+        self,
+    ) -> None:
+        program = "fixture program"
+        baseline = transport.NativeProgramFailed("baseline")
+        private = "private-container-field-sentinel"
+        valid = [{"field": "DNSConfig", "difference": "service_only"}]
+        for fields, expected in (
+            (valid, (("DNSConfig", "service_only"),)),
+            ([{"field": private, "difference": "unequal"}], ()),
+            ([{"field": "Env", "difference": private}], ()),
+            ([{"field": "Env", "difference": "unequal", "value": private}], ()),
+            ([{"field": [], "difference": "unequal"}], ()),
+            (private, ()),
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        Connection({"type": "failed", "sites": [1], "container_fields": fields}),
+                        program=program,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(error.container_fields, expected)
+                self.assertEqual(error.evidence, baseline.evidence)
+                self.assertEqual(error.has_diagnostic, baseline.has_diagnostic)
+                self.assertEqual(error.code, baseline.code)
+                self.assertEqual(error.unavailable, baseline.unavailable)
+                self.assertNotIn(private, str(error) + repr(error.container_fields))
+
     def test_native_program_sites_are_bounded_and_cannot_carry_provider_prose(self) -> None:
         program = "first fixture line\nsecond fixture line"
         baseline = transport.NativeProgramFailed("baseline")

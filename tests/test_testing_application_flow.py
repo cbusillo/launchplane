@@ -1494,6 +1494,38 @@ class ApplicationFlowTests(unittest.TestCase):
                 environment["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = json.dumps(identity)
                 configuration["Env"] = [key + "=" + value for key, value in environment.items()]
 
+    def test_retained_template_refusal_reports_fields_without_input_values(self) -> None:
+        from control_plane.http_error_evidence import log_handled_error_cause
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        private = "private-retained-input-sentinel"
+        template = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+        template["DNSConfig"] = {}
+        task = self.tasks["old-app-task"]["Spec"]["ContainerSpec"]
+        task["Env"].append("PRIVATE_FIXTURE=" + private)
+        task["Command"] = [private]
+        task[private] = private
+        before = deepcopy((template, task))
+        with self.assertRaises(ValueError) as raised:
+            self.adapter.preflight_application_route(self.planned)
+        with self.assertLogs("control_plane.http_error_evidence", level="WARNING") as logs:
+            log_handled_error_cause(raised.exception, "retained-template-test")
+        text = logs.records[-1].getMessage()
+        fields = json.loads(text)["native_programs"][0]["container_fields"]
+        self.assertEqual(
+            {item["field"]: item["difference"] for item in fields},
+            {
+                "DNSConfig": "service_only",
+                "Command": "task_only",
+                "Env": "unequal",
+                "other": "unequal",
+            },
+        )
+        self.assertNotIn(private, text)
+        self.assertEqual((template, task), before)
+        self.assertEqual(routing.effect_count, 0)
+
     def test_retained_native_template_scope_and_execution_controls(self) -> None:
         routing, _, _ = self.private_addressed()
         self.prepare()

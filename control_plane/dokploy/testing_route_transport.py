@@ -34,6 +34,7 @@ from control_plane.dokploy.native_copy_stream import (
     _read_remote,
     NativeSourceUnavailable,
     NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_CONTAINER_SPEC_FIELDS,
 )
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
@@ -117,7 +118,25 @@ def testing_route_host_program() -> str:
         + repr(READ_TRAEFIK_API)
         + "\nSOURCE_SITE_LIMIT="
         + repr(NATIVE_PROGRAM_SOURCE_SITE_LIMIT)
+        + "\nCONTAINER_SPEC_FIELDS="
+        + repr(NATIVE_CONTAINER_SPEC_FIELDS)
         + r"""
+
+class RetainedTaskSpecMismatch(RuntimeError):
+    def __init__(self, task: object, service: dict[str, Any]) -> None:
+        super().__init__('Retained task inputs differ from the current template')
+        self.container_fields=[]
+        if not isinstance(task,dict):
+            self.container_fields.append({'field':'other','difference':'unequal'})
+            return
+        missing=object()
+        changed={key for key in task.keys()|service.keys() if task.get(key,missing)!=service.get(key,missing)}
+        for field in CONTAINER_SPEC_FIELDS:
+            if field in changed:
+                difference='service_only' if field not in task else 'task_only' if field not in service else 'unequal'
+                self.container_fields.append({'field':field,'difference':difference})
+        if changed-set(CONTAINER_SPEC_FIELDS):
+            self.container_fields.append({'field':'other','difference':'unequal'})
 
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
@@ -268,7 +287,7 @@ def retained_application_backend(containers, binding, proxy_networks):
         if task.get('NodeID') and task['NodeID']!=local_nodes[0]['ID']:
             raise RuntimeError('Retained task is outside the local inventory')
         if task.get('DesiredState') not in {'shutdown','remove'} and task.get('Spec',{}).get('ContainerSpec')!=configuration:
-            raise RuntimeError('Retained task inputs differ from the current template')
+            raise RetainedTaskSpecMismatch(task.get('Spec',{}).get('ContainerSpec'),configuration)
         tasks[identifier]=task
     owned=[]
     actual_image=False
@@ -301,6 +320,8 @@ def retained_application_backend(containers, binding, proxy_networks):
                 raise RuntimeError('Retained actual container inputs differ from image and task')
             actual_image=True
         elif container.get('State',{}).get('Status')=='running':
+            if task is not None and task.get('Spec',{}).get('ContainerSpec')!=configuration:
+                raise RetainedTaskSpecMismatch(task.get('Spec',{}).get('ContainerSpec'),configuration)
             raise RuntimeError('A running retained container differs from the current template')
         if container.get('State',{}).get('Status')=='running':
             attached=container.get('NetworkSettings',{}).get('Networks',{})
@@ -594,7 +615,10 @@ if __name__=='__main__':
             if trace.tb_frame.f_code.co_filename==main.__code__.co_filename:
                 sites.append(trace.tb_lineno)
             trace=trace.tb_next
-        print(sys.argv[2]+json.dumps({'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}),flush=True)
+        frame={'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}
+        if isinstance(error,RetainedTaskSpecMismatch):
+            frame['container_fields']=error.container_fields
+        print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
 """
     )

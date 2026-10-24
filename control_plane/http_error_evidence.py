@@ -89,9 +89,16 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
             validation.extend(cause.validation[: _MAX_VALIDATION_ERRORS - len(validation)])
             validation_error_count += cause.error_count
         if isinstance(cause, NativeProgramFailed) and cause.program_sites:
-            native_programs.append(
-                {"sha": cause.program_sha256, "lines": list(cause.program_sites)}
-            )
+            native: dict[str, object] = {
+                "sha": cause.program_sha256,
+                "lines": list(cause.program_sites),
+            }
+            if cause.container_fields:
+                native["container_fields"] = [
+                    {"field": field, "difference": difference}
+                    for field, difference in cause.container_fields
+                ]
+            native_programs.append(native)
         cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     evidence: dict[str, object] = {
         "event": "handled_error_cause",
