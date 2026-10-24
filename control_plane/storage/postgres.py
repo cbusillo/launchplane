@@ -28253,7 +28253,6 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         evidence: AuthzPolicySchemaV3WriteEvidence | None,
     ) -> None:
-        # A null replacement is an exact-CAS no-op; it performs no fresh authority decision.
         if replacement_record is None:
             return
         if (
