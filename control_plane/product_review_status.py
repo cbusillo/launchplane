@@ -35,7 +35,12 @@ from control_plane.github_app_identity import (
 from control_plane.client_test_notes import change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
-from control_plane.product_review import ProductReviewStore, applicable_product_review_decisions
+from control_plane.product_review import (
+    ProductReviewStore,
+    applicable_product_review_decisions,
+    preview_review_unavailability,
+)
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
@@ -87,6 +92,7 @@ def owner_review_status(
     head_sha: str,
     decisions: tuple[ProductReviewDecisionRecord, ...],
     base_branch: str = "",
+    preview_unavailability: Callable[[], str] | None = None,
 ) -> OwnerReviewStatus:
     """Return the status for a marked pull request; `decisions` are newest first."""
 
@@ -112,7 +118,8 @@ def owner_review_status(
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
-            description=f"Waiting for @{owner.github_login} to review the preview",
+            description=(preview_unavailability() if preview_unavailability else "")
+            or f"Waiting for @{owner.github_login} to review the preview",
         )
     if decision.feedback_requested and not decision.feedback_url:
         return OwnerReviewStatus(state="pending", description="Client feedback delivery is pending")
@@ -152,6 +159,7 @@ class OwnerReviewStatusPublisher:
         pull_request_number: int,
         context: str = "",
         retire_leftovers: bool = False,
+        preview_request: ProductReconcileRequestRecord | None = None,
     ) -> OwnerReviewStatus | None:
         """Best-effort: never raises. Returns the status written, if any."""
         with ExitStack() as credentials:
@@ -235,6 +243,7 @@ class OwnerReviewStatusPublisher:
                                 pull_request_number=pull_request_number,
                                 facts=facts,
                                 token=token,
+                                preview_request=preview_request,
                                 existing_only=not profile.owner.is_set
                                 and profile.owner.review_label.strip().casefold()
                                 not in facts.labels,
@@ -362,6 +371,7 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
         existing_only: bool = False,
+        preview_request: ProductReconcileRequestRecord | None = None,
     ) -> OwnerReviewStatus | None:
         intent = change_client_review(
             body=facts.body,
@@ -410,6 +420,7 @@ class OwnerReviewStatusPublisher:
                 pull_request_number=pull_request_number,
                 facts=facts,
                 token=token,
+                preview_request=preview_request,
             )
         if intent.error and not existing_only:
             status = OwnerReviewStatus(state="failure", description=intent.error)
@@ -462,6 +473,7 @@ class OwnerReviewStatusPublisher:
         pull_request_number: int,
         facts: _PullRequestFacts,
         token: str,
+        preview_request: ProductReconcileRequestRecord | None = None,
     ) -> OwnerReviewStatus:
         try:
             record_decision_base(
@@ -498,6 +510,13 @@ class OwnerReviewStatusPublisher:
                 pull_request_number=pull_request_number,
             ),
             base_branch=facts.base_branch,
+            preview_unavailability=lambda: preview_review_unavailability(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                request=preview_request,
+            ),
         )
 
     def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:

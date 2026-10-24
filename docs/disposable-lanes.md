@@ -1127,6 +1127,14 @@ remove integration connections and retain the lane's public address. A candidate
 uses its own manual host schedule, so preparation cannot replace the serving
 lane's data-workflow schedule.
 
+For an existing non-root SSH reader, upstream capture requests `pg_dump -U ROLE
+-Fc DATABASE` and uses rsync for regular filestore files without links, devices
+or special files. The source can restrict that login to those two reads. Root
+readers retain their existing command for the database role. A restricted filestore
+namespace may be `/`. Upgrade rehearsal capture and sizing still require their
+separate remote tar and Python read capabilities; selecting a restricted reader
+does not authorize those commands or qualify a rehearsal.
+
 Before each provider effect the caller rechecks its exclusive operation lease,
 authority, holds, usage and physical custody. Configuration and deployment
 intent are persisted first. A continuation only accepts the exact configuration

@@ -51,6 +51,7 @@ from control_plane.testing_restore_prerequisite import (
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
+from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.dokploy.api import (
@@ -2554,7 +2555,11 @@ def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
         plan["missing_keys"] = list(keys)
         if keys:
             summary += f" Missing: {', '.join(keys)}."
-    plan.update(last_failed_error_code=code, last_failed_error_summary=summary)
+    plan.update(
+        last_failed_error_code=code,
+        last_failed_error_summary=summary,
+        last_failed_head_sha=plan.get("head_sha", ""),
+    )
     return ReconcileOutcome(plan, error=summary)
 
 
@@ -2961,6 +2966,20 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
+    if (
+        request.target_kind == "preview"
+        and not outcome.error
+        and plan.get("action") != "destroy"
+        and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
+        and plan.get("preview_result_status") != "pass"
+        and preview_refresh_failure(request)
+    ):
+        for key in ("last_failed_error_code", "last_failed_error_summary"):
+            if key in request.last_plan:
+                plan[key] = request.last_plan[key]
+        plan["last_failed_head_sha"] = request.last_plan.get(
+            "last_failed_head_sha", request.last_plan.get("head_sha", "")
+        )
     feedback = post_reconcile_feedback(
         record_store=record_store,
         request=request,
@@ -2975,6 +2994,9 @@ def run_product_reconcile_once(
             record_store=record_store,
             control_plane_root=control_plane_root,
             public_origin=public_origin,
+            preview_request=request.model_copy(
+                update={"last_plan": plan, "last_error": outcome.error}
+            ),
         ),
     )
     if feedback is not None:
@@ -3031,6 +3053,7 @@ def _owner_review_status_writer(
     record_store: object,
     control_plane_root: Path | None,
     public_origin: Callable[[], str],
+    preview_request: ProductReconcileRequestRecord | None = None,
 ) -> OwnerReviewStatusWriter | None:
     """Project Client review through the Delivery and Advisory Apps."""
     if control_plane_root is None:
@@ -3045,7 +3068,12 @@ def _owner_review_status_writer(
     ) -> OwnerReviewStatus | None:
         return OwnerReviewStatusPublisher(
             control_plane_root=control_plane_root, public_origin=public_origin() or None
-        ).publish(store=review_store, profile=profile, pull_request_number=pull_request_number)
+        ).publish(
+            store=review_store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            preview_request=preview_request,
+        )
 
     return write
 

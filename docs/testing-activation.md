@@ -331,6 +331,27 @@ review a new independent preparation and activation key to continue. Corrected
 configuration and staff-use records stay unchanged. Recorded staff use pauses
 both forward changes and route recovery, including an already selected inverse,
 until an explicit reviewed clear. Its expiry does not clear that protection.
+Use `scripts/activate-generic-web-testing.py inspect` with the identical original
+request and activation key to inspect an application's stored reservation and
+capability history, including a completed negative original. The read binds its
+preparation and stored recipient namespace, and reports the checkpoint, phase,
+recorded predecessor and external-proof count plus bounded capability/readback
+program provenance, history and result markers. It returns no scripts, raw logs,
+environment or credential values and starts no program or recovery. Missing or
+unavailable evidence stays unknown. `qualification: not_evaluated` grants no
+retry, separation or health credit; the generic refusal does not identify its
+underlying exception. Preserve the original receipt and choose a fresh evidence
+path for each inspection or readback. The caller rejects an already-used output
+path before making the service read; `--evidence-file` may name a fresh path for
+either read while retaining the original request and key.
+New retained-capability failures also emit bounded numeric locations in the
+generated Python program. Inspection exposes those locations and that recognized
+Python body's SHA-256 only for a matching, disabled, terminal capability run with
+available failure markers. A location set outside the recognized body is discarded.
+No exception text, values or locals are emitted. Historical programs without the
+diagnostic fragment remain recognizable, including the preceding stricter
+prepared-container variant; missing locations remain unknown. These diagnostics
+do not change any capability predicate, custody, retry or qualification rule.
 Public readiness observation and
 publication freshness use the same database clock.
 
@@ -567,3 +588,6 @@ a nonqualifying edge response alone leaves the original key pending; a later
 passing response can finish without replaying the physical route write. Proven
 candidate failure or authority drift still uses the existing exact inverse, which
 restores the original route without calling the original application healthy.
+
+Completed negative preparation receipts preserve the same optional source and
+location evidence, including stable replay; historical receipts remain unchanged.

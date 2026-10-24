@@ -2822,7 +2822,10 @@ either `context` and `instance` to inspect the current tracked target, or
 requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
-summaries, source metadata, and environment key names/counts. It must not return
+summaries, source metadata, and environment key names/counts. The tracked target's
+`env_keys` lists stored override names separately from the provider's observed
+environment keys, so source-setting precedence can be checked without values.
+It must not return
 raw provider payloads or environment values. A tracked target's `public_hosts`
 returns its stored product-config hostname intent separately from origin `domains`
 and the provider's observed domain summaries. Compare those lists before HTTP

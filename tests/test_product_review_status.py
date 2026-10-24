@@ -45,6 +45,11 @@ from tests.http_app_test_support import (
 )
 from tests.support.auth import StubVerifier
 from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_reconcile import (
+    ProductReconcileRequestRecord,
+    ProductReconcileTarget,
+)
+from control_plane.storage.postgres import PostgresRecordStore
 
 _REPOSITORY = "every/example-site"
 _PULL_REQUEST = 42
@@ -261,6 +266,183 @@ class OwnerReviewStatusTests(unittest.TestCase):
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
+        self.store.write_preview_record(_preview_read_record())
+        self.store.write_preview_generation_record(_preview_generation_read_record())
+
+    def test_unavailable_preview_never_invites_the_client(self) -> None:
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        github = _GitHub()
+        self._publish(github)
+        self.assertEqual(github.statuses[-1]["state"], "pending")
+        self.assertNotEqual(
+            str(github.statuses[-1]["description"]),
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
+        )
+
+    def test_preview_failure_survives_retry_and_clears_on_working_preview(self) -> None:
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        request = ProductReconcileRequestRecord(
+            target_key="example-site:preview:42",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=42,
+            state="failed",
+            requested_at="2026-10-24T15:00:00Z",
+            updated_at="2026-10-24T15:00:00Z",
+            request_count=1,
+            last_error="Provider unavailable",
+            last_plan={"action": "apply", "last_failed_error_summary": "Provider unavailable"},
+        )
+        for state in ("failed", "pending", "running"):
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    self.store,
+                    "read_product_reconcile_request",
+                    create=True,
+                    return_value=request.model_copy(update={"state": state}),
+                ),
+            ):
+                github = _GitHub()
+                self._publish(github)
+                self.assertIn("Provider unavailable", str(github.statuses[-1]["description"]))
+
+        self.store.write_preview_record(_preview_read_record())
+        self.store.write_preview_generation_record(_preview_generation_read_record())
+        with patch.object(
+            self.store,
+            "read_product_reconcile_request",
+            create=True,
+            return_value=request.model_copy(
+                update={"state": "done", "last_error": "", "last_plan": {}}
+            ),
+        ):
+            github = _GitHub()
+            self._publish(github)
+        self.assertEqual(
+            github.statuses[-1]["description"],
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
+        )
+
+    def test_current_reconcile_failure_is_projected_before_completion(self) -> None:
+        from control_plane.product_reconcile import run_product_reconcile_once, ReconcileOutcome
+
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.sqlite3")
+        store.ensure_schema()
+        self.addCleanup(store.close)
+        store.write_product_profile_record(_profile())
+        target = ProductReconcileTarget(
+            product="example-site", target_kind="preview", pull_request_number=42
+        )
+        github = _GitHub()
+        outcomes = (
+            ReconcileOutcome({"action": "apply", "head_sha": _HEAD_SHA}, error="Refresh refused"),
+            ReconcileOutcome(
+                {"action": "wait", "reason": "no_verified_build", "head_sha": _HEAD_SHA}
+            ),
+            ReconcileOutcome(
+                {"action": "wait", "reason": "no_verified_build", "head_sha": _OLDER_HEAD_SHA}
+            ),
+        )
+        with (
+            patch(
+                "control_plane.product_reconcile.OwnerReviewStatusPublisher",
+                return_value=_publisher(github),
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=outcomes
+            ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
+        ):
+            for index, _ in enumerate(outcomes):
+                github.head_sha = _OLDER_HEAD_SHA if index == 2 else _HEAD_SHA
+                store.request_product_reconcile(target, "2026-10-24T15:00:00Z")
+                result = run_product_reconcile_once(
+                    record_store=store,
+                    lease_owner="preview-test",
+                    control_plane_root=Path(directory),
+                    public_origin=lambda: _PUBLIC_ORIGIN,
+                    feedback_token=lambda *_: "",
+                )
+                assert result is not None
+                self.assertEqual(result.last_plan["last_failed_head_sha"], _HEAD_SHA)
+                self.assertIn(
+                    str(result.last_plan["last_failed_error_summary"]),
+                    str(github.statuses[0]["description"]),
+                )
+        store.write_preview_record(_preview_read_record())
+        generation = _preview_generation_read_record()
+        store.write_preview_generation_record(
+            generation.model_copy(
+                update={
+                    "anchor_summary": generation.anchor_summary.model_copy(
+                        update={"head_sha": _OLDER_HEAD_SHA}
+                    ),
+                }
+            )
+        )
+        expected = owner_review_status(
+            profile=_profile(), pull_request_number=42, head_sha=_OLDER_HEAD_SHA, decisions=()
+        )
+        self.assertEqual(
+            _publisher(github).publish(store=store, profile=_profile(), pull_request_number=42),
+            expected,
+        )
+        store.request_product_reconcile(target, "2026-10-24T15:01:00Z")
+        with (
+            patch(
+                "control_plane.product_reconcile.OwnerReviewStatusPublisher",
+                return_value=_publisher(github),
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request",
+                side_effect=ValueError("PR read unavailable"),
+            ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
+        ):
+            result = run_product_reconcile_once(
+                record_store=store,
+                lease_owner="preview-test",
+                control_plane_root=Path(directory),
+                public_origin=lambda: _PUBLIC_ORIGIN,
+            )
+        assert result is not None
+        self.assertNotIn("head_sha", result.last_plan)
+        self.assertEqual(github.statuses[0]["description"], expected.description)
+
+    def test_missing_preview_preserves_pending_saved_feedback(self) -> None:
+        decision = _decision(decision="changes_requested", decided_at="2026-10-24T15:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        github = _GitHub()
+        github.fail_comment_reads = True
+        with patch.object(
+            self.store,
+            "read_preview_generation_record",
+            side_effect=AssertionError("Saved decision must not read preview state"),
+        ) as read:
+            self._publish(github)
+            read.assert_not_called()
+        self.assertEqual(
+            github.statuses[-1]["description"],
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=42,
+                head_sha=_HEAD_SHA,
+                decisions=(decision,),
+            ).description,
+        )
 
     def _publish(
         self, github: _GitHub, *, owner_set: bool = True, retire_leftovers: bool = False
@@ -1496,7 +1678,9 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.reason, original.reason)
         self.assertTrue(saved.feedback_url)
 
-    async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
+    async def test_ready_feedback_without_a_serving_preview_does_not_invite_the_client(
+        self,
+    ) -> None:
         github = _GitHub(repository="every/verireel")
         github.statuses = [
             {"context": "manager-preview-approval", "state": "pending", "description": "Waiting"}
@@ -1530,9 +1714,14 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             [(status["context"], status["state"]) for status in github.statuses[:2]],
             [("launchplane/owner-review", "pending"), ("manager-preview-approval", "pending")],
         )
-        self.assertEqual(
+        self.assertNotEqual(
             github.owner_review_statuses()[0]["description"],
-            "Waiting for @site-owner to review the preview",
+            owner_review_status(
+                profile=LaunchplaneProductProfileRecord.model_validate(profile_payload),
+                pull_request_number=42,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
         )
 
 

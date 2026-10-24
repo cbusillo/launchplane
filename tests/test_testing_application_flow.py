@@ -865,7 +865,7 @@ class ApplicationFlowTests(unittest.TestCase):
             patch("sys.stdout", output),
         ):
             try:
-                exec(header, {})
+                exec(compile(header, "<stdin>", "exec"), {})
             except SystemExit as error:
                 if error.code != 1:
                     raise
@@ -4270,6 +4270,215 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
+
+    def test_original_activation_inspection_retains_negative_program_evidence_without_writes(
+        self,
+    ) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.testing_application_capabilities import (
+            RETAINED_CAPABILITY_PROGRAM_NAME,
+            retained_application_capability_spec,
+            retained_application_capability_program,
+        )
+        from control_plane.testing_separation_resources import APPLICATION_CAPABILITY_PHASE
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        self.prepare()
+
+        def refuse(**kwargs: Any) -> None:
+            kwargs["before_effect"](APPLICATION_CAPABILITY_PHASE)
+            raise ValueError("private-unreported-provider-error")
+
+        with patch(
+            "control_plane.testing_application_capabilities.inspect_retained_application_capabilities",
+            side_effect=refuse,
+        ):
+            refused = self.activate()
+        self.assertEqual(refused.status, "completed", refused)
+        record = self.adapter.current()
+        self.assertIsNotNone(record.failure)
+        spec = retained_application_capability_spec(
+            self.store, self.root, self.product, self.context
+        )
+        from control_plane.dokploy import post_deploy
+
+        _, lookup, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
+            host="https://provider.test",
+            token="fixture-token",
+            compose_id=self.old_id,
+            compose_name=self.context,
+            target_payload=self.payloads[self.old_id],
+        )
+        schedule: dict[str, Any] = {
+            "scheduleId": "original-capability",
+            "name": RETAINED_CAPABILITY_PROGRAM_NAME,
+            "appName": record.namespace,
+            "applicationId": lookup,
+            "enabled": False,
+            "script": retained_application_capability_program(spec),
+        }
+        self.schedules[schedule["scheduleId"]] = schedule
+        self.schedules["preparation-capability"] = {
+            **schedule,
+            "scheduleId": "preparation-capability",
+            "appName": record.namespace.removesuffix("-recipient"),
+        }
+        execution = {
+            "deploymentId": "original-capability-run",
+            "scheduleId": schedule["scheduleId"],
+            "status": "error",
+            "startedAt": self.old.now(-1),
+            "finishedAt": self.old.now(),
+        }
+        self.schedule_history[schedule["scheduleId"]] = [execution]
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        with (
+            patch(
+                "control_plane.testing_separation_inspection.post_deploy._read_odoo_post_deploy_log_markers",
+                return_value={"log_available": "true", "testing_resources_ok": "false"},
+            ),
+            patch("control_plane.secrets._decrypt_secret_value", side_effect=AssertionError),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        observed = response.json()["result"]
+        assert refused.record is not None
+        self.assertEqual(observed["state"], refused.record.state)
+        self.assertEqual(observed["activation_phase"], record.phase)
+        self.assertEqual(observed["provider_effect_phase"], refused.record.provider_effect_phase)
+        self.assertEqual(observed["predecessor_recorded"], record.predecessor is not None)
+        self.assertEqual(observed["external_capability_count"], len(record.external_capabilities))
+        programs = {item["kind"]: item for item in observed["programs"]}
+        capability = programs["retained_capability"]
+        self.assertEqual(capability["schedule_id"], schedule["scheduleId"])
+        self.assertEqual(capability["deployment_id"], execution["deploymentId"])
+        self.assertEqual(capability["deployment_status"], execution["status"])
+        self.assertIs(capability["resources_ok"], False)
+        self.assertTrue(capability["script_matches"])
+        self.assertIsNone(programs["retained_capability_readback"]["resources_ok"])
+        self.assertNotIn("storage_preparation", programs)
+        self.assertNotIn(schedule["script"], response.text)
+        self.assertNotIn("private-unreported-provider-error", response.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+
+        for key, changes in (
+            ("", {}),
+            ("different-original", {}),
+            ("activation", {"source_commit": "f" * 40}),
+            ("activation", {"preparation_key": "different-preparation"}),
+        ):
+            with (
+                self.subTest(key=key, changes=changes),
+                patch(
+                    "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                    side_effect=AssertionError(
+                        "Unbound inspection must not read provider programs"
+                    ),
+                ),
+            ):
+                denied = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": key,
+                        },
+                        payload=self.request.model_dump(mode="json")
+                        | {"mode": "inspect"}
+                        | changes,
+                    )
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+
+        for changed in (
+            None,
+            record.model_copy(update={"actor": "different-agent"}),
+            record.model_copy(update={"namespace": record.namespace + "-different"}),
+            record.model_copy(update={"preparation_record_id": "different-preparation-record"}),
+            record.model_copy(
+                update={
+                    "retained_target_id": record.retained_target_id.model_copy(
+                        update={"target_id": "different-target"}
+                    )
+                }
+            ),
+        ):
+            with (
+                self.subTest(record=changed),
+                patch(
+                    "control_plane.testing_activation_inspection.activation_record",
+                    return_value=changed,
+                ),
+                patch(
+                    "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                    side_effect=AssertionError("Foreign custody must refuse before provider reads"),
+                ),
+            ):
+                denied = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "activation",
+                        },
+                        payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                    )
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
+
+        foreign_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(
+                token_label="local-owner-write"
+            ).model_copy(update={"local_operator_subject": "different-agent"}),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch(
+            "control_plane.testing_activation_inspection.inspect_preparation_programs",
+            side_effect=AssertionError("Foreign caller must refuse before provider reads"),
+        ):
+            denied = asyncio.run(
+                request(
+                    foreign_app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
 
     def addressed(self) -> Any:
         """Reuse the native transport's real isolated file/lock/process harness."""
