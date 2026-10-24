@@ -9,6 +9,8 @@ from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from typing import Literal, Protocol, cast
 from uuid import uuid4
+import logging
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -19,7 +21,7 @@ from control_plane.contracts.product_review import (
 )
 from control_plane.release_review_shared import repository_key
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
-from control_plane.product_reconcile_read import product_preview_requests, preview_refresh_failure
+from control_plane.product_reconcile_read import product_preview_request, preview_refresh_failure
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 
@@ -201,14 +203,32 @@ def preview_review_unavailability(
 ) -> str:
     if not profile.preview.enabled:
         return ""
+    try:
+        return _preview_review_unavailability(
+            store=store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            head_sha=head_sha,
+            request=request,
+        )
+    except (SQLAlchemyError, ValueError, OSError):
+        logging.getLogger(__name__).warning(
+            "Preview review availability could not be read.", exc_info=True
+        )
+        return "Preview availability is unknown; nothing for the Client to review yet"
+
+
+def _preview_review_unavailability(
+    *,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str,
+    request: ProductReconcileRequestRecord | None,
+) -> str:
     if request is None:
-        request = next(
-            (
-                item
-                for item in product_preview_requests(store, product=profile.product)
-                if item.pull_request_number == pull_request_number
-            ),
-            None,
+        request = product_preview_request(
+            store, product=profile.product, pull_request_number=pull_request_number
         )
     serving = resolve_serving_preview(
         store=store, profile=profile, pull_request_number=pull_request_number
@@ -217,7 +237,19 @@ def preview_review_unavailability(
         return ""
     failure = preview_refresh_failure(request) if request is not None else ""
     if failure:
-        return f"Preview failed: {failure}; nothing for the Client to review yet"
+        if not head_sha:
+            return f"Preview refresh failed: {failure}; current review availability is unknown"
+        origin = (
+            request.last_plan.get("last_failed_head_sha", request.last_plan.get("head_sha", ""))
+            if request is not None
+            else ""
+        )
+        prefix = (
+            "Preview failed"
+            if origin == head_sha
+            else "Preview unavailable after an earlier refresh failed"
+        )
+        return f"{prefix}: {failure}; nothing for the Client to review yet"
     if serving.preview_url and not head_sha:
         return ""
     return "Preview not available; nothing for the Client to review yet"

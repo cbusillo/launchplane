@@ -69,14 +69,20 @@ publisher rereads the PR and saved decisions, even when there is no new preview
 comment to post, or when an open PR's preview is being destroyed. The open-PR
 sweep also refreshes reviews for products without previews or testing lanes;
 failed publication retries through the same reconcile row on a later sweep.
-A pending Client check invites review only when a ready serving preview matches the
-current PR head. Otherwise it reports that the preview is unavailable, including
-the redacted refresh failure reason when one is recorded, and says there is
-nothing for the Client to review yet. The current reconcile outcome is used
-immediately, before feedback completion saves it. Product Ops projects these
-recorded preview failures and their unavailable replacements in its existing product warnings;
-retrying a failed refresh does not clear its warning. A ready preview matching the current head clears it, even if another reconcile
-fails. Ordinary build waits add no warning. Saved Client decisions remain independent.
+A pending Client check invites review only when a ready serving preview matches
+the current PR head. Otherwise it reports that the preview is unavailable,
+including the redacted refresh failure reason when one is recorded, and says
+there is nothing for the Client to review yet. The current reconcile outcome is
+used immediately, before feedback completion saves it. Product Ops projects
+these recorded preview failures and their unavailable replacements in its
+existing product warnings; retrying a failed refresh does not clear its warning.
+A ready preview matching the current head clears it, even if another reconcile
+fails. A failed PR read leaves the current head unknown; Ops retains refresh
+attention without claiming that a serving preview is down. A failure carried to
+a replacement commit is described as an earlier refresh failure until the
+replacement works. Cleanup failures do not become refresh failures on reopen.
+Ordinary build waits add no warning. Saved Client decisions publish
+independently of preview reads.
 When its fresh PR read observes a closed change, the publisher can still deliver
 already-requested saved Client feedback. It skips current review projection,
 decision-base binding, acceptance carry and retired-check maintenance, even if

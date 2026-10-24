@@ -51,6 +51,7 @@ from control_plane.testing_restore_prerequisite import (
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
+from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.dokploy.api import (
@@ -2554,7 +2555,11 @@ def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
         plan["missing_keys"] = list(keys)
         if keys:
             summary += f" Missing: {', '.join(keys)}."
-    plan.update(last_failed_error_code=code, last_failed_error_summary=summary)
+    plan.update(
+        last_failed_error_code=code,
+        last_failed_error_summary=summary,
+        last_failed_head_sha=plan.get("head_sha", ""),
+    )
     return ReconcileOutcome(plan, error=summary)
 
 
@@ -2967,10 +2972,14 @@ def run_product_reconcile_once(
         and plan.get("action") != "destroy"
         and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
         and plan.get("preview_result_status") != "pass"
+        and preview_refresh_failure(request)
     ):
         for key in ("last_failed_error_code", "last_failed_error_summary"):
             if key in request.last_plan:
                 plan[key] = request.last_plan[key]
+        plan["last_failed_head_sha"] = request.last_plan.get(
+            "last_failed_head_sha", request.last_plan.get("head_sha", "")
+        )
     feedback = post_reconcile_feedback(
         record_store=record_store,
         request=request,

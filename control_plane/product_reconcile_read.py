@@ -21,6 +21,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileRequestRecord,
     ProductReconcileRequestState,
     ProductReconcileTargetKind,
+    product_reconcile_target_key,
 )
 
 _MAX_TEXT_LENGTH = 400
@@ -39,9 +40,26 @@ _REDACTED = "[redacted]"
 
 
 class ProductReconcileRequestReader(Protocol):
+    def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord: ...
+
     def list_product_reconcile_requests(
         self, *, product: str, limit: int | None = None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
+
+def product_preview_request(
+    store: object, *, product: str, pull_request_number: int
+) -> ProductReconcileRequestRecord | None:
+    if not callable(getattr(store, "read_product_reconcile_request", None)):
+        return None
+    try:
+        return cast(ProductReconcileRequestReader, store).read_product_reconcile_request(
+            product_reconcile_target_key(
+                product=product, target_kind="preview", pull_request_number=pull_request_number
+            )
+        )
+    except FileNotFoundError:
+        return None
 
 
 def product_preview_requests(
@@ -63,10 +81,14 @@ def product_preview_requests(
 
 
 def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
+    if request.last_plan.get("action") == "destroy" or (
+        "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
+    ):
+        return ""
     summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
     if not isinstance(summary, str) or not summary.strip():
         return ""
-    return _safe_text(summary, maximum_length=200)
+    return _safe_text(summary, maximum_length=140)
 
 
 class ProductReconcileRequestView(BaseModel):

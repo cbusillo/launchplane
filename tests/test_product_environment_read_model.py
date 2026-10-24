@@ -965,6 +965,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
     def test_product_ops_keeps_preview_failure_attention_through_retry(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
         store = _PreviewRecordStore(profile, ())
+        baseline = build_product_site_overview(
+            record_store=store, product=profile.product, action_allowed=lambda *_: True
+        )
         request = ProductReconcileRequestRecord(
             target_key="example-site:preview:42",
             product="example-site",
@@ -992,7 +995,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     product=profile.product,
                     action_allowed=lambda *_: True,
                 )
-                warning = next((text for text in overview.warnings if "#42" in text), "")
+                warning = " ".join(overview.warnings)
                 self.assertIn("Provider unavailable", warning)
                 self.assertNotIn("hunter2", warning)
         replacement = request.model_copy(
@@ -1024,11 +1027,31 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                         action_allowed=lambda *_: True,
                     )
                     self.assertEqual(
-                        any("#42" in text for text in overview.warnings), serving_head != "new-head"
+                        overview.warnings != baseline.warnings, serving_head != "new-head"
                     )
+        with (
+            patch.object(
+                store,
+                "list_product_reconcile_requests",
+                create=True,
+                return_value=(request.model_copy(update={"last_plan": {}}),),
+            ),
+            patch(
+                "control_plane.product_review.resolve_serving_preview",
+                return_value=ProductReviewPreview(
+                    preview_url="https://pr-42.example.invalid", head_sha="new-head"
+                ),
+            ),
+        ):
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+            self.assertNotEqual(overview.warnings, baseline.warnings)
+            self.assertIn("Provider unavailable", " ".join(overview.warnings))
         for plan in (
             {"action": "wait", "reason": "no_verified_build"},
             {"action": "destroy", "last_failed_error_summary": "Cleanup refused"},
+            {"destroy_retry_key": "closed-cleanup", "last_failed_error_summary": "Read failed"},
             {"feedback_recovery_closed_observed": True, "last_failed_error_summary": "Read failed"},
         ):
             with (
@@ -1047,7 +1070,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     product=profile.product,
                     action_allowed=lambda *_: True,
                 )
-                self.assertFalse(any("#42" in text for text in overview.warnings))
+                self.assertEqual(overview.warnings, baseline.warnings)
         with patch.object(
             store,
             "list_product_reconcile_requests",
@@ -1059,7 +1082,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 product=profile.product,
                 action_allowed=lambda *_: True,
             )
-            self.assertTrue(overview.warnings)
+            self.assertNotEqual(overview.warnings, baseline.warnings)
 
     def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())

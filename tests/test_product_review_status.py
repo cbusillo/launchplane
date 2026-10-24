@@ -303,9 +303,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 self.subTest(state=state),
                 patch.object(
                     self.store,
-                    "list_product_reconcile_requests",
+                    "read_product_reconcile_request",
                     create=True,
-                    return_value=(request.model_copy(update={"state": state}),),
+                    return_value=request.model_copy(update={"state": state}),
                 ),
             ):
                 github = _GitHub()
@@ -316,10 +316,10 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store.write_preview_generation_record(_preview_generation_read_record())
         with patch.object(
             self.store,
-            "list_product_reconcile_requests",
+            "read_product_reconcile_request",
             create=True,
-            return_value=(
-                request.model_copy(update={"state": "done", "last_error": "", "last_plan": {}}),
+            return_value=request.model_copy(
+                update={"state": "done", "last_error": "", "last_plan": {}}
             ),
         ):
             github = _GitHub()
@@ -351,6 +351,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ReconcileOutcome(
                 {"action": "wait", "reason": "no_verified_build", "head_sha": _HEAD_SHA}
             ),
+            ReconcileOutcome(
+                {"action": "wait", "reason": "no_verified_build", "head_sha": _OLDER_HEAD_SHA}
+            ),
         )
         with (
             patch(
@@ -362,7 +365,8 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ),
             patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
         ):
-            for _ in outcomes:
+            for index, _ in enumerate(outcomes):
+                github.head_sha = _OLDER_HEAD_SHA if index == 2 else _HEAD_SHA
                 store.request_product_reconcile(target, "2026-10-24T15:00:00Z")
                 result = run_product_reconcile_once(
                     record_store=store,
@@ -372,21 +376,50 @@ class OwnerReviewStatusTests(unittest.TestCase):
                     feedback_token=lambda *_: "",
                 )
                 assert result is not None
+                self.assertEqual(result.last_plan["last_failed_head_sha"], _HEAD_SHA)
                 self.assertIn(
                     str(result.last_plan["last_failed_error_summary"]),
-                    str(github.statuses[-1]["description"]),
+                    str(github.statuses[0]["description"]),
                 )
         store.write_preview_record(_preview_read_record())
-        store.write_preview_generation_record(_preview_generation_read_record())
+        generation = _preview_generation_read_record()
+        store.write_preview_generation_record(
+            generation.model_copy(
+                update={
+                    "anchor_summary": generation.anchor_summary.model_copy(
+                        update={"head_sha": _OLDER_HEAD_SHA}
+                    ),
+                }
+            )
+        )
+        expected = owner_review_status(
+            profile=_profile(), pull_request_number=42, head_sha=_OLDER_HEAD_SHA, decisions=()
+        )
         self.assertEqual(
             _publisher(github).publish(store=store, profile=_profile(), pull_request_number=42),
-            owner_review_status(
-                profile=_profile(),
-                pull_request_number=42,
-                head_sha=_HEAD_SHA,
-                decisions=(),
-            ),
+            expected,
         )
+        store.request_product_reconcile(target, "2026-10-24T15:01:00Z")
+        with (
+            patch(
+                "control_plane.product_reconcile.OwnerReviewStatusPublisher",
+                return_value=_publisher(github),
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request",
+                side_effect=ValueError("PR read unavailable"),
+            ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
+        ):
+            result = run_product_reconcile_once(
+                record_store=store,
+                lease_owner="preview-test",
+                control_plane_root=Path(directory),
+                public_origin=lambda: _PUBLIC_ORIGIN,
+            )
+        assert result is not None
+        self.assertNotIn("head_sha", result.last_plan)
+        self.assertEqual(github.statuses[0]["description"], expected.description)
 
     def test_missing_preview_preserves_pending_saved_feedback(self) -> None:
         decision = _decision(decision="changes_requested", decided_at="2026-10-24T15:00:00Z")
@@ -394,7 +427,13 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
         github = _GitHub()
         github.fail_comment_reads = True
-        self._publish(github)
+        with patch.object(
+            self.store,
+            "read_preview_generation_record",
+            side_effect=AssertionError("Saved decision must not read preview state"),
+        ) as read:
+            self._publish(github)
+            read.assert_not_called()
         self.assertEqual(
             github.statuses[-1]["description"],
             owner_review_status(

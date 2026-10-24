@@ -92,7 +92,7 @@ def owner_review_status(
     head_sha: str,
     decisions: tuple[ProductReviewDecisionRecord, ...],
     base_branch: str = "",
-    preview_unavailability: str = "",
+    preview_unavailability: Callable[[], str] | None = None,
 ) -> OwnerReviewStatus:
     """Return the status for a marked pull request; `decisions` are newest first."""
 
@@ -118,7 +118,7 @@ def owner_review_status(
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
-            description=preview_unavailability
+            description=(preview_unavailability() if preview_unavailability else "")
             or f"Waiting for @{owner.github_login} to review the preview",
         )
     if decision.feedback_requested and not decision.feedback_url:
@@ -510,7 +510,7 @@ class OwnerReviewStatusPublisher:
                 pull_request_number=pull_request_number,
             ),
             base_branch=facts.base_branch,
-            preview_unavailability=preview_review_unavailability(
+            preview_unavailability=lambda: preview_review_unavailability(
                 store=store,
                 profile=profile,
                 pull_request_number=pull_request_number,
