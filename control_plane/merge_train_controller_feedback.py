@@ -91,6 +91,22 @@ def build_feedback_payloads(
                 stopped=controller_action == "candidate_failed",
             )
         )
+    payloads.extend(
+        {
+            "schema_version": 1,
+            "repository": repository,
+            "base_branch": base_branch,
+            "pull_request_number": entry["number"],
+            "event": "blocked",
+            "controller_action": "stack_unsupported",
+            "controller_record_id": controller_record_id,
+            "message": "; ".join(entry["deferred_reasons"])
+            + ". Unrelated pull requests can proceed.",
+            "source": source,
+        }
+        for value in _as_list(_as_dict(result.get("dry_run_result")).get("queue"))
+        if (entry := _as_dict(value)).get("eligible") is False and entry.get("deferred_reasons")
+    )
     return payloads
 
 

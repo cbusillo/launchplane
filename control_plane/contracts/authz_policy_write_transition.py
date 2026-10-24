@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
-AUTHZ_POLICY_SOURCE_ADMISSIBLE_STATUSES = frozenset(
-    {"planned", "approved", "executing", "executed"}
-)
 AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED = "authz_policy_schema_v3_transition_denied"
 
 
@@ -62,63 +59,14 @@ class AuthzPolicySchemaV3MaintenanceEvidence(_StrictFrozenModel):
     candidate_policy_sha256: str
 
 
-class AuthzPolicySchemaV3OrdinaryEnableEvidence(_StrictFrozenModel):
-    schema_version: Literal[1] = 1
-    transition: Literal["ordinary_enable"] = "ordinary_enable"
-    caller: AuthzPolicyImmutableHumanCallerBinding
-    expected_record_id: str
-    expected_revision: int = Field(gt=0)
-    expected_policy_sha256: str
-    candidate_policy_sha256: str
-    activation_id: str
-    activation_revision: int = Field(gt=0)
-    activation_sha256: str
-    source_setup_operation_id: str
-    policy_operation_id: str
-    policy_request_sha256: str
-    policy_evidence_sha256: str
-    policy_plan_sha256: str
-    desired_set_sha256: str
-    repository_id: int = Field(gt=0)
-    repository: str
-    base_branch: str
-    managed_set_id: str
-    managed_rule_id: str
-
-    @field_validator(
-        "expected_policy_sha256",
-        "candidate_policy_sha256",
-        "activation_sha256",
-        "policy_request_sha256",
-        "policy_evidence_sha256",
-        "policy_plan_sha256",
-        "desired_set_sha256",
-    )
-    @classmethod
-    def _validate_sha256(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if len(normalized) != 64 or any(
-            character not in "0123456789abcdef" for character in normalized
-        ):
-            raise ValueError("transition evidence requires canonical sha256 values")
-        return normalized
+AuthzPolicySchemaV3WriteEvidence: TypeAlias = AuthzPolicySchemaV3MaintenanceEvidence
 
 
-AuthzPolicySchemaV3WriteEvidence: TypeAlias = Annotated[
-    AuthzPolicySchemaV3MaintenanceEvidence | AuthzPolicySchemaV3OrdinaryEnableEvidence,
-    Field(discriminator="transition"),
-]
-
-
-AuthzPolicySchemaTransitionKind: TypeAlias = Literal[
-    "legacy", "v2_to_v3_enable", "v3_maintenance", "v3_enable_or_expand"
-]
+AuthzPolicySchemaTransitionKind: TypeAlias = Literal["legacy", "v3_maintenance"]
 
 
 class AuthzPolicySchemaTransition(_StrictFrozenModel):
     kind: AuthzPolicySchemaTransitionKind
-    added_or_changed_ordinary_rule_keys: tuple[str, ...] = ()
-    removed_ordinary_rule_keys: tuple[str, ...] = ()
 
 
 def _ordinary_rules(policy: LaunchplaneAuthzPolicy) -> dict[str, str]:
@@ -131,6 +79,15 @@ def _ordinary_rules(policy: LaunchplaneAuthzPolicy) -> dict[str, str]:
     return result
 
 
+def _adds_or_widens_ordinary_rules(
+    current_policy: LaunchplaneAuthzPolicy, candidate_policy: LaunchplaneAuthzPolicy
+) -> bool:
+    current = _ordinary_rules(current_policy)
+    return any(
+        current.get(key) != digest for key, digest in _ordinary_rules(candidate_policy).items()
+    )
+
+
 def classify_authz_policy_schema_v3_transition(
     current_policy: LaunchplaneAuthzPolicy,
     candidate_policy: LaunchplaneAuthzPolicy,
@@ -138,29 +95,8 @@ def classify_authz_policy_schema_v3_transition(
     pair = (current_policy.schema_version, candidate_policy.schema_version)
     if pair in {(1, 1), (1, 2), (2, 2)}:
         return AuthzPolicySchemaTransition(kind="legacy")
-    if pair not in {(2, 3), (3, 3)}:
-        raise AuthzPolicySchemaV3TransitionDeniedError("schema_transition_unsupported")
-    current = _ordinary_rules(current_policy)
-    candidate = _ordinary_rules(candidate_policy)
-    changed = tuple(sorted(key for key, digest in candidate.items() if current.get(key) != digest))
-    removed = tuple(sorted(current.keys() - candidate.keys()))
-    if pair == (2, 3):
-        if len(changed) != 1 or current:
-            raise AuthzPolicySchemaV3TransitionDeniedError("ordinary_enable_scope_not_singleton")
-        kind: AuthzPolicySchemaTransitionKind = "v2_to_v3_enable"
-    elif not changed:
-        kind = "v3_maintenance"
-    elif len(changed) == 1:
-        kind = "v3_enable_or_expand"
-    else:
-        raise AuthzPolicySchemaV3TransitionDeniedError("ordinary_enable_scope_not_singleton")
-    return AuthzPolicySchemaTransition(
-        kind=kind,
-        added_or_changed_ordinary_rule_keys=changed,
-        removed_ordinary_rule_keys=removed,
-    )
-
-
-def require_authz_policy_source_status(*, status: str) -> None:
-    if status not in AUTHZ_POLICY_SOURCE_ADMISSIBLE_STATUSES:
-        raise AuthzPolicySchemaV3TransitionDeniedError("policy_source_status_inadmissible")
+    if pair == (3, 3) and not _adds_or_widens_ordinary_rules(current_policy, candidate_policy):
+        return AuthzPolicySchemaTransition(kind="v3_maintenance")
+    if pair in {(2, 3), (3, 3)}:
+        raise AuthzPolicySchemaV3TransitionDeniedError("ordinary_authority_retired")
+    raise AuthzPolicySchemaV3TransitionDeniedError("schema_transition_unsupported")

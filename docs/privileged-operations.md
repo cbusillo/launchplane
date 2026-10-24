@@ -130,7 +130,8 @@ route, execute action, static execution credential, or agent execution path.
   explicit `schema_migration` mode, reason, and optional related issue. The
   migration mode defaults to `reject`; `migrate_v2_to_v3` is accepted only with
   a schema-v3 desired policy and remains bound into planning, replay, approval,
-  and worker execution. Planning persists the proposal as operation data but
+  and worker execution; applying it is refused because ordinary-agent rules can
+  no longer be added. Planning persists the proposal as operation data but
   never writes the active authorization policy. The separate policy-write
   transition and its fences are described in the authorization authority
   [Current Transitional Model](authorization-authority.md#current-transitional-model).

@@ -77,7 +77,8 @@ implement that bridge.
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
-defining those actions grants neither one. Active tracked inventory records are
+defining those actions grants neither one to other identities; the Director's
+authenticated agents use the standing permission below. Active tracked inventory records are
 repository-record evidence for the redacted repository-scope read model;
 retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
@@ -116,6 +117,15 @@ transport to its existing browser/bearer mutation path; other terminal mutation
 restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
+
+Repository inventory apply also inherits that standing permission, for tracked
+and retired records alike. A record identifies one immutable GitHub repository;
+it cannot install the Delivery App, widen its installed permissions, grant
+access, accept a release or change merge policy, and token minting still checks
+the exact repository id and name. The Director's `local_operator` may apply;
+terminal transport may dry-run, which is an inert plan, but cannot apply.
+Append-only revisions, current-record comparison, idempotency and PostgreSQL
+storage still govern apply.
 
 The expected-config declaration path remains additive for the authenticated
 Director agent. It may add a positive external-provider purpose to an existing
@@ -979,19 +989,17 @@ through 30 days without requiring typed record IDs, digests, issue IDs, or
 free-form reasons. The planner rejects any setup expiry beyond 30 days.
 
 This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, and derives no guarded readiness. The schema-v3
-write transition is separately mediated: a complete reviewed policy candidate
-may add or change exactly one ordinary rule only when it matches a current,
-unrevoked typed activation and its executed setup provenance. Exact ordinary-rule
-removal and unrelated schema-v3 maintenance remain possible after activation
-revocation or expiry; raw schema-v3 seed and unbound replacement stay fenced.
-Runtime capability evidence records installed schema and compiled
-parser/storage/write-handler support. `policy_v3_write_supported` reports the
-presence of this mediated typed handler and is not itself authority or a raw
-write bypass. Qualification and guarded-worker support remain separate.
+registers no ordinary worker, and derives no guarded readiness. New setups and
+revocations are refused, and the activation writers are deleted; stored
+activation records remain readable history.
 
-Activation remains a separately Director-approved DB-native administration event;
-it is not authorized by landing code.
+A schema-v3 policy write that adds or changes any ordinary rule, including a
+v2-to-v3 migration, is refused with `ordinary_authority_retired`, at both the
+service and the storage compare-and-write. Exact ordinary-rule removal and
+other schema-v3 maintenance remain possible with maintenance evidence; raw
+schema-v3 seed and unbound replacement stay fenced. Historical
+`runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
+records are history only, not authority.
 
 ### Preparing Agent Delivery Administration
 

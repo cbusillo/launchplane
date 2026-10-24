@@ -78,6 +78,7 @@ from control_plane.storage.postgres import (
 )
 from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
+from tests.support.activation_history import seed_activation_history
 from tests.test_ordinary_agent_activation_storage import (
     _event as _activation_event,
     _record as _activation_record,
@@ -1260,7 +1261,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 installed_at="2026-09-12T12:00:00Z",
                 expires_at="2026-09-13T12:00:00Z",
             )
-            store.install_ordinary_agent_delivery_activation(
+            seed_activation_history(
+                store,
                 activation,
                 _activation_event(
                     activation,
@@ -1708,7 +1710,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 installed_at="2026-09-12T12:00:00Z",
                 expires_at="2026-09-13T12:00:00Z",
             )
-            store.install_ordinary_agent_delivery_activation(
+            seed_activation_history(
+                store,
                 activation,
                 _activation_event(
                     activation,
@@ -1742,7 +1745,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         "activation_sha256": "",
                     }
                 )
-                store.revoke_ordinary_agent_delivery_activation(
+                seed_activation_history(
+                    store,
                     revoked,
                     _activation_event(
                         revoked,

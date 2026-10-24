@@ -797,7 +797,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(
             record.execution.failure_code,
-            "authz_policy_schema_v3_transition_denied:activation_not_current",
+            "authz_policy_schema_v3_transition_denied:ordinary_authority_retired",
         )
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(len(apply_errors), 1)
