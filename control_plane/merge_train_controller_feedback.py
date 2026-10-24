@@ -230,6 +230,8 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if controller_action == "target_not_ready":
+        return "blocked"
     if result.get("reason_code") == "candidate_block_confirmation_pending":
         return "waiting"
     if controller_action == "recover_candidate_block":
@@ -325,6 +327,11 @@ def _feedback_message(
                 "fresh mergeability and required checks."
             )
         return "Launchplane needs to refresh this pull request's branch before continuing."
+    if controller_action == "target_not_ready":
+        return (
+            f"Launchplane cannot land pull requests here yet: {_blocking_detail(result)} "
+            "The train resumes on its own once the setting is in place."
+        )
     if event == "blocked":
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         if selected.get("client_test_notes_error"):
@@ -525,6 +532,14 @@ def _pull_request_numbers(
     if controller_action == "recover_candidate_block":
         number = _as_dict(result.get("details")).get("pull_request_number")
         return [number] if type(number) is int and number > 0 else []
+    if controller_action == "target_not_ready":
+        return [
+            number
+            for number in _as_list(
+                _as_dict(result.get("details")).get("ready_pull_request_numbers")
+            )
+            if type(number) is int and number > 0
+        ]
     selected_actions = {"wait_for_checks", "block", "update_branch"}
     if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))

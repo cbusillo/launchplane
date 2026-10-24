@@ -123,6 +123,9 @@ class _FakeMergeTrainGitHubClient:
     begin_snapshot_pass = GitHubMergeTrainClient.begin_snapshot_pass
     end_snapshot_pass = GitHubMergeTrainClient.end_snapshot_pass
 
+    def target_setting_gaps(self, *, repository_policy: object) -> tuple[str, ...]:
+        return ()
+
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
@@ -222,7 +225,7 @@ class _FakeMergeTrainGitHubClient:
         # Existing controller fixtures model legacy PR-by-PR landing records.
         return None
 
-    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate, reason: str) -> None:
         pass
 
     def land_batch_candidate(

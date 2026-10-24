@@ -71,12 +71,15 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryPolicyPackageReference,
     OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
 )
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.privileged_operation_registry import (
     MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
+    MergeTrainTargetNotReadyError,
     PrivilegedOperationPlannerError,
     RegisteredPrivilegedOperationDescriptor,
     list_privileged_operation_descriptors,
+    merge_train_target_setting_gaps,
     plan_managed_merge_train_policy_import,
     plan_managed_secret_reencryption,
 )
@@ -300,7 +303,25 @@ def _legacy_authz_policy_payload() -> dict[str, object]:
     return payload
 
 
+class _UnprotectedRepository:
+    def __init__(self, *, token: object) -> None:
+        self.token = token
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method == "GET" and path.endswith("/branches/main"):
+            return {"protected": False}
+        raise MergeTrainGitHubError("Not Found", status_code=404)
+
+
 class PrivilegedOperationContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.setting_gaps = self.enterContext(
+            patch(
+                "control_plane.privileged_operation_registry.merge_train_target_setting_gaps",
+                return_value=(),
+            )
+        )
+
     def test_historical_authz_request_digest_without_quorum_field_remains_valid(self) -> None:
         current_record = _failed_authz_policy_record()
         current_payload = current_record.model_dump(mode="json", exclude_none=True)
@@ -876,6 +897,41 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         rendered = evidence.model_dump_json()
         self.assertNotIn("GH_TOKEN", rendered)
         self.assertNotIn("launchplane-merge-train", rendered)
+
+    def test_enrollment_refuses_a_target_the_train_cannot_land_on(self) -> None:
+        self.setting_gaps.side_effect = merge_train_target_setting_gaps
+        with (
+            TemporaryDirectory() as temporary_directory,
+            patch(
+                "control_plane.merge_train_github_token.resolve_merge_train_github_token",
+                return_value="token",
+            ),
+            patch(
+                "control_plane.merge_train_github.UrllibMergeTrainGitHubTransport",
+                _UnprotectedRepository,
+            ),
+        ):
+            store = FilesystemRecordStore(Path(temporary_directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard", record_id="merge-train-policy-active"
+                )
+            )
+            candidate_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills", record_id="merge-train-policy-candidate"
+            )
+            with self.assertRaises(MergeTrainTargetNotReadyError) as refusal:
+                plan_managed_merge_train_policy_import(
+                    store,
+                    ManagedMergeTrainPolicyImportProposalInput(
+                        record=candidate_record,
+                        reason="Enroll a repository without required checks.",
+                    ),
+                )
+
+        message = str(refusal.exception)
+        self.assertIn("gh-rulesets.py apply --repo cbusillo/codex-skills", message)
+        self.assertIn(f"`{candidate_record.policy.policies[0].enqueue_label}` label", message)
 
     def test_merge_train_policy_import_planner_rejects_changed_policy_with_reused_record_id(
         self,

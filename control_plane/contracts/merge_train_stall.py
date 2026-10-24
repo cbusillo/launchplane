@@ -27,6 +27,7 @@ class MergeTrainStallObservation(BaseModel):
     reasons: tuple[str, ...] = ()
     suspected_signals: tuple[str, ...] = ()
     queue_suspended: bool = False
+    setting_gaps: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
 
 
 class MergeTrainStallRecord(BaseModel):

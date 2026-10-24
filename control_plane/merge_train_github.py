@@ -195,6 +195,16 @@ class MergeTrainGitHubPolicyUnavailableError(MergeTrainGitHubError):
     pass
 
 
+_REQUIRED_CHECKS_MISSING = (
+    "Merge train candidate validation requires enforced protected-branch status checks."
+)
+_PROTECTED_BRANCH_MISSING = "Merge train candidate validation requires a protected branch."
+
+
+def is_missing_required_checks_evidence(observation_error: str) -> bool:
+    return observation_error in {_REQUIRED_CHECKS_MISSING, _PROTECTED_BRANCH_MISSING}
+
+
 class _CandidateCheckRetryProvenanceUnavailable(MergeTrainGitHubError):
     pass
 
@@ -2768,25 +2778,31 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         return ensure_batch_pull_request(client=self, candidate=candidate)
 
-    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate, reason: str) -> None:
         from control_plane.merge_train_batch_pull_request import close_batch_pull_request
 
         if self._effect_executor is not None and not isinstance(
             self._effect_executor, LegacyMergeTrainEffectExecutor
         ):
             raise MergeAdmissionDeniedError("Batch PR retirement requires the service adapter.")
-        close_batch_pull_request(client=self, candidate=candidate)
+        close_batch_pull_request(client=self, candidate=candidate, reason=reason)
+
+    def target_setting_gaps(
+        self, *, repository_policy: MergeTrainRepositoryPolicy
+    ) -> tuple[str, ...]:
+        return merge_train_target_setting_gaps(
+            transport=self.transport,
+            repository=repository_policy.repository,
+            base_branch=repository_policy.base_branch,
+        )
 
     def ensure_repository_label(self, *, repository: str, label: str, mutate: bool = True) -> bool:
         repository_path = _repository_path(repository)
         normalized_label = require_text(label, "GitHub label is required.")
-        label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
-        try:
-            self.transport.request(method="GET", path=label_path)
+        if _repository_label_exists(
+            transport=self.transport, repository_path=repository_path, label=normalized_label
+        ):
             return True
-        except MergeTrainGitHubError as error:
-            if error.status_code != 404:
-                raise
         if not mutate:
             return False
         if self._effect_executor is not None and not isinstance(
@@ -5789,10 +5805,56 @@ def _required_branch_checks(
         base_branch=base_branch,
     )
     if not policy.checks:
-        raise MergeTrainGitHubPolicyUnavailableError(
-            "Merge train candidate validation requires enforced protected-branch status checks."
-        )
+        raise MergeTrainGitHubPolicyUnavailableError(_REQUIRED_CHECKS_MISSING)
     return policy.checks
+
+
+def merge_train_target_setting_gaps(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository: str,
+    base_branch: str,
+    enqueue_label: str = "",
+) -> tuple[str, ...]:
+    repository_path = _repository_path(repository)
+    gaps: list[str] = []
+    try:
+        has_required_checks = bool(
+            _required_branch_check_policy(
+                transport=transport, repository_path=repository_path, base_branch=base_branch
+            ).checks
+        )
+    except MergeTrainGitHubPolicyUnavailableError:
+        has_required_checks = False
+    if not has_required_checks:
+        gaps.append(
+            f"{repository} `{base_branch}` requires no status checks, so Launchplane cannot "
+            "validate a batch for it. Apply the standard ruleset pair with "
+            f"`gh-rulesets.py apply --repo {repository}`, then require the repository's CI "
+            f"checks with `gh-rulesets.py checks-plan --repo {repository}`."
+        )
+    if enqueue_label and not _repository_label_exists(
+        transport=transport, repository_path=repository_path, label=enqueue_label
+    ):
+        gaps.append(
+            f"{repository} has no `{enqueue_label}` label for ready pull requests. Create it "
+            f"with `gh label create {enqueue_label} --repo {repository}`."
+        )
+    return tuple(gaps)
+
+
+def _repository_label_exists(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, label: str
+) -> bool:
+    try:
+        transport.request(
+            method="GET", path=f"/repos/{repository_path}/labels/{quote(label, safe='')}"
+        )
+    except MergeTrainGitHubError as error:
+        if error.status_code == 404:
+            return False
+        raise
+    return True
 
 
 def _required_branch_check_policy(
@@ -5819,9 +5881,7 @@ def _required_branch_check_policy(
         raise
     branch = _json_object(raw_payload, "GitHub protected branch response")
     if branch.get("protected") is not True:
-        raise MergeTrainGitHubPolicyUnavailableError(
-            "Merge train candidate validation requires a protected branch."
-        )
+        raise MergeTrainGitHubPolicyUnavailableError(_PROTECTED_BRANCH_MISSING)
     protection = _json_object(branch.get("protection"), "GitHub branch protection")
     payload = _json_object(
         protection.get("required_status_checks"), "GitHub required status checks response"
