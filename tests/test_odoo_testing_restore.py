@@ -455,9 +455,22 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         import shlex
 
         remote_arguments = shlex.split(remote)
-        self.assertEqual(remote_arguments[-1], self.spec["source"]["ODOO_UPSTREAM_DB_NAME"])
-        self.assertIn("pg_dump", remote_arguments)
-        self.assertIn("--", remote_arguments)
+        source_settings = self.spec["source"]
+        self.assertEqual(
+            remote_arguments,
+            [
+                "pg_dump",
+                "-U",
+                source_settings["ODOO_UPSTREAM_DB_USER"],
+                "-Fc",
+                source_settings["ODOO_UPSTREAM_DB_NAME"],
+            ],
+        )
+        transfer = next(call for call in self.calls if call[0] == "rsync")
+        self.assertEqual(
+            set(transfer[1 : transfer.index("-e")]),
+            {"-a", "--no-links", "--no-devices", "--no-specials"},
+        )
         self.assertEqual(len([call for call in self.calls if call[0] == "ssh"]), 1)
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
@@ -480,6 +493,33 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             timeout=2,
             check=True,
         )
+
+    def test_root_source_preserves_database_owner_dump(self) -> None:
+        self.spec["source"]["ODOO_UPSTREAM_USER"] = "root"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        remote = next(call[-1] for call in self.calls if call[0] == "ssh")
+        import shlex
+
+        source = self.spec["source"]
+        self.assertEqual(
+            shlex.split(remote),
+            [
+                "sudo",
+                "-u",
+                source["ODOO_UPSTREAM_DB_USER"],
+                "pg_dump",
+                "-Fc",
+                "--",
+                source["ODOO_UPSTREAM_DB_NAME"],
+            ],
+        )
+
+    def test_root_source_cannot_capture_a_filesystem_root_as_filestore(self) -> None:
+        self.spec["source"].update(ODOO_UPSTREAM_USER="root", ODOO_UPSTREAM_FILESTORE_PATH="///./")
+        status, _ = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
 
     def test_database_mount_at_another_path_refuses_before_source_capture(self) -> None:
         self.containers["database"]["Mounts"][0]["Destination"] = "/other-database"
