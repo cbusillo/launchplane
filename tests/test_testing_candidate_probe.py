@@ -18,6 +18,8 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 from urllib.request import Request
 
+from passlib.context import CryptContext  # type: ignore[import-untyped]
+
 from control_plane import testing_candidate_probe as probe
 from tests import test_odoo_testing_restore as copy_tests
 
@@ -350,6 +352,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 ("admin", "admin"),
             }
         )
+        self.context_factory = Mock(return_value=self.context)
         self.requests: list[Request] = []
         self.preserved = False
         self.password_helper: Any = SimpleNamespace(
@@ -384,9 +387,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
                     "psycopg2": self.driver,
                     "odoo_admin_password": self.password_helper,
                     "passlib": SimpleNamespace(),
-                    "passlib.context": SimpleNamespace(
-                        CryptContext=Mock(return_value=self.context)
-                    ),
+                    "passlib.context": SimpleNamespace(CryptContext=self.context_factory),
                 },
             ),
             patch("sys.stdin", io.StringIO(json.dumps(self.spec))),
@@ -464,6 +465,24 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.run_probe()
                 self.assertEqual(self.cursor.execute.call_args.args[1], (["admin", "tester"],))
+
+    def test_restored_copy_verifies_actual_hashes_and_plaintext_without_authentication(
+        self,
+    ) -> None:
+        self.spec["copy_binding_sha256"] = "verified-copy-binding"
+        self.preserved = True
+        self.context_factory = CryptContext
+        encoder = CryptContext(schemes=["pbkdf2_sha512"], pbkdf2_sha512__rounds=1000)
+        for stored in (encoder.hash("copied-human-fixture"), "copied-human-fixture"):
+            with self.subTest(stored_type=stored.startswith("$")):
+                self.rows = [(stored,)]
+                self.run_probe()
+        for stored in (encoder.hash("admin"), "admin"):
+            with self.subTest(stored_type=stored.startswith("$")):
+                self.rows = [(stored,)]
+                with self.assertRaises(RuntimeError):
+                    self.run_probe()
+        self.connection.commit.assert_not_called()
 
     def test_unmarked_or_older_copy_and_empty_bootstrap_keep_strict_login_check(self) -> None:
         for binding, preserved, helper in (
