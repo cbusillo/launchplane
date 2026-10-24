@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-staging", "key-storage-unavailable", "stale", "denied", "read-only", "narrow-admin"]) {
+for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-staging", "key-storage-unavailable", "stale", "denied", "read-only", "narrow-admin", "isolation-staging", "isolation-narrow-admin"]) {
   test(`testing hold lift handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -11,8 +11,10 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
     const scope = { product: "atlas-commerce", context: fixtures.environment.context, instance: "testing" };
     const receiptTrace = "lift-receipt";
     const original = { reason: "Renderer diagnosis. https://issues.example/diagnosis/42", recorded_by: "diagnosis-agent", recorded_at: "2026-10-20T20:00:00Z" };
-    let hold: typeof original & { purpose?: "staff_testing" | "isolation_staging" } | null = original;
-    const administrator = !["read-only", "narrow-admin"].includes(outcome);
+    const initial: typeof original & { purpose?: "staff_testing" | "isolation_staging" } =
+      outcome.startsWith("isolation") ? { ...original, purpose: "isolation_staging" } : original;
+    let hold: typeof initial | null = initial;
+    const administrator = !["read-only", "narrow-admin", "isolation-narrow-admin"].includes(outcome);
     let sessionReads = 0;
     await page.route("**/v1/auth/session", route => { sessionReads += 1; return route.fulfill({ json: {
       status: "ok", trace_id: "session", csrf_token: "fixture-csrf", is_administrator: administrator,
@@ -32,7 +34,9 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
     const applies: Array<{ key: string; body: unknown }> = [];
     await page.route("**/v1/product-config/testing-hold/apply", async route => {
       const body = route.request().postDataJSON();
+      const before = hold;
       expect(route.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
+      expect(body.purpose).toBe(initial.purpose);
       expect(body.hold).toBe(false);
       expect(body.rehearsal).not.toBe(true);
       if (body.mode === "apply") {
@@ -52,8 +56,9 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
         hold = null;
       }
       await route.fulfill({ json: { status: "accepted", trace_id: receiptTrace, records: {}, result: {
-        ...scope, action: "clear", changed: true, applied: body.mode === "apply", before: original,
-        plan_sha256: "a".repeat(64), reason: body.reason, read_back_matches: true, reconcile_requested: body.mode === "apply",
+        ...scope, action: "clear", changed: true, applied: body.mode === "apply", before,
+        plan_sha256: "a".repeat(64), reason: body.reason, read_back_matches: true,
+        reconcile_requested: body.mode === "apply" && body.purpose !== "isolation_staging",
       } } });
     });
     await page.goto("/ui/products/atlas-commerce/environments/testing");
@@ -68,6 +73,7 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
     let panel = page.getByRole("region", { name: "Testing hold", exact: true });
     await expect(panel.getByText(original.reason)).toBeVisible();
     await expect(panel.getByText(original.recorded_by)).toBeVisible();
+    if (outcome === "isolation-staging") await expect(panel.getByText("Deploys held until testing is proven separate from production")).toBeVisible();
     await expect(panel.getByRole("link", { name: "Linked issue" })).toHaveAttribute("href", "https://issues.example/diagnosis/42");
     await panel.getByLabel("Reason for lifting").fill("Diagnosis fixed; resume testing.");
     await panel.getByRole("button", { name: "Review lift", exact: true }).click();
@@ -109,7 +115,8 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
         await panel.getByRole("button", { name: "Review current hold separately", exact: true }).click();
         await expect(panel.getByText(applies[0].key, { exact: true })).toBeVisible();
         if (outcome === "uncertain-staging") {
-          await expect(panel.getByRole("button", { name: "Review lift", exact: true })).toHaveCount(0);
+          await expect(panel.getByText("Deploys held until testing is proven separate from production")).toBeVisible();
+          await expect(panel.getByRole("button", { name: "Review lift", exact: true })).toBeVisible();
           await expect(panel.getByRole("button", { name: "Lift testing hold", exact: true })).toHaveCount(0);
           expect(hold?.purpose).toBe("isolation_staging"); return;
         }
@@ -129,7 +136,9 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
       await expect(panel.getByRole("button", { name: "Lift testing hold", exact: true })).toHaveCount(0);
       expect(hold).toEqual(original);
     } else {
-      await expect(panel.getByRole("status").filter({ hasText: receiptTrace })).toBeVisible();
+      const receipt = panel.getByRole("status").filter({ hasText: receiptTrace });
+      await expect(receipt).toBeVisible();
+      await expect(receipt).toContainText(outcome === "isolation-staging" ? "No testing reconcile was requested." : "Testing reconciliation requested.");
       expect(hold).toBeNull();
     }
     expect(applies[0].key).toBeTruthy();
