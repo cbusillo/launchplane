@@ -90,14 +90,13 @@ Native predicate errors from execution append `_refused` or `_unavailable` to
 the predicate; path-check carries that distinction in its `blocked` or `unknown`
 state. A predicate names the observation, never permission to repair or repeat an effect.
 
-The read-only provision path check can inspect generation completion and the
-existing physical-copy predicates while an `isolation_staging` hold remains set.
-It uses the generation reader's resource-qualification checks, including managed
-credential separation. The use checkpoint still reports the protective hold;
-a `staff_testing` hold still blocks generation qualification. Account planning,
-provisioning and browser execution retain their ordinary hold checks. A completed
-generation observation does not qualify a hold lift, inherited credentials or an
-upstream source's capability, and a skipped checkpoint is not an observed failure.
+The read-only provision path check inspects generation completion and physical-copy
+predicates under an unchanged `isolation_staging` hold; staff holds and all action
+hold checks remain protective. Both native-published and legacy generations require
+managed password separation for reads and actions. This does not qualify inherited
+credentials, upstream-source capability or a hold lift. Generation-preparation
+checks that require an unheld lane report that hold without claiming a resource or
+usage defect; use the provision read for current-copy evidence.
 
 Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It

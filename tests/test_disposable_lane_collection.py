@@ -226,6 +226,61 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 resource_qualification=True,
             )
 
+    def test_published_copy_enforces_credential_separation_for_read_and_action(self) -> None:
+        from control_plane.odoo_testing_restore import TestingCredentialsOverlap
+
+        self.target.policies.staff_testing_hold = None
+        self.credentials.side_effect = TestingCredentialsOverlap("fixture overlap")
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            for qualification in (False, True):
+                with (
+                    self.subTest(qualification=qualification),
+                    self.assertRaises(TestingCredentialsOverlap),
+                ):
+                    read_current_testing_generation(
+                        self.store,
+                        product=self.generation.product,
+                        context=self.generation.context,
+                        instance="testing",
+                        resource_qualification=qualification,
+                    )
+
+    def test_published_copy_keeps_read_only_isolation_hold_and_staff_protection(self) -> None:
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            self.assertEqual(
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    resource_qualification=True,
+                ),
+                self.generation,
+            )
+            self.credentials.assert_called_once()
+            with self.assertRaises(ValueError):
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                )
+            hold = self.target.policies.staff_testing_hold
+            assert hold is not None
+            hold.purpose = "staff_testing"
+            with self.assertRaises(ValueError):
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    resource_qualification=True,
+                )
+
     def test_qualification_keeps_credentials_allocation_and_queue_guards(self) -> None:
         faults: tuple[tuple[Mock, str, object], ...] = (
             (self.credentials, "side_effect", ValueError("overlapping credentials")),

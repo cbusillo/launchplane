@@ -151,6 +151,9 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await self.read()
         steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
         self.assertEqual(steps["testing_generation_use"]["state"], "blocked")
+        for step_id in ("testing_generation_use", "testing_resource_allocation"):
+            self.assertEqual(steps[step_id]["code"], steps["testing_hold"]["code"])
+            self.assertEqual(steps[step_id]["fix"], "wait")
         self.assertEqual(steps["testing_restore_source"]["state"], "unknown")
         self.assertNotIn("private-source", response.text)
 

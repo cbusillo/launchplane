@@ -58,6 +58,10 @@ _WALKTHROUGH_DESCRIPTIONS = {
 }
 
 
+class TestingPathHoldActive(ValueError):
+    pass
+
+
 def read_testing_prerequisites(
     *,
     intent: Literal["provision", "generation", "testing-replacement"],
@@ -79,6 +83,9 @@ def read_testing_prerequisites(
         state: Literal["clear", "blocked", "unknown"] = "clear"
         try:
             read()
+        except TestingPathHoldActive:
+            state, code = "blocked", "testing_hold_active"
+            description = "The testing hold prevents this action-admission check; use the provision prerequisite read for current-copy evidence."
         except TestingCredentialsOverlap:
             state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."
@@ -98,7 +105,11 @@ def read_testing_prerequisites(
                 state=state,
                 code=code if state != "clear" else step_id + "_clear",
                 description=description if state != "clear" else "This prerequisite passed.",
-                fix="none" if state == "clear" else "wait" if state == "unknown" else "by_hand",
+                fix="none"
+                if state == "clear"
+                else "wait"
+                if state == "unknown" or code == "testing_hold_active"
+                else "by_hand",
             )
         )
 
@@ -290,6 +301,9 @@ def read_testing_prerequisites(
 
     def allocation() -> None:
         assert operation_id is not None
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         preparation = store.read_disposable_resource_preparation(operation_id)
         if preparation is None:
             raise ValueError("Retained resource preparation is missing.")
@@ -340,6 +354,8 @@ def read_testing_prerequisites(
         if root is None:
             raise RuntimeError("Testing usage needs the service runtime.")
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         target_id = store.read_dokploy_target_id_record(
             context_name=context, instance_name="testing"
         )
