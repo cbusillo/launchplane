@@ -45,9 +45,11 @@ Launchplane write payload. A selected host is read independently by ID and
 fully qualified, including its current names, loaded configuration, certificate,
 access list and ownership receipt, before any testing effect or successful readback.
 Selected-host responses normalize explicit `access_lists` relation IDs and older
-ACL ID fields to the same receipt payload. Redundant representations must agree;
+ACL ID fields to the same receipt payload. Relation IDs and request-ID arrays must agree;
 missing ACL evidence never defaults to public, and custom hosts still require
-exactly one positive ACL ID. The write payload and route qualification are unchanged.
+exactly one positive ACL ID. Locations preserve the supported host-ACL inheritance:
+requests state it explicitly and response-only relation metadata stays out of receipt hashes.
+Independent, contradictory or incomplete location ACL policies refuse before a write.
 When the HTTP refusal retains its provider cause, the trace-bound
 `handled_error_cause` log also carries the statically bound model name,
 bounded validation kinds, schema-owned

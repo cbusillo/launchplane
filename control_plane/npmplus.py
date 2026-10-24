@@ -114,6 +114,24 @@ class NpmplusLocationPayload(BaseModel):
 class NpmplusLocation(NpmplusLocationPayload):
     model_config = ConfigDict(extra="ignore")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _require_round_trip_access_list_policy(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        membership_fields = ("npmplus_access_list_ids", "access_lists")
+        if not any(field in value for field in ("npmplus_access_list_type", *membership_fields)):
+            return value
+        if value.get("npmplus_access_list_type") != "global" or not any(
+            field in value for field in membership_fields
+        ):
+            raise ValueError("NPMplus location requires verified host access-list inheritance")
+        if any(value[field] != [] for field in membership_fields if field in value):
+            raise ValueError(
+                "NPMplus location cannot round-trip independent access-list membership"
+            )
+        return value
+
 
 class NpmplusProxyHostPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -176,6 +194,9 @@ class NpmplusProxyHostPayload(BaseModel):
             [] if self.access_list_id == 0 else [self.access_list_id]
         )
         payload["npmplus_access_list_type"] = "public" if self.access_list_id == 0 else "custom"
+        for location in payload["locations"]:
+            location["npmplus_access_list_type"] = "global"
+            location["npmplus_access_list_ids"] = []
         return payload
 
 
