@@ -220,9 +220,9 @@ rechecks that at most every 30 minutes. Edited test notes that change the checkl
 Client a fresh request, including engineering-only candidates. This cache never
 supplies acceptance or bypasses release checks.
 
-While the current Client's accepted release can proceed or has started and is
-waiting, running, or awaiting reconciliation, the publisher sends no new
-request or reminder. Before any step starts, a change to the accepted production
+An accepted release sends no new request or reminder while it waits on its
+unchanged production/testing versions or has started and still awaits a step
+or reconciliation. Before any step starts, a change to the accepted production
 or testing version permits a request for the newer qualified release snapshot.
 Temporary calendar, deploy-drain or acceptance-publication waits with unchanged
 versions keep the original acceptance and produce no new request.

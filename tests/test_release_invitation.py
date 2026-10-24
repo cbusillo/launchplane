@@ -1089,7 +1089,11 @@ class ReleaseInvitationTests(unittest.TestCase):
             decision_record_id=accepted.record_id,
             rollback_drill=True,
             state="running",
-            steps=(),
+            steps=(
+                ClientReleaseStepView(
+                    step="backup-2", kind="backup", status="running", operation_id="backup"
+                ),
+            ),
         )
         unresolved = ClientReleaseStepView(
             step="rollback-1",
@@ -1112,6 +1116,16 @@ class ReleaseInvitationTests(unittest.TestCase):
         with patch("control_plane.client_release.read_client_release_run", return_value=run):
             self.change_candidate(source_commit="e" * 40)
             self.assertFalse(self.publish())
+            with patch(
+                "control_plane.client_release.read_client_release_run",
+                return_value=run.model_copy(
+                    update={
+                        "state": "waiting",
+                        "steps": (run.steps[0].model_copy(update={"status": "pass"}),),
+                    }
+                ),
+            ):
+                self.assertFalse(self.publish())
             self.change_candidate(source_commit=accepted.checklist.candidate.source_commit)
         self.assertEqual(self.posts, posts)
         self.assertEqual(self.comments, [original])
@@ -1145,6 +1159,16 @@ class ReleaseInvitationTests(unittest.TestCase):
         run = ClientReleaseRunView(
             decision_record_id=accepted.record_id, rollback_drill=True, state="passed", steps=()
         )
+        running = run.model_copy(
+            update={
+                "state": "running",
+                "steps": (
+                    ClientReleaseStepView(
+                        step="backup-1", kind="backup", status="pending", operation_id="backup"
+                    ),
+                ),
+            }
+        )
         resumed = False
 
         def github(*, path: str, token: str, **kwargs: Any) -> object:
@@ -1158,9 +1182,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             patch("control_plane.release_invitation.github_api_request", side_effect=github),
             patch(
                 "control_plane.client_release.read_client_release_run",
-                side_effect=lambda **kwargs: (
-                    run.model_copy(update={"state": "running"}) if resumed else run
-                ),
+                side_effect=lambda **kwargs: running if resumed else run,
             ),
         ):
             self.assertFalse(self.publish())
@@ -1225,6 +1247,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
         original = self.comments[0].copy()
+        observed_reasons: set[str] = set()
         for window, draining, release_url in (
             (
                 BusinessHoursWindow(applies=True, blocked_reason="business open"),
@@ -1253,6 +1276,10 @@ class ReleaseInvitationTests(unittest.TestCase):
                 assert run is not None
                 self.assertEqual(run.state, "waiting")
                 self.assertTrue(run.blocked_reason)
+                if window.blocked_reason:
+                    self.assertEqual(run.blocked_reason, window.blocked_reason)
+                self.assertNotIn(run.blocked_reason, observed_reasons)
+                observed_reasons.add(run.blocked_reason)
                 self.assertFalse(self.publish(ReleaseInvitationBackoff()))
                 self.assertFalse(self.publish(urgent_reason="Send the release request."))
         self.assertEqual(self.comments, [original])

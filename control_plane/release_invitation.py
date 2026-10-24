@@ -369,10 +369,7 @@ def _accepted_release_in_progress(
 
     run = read_client_release_run(store=store, profile=profile, decision=decision)
     return run is not None and (
-        run.state == "running"
-        or any(
-            step.status in {"pending", "running", "reconciliation_required"} for step in run.steps
-        )
+        any(step.status in {"pending", "running", "reconciliation_required"} for step in run.steps)
         or (
             run.state == "waiting"
             and (
