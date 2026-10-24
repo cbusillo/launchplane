@@ -127,14 +127,6 @@ def build_product_owner_setting_plan(
     request: ProductOwnerApplyRequest,
     resolved_owner: ProductOwnerIdentity,
 ) -> ProductOwnerSettingPlan:
-    if (
-        not profile.is_managed_runtime
-        and profile.is_active
-        and profile.owner.github_id != resolved_owner.github_id
-    ):
-        raise ValueError(
-            "Retire the non-runtime product before changing its Client; only Director-standing products are supported."
-        )
     owner_before = ProductOwnerIdentity(
         github_login=profile.owner.github_login,
         github_id=profile.owner.github_id,

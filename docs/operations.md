@@ -5526,8 +5526,9 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
-revision `b81ca763d924`, which follows the separately approved Q533
+`RETIRED_TABLES` in that revision. Normal service startup targets the
+non-runtime profile archive `a4c8e0f2b6d3` (see below), which follows
+discussion-topic revision `b81ca763d924` and the separately approved Q533
 preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
@@ -5680,3 +5681,25 @@ A release that changes startup's migration target can activate the transition
 during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
 compatibility image without downgrading the hostname schema.
+
+### Non-runtime profile archive
+
+Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
+product profile whose payload names a classification other than
+`managed_runtime` into `launchplane_product_profile_archive`, with
+`migration:nonruntime-product-retirement` as its source and a fixed reason,
+then deletes those profile rows. Runtime profiles, repository inventory and
+every other record stay as they are. A database with no such rows only gains
+the empty archive table.
+
+Empty joins keep every recognized branch reachable without applying a held
+step. A database that already applied the delivery drop or its joins joins at
+`a5d9f1b3c7e4`; a hostname-only schema joins at `a6e0a2c4d8f5`; the
+hostname/retirement and compatibility joins reach the graph head
+`a7f1b3d5e9a6`. Explicitly requesting the delivery drop from the archive
+revision joins at `a5d9f1b3c7e4`; a hostname-only schema still refuses it.
+Hostname activation must target a join that includes this revision.
+
+Downgrade refuses. Images from before this revision reject it, so an image
+rollback across it needs this image or a later one; the hostname compatibility
+image above is no longer a rollback target once the archive has run.

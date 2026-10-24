@@ -23,6 +23,10 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as public_host_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
+    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
+    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
+    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
+    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -30,8 +34,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-# Topics extend the approved preview path. #2437's sibling drop stays held.
-SCHEMA_MIGRATION_TARGET_REVISION = discussion_topics.revision
+SCHEMA_MIGRATION_TARGET_REVISION = profile_archive.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -40,6 +43,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     retirement_join.revision,
     discussion_topics.revision,
     topics_join.revision,
+    profile_archive.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -47,6 +51,21 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     public_host_join.revision,
     topics_hostnames.revision,
     compatibility_join.revision,
+    archive_retirement_join.revision,
+    archive_hostnames_join.revision,
+    archive_compatibility_join.revision,
+)
+_ARCHIVE_JOIN_BY_SOURCE = {
+    retired_delivery.revision: archive_retirement_join.revision,
+    retirement_join.revision: archive_retirement_join.revision,
+    topics_join.revision: archive_retirement_join.revision,
+    public_host_fences.revision: archive_hostnames_join.revision,
+    topics_hostnames.revision: archive_hostnames_join.revision,
+    public_host_join.revision: archive_compatibility_join.revision,
+    compatibility_join.revision: archive_compatibility_join.revision,
+}
+_HELD_DELIVERY_TARGETS = frozenset(
+    {retired_delivery.revision, retirement_join.revision, topics_join.revision}
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
 SchemaMigrationAction = Literal["current", "upgrade", "compatible_ahead"]
@@ -72,6 +91,10 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == profile_archive.revision and current_revision in _ARCHIVE_JOIN_BY_SOURCE:
+        return _ARCHIVE_JOIN_BY_SOURCE[current_revision]
+    if current_revision == profile_archive.revision and target_revision in _HELD_DELIVERY_TARGETS:
+        return archive_retirement_join.revision
     # Only a database that has ALREADY applied the held delivery branch may
     # auto-join it. Explicitly requesting that branch remains the approved-host
     # application path; when preview has applied, join both on that request.
