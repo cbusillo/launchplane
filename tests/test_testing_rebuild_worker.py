@@ -4047,24 +4047,41 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
 
     def test_failed_restore_diagnostic_survives_original_worker_recovery(self) -> None:
+        self.assert_terminal_preparation_recovery("restoring")
+
+    def test_failed_build_survives_abandonment_commit_before_worker_checkpoint(self) -> None:
+        self.assert_terminal_preparation_recovery("deploying")
+
+    def assert_terminal_preparation_recovery(
+        self, phase: Literal["deploying", "restoring"]
+    ) -> None:
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
         candidate = self.fixture.candidate
         assert candidate.application is not None
-        restoring = candidate.model_copy(
-            update={
-                "application": candidate.application.model_copy(
-                    update={"phase": "restoring", "prepared": None}
-                )
-            }
+        changes: dict[str, Any] = {"phase": phase, "prepared": None}
+        if phase == "deploying":
+            changes.update(
+                deployment_id="",
+                restore_schedule_id="",
+                restore_previous_deployments=(),
+                restore_workflow_started=None,
+                workflow_evidence={},
+            )
+        interrupted = candidate.model_copy(
+            update={"application": candidate.application.model_copy(update=changes)}
         )
         with self.store._session_factory.begin() as session:
             row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
             assert row is not None
-            row.payload = restoring.model_dump(mode="json", exclude_none=True)
-        history = self.fixture.fixture.restore_deployments
+            row.payload = interrupted.model_dump(mode="json", exclude_none=True)
+        history = (
+            self.fixture.fixture.restore_deployments
+            if phase == "restoring"
+            else self.fixture.fixture.deployments
+        )
         history[0].update(
             status="error",
             logs=[],
@@ -4072,6 +4089,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
         original_prepare = service.NativeTestingRebuildExecution.prepare
         plans: list[Any] = []
         effects = list(self.fixture.fixture.effects)
+        write = self.store.compare_and_write_testing_candidate
+
+        def lose_reply(
+            expected: TestingCandidateAllocation | None,
+            replacement: TestingCandidateAllocation,
+            **kwargs: Any,
+        ) -> None:
+            write(expected, replacement, **kwargs)
+            if replacement.application is not None and replacement.application.phase == "abandoned":
+                raise TimeoutError("Fixture lost abandonment commit reply")
 
         def prepare(executor: Any, plan: Any) -> Any:
             plans.append(plan)
@@ -4096,15 +4123,35 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 api, "list_deployments_for_target", return_value=self.fixture.fixture.deployments
             ),
         ):
-            result = self.execute()
+            with (
+                patch.object(
+                    self.store, "compare_and_write_testing_candidate", side_effect=lose_reply
+                ),
+                self.assertRaises(TimeoutError),
+            ):
+                self.execute()
+            retained = self.store.read_testing_candidate(candidate.namespace)
+            assert retained is not None and retained.application is not None
+            self.assertEqual(retained.application.phase, "abandoned")
+            abandoned = retained
+            checkpoint = RecordTestingRebuildStore(self.store).load(plans[0])
+            self.assertEqual(checkpoint.step, "preparing")
+            self.assertFalse(checkpoint.preparation_failure_evidence)
+            with patch.object(
+                service,
+                "abandon_candidate_application",
+                side_effect=AssertionError("Reuse the committed abandonment receipt"),
+            ):
+                result = self.execute()
         self.assertEqual(result.error_code, "candidate_preparation_failed")
         checkpoint = RecordTestingRebuildStore(self.store).load(plans[0])
-        diagnostic = f"{ReadbackPredicate.ATTACHMENTS}_refused"
-        self.assertIn(diagnostic, checkpoint.preparation_failure_evidence)
+        self.assertEqual(checkpoint.step, "failed")
+        if phase == "restoring":
+            diagnostic = f"{ReadbackPredicate.ATTACHMENTS}_refused"
+            self.assertIn(diagnostic, checkpoint.preparation_failure_evidence)
         retained = self.store.read_testing_candidate(candidate.namespace)
         assert retained is not None and retained.application is not None
-        self.assertEqual(retained.application.phase, "abandoned")
-        self.assertIn(diagnostic, retained.application.abandonment_evidence)
+        self.assertEqual(retained, abandoned)
         self.assertEqual(
             checkpoint.preparation_failure_evidence, retained.application.abandonment_evidence
         )

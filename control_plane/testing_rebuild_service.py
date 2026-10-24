@@ -1566,12 +1566,7 @@ class NativeTestingRebuildExecution:
                         retain_configured=True,
                     )
                 app = current.application
-                if (
-                    app is not None
-                    and app.phase == "abandoned"
-                    and app.abandonment_evidence
-                    in {app.unapplied_configuration_evidence, app.retained_configuration_evidence}
-                ):
+                if app is not None and app.phase == "abandoned":
                     self.allocation = current
                     raise TestingRebuildPreparationFailure(
                         copy_id=plan.new.copy_id, evidence_id=app.abandonment_evidence
