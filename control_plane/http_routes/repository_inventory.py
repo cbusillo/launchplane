@@ -174,9 +174,11 @@ def register_repository_inventory_write_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> RepositoryInventoryApplyResponse:
         trace_id = dependencies.next_trace_id()
-        # Terminal transport stays read-only for apply; its inert dry run is a plan.
+        terminal_transport_apply = envelope.mode == "apply" and isinstance(
+            identity, TerminalAgentIdentity
+        )
         if (
-            (envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity))
+            terminal_transport_apply
             or not dependencies.authorization_allows(
                 identity=identity,
                 action=REPOSITORY_INVENTORY_WRITE_ACTION

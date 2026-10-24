@@ -478,7 +478,7 @@ class RepositoryInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
                 "/v1/repository-inventory/apply",
                 headers={
                     "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "director-inventory-apply-1",
+                    "Idempotency-Key": "operator-apply",
                 },
                 payload=_payload(),
             )
@@ -519,7 +519,7 @@ class RepositoryInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
                 "/v1/repository-inventory/apply",
                 headers={
                     "Authorization": "Bearer valid-token",
-                    "Idempotency-Key": "director-terminal-apply-1",
+                    "Idempotency-Key": "terminal-apply",
                 },
                 payload=_payload(),
             )
@@ -549,7 +549,7 @@ class RepositoryInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
                     "/v1/repository-inventory/apply",
                     headers={
                         "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "unmarked-operator-apply-1",
+                        "Idempotency-Key": "denied-apply",
                     },
                     payload=_payload(mode=mode),
                 )
