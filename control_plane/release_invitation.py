@@ -148,7 +148,10 @@ def _change_link(change: InvitationChange) -> str:
 
 
 def _announced_changes(
-    request: dict[str, object] | None, changes: dict[str, InvitationChange], candidate_marker: str
+    request: dict[str, object] | None,
+    changes: dict[str, InvitationChange],
+    candidate_marker: str,
+    settings_key: str = "",
 ) -> set[str]:
     if request is None:
         return set()
@@ -158,7 +161,7 @@ def _announced_changes(
     ):
         # A manually adopted receipt for this exact candidate already requested
         # every included change, even when its prose has no individual PR links.
-        return set(changes)
+        return set(changes) | ({settings_key} if settings_key else set())
     keys = {
         match[1]
         for line in lines
@@ -625,13 +628,6 @@ def publish_release_invitation(
     urgent_reason: str = "",
     urgent_checklist_digest: str = "",
 ) -> bool:
-    """Keep the Client's release request current; return whether one is open.
-
-    Only a Client-facing change opens a request. An engineering-only candidate
-    waits for the next Client-facing release unless an admin deliberately opens
-    it with ``urgent_reason`` for the exact checklist the admin reviewed
-    (``urgent_checklist_digest``). The Client still has to accept it either way.
-    """
     origin = launchplane_public_origin_from_env()
     if (
         not origin
@@ -752,6 +748,23 @@ def publish_release_invitation(
         notification_changes = {
             key: change for key, change in client_changes.items() if change.client_review_requested
         }
+        settings_key = ""
+        if (
+            review.checklist.website_settings is not None
+            and review.checklist.candidate.website_settings_sha256
+            != review.checklist.production.website_settings_sha256
+        ):
+            settings_key = hashlib.sha256(
+                f"website-settings:{review.checklist.candidate.website_settings_sha256}".encode()
+            ).hexdigest()
+        change_links = {key: _change_link(change) for key, change in client_changes.items()}
+        notification_links = {key: change_links[key] for key in notification_changes}
+        if settings_key:
+            change_links[settings_key] = (
+                "- Website settings: review the prepared search indexing, analytics and cookie "
+                "consent settings on the release page. They apply only after you accept."
+            )
+            notification_links[settings_key] = change_links[settings_key]
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -775,7 +788,7 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not notification_changes and not urgent_reason:
+                if not notification_links and not urgent_reason:
                     return False
                 created = github_api_request(
                     path=path,
@@ -801,7 +814,7 @@ def publish_release_invitation(
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
             # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not notification_changes and not urgent_reason:
+            if request is None and not notification_links and not urgent_reason:
                 return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
@@ -845,10 +858,8 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, notification_changes, marker)
-            added = {
-                key: item for key, item in notification_changes.items() if key not in announced
-            }
+            announced = _announced_changes(request, notification_changes, marker, settings_key)
+            added = {key: link for key, link in notification_links.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
             formatted = (
@@ -860,9 +871,9 @@ def publish_release_invitation(
             # steps were displayed, or corrected notes on its source PR. Refresh
             # that content silently before trusting or reminding from the receipt.
             release_steps_changed = request is not None and any(
-                _change_link(change) not in _comment_lines(request)
-                for change in client_changes.values()
-                if change.release_test_notes
+                link not in _comment_lines(request)
+                for key, link in change_links.items()
+                if key == settings_key or client_changes[key].release_test_notes
             )
             if (
                 request
@@ -909,10 +920,7 @@ def publish_release_invitation(
                 _remember_delivery(backoff, receipt, due, True)
                 return True
             notify = not request or bool(added)
-            changes = [
-                _change_link(change)
-                for change in (added if request and added else client_changes).values()
-            ]
+            changes = list((added if request and added else change_links).values())
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
@@ -921,7 +929,7 @@ def publish_release_invitation(
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
-                for key in sorted(announced | notification_changes.keys())
+                for key in sorted(announced | notification_links.keys())
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
@@ -953,7 +961,9 @@ def publish_release_invitation(
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
-                "check the changes on the testing site, then press **Accept** or **Request changes**."
+                "review the prepared website settings and check the testing site, then press **Accept** or **Request changes**."
+                if settings_key
+                else "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )

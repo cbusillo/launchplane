@@ -18,6 +18,15 @@ from control_plane.contracts.release_review import (
     ReleaseReviewStatus,
 )
 from control_plane.client_release import ClientReleaseRunView
+from control_plane.contracts.odoo_website_settings import (
+    OdooWebsiteSettings,
+    OdooWebsiteSettingsIntent,
+)
+from control_plane.odoo_website_settings import (
+    OdooWebsiteSettingsRequest,
+    plan_website_settings,
+    prepare_website_settings,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
@@ -1067,6 +1076,165 @@ class ReleaseInvitationTests(unittest.TestCase):
             }
         )
         return item
+
+    def prepare_settings(self, *, key: str = "G-TEST123") -> None:
+        self.profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "https://site.example"})
+                    if lane.instance == "prod"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        candidate = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="testing"
+        )
+        request = OdooWebsiteSettingsRequest(
+            product=self.profile.product,
+            context="example-site",
+            website_settings=OdooWebsiteSettingsIntent(
+                artifact_id=candidate.artifact_id,
+                settings=OdooWebsiteSettings(
+                    website_id=1,
+                    public_origin="https://site.example",
+                    public_indexing_enabled=True,
+                    google_analytics_key=key,
+                ),
+            ),
+            reason="Prepare release settings",
+        )
+        plan = plan_website_settings(self.store, request)
+        prepared = prepare_website_settings(
+            self.store,
+            request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+            ),
+        )
+        self.assertTrue(prepared["read_back_matches"])
+        self.refresh_settings_review()
+
+    def refresh_settings_review(self) -> None:
+        assert self.review.checklist is not None
+        with patch(
+            "control_plane.release_review.read_release_changes",
+            return_value=(self.review.checklist.items, ()),
+        ):
+            self.review = build_release_review(
+                store=cast(ReleaseReviewStore, self.store), profile=self.profile, read=github_read
+            )
+
+    def test_prepared_settings_open_one_request_without_preview_evidence(self) -> None:
+        self.make_engineering_only()
+        self.prepare_settings()
+        assert self.review.checklist is not None
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        candidate = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="testing"
+        )
+        self.store.write_release_tuple_record(
+            production.model_copy(
+                update={"artifact_id": candidate.artifact_id, "repo_shas": candidate.repo_shas}
+            )
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": ()})}
+        )
+        self.refresh_settings_review()
+        self.assertTrue(self.publish())
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.comments), 1)
+        self.assertIn("@site-owner", self.comments[0]["body"])
+        self.assertIn("Website settings", self.comments[0]["body"])
+        self.assertNotIn("nothing new to test", self.comments[0]["body"])
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+
+    def test_prepared_settings_include_engineering_release_steps(self) -> None:
+        self.make_engineering_only()
+        item = self.add_release_test_change()
+        self.prepare_settings()
+        self.assertTrue(self.publish())
+        self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[0]["body"])
+        self.assertIn("Website settings", self.comments[0]["body"])
+        self.assertEqual(len(self.comments), 1)
+
+    def test_settings_changes_notify_once_but_same_settings_on_new_build_do_not(self) -> None:
+        self.assertTrue(self.publish())
+        self.prepare_settings()
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertIn("Website settings", self.comments[-1]["body"])
+        assert self.review.checklist is not None
+        self.assertNotIn(self.review.checklist.items[0].owner_test_notes, self.comments[-1]["body"])
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.comments), 2)
+        self.prepare_settings(key="G-NEXT456")
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.comments), 3)
+        self.change_candidate(source_commit="e" * 40)
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.comments), 3)
+        self.assertIn("Website settings", self.comments[-1]["body"])
+
+    def test_settings_request_recovers_lost_response_without_a_duplicate(self) -> None:
+        self.make_engineering_only()
+        self.prepare_settings()
+        self.assertTrue(self.publish())
+        self.prepare_settings(key="G-NEXT456")
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.comments), 2)
+        self.assertEqual(sum("@site-owner" in comment["body"] for comment in self.comments), 1)
+
+    def test_unqualified_settings_never_open_a_request(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
+
+        self.make_engineering_only()
+        self.prepare_settings()
+        stored = self.store.read_odoo_instance_override_record(
+            context_name="example-site", instance_name="prod"
+        )
+        assert stored.website_settings is not None
+        for replacement in (
+            stored.model_copy(update={"website_settings": None}),
+            stored.model_copy(
+                update={
+                    "website_settings": stored.website_settings.model_copy(
+                        update={"artifact_id": "stale"}
+                    )
+                }
+            ),
+            stored.model_copy(
+                update={
+                    "last_apply": OdooOverrideApplyResult(
+                        website_settings=stored.website_settings, website_settings_verified=False
+                    )
+                }
+            ),
+            stored.model_copy(
+                update={
+                    "last_apply": OdooOverrideApplyResult(
+                        website_settings=stored.website_settings.model_copy(
+                            update={"artifact_id": "artifact-prod"}
+                        )
+                    )
+                }
+            ),
+        ):
+            with self.subTest(replacement=replacement):
+                self.store.write_odoo_instance_override_record(replacement)
+                self.refresh_settings_review()
+                self.assertFalse(self.publish(ReleaseInvitationBackoff()))
+                self.assertEqual((self.issues, self.posts), ([], []))
 
     def test_release_test_steps_appear_on_urgent_opening_without_automatic_request(self) -> None:
         self.make_engineering_only()
