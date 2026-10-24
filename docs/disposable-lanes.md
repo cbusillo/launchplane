@@ -3416,7 +3416,7 @@ Keep the original rehearsal intent and add:
 }
 ```
 
-The existing privileged operator attests that the reference records the consumer's
+The existing admin attests that the reference records the consumer's
 confirmation. Launchplane binds it to the reviewed record, original preserving
 journal and exact native inventory; it does not fetch or validate the linked
 discussion. No tenant identity or issue is runtime authority in code.
