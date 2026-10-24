@@ -95,7 +95,7 @@ def inspect_application_activation(
             row.provider_effect_phase,
             row.reconciliation_key,
         )
-        _logger.info(
+        _logger.warning(
             "%s",
             json.dumps(
                 {

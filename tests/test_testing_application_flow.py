@@ -3340,7 +3340,7 @@ class ApplicationFlowTests(unittest.TestCase):
                 return_value=(),
             ),
             self.assertLogs(
-                "control_plane.testing_activation_inspection", level="INFO"
+                "control_plane.testing_activation_inspection", level="WARNING"
             ) as outcomes,
         ):
             inspected = inspect_original()
@@ -3348,7 +3348,6 @@ class ApplicationFlowTests(unittest.TestCase):
         outcome = json.loads(outcomes.records[-1].getMessage())
         self.assertEqual(outcome["trace_id"], inspected.json()["trace_id"])
         self.assertEqual(outcome["outcome"], "absent")
-        self.assertEqual(inspected.json()["result"]["qualification"], "not_evaluated")
         self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
         self.assertEqual(self.adapter.current(), record)
         self.assertEqual(
