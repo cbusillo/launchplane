@@ -218,6 +218,8 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.lose_writer_reply = False
         self.remote_modes: list[str] = []
         self.original_run = subprocess.run
+        self.original_popen = subprocess.Popen
+        self.docker_stdio: Any = None
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
             host="https://provider.invalid",
@@ -339,6 +341,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         opener = Mock()
         opener.open.side_effect = URLError("Docker bridge is unreachable from the host")
 
+        def start(arguments: Any, **options: Any) -> Any:
+            if arguments == ["docker", "system", "dial-stdio"]:
+                if self.docker_stdio is None:
+                    raise AssertionError("The native service fixture is missing")
+                return self.docker_stdio()
+            return self.original_popen(arguments, **options)
+
         def dispatch() -> None:
             if (
                 kwargs["payload"]["mode"] in {"publish", "publish_v2"}
@@ -348,6 +357,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("subprocess.run", side_effect=self.command),
+                patch("subprocess.Popen", side_effect=start),
                 patch("urllib.request.build_opener", return_value=opener),
                 patch.object(
                     sys,
