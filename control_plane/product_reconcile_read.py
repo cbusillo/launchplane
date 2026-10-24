@@ -43,7 +43,7 @@ class ProductReconcileRequestReader(Protocol):
     def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord: ...
 
     def list_product_reconcile_requests(
-        self, *, product: str, limit: int | None = None
+        self, *, product: str, limit: int | None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
 
 

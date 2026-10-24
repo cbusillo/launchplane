@@ -956,6 +956,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 ("testing_deploy", "unknown"),
             ],
         )
+        self.assertEqual(check["steps"][-1]["code"], "no_reconcile_record")
         self.assertEqual(rollback.status_code, 200, rollback.text)
         self.assertEqual(rollback.json()["check"]["path"], "rollback")
         rollback_check = rollback.json()["check"]
