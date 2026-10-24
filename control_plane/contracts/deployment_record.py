@@ -17,6 +17,7 @@ from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverRecord
 
 DelegatedExecutor = str
+DEPLOYMENT_OPERATION_EVIDENCE_KEY = "deployment_operation"
 # New read-backs produce pass, fail, unavailable or skipped. Only deployment records
 # written before launchplane#2773 carry "reported", so it stays readable.
 IntegrationKeyReadbackStatus = Literal["pass", "reported", "fail", "unavailable", "skipped"]
@@ -137,6 +138,10 @@ def deployment_record_passed(record: DeploymentRecord) -> bool:
         and record.post_deploy_update.status in {"pass", "skipped"}
         and record.destination_health.status in {"pass", "skipped"}
     )
+
+
+def deployment_operation_evidence(*, rollback: bool) -> dict[str, str]:
+    return {DEPLOYMENT_OPERATION_EVIDENCE_KEY: "rollback" if rollback else "deploy"}
 
 
 def previous_passing_deployment(
