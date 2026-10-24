@@ -264,8 +264,13 @@ make readiness pass. The activation's image record retains pending product
 health and no passing product inventory is fabricated.
 
 Application progress is stored in the **real original activation intent** and
-its existing provider receipt. Repeat generations use distinct preparation and
-original operation keys while preserving all prior completed custody. Unknown
+its existing provider receipt. Fresh bound external capability evidence can be
+appended once to unchanged prepared application custody before placement or
+provider effects. Later progress preserves that proof; replacement, removal,
+additional proofs and admission bundled with other changes are refused. Current
+credential authority and production separation remain checked by the adapter.
+Repeat generations use distinct preparation and original operation keys while
+preserving all prior completed custody. Unknown
 creates or deployment replies recover only through exact positive original
 identity/job readback; absence is not permission to repeat. Final target,
 runtime-binding and custody publication is one transaction, including lease,
