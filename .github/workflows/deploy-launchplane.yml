@@ -114,7 +114,6 @@ jobs:
       LAUNCHPLANE_NPMPLUS_BASE_URL: ${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}
       LAUNCHPLANE_NPMPLUS_IDENTITY: ${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}
       LAUNCHPLANE_NPMPLUS_SECRET: ${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}
-      LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
       LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
       OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env || false }}
       OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env || false }}
@@ -1390,26 +1389,6 @@ jobs:
           poll-interval-ms: "1000"
           poll-timeout-ms: ${{ steps.rollback_health.outputs.remaining_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-final.json
-          log-response-body: "false"
-
-      - name: Render runtime key-safety policy
-        id: runtime_key_safety
-        shell: bash
-        env:
-          LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: >-
-            ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
-        run: bash scripts/deploy/render-runtime-key-safety-policy.sh
-
-      - name: Ensure runtime key-safety policy
-        if: steps.runtime_key_safety.outputs.has_runtime_key_safety_policy == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
-        with:
-          launchplane-url: ${{ steps.service.outputs.service_url }}
-          audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/runtime-key-safety/policies/apply
-          payload-file: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_policy_file }}
-          idempotency-key: ${{ steps.runtime_key_safety.outputs.runtime_key_safety_idempotency_key }}
-          response-output-file: ${{ runner.temp }}/launchplane-runtime-key-safety/runtime-key-safety-policy-response.json
           log-response-body: "false"
 
       - name: Read deployed Launchplane runtime
