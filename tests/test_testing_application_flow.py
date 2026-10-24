@@ -232,6 +232,8 @@ class ApplicationFlowTests(unittest.TestCase):
         self.stored_service_reads = 0
         self.stored_service_view: Any = None
         self.after_stored_service_read: Any = None
+        self.service_id_resolution: Any = None
+        self.before_service_list: Any = None
         self.tasks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
         self.images: dict[str, str] = {}
@@ -528,7 +530,11 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def install_runtime(self, payload: dict[str, Any], identity: dict[str, Any]) -> None:
         name = payload["appName"]
-        service, task, container = name + "-service", name + "-task", name + "-container"
+        service, task, container = (
+            hashlib.sha256((name + "-service").encode()).hexdigest()[:25],
+            name + "-task",
+            name + "-container",
+        )
         values = [
             key + "=" + value
             for key, value in __import__(
@@ -1494,7 +1500,7 @@ class ApplicationFlowTests(unittest.TestCase):
                 *(
                     row["Spec"]["ContainerSpec"]
                     for row in self.tasks.values()
-                    if row["ServiceID"] == name + "-service"
+                    if row["ServiceID"] == self.services[name]["ID"]
                 ),
                 container["Config"],
             ]
@@ -1607,6 +1613,58 @@ class ApplicationFlowTests(unittest.TestCase):
         self.services["old-app"] = service
         self.tasks = tasks
         self.assertEqual(self.adapter.preflight_application_route(record), witness)
+
+    def test_complete_service_inventory_resolves_prefixes_and_refuses_incomplete_views(
+        self,
+    ) -> None:
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        neighbor = deepcopy(self.services["old-app"])
+        neighbor["ID"] = hashlib.sha256(b"neighbor-service").hexdigest()[:25]
+        neighbor["Spec"]["Name"] = "neighbor"
+        neighbor["Spec"]["TaskTemplate"]["Networks"][0]["Aliases"] = ["neighbor"]
+        self.services["neighbor"] = neighbor
+        self.adapter.preflight_application_route(self.planned)
+        for problem in ("missing", "reordered", "duplicate", "foreign", "malformed", "reread"):
+
+            def resolve(rows: list[Any]) -> list[Any]:
+                if problem == "missing":
+                    return rows[:-1]
+                if problem == "reordered":
+                    return list(reversed(rows))
+                if problem == "duplicate":
+                    return [rows[0], rows[0]]
+                if problem == "foreign":
+                    return ["foreign-service", *rows[1:]]
+                if problem == "malformed":
+                    return [{"id": rows[0]}, *rows[1:]]
+                return rows
+
+            with self.subTest(problem=problem):
+                self.service_id_resolution = resolve
+                if problem == "reread":
+                    list_calls = 0
+
+                    def change_inventory() -> None:
+                        nonlocal list_calls
+                        list_calls += 1
+                        if list_calls == 2:
+                            neighbor["ID"] = hashlib.sha256(b"changed-neighbor").hexdigest()[:25]
+
+                    self.before_service_list = change_inventory
+                with self.assertRaises(ValueError):
+                    self.adapter.preflight_application_route(self.planned)
+                self.assertEqual(routing.effect_count, 0)
+                self.before_service_list = None
+                neighbor["ID"] = hashlib.sha256(b"neighbor-service").hexdigest()[:25]
+        self.service_id_resolution = None
+        original = neighbor["ID"]
+        neighbor["ID"] = self.services["old-app"]["ID"][:12] + "x" * 13
+        with self.assertRaises(ValueError):
+            self.adapter.preflight_application_route(self.planned)
+        self.assertEqual(routing.effect_count, 0)
+        neighbor["ID"] = original
+        self.adapter.preflight_application_route(self.planned)
 
     def test_cli_defaults_do_not_replace_actual_immutable_image_proof(self) -> None:
         self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
@@ -2765,11 +2823,11 @@ class ApplicationFlowTests(unittest.TestCase):
 
         # Superseded actual Swarm resources may be retired independently; the
         # completed lineage still owns the exact selected file/raw route.
-        self.services.pop("old-app")
+        retired_service = self.services.pop("old-app")
         self.tasks = {
             key: value
             for key, value in self.tasks.items()
-            if value["ServiceID"] != "old-app-service"
+            if value["ServiceID"] != retired_service["ID"]
         }
         self.containers.pop("old-app-container")
         observed = fetch()
@@ -4286,15 +4344,39 @@ class ApplicationFlowTests(unittest.TestCase):
         native = routing.command
 
         def command(arguments: list[str], **kwargs: Any) -> Any:
-            if arguments[1:4] == ["service", "ls", "-q"]:
+            if arguments[1:3] == ["service", "ls"]:
+                if self.before_service_list is not None:
+                    self.before_service_list()
+                if arguments[3:] not in (["-q"], ["--quiet"]):
+                    return subprocess.CompletedProcess(
+                        arguments, 125, b"", b"unsupported list option"
+                    )
                 return subprocess.CompletedProcess(
                     arguments,
                     0,
-                    stdout="\n".join(row["ID"] for row in self.services.values()).encode(),
+                    stdout="\n".join(row["ID"][:12] for row in self.services.values()).encode(),
                     stderr=b"",
                 )
             if arguments[1:4] == ["service", "inspect", "--format"]:
-                service = next(row for row in self.services.values() if row["ID"] == arguments[-1])
+                selected = []
+                for identifier in arguments[5:]:
+                    matching = [
+                        row for row in self.services.values() if row["ID"].startswith(identifier)
+                    ]
+                    if len(matching) != 1:
+                        return subprocess.CompletedProcess(
+                            arguments, 1, b"", b"ambiguous or missing service"
+                        )
+                    selected.append(matching[0])
+                if arguments[4] == "{{json .ID}}":
+                    rows = [row["ID"] for row in selected]
+                    if self.service_id_resolution is not None:
+                        rows = self.service_id_resolution(rows)
+                    return subprocess.CompletedProcess(
+                        arguments, 0, "\n".join(json.dumps(row) for row in rows).encode(), b""
+                    )
+                assert len(selected) == 1
+                service = selected[0]
                 return subprocess.CompletedProcess(
                     arguments,
                     0,

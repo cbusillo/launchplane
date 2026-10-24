@@ -517,6 +517,9 @@ This fixed read rejects incomplete, ambiguous, oversized or changed observations
 raw inputs stay inside the runner and never enter diagnostics or persisted intent.
 Lock and fence recovery do not depend on this read. A tag-only retained template
 still needs actual immutable image proof; display defaults never satisfy it.
+Service inventory resolves quiet-list prefixes through one ID-only bulk service
+inspection. Missing, ambiguous, reordered or changed identities refuse the read;
+the existing complete inventory, alias and final stability checks remain.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
