@@ -316,8 +316,10 @@ class PreflightHostTests(unittest.TestCase):
     def test_shared_reader_uses_only_existing_selected_key_and_known_hosts(self) -> None:
         namespace: dict[str, Any] = {"Path": Path, "re": re}
         exec(REHEARSAL_SOURCE_READER_LIBRARY, namespace)
+        self.source["ODOO_UPSTREAM_FILESTORE_PATH"] = "/"
         self.source["DATA_WORKFLOW_SSH_KEY"] = "/root/.ssh/id_ed25519"
-        command, _, _ = namespace["rehearsal_source_reader"](self.source)
+        command, _, filestore = namespace["rehearsal_source_reader"](self.source)
+        self.assertEqual(filestore, self.source["ODOO_UPSTREAM_FILESTORE_PATH"])
         self.assertEqual(command[command.index("-i") + 1], str(self.ssh / "id_ed25519"))
         self.source["DATA_WORKFLOW_SSH_KEY"] = str(self.ssh / "missing-selected-key")
         with self.assertRaises(RuntimeError):

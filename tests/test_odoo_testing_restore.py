@@ -455,9 +455,17 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         import shlex
 
         remote_arguments = shlex.split(remote)
-        self.assertEqual(remote_arguments[-1], self.spec["source"]["ODOO_UPSTREAM_DB_NAME"])
-        self.assertIn("pg_dump", remote_arguments)
-        self.assertIn("--", remote_arguments)
+        source_settings = self.spec["source"]
+        self.assertEqual(
+            remote_arguments,
+            [
+                "pg_dump",
+                "-U",
+                source_settings["ODOO_UPSTREAM_DB_USER"],
+                "-Fc",
+                source_settings["ODOO_UPSTREAM_DB_NAME"],
+            ],
+        )
         self.assertEqual(len([call for call in self.calls if call[0] == "ssh"]), 1)
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
@@ -479,6 +487,27 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             },
             timeout=2,
             check=True,
+        )
+
+    def test_root_source_preserves_database_owner_dump(self) -> None:
+        self.spec["source"]["ODOO_UPSTREAM_USER"] = "root"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        remote = next(call[-1] for call in self.calls if call[0] == "ssh")
+        import shlex
+
+        source = self.spec["source"]
+        self.assertEqual(
+            shlex.split(remote),
+            [
+                "sudo",
+                "-u",
+                source["ODOO_UPSTREAM_DB_USER"],
+                "pg_dump",
+                "-Fc",
+                "--",
+                source["ODOO_UPSTREAM_DB_NAME"],
+            ],
         )
 
     def test_database_mount_at_another_path_refuses_before_source_capture(self) -> None:
