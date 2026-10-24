@@ -975,7 +975,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             updated_at="2026-10-24T15:00:00Z",
             request_count=1,
             last_error="Provider unavailable password=hunter2",
-            last_plan={"action": "apply"},
+            last_plan={"action": "apply", "head_sha": "new-head"},
         )
         for state in ("failed", "pending", "running"):
             with (
@@ -996,7 +996,14 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 self.assertIn("Provider unavailable", warning)
                 self.assertNotIn("hunter2", warning)
         replacement = request.model_copy(
-            update={"state": "done", "last_error": "", "last_plan": {"head_sha": "new-head"}}
+            update={
+                "state": "done",
+                "last_error": "",
+                "last_plan": {
+                    "head_sha": "new-head",
+                    "last_failed_error_summary": "Provider unavailable",
+                },
+            }
         )
         with patch.object(
             store, "list_product_reconcile_requests", create=True, return_value=(replacement,)
@@ -1019,6 +1026,40 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     self.assertEqual(
                         any("#42" in text for text in overview.warnings), serving_head != "new-head"
                     )
+        for plan in (
+            {"action": "wait", "reason": "no_verified_build"},
+            {"action": "destroy", "last_failed_error_summary": "Cleanup refused"},
+            {"feedback_recovery_closed_observed": True, "last_failed_error_summary": "Read failed"},
+        ):
+            with (
+                self.subTest(plan=plan),
+                patch.object(
+                    store,
+                    "list_product_reconcile_requests",
+                    create=True,
+                    return_value=(
+                        request.model_copy(update={"last_error": "", "last_plan": plan}),
+                    ),
+                ),
+            ):
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                self.assertFalse(any("#42" in text for text in overview.warnings))
+        with patch.object(
+            store,
+            "list_product_reconcile_requests",
+            create=True,
+            side_effect=ValueError("invalid saved record"),
+        ):
+            overview = build_product_site_overview(
+                record_store=store,
+                product=profile.product,
+                action_allowed=lambda *_: True,
+            )
+            self.assertTrue(overview.warnings)
 
     def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())

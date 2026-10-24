@@ -2961,6 +2961,16 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
+    if (
+        request.target_kind == "preview"
+        and not outcome.error
+        and plan.get("action") != "destroy"
+        and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
+        and plan.get("preview_result_status") != "pass"
+    ):
+        for key in ("last_failed_error_code", "last_failed_error_summary"):
+            if key in request.last_plan:
+                plan[key] = request.last_plan[key]
     feedback = post_reconcile_feedback(
         record_store=record_store,
         request=request,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from fnmatch import fnmatchcase
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -39,7 +41,7 @@ from control_plane.contracts.runtime_dependency_health import (
 )
 from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.product_review import ProductReviewStore, preview_review_unavailability
-from control_plane.product_reconcile_read import product_preview_requests
+from control_plane.product_reconcile_read import product_preview_requests, preview_refresh_failure
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_INSTANCE,
     TestingHoldReader,
@@ -735,20 +737,7 @@ def build_product_site_overview(
     )
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
     if profile.preview.enabled:
-        warnings += tuple(
-            f"PR #{request.pull_request_number}: {unavailable}"
-            for request in product_preview_requests(record_store, product=profile.product)
-            if request.pull_request_number is not None
-            and (
-                unavailable := preview_review_unavailability(
-                    store=cast(ProductReviewStore, record_store),
-                    profile=profile,
-                    pull_request_number=request.pull_request_number,
-                    head_sha=str(request.last_plan.get("head_sha") or ""),
-                    request=request,
-                )
-            )
-        )
+        warnings += _preview_refresh_warnings(record_store, profile)
     trust_state = _combine_trust_states(
         (summary.trust_state for summary in environment_summaries),
         fallback="recorded",
@@ -766,6 +755,32 @@ def build_product_site_overview(
         provenance=_profile_provenance(profile),
         available_actions=available_actions,
     )
+
+
+def _preview_refresh_warnings(
+    record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[str, ...]:
+    try:
+        return tuple(
+            f"PR #{request.pull_request_number}: {unavailable}"
+            for request in product_preview_requests(record_store, product=profile.product)
+            if request.pull_request_number is not None
+            and preview_refresh_failure(request)
+            and (
+                unavailable := preview_review_unavailability(
+                    store=cast(ProductReviewStore, record_store),
+                    profile=profile,
+                    pull_request_number=request.pull_request_number,
+                    head_sha=str(request.last_plan.get("head_sha") or ""),
+                    request=request,
+                )
+            )
+        )
+    except (SQLAlchemyError, ValueError, OSError):
+        logging.getLogger(__name__).warning(
+            "Preview refresh attention could not be read.", exc_info=True
+        )
+        return ("Preview refresh attention is unavailable; preview failures cannot be ruled out.",)
 
 
 def build_product_environment_detail(

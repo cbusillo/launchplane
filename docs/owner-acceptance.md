@@ -74,9 +74,9 @@ current PR head. Otherwise it reports that the preview is unavailable, including
 the redacted refresh failure reason when one is recorded, and says there is
 nothing for the Client to review yet. The current reconcile outcome is used
 immediately, before feedback completion saves it. Product Ops projects these
-preview failures and unavailable replacements in its existing product warnings;
-retrying a failed refresh does not clear its warning. A working preview and a
-successful reconcile clear it. Saved Client decisions remain independent.
+recorded preview failures and their unavailable replacements in its existing product warnings;
+retrying a failed refresh does not clear its warning. A ready preview matching the current head clears it, even if another reconcile
+fails. Ordinary build waits add no warning. Saved Client decisions remain independent.
 When its fresh PR read observes a closed change, the publisher can still deliver
 already-requested saved Client feedback. It skips current review projection,
 decision-base binding, acceptance carry and retired-check maintenance, even if

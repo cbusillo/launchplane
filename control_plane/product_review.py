@@ -210,15 +210,17 @@ def preview_review_unavailability(
             ),
             None,
         )
-    failure = preview_refresh_failure(request) if request is not None else ""
-    if failure:
-        return f"Preview failed: {failure}; nothing for the Client to review yet"
     serving = resolve_serving_preview(
         store=store, profile=profile, pull_request_number=pull_request_number
     )
-    if not serving.preview_url or (head_sha and serving.head_sha != head_sha.lower()):
-        return "Preview not available; nothing for the Client to review yet"
-    return ""
+    if serving.preview_url and head_sha and serving.head_sha == head_sha.lower():
+        return ""
+    failure = preview_refresh_failure(request) if request is not None else ""
+    if failure:
+        return f"Preview failed: {failure}; nothing for the Client to review yet"
+    if serving.preview_url and not head_sha:
+        return ""
+    return "Preview not available; nothing for the Client to review yet"
 
 
 def latest_product_review_decision(

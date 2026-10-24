@@ -58,6 +58,7 @@ def product_preview_requests(
         and request.target_kind == "preview"
         and request.last_plan.get("action") != "destroy"
         and request.last_plan.get("reason") != "pull_request_not_open"
+        and request.last_plan.get("feedback_recovery_closed_observed") is not True
     )
 
 
