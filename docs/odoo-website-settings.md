@@ -42,6 +42,20 @@ To switch collection off, prepare explicit disabled settings for acceptance.
 Withdrawal remains available without a testing candidate
 and on a two-slot lane; preparing new settings on that unsupported driver is refused.
 
+When the qualified release checklist needs only the Client's acceptance, changed
+prepared settings automatically open the existing Client release request. No
+Director click is needed, including settings-only releases on the same build and
+engineering releases carrying prepared settings. The intent must match the current
+artifact, its settings digest must differ from verified production settings, and
+the checklist's stale-intent, readback and other blockers still apply.
+The request directs the Client to the prepared indexing, analytics and cookie
+consent choices on the release page; those settings are not active on testing.
+Settings content uses the invitation's existing delivery receipts, so a new
+settings choice notifies once and the same choices on a later build do not ping
+again. Missing or withdrawn intent supplies no new trigger. Pure engineering-only
+releases keep their [existing invitation rules](release-review.md).
+Publishing a request records no acceptance and starts no production action.
+
 The Client release checklist compares recorded production values with these
 exact candidate choices, identifies kept/changed fields, and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
