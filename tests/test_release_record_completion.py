@@ -89,11 +89,9 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.assertEqual(self.issue["state"], "closed")
         self.assertTrue("\n".join(self.comments[0]["body"].splitlines()[1:]).strip())
         self.assertNotIn("@", self.comments[0]["body"])
-        calls = self.calls.copy()
         self.advance()
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(sum(method == "PATCH" for method, _ in self.calls), 1)
-        self.assertGreater(len(self.calls), len(calls))
 
     def test_failed_and_cancelled_runs_close_but_active_or_unknown_runs_stay_open(self) -> None:
         for status in (

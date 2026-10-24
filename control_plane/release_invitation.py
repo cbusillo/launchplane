@@ -583,8 +583,7 @@ def _settle_release_record(
                 )
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release outcome publication was not confirmed.")
-            if issue.get("state") != "closed":
-                _close_issue(path=path, token=token, number=number)
+            _close_issue(path=path, token=token, number=number)
             return True
     return False
 
