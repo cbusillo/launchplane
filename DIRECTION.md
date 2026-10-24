@@ -22,7 +22,7 @@ provenance Launchplane can verify; it never calls Launchplane, and Launchplane
 never supplies its build inputs. Launchplane reacts to source-control events,
 verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
-between them.
+between them. The one exception is the three updater workflows under Retired.
 
 Launchplane should not depend on GitHub. GitHub is the git host we use
 today; others may follow, including one we run ourselves. New code talks to
