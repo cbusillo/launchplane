@@ -189,20 +189,17 @@ changes the digest and requires review of the displayed checklist. Unaffected
 items omit the false marker, preserving historical digests. Prior preview
 acceptance annotations still do not change the digest.
 
-When the checklist is complete, only the Client's approval remains, and the
-candidate contains a Client-facing change, the
+When the checklist is complete and only the Client's approval remains, the
 stable worker posts a release-review request mentioning the recorded Client,
 through the existing Launchplane Delivery App's release-record access. It links
 the Client review page and explains whether Accept starts the gated production
 release or records approval while releases are held. Incomplete or unavailable
 checklists, prelaunch/retired products, standing Director acceptance and candidates
-with a recorded decision receive no request. An engineering-only candidate (no
-included change has Client-facing evidence, defined below) never opens a request,
-creates the requests issue, or notifies the Client: it waits on testing and ships
-with the next release that contains a Client-facing change, under that release's
-single acceptance. When an engineering-only release must reach production sooner,
-such as a security or reliability fix, an admin opens it deliberately from the
-review page's **Ask the Client now** section
+with a recorded decision receive no request. Qualified engineering-only candidates
+also open a request automatically. Its **Why now:** line explains that engineering
+updates are ready for production and need release acceptance. Release-only test
+steps still appear when present; otherwise it says there is nothing new to test.
+An admin can also open a qualified request from the review page's **Ask the Client now** section
 (`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound to the
 checklist digest) with a plain-language reason. The invitation shows that reason
 on a **Why now:** line, kept through later silent updates, and the Client accepts
@@ -220,9 +217,16 @@ changes; a replica restart reads the durable receipt again. Once the single
 reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
 lane versions is settled only while its checklist digest matches the current checklist; each worker
 rechecks that at most every 30 minutes. Edited test notes that change the checklist send the
-Client a fresh request when the candidate contains a Client-facing change. An engineering-only
-candidate still waits on testing; an admin can deliberately reopen it with a current reason
-and checklist digest. This cache never supplies acceptance or bypasses release checks.
+Client a fresh request, including engineering-only candidates. This cache never
+supplies acceptance or bypasses release checks.
+
+While the current Client's accepted release is waiting, running, or has a step
+still pending, running or awaiting reconciliation, the publisher sends no new
+request or reminder. The acceptance covers the entire run, including its rollback
+drill and re-promotion, even when production temporarily differs from testing or
+testing advances. Publication rechecks the run after looking up its destination.
+Once the run finishes, the existing settle path reconciles all invitations for
+that released version, including a stray request posted after acceptance.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
