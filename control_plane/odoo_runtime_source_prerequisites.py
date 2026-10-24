@@ -1,6 +1,5 @@
-"""Fixed testing read of installed importer options; no source connection or grant verdict."""
-
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +19,6 @@ from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_import_diagnostics import DiagnosticStore, SOURCE_PREFIXES, import_authority
 from control_plane.odoo_import_overrides import import_runtime_authority
-from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.odoo_secret_references import (
     read_secret_reference_authority,
     selected_config_parameter_bindings,
@@ -36,13 +34,23 @@ TlsConfiguration = Literal[
     "enabled_with_verification", "disabled", "verification_disabled", "unknown"
 ]
 OPTION_FIELDS = ("port", "use_ssl", "ssl_verify", "batch_size")
-# Fixed integration adapters, not tenant defaults. Inventory paths are tenant-repository relative.
 SOURCE_ADDONS = {
     "cm_data": ("cm_data_import", "cm_data_importer", "cm_data_client"),
     "repairshopr": ("repairshopr_import", "repairshopr_importer", "repairshopr_sync_client"),
     "fishbowl": ("fishbowl_import", "fishbowl_importer", "fishbowl_client"),
 }
+PAYLOAD_ADDON = "launchplane_settings"
+PAYLOAD_ROOT = "/opt/project/addons/shared"
+PAYLOAD_FILES = (
+    "__init__.py",
+    "__manifest__.py",
+    "models/__init__.py",
+    "models/launchplane_settings.py",
+    "services/__init__.py",
+    "services/override_payload.py",
+)
 _READ_SLOTS = threading.BoundedSemaphore(4)
+_logger = logging.getLogger(__name__)
 
 
 class PrerequisiteStore(DiagnosticStore, Protocol):
@@ -141,6 +149,29 @@ def producer_files(
             }
         except KeyError:
             result[name] = {}
+    candidates = (
+        [
+            source
+            for source in manifest.release_compatibility.sources
+            if source.input_name.startswith("addon:")
+            and all(
+                (source.input_name, f"{PAYLOAD_ADDON}/{path}") in inventory
+                for path in PAYLOAD_FILES
+            )
+        ]
+        if manifest.release_compatibility
+        else []
+    )
+    result["payload"] = (
+        {
+            f"{PAYLOAD_ROOT}/{PAYLOAD_ADDON}/{path}": inventory[
+                (candidates[0].input_name, f"{PAYLOAD_ADDON}/{path}")
+            ].sha256
+            for path in PAYLOAD_FILES
+        }
+        if len(candidates) == 1
+        else {}
+    )
     return result
 
 
@@ -177,19 +208,33 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
         overrides = store.read_odoo_instance_override_record(
             context_name=lane.context, instance_name=lane.instance
         )
-        references = read_secret_reference_authority(store, overrides)
     except FileNotFoundError:
-        overrides, references = None, None
+        overrides = None
+    try:
+        references = (
+            read_secret_reference_authority(store, overrides) if overrides is not None else None
+        )
+    except FileNotFoundError:
+        references = None
     for name, prefix in SOURCE_PREFIXES.items():
         options[name] = {}
         for field in OPTION_FIELDS:
             key = prefix + "." + field
             runtime_key = config_parameter_runtime_key(key)
-            # Excluded authority is unknown, never an omitted option/default.
+            parameter = (
+                next((item for item in overrides.config_parameters if item.key == key), None)
+                if overrides
+                else None
+            )
+            literal_parameter = (
+                parameter if parameter is not None and parameter.value.source == "literal" else None
+            )
             options[name][key] = {
-                "known": runtime_key not in excluded,
-                "present": runtime_key in values,
-                "value": values.get(runtime_key, ""),
+                "known": runtime_key not in excluded
+                and runtime_key not in values
+                and (parameter is None or literal_parameter is not None),
+                "present": parameter is not None,
+                "value": literal_parameter.value.value if literal_parameter is not None else None,
             }
         selected = authority.sources.get(name)
         reference: Agreement = "unknown"
@@ -210,7 +255,7 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
                     else "mismatch"
                 )
             except ValueError:
-                pass
+                reference = "unknown"
         metadata[name] = {
             "binding": "selected" if selected else "missing_or_unsafe",
             "secret_reference": reference,
@@ -244,7 +289,6 @@ def runtime_prerequisites(
     reads.require_runtime_identity(
         connection.selection.identity, parse_runtime_identity_payload(observed_identity)
     )
-    # The remote transport never receives a managed secret value or settings object.
     program = CONTAINER_PROGRAM.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
         "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
     )
@@ -264,11 +308,8 @@ def runtime_prerequisites(
             "option_fields": OPTION_FIELDS,
             "authority": authority.options,
             "metadata": authority.metadata,
-            "runtime_env_prefix": config_parameter_runtime_key(""),
-            "password_env_keys": {
-                name: config_parameter_secret_env_key(prefix + ".password")
-                for name, prefix in SOURCE_PREFIXES.items()
-            },
+            "payload_addon": PAYLOAD_ADDON,
+            "payload_root": PAYLOAD_ROOT,
             "container_program": program,
         },
         receive=frames.append,
@@ -276,7 +317,6 @@ def runtime_prerequisites(
     )
     if len(frames) != 1 or set(frames[0]) != {"type", "result"} or frames[0]["type"] != "complete":
         raise ValueError("Invalid prerequisite frame")
-    # JSON validation permits wire arrays for tuple fields, but preserves strict scalars.
     if len(json.dumps(frames[0])) > 16384:
         raise ValueError("Oversized prerequisite frame")
     result = SourcePrerequisiteResult.model_validate_json(json.dumps(frames[0]["result"]))
@@ -332,7 +372,7 @@ def diagnose_source_prerequisites(
             return unknown_result()
         return result
     except Exception:
-        # Nothing from provider, producer or configuration exceptions crosses this boundary.
+        _logger.debug("Source prerequisite read unavailable.")
         return unknown_result()
     finally:
         _READ_SLOTS.release()

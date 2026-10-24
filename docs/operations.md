@@ -5338,7 +5338,10 @@ The service binds the current runtime to its verified release artifact and the
 canonical complete source inventory. The host verifies the actual Docker image's
 immutable repository digest, then brackets execution with container/image
 inspection. The container checks the fixed importer producer, getter, client and
-package files against the tenant inventory. It rejects symlinks, code-overlay
+package files against the tenant inventory. It also verifies the shared
+`launchplane_settings` package, applier and pure payload producer against a
+unique complete addon source inventory at `/opt/project/addons/shared`.
+Missing or ambiguous shared provenance remains unknown. It rejects symlinks, code-overlay
 mounts and duplicate addon copies across configured roots, platform addons,
 the image's `/odoo` framework/community roots and existing data-addon version
 directories. It neither creates directories nor imports Odoo. Legacy, missing,
@@ -5351,20 +5354,30 @@ bytes it hashed, suppresses producer output and consumes that producer's own
 defaults and parsing. Launchplane contains no copy of the tenant defaults.
 A bounded local PostgreSQL transaction explicitly requests and verifies
 read-only mode, reads only those parameter keys and the three fixed addons'
-installation states, then rolls back and closes. An addon must be installed
+installation states, including the shared applier, then rolls back and closes. An addon must be installed
 before its effective settings are reported. No source database connection,
 import, synchronization, account, configuration or lifecycle change occurs.
 
 The closed response reports per-option `explicit`, `empty`, `absent` or
 `unknown` input provenance and effective agreement between authority, delivered
-and applied settings. Empty and absent optional inputs use the verified
-producer's defaults.
+and applied settings. Optional inputs use the verified connection producer's
+parsing and defaults. Omission from authority or delivered overrides does not
+clear a persisted Odoo parameter: when such a parameter is present, comparison
+for that omitted field stays unknown. A missing persisted optional parameter
+can resolve through the installed producer's default.
 Origins concern consumed producer keys: a constant enabled SSL setting can have
 an absent `use_ssl` input, as with the Fishbowl producer that ignores that key.
-Authority uses only the site's context/instance records;
-global settings are not site delivery authority. Retired keys, managed overlays
-and target overrides remain unknown rather than being treated as omissions.
-Authority resolves only nonsecret options. Full delivered/applied settings and
+Authority options come from the site's typed instance-override literals,
+normalized by the verified installed shared payload producer. Secret-backed
+option authority, conflicting legacy runtime inputs, retired keys and target
+overlays remain unknown. Global settings are not site delivery authority.
+Delivered settings come exclusively from `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64`,
+using that same installed decoder and selected-key resolver. Legacy per-field
+environment variables are never a delivery fallback. The parser fixture is an
+immutable source artifact; tests do not read a sibling checkout or implement a
+second production parser. Missing or malformed payloads cannot become valid
+full delivered settings. Authority resolves only nonsecret options.
+Full delivered/applied settings and
 their password comparison stay inside the container, and their option
 projections must agree with the password-free resolver before evidence is used.
 Raw values, settings objects, passwords, hashes and exception text are never

@@ -1,5 +1,3 @@
-"""Execute the fixed provider/host/container chain against synthetic installed producers."""
-
 import base64
 import builtins
 import contextlib
@@ -65,7 +63,7 @@ class PrerequisiteTests(unittest.TestCase):
         self.data.mkdir()
         self.config.write_text(
             "[options]\ndb_name=fixture_db\ndb_host=database\ndb_user=local\n"
-            f"db_password={PRIVATE}\naddons_path={self.tenant / 'addons'}\ndata_dir={self.data}\n"
+            f"db_password={PRIVATE}\naddons_path={self.tenant / 'addons'},{self.tenant / 'addons/shared'}\ndata_dir={self.data}\n"
         )
         template = (
             Path(__file__).parent / "fixtures/source_prerequisites/connection_settings.py"
@@ -97,7 +95,26 @@ class PrerequisiteTests(unittest.TestCase):
                         sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     )
                 )
-        self.manifest = artifact("fixture-artifact", files=tuple(files))
+        shared_files = []
+        parser_fixture = (
+            Path(__file__).parent / "fixtures/source_prerequisites/override_payload.py.txt"
+        )
+        for relative in reader.PAYLOAD_FILES:
+            path = self.tenant / "addons/shared" / reader.PAYLOAD_ADDON / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(
+                parser_fixture.read_bytes() if relative == "services/override_payload.py" else b""
+            )
+            shared_files.append(
+                ReleaseInputFile(
+                    path=f"{reader.PAYLOAD_ADDON}/{relative}",
+                    kind="unknown",
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+            )
+        self.manifest = artifact(
+            "fixture-artifact", files=tuple(files), shared_files=tuple(shared_files)
+        )
         self.fixture.profile = self.fixture.profile.model_copy(
             update={"repository": "example/site"}
         )
@@ -150,7 +167,47 @@ class PrerequisiteTests(unittest.TestCase):
         self.container_calls = 0
         self.parameter_reads = 0
         self.installed = {value[0]: "installed" for value in reader.SOURCE_ADDONS.values()}
+        self.installed[reader.PAYLOAD_ADDON] = "installed"
+        self.set_overrides({})
         self.payloads: list[dict[str, Any]] = []
+
+    def set_overrides(self, options: dict[str, Any]) -> None:
+        values = {
+            key: value
+            for key, value in self.values.items()
+            if key.endswith((".host", ".user", ".password"))
+        }
+        values.update(options)
+        parameters = []
+        for key, value in values.items():
+            source = next(
+                name for name, prefix in SOURCE_PREFIXES.items() if key.startswith(prefix + ".")
+            )
+            parameters.append(
+                OdooConfigParameterOverride(
+                    key=key,
+                    value=OdooOverrideValue(source="secret_binding", secret_binding_id=source)
+                    if key.endswith(".password")
+                    else OdooOverrideValue(source="literal", value=value),
+                )
+            )
+        self.override_record = OdooInstanceOverrideRecord(
+            context=self.fixture.context,
+            instance="testing",
+            config_parameters=tuple(parameters),
+            updated_at=self.fixture.runtime.updated_at,
+        )
+        self.fixture.store.read_odoo_instance_override_record.side_effect = None
+        self.fixture.store.read_odoo_instance_override_record.return_value = self.override_record
+        self.deliver_overrides()
+
+    def deliver_overrides(self) -> None:
+        payload = render_post_deploy_payload(
+            self.override_record, record_store=self.fixture.store, clear_undeclared_shopify=False
+        )
+        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
+            payload.model_dump_json().encode()
+        ).decode()
 
     def set_session(self, **kwargs: Any) -> None:
         self.assertEqual(kwargs, {"readonly": True, "autocommit": False})
@@ -166,6 +223,13 @@ class PrerequisiteTests(unittest.TestCase):
                 self.values[next(iter(self.values))] = "changed"
             if self.drift == "file" and self.parameter_reads > 1:
                 self.producer("cm_data").write_text("# changed")
+            if self.drift == "payload_file" and self.parameter_reads > 1:
+                (
+                    self.tenant
+                    / "addons/shared"
+                    / reader.PAYLOAD_ADDON
+                    / "services/override_payload.py"
+                ).write_text("changed")
             if self.drift == "config" and self.parameter_reads > 1:
                 self.config.write_text(self.config.read_text() + "\n# changed\n")
 
@@ -286,7 +350,6 @@ class PrerequisiteTests(unittest.TestCase):
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         spec = json.loads(kwargs["input"])
         spec["test_only"] = True
-        # Paths in the fixed program resolve into this isolated synthetic filesystem.
         with (
             patch("pathlib.Path", side_effect=self.path),
             patch.dict(os.environ, self.env, clear=True),
@@ -358,34 +421,7 @@ class PrerequisiteTests(unittest.TestCase):
 
     def test_override_literal_and_real_delivery_payload_are_explicit_authority(self) -> None:
         verify_key = SOURCE_PREFIXES["cm_data"] + ".ssl_verify"
-        literals: dict[str, Any] = {**self.values, verify_key: False}
-        parameters = []
-        for key, value in literals.items():
-            source = next(
-                name for name, prefix in SOURCE_PREFIXES.items() if key.startswith(prefix + ".")
-            )
-            parameters.append(
-                OdooConfigParameterOverride(
-                    key=key,
-                    value=OdooOverrideValue(source="secret_binding", secret_binding_id=source)
-                    if key.endswith(".password")
-                    else OdooOverrideValue(source="literal", value=value),
-                )
-            )
-        record = OdooInstanceOverrideRecord(
-            context=self.fixture.context,
-            instance="testing",
-            config_parameters=tuple(parameters),
-            updated_at=self.fixture.runtime.updated_at,
-        )
-        self.fixture.store.read_odoo_instance_override_record.side_effect = None
-        self.fixture.store.read_odoo_instance_override_record.return_value = record
-        payload = render_post_deploy_payload(
-            record, record_store=self.fixture.store, clear_undeclared_shopify=False
-        )
-        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
-            payload.model_dump_json().encode()
-        ).decode()
+        self.set_overrides({verify_key: False})
         self.values[verify_key] = str(False)
         source_result = self.read().sources[0]
         option = next(option for option in source_result.options if option.field == "ssl_verify")
@@ -461,17 +497,8 @@ class PrerequisiteTests(unittest.TestCase):
         fishbowl = SOURCE_PREFIXES["fishbowl"]
         repairshopr = SOURCE_PREFIXES["repairshopr"]
         self.values[fishbowl + ".use_ssl"] = "disabled"
-        self.env[config_parameter_runtime_key(fishbowl + ".use_ssl")] = "disabled"
         self.values[repairshopr + ".batch_size"] = "17"
-        self.env[config_parameter_runtime_key(repairshopr + ".batch_size")] = "17"
-        self.fixture.runtime = self.fixture.runtime.model_copy(
-            update={
-                "env": {
-                    config_parameter_runtime_key(fishbowl + ".use_ssl"): "disabled",
-                    config_parameter_runtime_key(repairshopr + ".batch_size"): "17",
-                }
-            }
-        )
+        self.set_overrides({fishbowl + ".use_ssl": "disabled", repairshopr + ".batch_size": "17"})
         result = self.read()
         fish = result.sources[2]
         ssl = next(option for option in fish.options if option.field == "use_ssl")
@@ -563,7 +590,7 @@ class PrerequisiteTests(unittest.TestCase):
         prefix = SOURCE_PREFIXES["cm_data"]
         port = prefix + ".port"
         replacement = runpy.run_path(str(self.producer("cm_data")))["DEFAULT_PORT"] + 37
-        self.values[port] = str(replacement)
+        self.set_overrides({port: replacement})
         self.assertEqual(self.read().sources[0].options[0].delivered_applied, "mismatch")
         path = self.producer("cm_data")
         self.update_producer("cm_data", path.read_text() + f"\nDEFAULT_PORT = {replacement}\n")
@@ -605,20 +632,11 @@ def resolve_connection_settings(values):
         self.assertEqual(source.managed_password_value_agreement, "unknown")
         self.assertNotIn("other-synthetic-password", json.dumps(self.payloads))
 
-    def test_explicit_empty_and_unknown_authority_and_disabled_tls(self) -> None:
+    def test_explicit_disabled_tls_uses_typed_intent_and_ignores_global_legacy_values(self) -> None:
         prefix = SOURCE_PREFIXES["cm_data"]
-        self.fixture.runtime = self.fixture.runtime.model_copy(
-            update={
-                "env": {
-                    config_parameter_runtime_key(prefix + ".port"): "",
-                    config_parameter_runtime_key(prefix + ".use_ssl"): "disabled",
-                }
-            }
-        )
+        self.set_overrides({prefix + ".use_ssl": "disabled"})
         self.values[prefix + ".use_ssl"] = "disabled"
-        self.env[config_parameter_runtime_key(prefix + ".use_ssl")] = "disabled"
         source = self.read().sources[0]
-        self.assertEqual(source.options[0].authority, "empty")
         self.assertEqual(source.options[1].authority, "explicit")
         self.assertEqual(source.authority_tls_configuration, "disabled")
         self.assertEqual(source.applied_tls_configuration, "disabled")
@@ -632,8 +650,157 @@ def resolve_connection_settings(values):
             self.fixture.runtime,
         )
         source = self.read().sources[0]
-        self.assertEqual(source.options[0].authority, "empty")
+        self.assertEqual(source.options[0].authority, "absent")
         self.assertEqual(source.options[0].authority_applied, "match")
+
+    def test_omitted_overrides_do_not_claim_persisted_values_reverted_to_defaults(self) -> None:
+        prefix = SOURCE_PREFIXES["cm_data"]
+        self.values.update({prefix + ".port": "17", prefix + ".ssl_verify": "disabled"})
+        source = self.read().sources[0]
+        for option in (source.options[0], source.options[2]):
+            self.assertEqual(
+                (option.authority, option.delivered, option.applied),
+                ("absent", "absent", "explicit"),
+            )
+            self.assertEqual(option.authority_applied, "unknown")
+            self.assertEqual(option.delivered_applied, "unknown")
+            self.assertEqual(option.authority_delivered, "unknown")
+        self.assertEqual(source.applied_tls_configuration, "verification_disabled")
+        self.assertEqual(source.authority_tls_configuration, "unknown")
+        self.assertEqual(source.delivered_tls_configuration, "unknown")
+        self.assertEqual(source.delivered_settings, "unknown")
+        self.assertEqual(source.applied_delivered_password, "unknown")
+
+    def test_canonical_literal_normalization_and_explicit_delivery_mismatch(self) -> None:
+        prefix = SOURCE_PREFIXES["fishbowl"]
+        key = prefix + ".port"
+        self.set_overrides({key: 17})
+        payload = json.loads(base64.b64decode(self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        next(item for item in payload["config_parameters"] if item["key"] == key)["value"][
+            "value"
+        ] = 23
+        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
+            json.dumps(payload).encode()
+        ).decode()
+        self.values[key] = "23"
+        option = self.read().sources[2].options[0]
+        self.assertEqual(option.authority_delivered, "mismatch")
+        self.assertEqual(option.authority_applied, "mismatch")
+        self.assertEqual(option.delivered_applied, "match")
+        self.set_overrides({key: ""})
+        source = self.read().sources[2]
+        self.assertEqual(source.options[0].authority, "explicit")
+        self.assertEqual(source.options[0].delivered, "explicit")
+        self.assertEqual(source.options[0].delivered_applied, "unknown")
+
+    def test_empty_secret_delivery_and_persisted_input_are_distinct_from_omission(self) -> None:
+        key = SOURCE_PREFIXES["cm_data"] + ".port"
+        payload = json.loads(base64.b64decode(self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        payload["config_parameters"].append(
+            {
+                "key": key,
+                "value": {"source": "secret_binding", "environment_variable": "SYNTHETIC_EMPTY"},
+            }
+        )
+        self.env["SYNTHETIC_EMPTY"] = ""
+        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
+            json.dumps(payload).encode()
+        ).decode()
+        self.values[key] = ""
+        option = self.read().sources[0].options[0]
+        self.assertEqual(
+            (option.authority, option.delivered, option.applied), ("absent", "empty", "empty")
+        )
+        self.assertEqual(option.authority_applied, "unknown")
+        self.assertEqual(option.delivered_applied, "match")
+
+    def test_missing_or_invalid_payload_never_uses_legacy_environment_fallback(self) -> None:
+        encoded = self.env.pop(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY)
+        for source in self.read().sources:
+            self.assertEqual(source.delivered_settings, "unknown")
+            self.assertEqual(source.applied_delivered_password, "unknown")
+        for malformed in ("not-base64", base64.b64encode(b"[]").decode()):
+            with self.subTest(malformed=malformed):
+                self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = malformed
+                self.assertEqual(self.read().runtime, "unknown")
+        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = encoded
+        self.assertEqual(self.read().runtime, "verified")
+
+    def test_missing_secret_reference_record_does_not_erase_literal_authority(self) -> None:
+        key = SOURCE_PREFIXES["cm_data"] + ".port"
+        self.set_overrides({key: 17})
+        with patch.object(
+            reader, "read_secret_reference_authority", side_effect=FileNotFoundError()
+        ):
+            source = self.read().sources[0]
+        self.assertEqual(source.options[0].authority, "explicit")
+        self.assertEqual(source.secret_reference, "unknown")
+
+    def test_secret_backed_option_authority_stays_unknown_without_decryption(self) -> None:
+        key = SOURCE_PREFIXES["cm_data"] + ".port"
+        self.set_overrides({key: 17})
+        record = self.override_record.model_copy(
+            update={
+                "config_parameters": (
+                    *self.override_record.config_parameters[:-1],
+                    OdooConfigParameterOverride(
+                        key=key,
+                        value=OdooOverrideValue(
+                            source="secret_binding", secret_binding_id="cm_data"
+                        ),
+                    ),
+                )
+            }
+        )
+        self.fixture.store.read_odoo_instance_override_record.return_value = record
+        with patch("control_plane.secrets._decrypt_secret_value") as decrypt:
+            option = self.read().sources[0].options[0]
+        self.assertEqual(option.authority, "unknown")
+        self.assertEqual(option.authority_delivered, "unknown")
+        self.assertEqual(option.delivered, "explicit")
+        decrypt.assert_not_called()
+
+    def test_shared_parser_provenance_installation_and_drift_fail_closed(self) -> None:
+        parser = (
+            self.tenant / "addons/shared" / reader.PAYLOAD_ADDON / "services/override_payload.py"
+        )
+        raw = parser.read_bytes()
+        parser.write_bytes(raw + b"\n")
+        self.assertEqual(self.read().runtime, "unknown")
+        parser.write_bytes(raw)
+        self.installed[reader.PAYLOAD_ADDON] = "uninstalled"
+        self.assertEqual(self.read().runtime, "unknown")
+        self.installed[reader.PAYLOAD_ADDON] = "installed"
+        self.drift = "payload_file"
+        self.assertEqual(self.read().runtime, "unknown")
+
+    def test_shared_parser_shadow_symlink_and_missing_inventory_fail_closed(self) -> None:
+        parser = (
+            self.tenant / "addons/shared" / reader.PAYLOAD_ADDON / "services/override_payload.py"
+        )
+        target = parser.with_suffix(".original")
+        parser.rename(target)
+        parser.symlink_to(target)
+        self.assertEqual(self.read().runtime, "unknown")
+        parser.unlink()
+        target.rename(parser)
+        shadow = self.framework.parent / "addons" / reader.PAYLOAD_ADDON
+        shadow.mkdir(parents=True)
+        self.assertEqual(self.read().runtime, "unknown")
+        shadow.rmdir()
+        declaration = self.manifest.release_compatibility
+        assert declaration is not None
+        self.manifest.release_compatibility = declaration.model_copy(
+            update={
+                "sources": tuple(
+                    source.model_copy(update={"files": ()})
+                    if source.input_name.startswith("addon:")
+                    else source
+                    for source in declaration.sources
+                )
+            }
+        )
+        self.assertEqual(self.read().runtime, "unknown")
 
     def test_provenance_protocol_and_drift_fail_closed(self) -> None:
         original_values = self.values.copy()

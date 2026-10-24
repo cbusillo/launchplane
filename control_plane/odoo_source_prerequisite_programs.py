@@ -1,6 +1,3 @@
-"""Fixed bounded programs for the prerequisite read; neither connects to a source DB."""
-
-# Both ends of the provider terminal validate this closed value-free language.
 _VALIDATOR = r"""
 def validate_result(value, names):
     agreements={'match','mismatch','unknown'}
@@ -90,8 +87,6 @@ def code_roots(options):
     if not roots or len(roots)>32 or len(roots)!=len(set(roots)) or Path('/opt/project/addons') not in roots:
         raise ValueError()
     roots.append(safe_path('/opt/launchplane/addons'))
-    # The image owns this source layout. Isolated Python does not necessarily
-    # have /odoo on sys.path, so package importability supplies no proof here.
     package=safe_path('/odoo/odoo')
     if not safe_path(package/'__init__.py').is_file():
         raise ValueError()
@@ -117,34 +112,50 @@ def code_roots(options):
                 roots.append(version)
     return tuple(dict.fromkeys(roots))
 
-def source_bytes(name, roots):
-    addon=spec['addons'][name]
-    canonical=Path('/opt/project/addons')/addon
+def verified_source(addon, canonical, inventory, roots, producer_path):
+    if canonical.parent not in roots:
+        raise ValueError()
     for root in roots:
         candidate=root/addon
-        # Broken symlinks and any second copy are ambiguous too.
         if candidate.is_symlink() or (candidate.exists() and candidate!=canonical):
             raise ValueError()
     observed={}
     producer=None
-    for path,digest in spec['files'][name].items():
+    for path,digest in inventory.items():
         if not re.fullmatch('[0-9a-f]{64}',digest):
             raise ValueError()
         raw=bounded_bytes(path)
         if hashlib.sha256(raw).hexdigest()!=digest:
             raise ValueError()
         observed[path]=digest
-        if safe_path(path)==canonical/'services/connection_settings.py':
+        if safe_path(path)==canonical/producer_path:
             producer=raw
     if producer is None:
         raise ValueError()
     return producer,observed
 
+def source_bytes(name, roots):
+    addon=spec['addons'][name]
+    return verified_source(addon,Path('/opt/project/addons')/addon,spec['files'][name],roots,
+                           'services/connection_settings.py')
+
+def payload_bytes(roots):
+    return verified_source(spec['payload_addon'],Path(spec['payload_root'])/spec['payload_addon'],
+                           spec['files']['payload'],roots,'services/override_payload.py')
+
+def load_payload_producer(raw):
+    module=types.ModuleType('_launchplane_verified_override_payload')
+    sys.modules[module.__name__]=module
+    with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):
+        exec(compile(raw,'<verified-installed-payload-producer>','exec'),module.__dict__)
+    if not callable(module.decode_payload) or not callable(module.resolve_config_parameters):
+        raise ValueError()
+    return module
+
 def load_producer(name,raw):
     module_name='_launchplane_verified_options_'+name
     module=types.ModuleType(module_name)
     sys.modules[module_name]=module
-    # No producer output or exception is part of the transport contract.
     with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):
         exec(compile(raw,'<verified-installed-producer>','exec'),module.__dict__)
     keys=module.PARAMETER_KEYS
@@ -180,7 +191,7 @@ def parameters(keys,options):
                 if key not in keys or key in result or not isinstance(value,str) or len(value)>16384:
                     raise ValueError()
                 result[key]=value
-            addon_names=list(spec['addons'].values())
+            addon_names=[*spec['addons'].values(),spec['payload_addon']]
             cursor.execute('SELECT name, state FROM ir_module_module WHERE name = ANY(%s)',(addon_names,))
             states=cursor.fetchmany(len(addon_names)+1)
             if len(states)>len(addon_names):
@@ -230,7 +241,7 @@ def full_settings(module,raw):
         return None
 
 def tls(value):
-    if value is None:
+    if value is None or not {'use_ssl','ssl_verify'}<=set(value):
         return 'unknown'
     return ('disabled' if not value['use_ssl'] else
             'enabled_with_verification' if value['ssl_verify'] else 'verification_disabled')
@@ -239,14 +250,17 @@ def agreement(left,right,field):
     return ('unknown' if left is None or right is None or field not in left or field not in right
             else 'match' if left[field]==right[field] else 'mismatch')
 
-def source_result(name,module,applied):
-    delivered={}
-    for key in module.PARAMETER_KEYS:
-        env_key=(spec['password_env_keys'][name] if key.endswith('.password')
-                 else spec['runtime_env_prefix']+key.upper().replace('.','__'))
-        if env_key in os.environ:
-            delivered[key]=os.environ[env_key]
-    authority={}
+def omit_persisted_comparisons(name, projected, overrides, applied, module):
+    if projected is None:
+        return None
+    return {field:value for field,value in projected.items()
+            if spec['prefixes'][name]+'.'+field not in module.OPTION_PARAMETER_KEYS
+            or spec['prefixes'][name]+'.'+field in overrides
+            or spec['prefixes'][name]+'.'+field not in applied}
+
+def source_result(name,module,payload_producer,payload,applied):
+    delivered=payload_producer.resolve_config_parameters(payload,os.environ,keys=module.PARAMETER_KEYS)
+    authority_items=[]
     authority_origins={}
     known=True
     for key in module.OPTION_PARAMETER_KEYS:
@@ -254,9 +268,12 @@ def source_result(name,module,applied):
         if fact is None or not fact['known']:
             known=False
             authority_origins[key]='unknown'
-        else:
-            if fact['present']:
-                authority[key]=fact['value']
+        elif fact['present']:
+            authority_items.append({'key':key,'value':{'source':'literal','value':fact['value']}})
+    authority=payload_producer.resolve_config_parameters({'config_parameters':authority_items},{},
+                                                         keys=module.OPTION_PARAMETER_KEYS)
+    for key in module.OPTION_PARAMETER_KEYS:
+        if key not in authority_origins:
             authority_origins[key]=origin(authority,key)
     a=options_projection(module,authority) if known else None
     d=options_projection(module,delivered)
@@ -277,11 +294,14 @@ def source_result(name,module,applied):
     except Exception:
         full_p=None
         p=None
+    a=omit_persisted_comparisons(name,a,authority,applied,module)
+    d=omit_persisted_comparisons(name,d,delivered,applied,module)
+    if full_d is not None and projection(full_d)!=d:
+        full_d=None
     password='unknown'
     if full_d is not None and full_p is not None:
         password='match' if hmac.compare_digest(full_d.password.encode(),full_p.password.encode()) else 'mismatch'
     evidence=[]
-    # Field projection is fixed. Raw keys/defaults come exclusively from the producer.
     for field in spec['option_fields']:
         if field=='batch_size' and spec['prefixes'][name]+'.'+field not in module.OPTION_PARAMETER_KEYS:
             continue
@@ -303,6 +323,12 @@ def run():
         raise ValueError()
     config,options=config_snapshot()
     roots=code_roots(options)
+    payload_raw,payload_snapshot=payload_bytes(roots)
+    payload_producer=load_payload_producer(payload_raw)
+    encoded=os.environ.get(payload_producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,'')
+    if len(encoded)>262144:
+        raise ValueError()
+    payload=payload_producer.decode_payload(encoded)
     modules={}
     snapshots={}
     for name in names:
@@ -313,6 +339,8 @@ def run():
             pass
     keys=list(dict.fromkeys(key for module in modules.values() for key in module.PARAMETER_KEYS))
     before,installed=parameters(keys,options) if keys else ({},{})
+    if not installed.get(spec['payload_addon']):
+        raise ValueError()
     results=[]
     for name in names:
         if name not in modules:
@@ -323,11 +351,13 @@ def run():
             continue
         try:
             with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):
-                results.append(source_result(name,modules[name],before))
+                results.append(source_result(name,modules[name],payload_producer,payload,before))
         except Exception:
             results.append({'source':name})
     after=parameters(keys,options) if keys else ({},{})
     if (after!=(before,installed) or config_snapshot()[0]!=config or code_roots(options)!=roots):
+        raise ValueError()
+    if payload_bytes(roots)[1]!=payload_snapshot:
         raise ValueError()
     for index,name in enumerate(names):
         if name in modules:
@@ -395,7 +425,7 @@ try:
     if not isinstance(mounts,list) or len(mounts)>128:
         raise ValueError()
     payload={key:spec[key] for key in ('identity','files','addons','prefixes','option_fields','authority','metadata',
-                                      'runtime_env_prefix','password_env_keys')}
+                                      'payload_addon','payload_root')}
     payload['mounts']=[mount['Destination'] for mount in mounts]
     child=subprocess.run(['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','20s','python3','-I','-c',spec['container_program']],
         input=json.dumps(payload),text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=25,check=False)

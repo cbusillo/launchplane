@@ -1,5 +1,3 @@
-"""Synthetic producer protocol; intentionally unrelated to tenant defaults/parsers."""
-
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -43,7 +41,7 @@ class BatchSettings(Settings):
 
 
 def resolve_connection_options(values: Mapping[str, str]) -> Options:
-    print(values)  # The consumer must suppress accidental producer output.
+    print(values)
     port = int(values.get(PREFIX + ".port") or DEFAULT_PORT)
     ssl = values.get(PREFIX + ".use_ssl") if CONSUME_USE_SSL else None
     verify = values.get(PREFIX + ".ssl_verify")
