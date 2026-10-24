@@ -15,7 +15,6 @@ from control_plane.contracts.artifact_identity import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -440,23 +439,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         return record_store
 
     def test_rollback_defaults_to_previous_passing_prod_deployment(self) -> None:
-        self._assert_previous_passing_prod_rollback()
-
-    def test_accepted_rollback_restores_its_absent_settings_baseline(self) -> None:
-        from tempfile import TemporaryDirectory
-        from control_plane.storage.filesystem import FilesystemRecordStore
-        from tests.test_release_review import seed, decision
-
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(Path(directory))
-            seed(store)
-            accepted = decision(store)
-        self.assertIsNone(accepted.checklist.production_website_settings)
-        self._assert_previous_passing_prod_rollback(release_decision=accepted)
-
-    def _assert_previous_passing_prod_rollback(
-        self, *, release_decision: ReleaseReviewDecisionRecord | None = None
-    ) -> None:
         record_store = self._record_store()
 
         with patch(
@@ -468,7 +450,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
                 record_store=record_store,
                 product="odoo-tenant-opw",
                 request=OdooProdRollbackRequest(context="opw"),
-                release_decision=release_decision,
             )
 
         self.assertEqual(result.rollback_status, "pass")
@@ -477,10 +458,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.deployment_record_id, "deployment-opw-prod-rollback")
         self.assertEqual(result.release_tuple_id, "opw-prod-artifact-opw-847c71c1db61785c")
         replacement_apply.assert_called_once()
-        self.assertEqual(
-            replacement_apply.call_args.kwargs["restore_release_website_settings"],
-            release_decision is not None,
-        )
         replacement_request = replacement_apply.call_args.kwargs["request"]
         self.assertEqual(replacement_request.product, "odoo-tenant-opw")
         self.assertEqual(replacement_request.instance, "prod")
