@@ -13,11 +13,13 @@ are never included. A failed lookup leaves the profile unchanged; it does not
 fall back to another credential. Service logs include the same failure stage.
 
 Products recorded with `release_on_acceptance: director_standing` do not wait
-for a Client-preview check at merge admission or receive preview-review invitations,
-even when the PR has test notes or an old review label. The Director's standing
-direction supplies acceptance; note validation and engineering checks still
-apply. Production release remains on the gated path
-described in [release-review.md](release-review.md), including its checklist-note validation.
+for a Client-preview check at merge admission or receive preview-review invitations
+when the PR only has test notes. The Director's standing direction supplies
+acceptance; note validation and engineering checks still apply. The product's
+review label is an explicit hold: with it, the change waits for the recorded
+Client's preview review like any other product, and the label still requires
+real test notes. Remove the label to return the change to standing acceptance.
+Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
 Launchplane requests review when a pull request has real `Client test notes`

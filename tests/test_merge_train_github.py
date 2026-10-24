@@ -3901,15 +3901,21 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         fixture.start()
         self.addCleanup(fixture.stop)
 
-    def test_director_standing_product_needs_engineering_checks_without_a_client_check(
+    def test_director_standing_product_waits_for_a_client_check_only_with_the_label(
         self,
     ) -> None:
-        for labels in (("ready-to-merge",), ("ready-to-merge", "owner-review")):
+        for labels, review_required in (
+            (("ready-to-merge",), False),
+            (("ready-to-merge", "owner-review"), True),
+        ):
             with self.subTest(labels=labels):
                 pull = _github_pull_request(42)
                 pull["body"] = "## Client test notes\nTry the approval buttons on a phone."
                 pull["labels"] = [{"name": label} for label in labels]
-                for conclusion, expected in (("success", "pass"), ("failure", "fail")):
+                for conclusion, expected in (
+                    ("success", "pending" if review_required else "pass"),
+                    ("failure", "fail"),
+                ):
                     with self.subTest(conclusion=conclusion):
                         transport = RecordingMergeTrainGitHubTransport(
                             responses=(
@@ -3942,7 +3948,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         ).read_merge_train_snapshot(
                             repository=profile.repository, base_branch="main"
                         )
-                        self.assertFalse(snapshot.pull_requests[0].owner_review_required)
+                        self.assertIs(
+                            snapshot.pull_requests[0].owner_review_required, review_required
+                        )
                         self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
 
     def test_another_clients_product_keeps_its_review_gate_with_a_standing_profile(self) -> None:
