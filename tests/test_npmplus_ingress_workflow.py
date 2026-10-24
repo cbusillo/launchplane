@@ -22,6 +22,9 @@ class _FakeNpmplusClient:
         self.calls.append("list")
         return tuple(self.proxy_hosts)
 
+    def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        return next(host for host in self.proxy_hosts if host.id == host_id)
+
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
         self.calls.append("create")
         created = NpmplusProxyHost.model_validate({"id": self.next_id, **payload.to_api_payload()})
@@ -101,6 +104,37 @@ def _location(**overrides: object) -> dict[str, object]:
 
 
 class NpmplusIngressWorkflowTests(unittest.TestCase):
+    def test_plan_uses_selected_host_read_for_configuration(self) -> None:
+        claimed = _proxy_host(forward_port=8080)
+        current = _proxy_host()
+
+        class Client(_FakeNpmplusClient):
+            def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+                self.calls.append(f"read:{host_id}")
+                return current
+
+        client = Client((claimed,))
+        result = apply_npmplus_ingress_route(
+            client=client, request=_request(allow_create=False, allow_update=False)
+        )
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(result.proxy_host, current)
+        self.assertIn(f"read:{current.id}", client.calls)
+        self.assertEqual(client.proxy_hosts, [claimed])
+
+    def test_plan_refuses_a_changed_selected_hostname_claim(self) -> None:
+        claimed = _proxy_host()
+        changed = _proxy_host(domain_names=["other.example.test"])
+
+        class Client(_FakeNpmplusClient):
+            def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+                return changed
+
+        client = Client((claimed,))
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(client=client, request=_request(mode="apply"))
+        self.assertEqual(client.proxy_hosts, [claimed])
+
     def test_dry_run_plans_create_without_mutating(self) -> None:
         client = _FakeNpmplusClient()
 

@@ -22,6 +22,7 @@ from control_plane.contracts.ingress_route_audit_record import (
 )
 from control_plane.dokploy import api, source
 from control_plane.npmplus import (
+    NpmplusHostIdentity,
     NpmplusAccessList,
     NpmplusCertificate,
     NpmplusProxyHost,
@@ -78,7 +79,7 @@ class TestingPublicIngressRequest(BaseModel):
 
 
 class TestingPublicIngressClient(Protocol):
-    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]: ...
+    def list_proxy_hosts(self) -> tuple[NpmplusHostIdentity, ...]: ...
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate: ...
 
@@ -400,7 +401,13 @@ class TestingPublicIngressAdapter:
                     name.startswith("*.") and generation.domain_host.endswith(name[1:])
                 )
                 if name.startswith("~") or matches:
-                    if _host_payload(h) != desired.model_dump(mode="json", exclude={"meta"}):
+                    current = self.client.get_proxy_host(h.id, public_only=True)
+                    if (
+                        current.id != h.id
+                        or set(current.domain_names) != set(h.domain_names)
+                        or _host_payload(current)
+                        != desired.model_dump(mode="json", exclude={"meta"})
+                    ):
                         raise ValueError("The testing hostname already has foreign edge authority.")
         for name in self.client.list_other_host_domains():
             if (
@@ -529,14 +536,19 @@ class TestingPublicIngressAdapter:
         ]
         if len(matches) != 1 or (
             matches[0].domain_names != (generation.domain_host,)
-            or not matches[0].advanced_config.startswith(_marker(self.request.reviewed_plan_sha256))
-            or not matches[0].enabled
-            or not matches[0].ssl_forced
             or tuple(d.domain_name for d in binding.domains) != (generation.domain_host,)
         ):
             raise ValueError("The testing edge route and binding are not verified.")
         endpoint = self.store.read_edge_endpoint_record(binding.ingress.endpoint_key)
         current = self.client.get_proxy_host(matches[0].id, public_only=True)
+        if (
+            current.id != matches[0].id
+            or current.domain_names != matches[0].domain_names
+            or not current.advanced_config.startswith(_marker(self.request.reviewed_plan_sha256))
+            or not current.enabled
+            or not current.ssl_forced
+        ):
+            raise ValueError("The testing edge route and binding are not verified.")
         if (
             current.access_list_id
             and self.client.get_access_list(current.access_list_id).id != current.access_list_id
@@ -621,13 +633,15 @@ class TestingPublicIngressAdapter:
                 if not create:
                     raise ValueError("An unknown create may not be repeated.")
                 checkpoint()
-                actual = self.client.create_proxy_host(desired)
+                selected_id = self.client.create_proxy_host(desired).id
             elif len(matches) == 1:
-                actual = matches[0]
+                selected_id = matches[0].id
             else:
                 raise ValueError("Testing edge authority is ambiguous.")
-            actual = self.client.get_proxy_host(actual.id, public_only=True)
-            if _host_payload(actual) != desired.model_dump(mode="json", exclude={"meta"}):
+            actual = self.client.get_proxy_host(selected_id, public_only=True)
+            if actual.id != selected_id or _host_payload(actual) != desired.model_dump(
+                mode="json", exclude={"meta"}
+            ):
                 raise ValueError("The provider did not preserve the exact testing route.")
             result_host.append(actual)
 

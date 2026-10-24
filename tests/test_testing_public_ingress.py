@@ -8,7 +8,7 @@ import unittest
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
-from control_plane.npmplus import NpmplusAccessList, NpmplusCertificate
+from control_plane.npmplus import NpmplusAccessList, NpmplusCertificate, NpmplusProxyHostClaim
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
@@ -292,6 +292,22 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_claim_list_uses_selected_route_configuration_for_readback(self) -> None:
+        def claims() -> tuple[NpmplusProxyHostClaim, ...]:
+            return tuple(
+                NpmplusProxyHostClaim(id=host.id, domain_names=host.domain_names)
+                for host in self.client.proxy_hosts
+            )
+
+        with patch.object(self.client, "list_proxy_hosts", side_effect=claims):
+            self.review_edge()
+            self.publish()
+            self.assertTrue(self.edge().readback()["applied"])
+            self.client.proxy_hosts[-1].advanced_config = ""
+            with self.assertRaises(ValueError):
+                self.edge().readback()
+        self.assertEqual(self.client.calls.count("create"), 1)
+
     def test_stored_profile_history_preserves_testing_edge_publication(self) -> None:
         from tests.support.stored_profiles import persist_historical_preview_transport
 

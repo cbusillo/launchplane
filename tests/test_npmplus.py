@@ -274,6 +274,38 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_collection_preserves_foreign_claims_without_route_qualification(self) -> None:
+        owned = _proxy_host_payload(id=78)
+        cases = (
+            {"npmplus_access_list_type": "custom", "npmplus_access_list_ids": [1, 2]},
+            {"npmplus_auth_request": "oauth2proxy"},
+            {"forward_scheme": "empty", "forward_host": ""},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                names = ("other.example.test",)
+                foreign = {**_proxy_host_payload(id=79), "domain_names": list(names), **changes}
+                opener = _Opener()
+                opener.proxy_hosts_payload = [owned, foreign]
+                client = NpmplusClient(credentials=_credentials(), opener=opener)
+                claims = client.list_proxy_hosts()
+                self.assertEqual([host.id for host in claims], [owned["id"], foreign["id"]])
+                self.assertEqual(claims[1].domain_names, names)
+                self.assertEqual(
+                    client.get_proxy_host(78).domain_names,
+                    NpmplusProxyHost.model_validate(owned).domain_names,
+                )
+                opener.host_details = {**owned, **changes}
+                with self.assertRaises(ValidationError):
+                    client.get_proxy_host(78)
+
+    def test_selected_host_read_rejects_a_different_id(self) -> None:
+        opener = _Opener()
+        opener.host_details["id"] = 79
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        with self.assertRaises(click.ClickException):
+            client.get_proxy_host(78)
+
     def test_access_list_read_checks_identity_and_discards_authentication_entries(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)
@@ -437,21 +469,52 @@ class NpmplusClientTests(unittest.TestCase):
         self.assertEqual([request[0] for request in opener.requests], ["POST"])
 
     def test_list_proxy_hosts_rejects_malformed_entries(self) -> None:
+        valid = _proxy_host_payload(id=78)
+        cases = (
+            "not-a-host",
+            {key: value for key, value in valid.items() if key != "id"},
+            {**valid, "id": 0},
+            {**valid, "domain_names": []},
+            {**valid, "domain_names": [" "]},
+            {**valid, "domain_names": "hidden.example.test"},
+        )
+        for malformed in cases:
+            with self.subTest(malformed=malformed):
+                opener = _Opener()
+                opener.proxy_hosts_payload = [valid, malformed]
+                client = NpmplusClient(credentials=_credentials(), opener=opener)
+                with self.assertRaises((click.ClickException, ValidationError)):
+                    client.list_proxy_hosts()
+
+    def test_selected_host_read_normalizes_null_locations(self) -> None:
         opener = _Opener()
-        opener.proxy_hosts_payload = [_proxy_host_payload(id=78), "not-a-host"]
+        opener.host_details["locations"] = None
         client = NpmplusClient(credentials=_credentials(), opener=opener)
+        self.assertEqual(client.get_proxy_host(78).locations, ())
 
-        with self.assertRaises(click.ClickException):
-            client.list_proxy_hosts()
-
-    def test_list_proxy_hosts_normalizes_null_locations(self) -> None:
+    def test_collection_retains_duplicate_wildcard_and_regex_claims(self) -> None:
+        domains = (
+            ["owned.example.test"],
+            ["owned.example.test", "alias.example.test"],
+            ["*.example.test"],
+            ["~.*"],
+        )
         opener = _Opener()
-        opener.proxy_hosts_payload = [{**_proxy_host_payload(id=78), "locations": None}]
+        payloads = [
+            {
+                **_proxy_host_payload(id=index + 1),
+                "domain_names": names,
+                "npmplus_auth_request": "oauth2proxy",
+            }
+            for index, names in enumerate(domains)
+        ]
+        opener.proxy_hosts_payload = payloads
         client = NpmplusClient(credentials=_credentials(), opener=opener)
-
-        proxy_hosts = client.list_proxy_hosts()
-
-        self.assertEqual(proxy_hosts[0].locations, ())
+        claims = client.list_proxy_hosts()
+        self.assertEqual([claim.id for claim in claims], [payload["id"] for payload in payloads])
+        self.assertEqual(
+            [claim.domain_names for claim in claims], [tuple(names) for names in domains]
+        )
 
     def test_credentials_fail_closed_for_missing_secret(self) -> None:
         with self.assertRaises(ValueError):
