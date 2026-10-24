@@ -1138,12 +1138,22 @@ job IDs before the callback permits the trigger;
 continuation observes that one terminal job instead of triggering another.
 Private readiness then checks actual storage/network isolation, pinned installed
 images, runtime and copy identity, integration settings and the web-start gate,
-and verifies the testing-local credentials without signing in. The private HTTP
+and verifies testing-local infrastructure credentials without signing in. The private HTTP
 health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
-database password and the active local administrator's stored password hash.
-The login follows startup's trimmed value or `admin` default. Local database
-authentication or SQL/file permission failure in either the integration readback
+database password. Empty candidates, unmarked copies and images without the
+restored-login helper require exactly one active configured login whose stored
+password matches the bootstrap binding. The login follows startup's trimmed value
+or `admin` default. A restored candidate whose copy witness matches and whose
+installed artifact helper reports preserved logins instead keeps those logins,
+including admin, unchanged under [Director decision Q356](https://github.com/cbusillo/launchplane/issues/3604#issuecomment-6204479469). It refuses an active
+`admin` or configured login accepting the default password `admin`; missing,
+inactive or passwordless copied logins do not require account creation. This does
+not attest that the bootstrap password authenticates on restored data; automation
+uses the separate testing-only diagnostic identity. A failed marker read is a
+failed candidate check. Database/master consistency and runtime identity remain
+required in either mode; the copy witness remains required for every restored copy.
+Local database authentication or SQL/file permission failure in either the integration readback
 or credential program is a failed candidate check. Only a Docker socket/API,
 daemon or authorization-plugin refusal is reported as a provider denial. The
 candidate, restore and route host programs share one classification and drop
@@ -1154,7 +1164,7 @@ that a stored provider environment update was deployed; provider configuration,
 installed runtime identity and image are checked separately. Readiness never creates a session
 or login-history row, which would otherwise protect the new copy from its next
 rebuild. Passwords, hashes and raw program output stay private to the provider
-transport. This checks credential installation, not an interactive browser
+transport. This checks the mode's local credential policy, not an interactive browser
 sign-in or Client acceptance.
 
 A terminal original build before restore dispatch, or a terminal restore, may
