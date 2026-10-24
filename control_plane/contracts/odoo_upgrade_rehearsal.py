@@ -373,6 +373,7 @@ class RehearsalChildFailure(BaseModel):
     def failed(self) -> "RehearsalChildFailure":
         if self.exit_status == 0:
             raise ValueError("Child failure requires a nonzero exit status.")
+        self.error_text = ""
         return self
 
 
@@ -397,6 +398,13 @@ class RehearsalRetainedLogs(BaseModel):
     runtime: list[RehearsalRuntimeLog] = Field(max_length=2)
     since: datetime
     truncated: bool
+
+    @model_validator(mode="after")
+    def withhold_content(self) -> "RehearsalRetainedLogs":
+        self.files = []
+        self.runtime = []
+        self.truncated = True
+        return self
 
 
 class PendingBusinessValidation(BaseModel):

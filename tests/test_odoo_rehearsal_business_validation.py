@@ -761,7 +761,84 @@ class BusinessValidationHostTests(unittest.TestCase):
             self.assertTrue(observed["custody"]["effect_started"])
             self.assertNotIn("copied customer", str(observed))
 
-    def test_failed_product_retains_redacted_stderr_under_original_custody(self) -> None:
+    def test_connection_and_health_failures_withhold_values_before_and_after_product(self) -> None:
+        import subprocess
+
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        for source in ("connection", "health"):
+            for phase in (1, 2):
+                with self.subTest(source=source, phase=phase):
+                    scenario = BusinessValidationHostTests()
+                    scenario.setUp()
+                    self.addCleanup(scenario.doCleanups)
+                    scenario.spec["record"]["target_artifact"]["artifact_id"] = scenario.plan[
+                        "artifact_id"
+                    ]
+                    calls = {"connection": 0, "health": 0}
+
+                    def run_check(
+                        arguments: list[str], **kwargs: Any
+                    ) -> subprocess.CompletedProcess[bytes]:
+                        check = (
+                            "connection"
+                            if kwargs.get("input") == scenario.spec["readback_program"].encode()
+                            else "health"
+                        )
+                        calls[check] += 1
+                        failed = check == source and calls[check] >= phase
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            7 if failed else 0,
+                            copied.encode() if failed else b"integration_readback_ok=true\n",
+                            copied.encode() if failed else b"",
+                        )
+
+                    with (
+                        patch.dict(
+                            scenario.host,
+                            {
+                                "docker": scenario.fixture.native_docker,
+                                "private_health": scenario.fixture.native_private_health,
+                            },
+                        ),
+                        patch.object(scenario.host["subprocess"], "run", side_effect=run_check),
+                    ):
+                        if phase == 1:
+                            observed = scenario.fixture.run_host(scenario.spec)
+                            self.assertIsNone(
+                                scenario.host["read_command_failure"](scenario.spec, scenario.root)
+                            )
+                        else:
+                            with self.assertRaises(
+                                scenario.host["RehearsalCommandFailure"]
+                            ) as failed:
+                                scenario.fixture.run_host(scenario.spec)
+                            failure = failed.exception.diagnostic
+                            self.assertNotIn(copied, str(failure))
+                            self.assertEqual(failure["exit_status"], 7)
+                            expected_step = scenario.host[
+                                "private_health"
+                                if source == "health"
+                                else "business_validation_precheck"
+                            ].__name__
+                            self.assertEqual(failure["step"], expected_step)
+                            observed = scenario.fixture.run_host(
+                                {**scenario.spec, "mode": "observe", "inspect_capture": True}
+                            )
+                            self.assertEqual(
+                                observed["pending_business_validation"]["attempt_sha256"],
+                                scenario.spec["attempt_sha256"],
+                            )
+                            self.assertNotIn("child_failure", observed)
+                            self.assertTrue(
+                                observed["pending_business_validation"]["receipt"]["committed"]
+                            )
+                            self.assertFalse(observed["business_validation_postcheck_verified"])
+                    self.assertNotIn(copied, str(observed))
+                    self.assertEqual(scenario.executions, phase - 1)
+                    self.assertFalse(observed["completed"])
+
+    def test_failed_product_withholds_stderr_under_original_custody(self) -> None:
         import sys
 
         self.spec["environment"] = {"ODOO_DB_PASSWORD": "fixture-private-password"}
@@ -780,7 +857,7 @@ class BusinessValidationHostTests(unittest.TestCase):
                 self.fixture.run_host(self.spec)
         observed = self.fixture.run_host({**self.spec, "mode": "observe", "inspect_capture": True})
         diagnostic = observed["child_failure"]
-        self.assertIn("ValidationError: ODOO_FILESTORE_PATH is required", diagnostic["error_text"])
+        self.assertEqual(diagnostic["error_text"], "")
         self.assertEqual(diagnostic["exit_status"], 9)
         self.assertEqual(diagnostic["step"], "business_validation")
         self.assertEqual(diagnostic["attempt_sha256"], self.spec["attempt_sha256"])
@@ -826,25 +903,6 @@ class BusinessValidationHostTests(unittest.TestCase):
             ),
             b"receipt\n",
         )
-
-    def test_product_stderr_does_not_hide_host_observation_failure(self) -> None:
-        import sys
-
-        cases: tuple[tuple[str, dict[str, int]], ...] = (
-            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 1}),
-            ("print('x' * 100000)", {}),
-        )
-        for command, limits in cases:
-            script = "import sys; print('startup notice', file=sys.stderr, flush=True); " + command
-            with (
-                self.subTest(command=command),
-                patch.dict(self.host, limits),
-                self.assertRaises(self.host["RehearsalCommandFailure"]) as failure,
-            ):
-                self.native_product_command([sys.executable, "-c", script])
-            lines = failure.exception.diagnostic["error_text"].splitlines()
-            self.assertIn("startup notice", lines)
-            self.assertNotEqual(lines[-1], "startup notice")
 
 
 class BusinessValidationClientTests(unittest.TestCase):
