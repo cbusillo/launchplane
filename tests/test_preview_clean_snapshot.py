@@ -1,6 +1,7 @@
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import io
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -69,7 +70,12 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.present = False
         self.sanitized = True
         self.runner_failure = False
+        self.killed_during_restore = False
+        self.database_witness = ""
+        self.module_lock_available = False
         self.paused = False
+        self.overlay = self.root / "runner-overlay"
+        self.overlay.mkdir()
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
         self.containers: dict[str, dict[str, Any]] = {
             role: {
@@ -104,6 +110,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
             for role in ("database", "web", "script-runner")
         }
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.overlay)}}
         self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
 
     def run_script(self, **updates: Any) -> str:
@@ -170,6 +177,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     else self.containers[arguments[-1]]
                 ]
             ).encode()
+        elif arguments[:3] == ["docker", "volume", "ls"]:
+            output = "\n".join(self.volumes).encode()
         elif arguments[:3] == ["docker", "volume", "inspect"]:
             output = json.dumps(
                 [
@@ -195,9 +204,23 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 output = b"integration_readback_ok=true" if self.sanitized else b""
             elif kwargs.get("input"):
                 self.assertFalse(self.paused)
+                with (self.source.parent / "snapshot.lock").open("a") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        self.module_lock_available = True
+                if self.killed_during_restore:
+                    self.present = True
+                    self.database_witness = self.snapshot.snapshot_id
+                    return subprocess.CompletedProcess(arguments, 137, stdout=b"", stderr=b"")
+                if arguments[-3] == "resume" and self.database_witness != arguments[-2]:
+                    return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
                 if self.runner_failure:
                     return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
                 self.present = True
+                self.database_witness = arguments[-2]
                 output = b"\n".join(
                     key + b"=true"
                     for key in (
@@ -271,7 +294,46 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 clean_preview_snapshot=self.snapshot,
             )
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
+        self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_module_update_does_not_hold_the_shared_source_lock(self) -> None:
+        self.run_script()
+        self.assertTrue(self.module_lock_available)
+
+    def test_abandoned_attempt_releases_snapshot_only_after_every_backing_is_gone(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        spec = {
+            "copy_binding_sha256": "b" * 64,
+            "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+        }
+        with patch("pathlib.Path.home", return_value=self.root):
+            inspect = library["docker"]
+            library["docker"] = Mock(side_effect=RuntimeError("fixture unavailable inventory"))
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.exists())
+            library["docker"] = inspect
+            shutil.rmtree(self.volumes.pop("preview-logs"))
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.exists())
+            for path in self.volumes.values():
+                shutil.rmtree(path)
+            self.volumes.clear()
+            library["retire_clean_snapshots"](spec)
+        self.assertFalse(self.source.exists())
+        self.assertFalse(list((self.source.parent / "preview-attempts").iterdir()))
+
+    def test_overlay_dump_demand_shares_the_real_filesystem_budget(self) -> None:
+        budget = self.snapshot.storage_budget
+        available = budget.database_bytes + budget.filestore_bytes + budget.reserve_bytes
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)):
+            with self.assertRaises(RuntimeError):
+                self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
 
     def test_existing_preview_data_and_staff_edits_are_never_overwritten(self) -> None:
         self.present = True
@@ -333,6 +395,16 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(
             any(call[0] == "cp" or call[:2] == ["docker", "cp"] for call in self.calls)
         )
+
+    def test_inherited_testing_witness_cannot_certify_an_interrupted_preview_restore(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_shared_guard_refuses_privilege_and_snapshot_mount_exposure(self) -> None:
         self.containers["script-runner"]["HostConfig"] = {"Privileged": True}

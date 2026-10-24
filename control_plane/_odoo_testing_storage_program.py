@@ -44,8 +44,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if size:
             required[device] = required.get(device, 0) + size
         available[device] = min(available.get(device, free), free)
-    for suffix, size in (('-db', budget['database_bytes']), ('-data', budget['filestore_bytes'])):
-        volume = json.loads(docker('volume', 'inspect', gen['namespace'] + suffix))[0]
+    for role, suffix, size in (('database', '-db', budget['database_bytes']), ('data', '-data', budget['filestore_bytes'])):
+        name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
+        volume = json.loads(docker('volume', 'inspect', name))[0]
         demand(volume['Mountpoint'], size)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.

@@ -60,12 +60,48 @@ def verified_clean_snapshot(snapshot_id):
     return path, receipt
 
 
+def snapshot_attempt_backings_retired(binding, inventory):
+    names = binding.get('preview_volumes')
+    backings = binding.get('volume_backings')
+    if not isinstance(names, dict) or set(names) != {'data', 'database', 'logs'} or not isinstance(backings, dict):
+        return False
+    for role, name in names.items():
+        previous = backings[role]
+        old_path = Path(previous['path'])
+        if old_path.resolve(strict=False) != old_path.absolute():
+            return False
+        try:
+            old_metadata = old_path.stat()
+        except FileNotFoundError:
+            old_metadata = None
+        if old_metadata is not None and (old_metadata.st_dev, old_metadata.st_ino) == (previous['device'], previous['inode']):
+            return False
+        if name not in inventory:
+            continue
+        rows = json.loads(docker('volume', 'inspect', name))
+        if not isinstance(rows, list) or len(rows) != 1:
+            return False
+        volume = rows[0]
+        if volume.get('Name') != name or volume.get('Driver') != 'local' or volume.get('Options'):
+            return False
+        path = Path(volume['Mountpoint'])
+        if path.resolve(strict=True) != path.absolute():
+            return False
+        metadata = path.stat()
+        if (not volume.get('CreatedAt') or volume['CreatedAt'] == previous['created_at']
+            or (str(path), metadata.st_dev, metadata.st_ino) == (previous['path'], previous['device'], previous['inode'])):
+            return False
+    return True
+
+
 def retire_clean_snapshots(spec):
     root = clean_snapshot_root(spec['copy_binding_sha256']).parent
     with (root / 'snapshot.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         pinned = set()
         attempts = root / 'preview-attempts'
+        inventory = None
+        inventory_read = False
         if attempts.exists():
             if attempts.is_symlink():
                 raise RuntimeError('Snapshot reader custody is aliased')
@@ -73,6 +109,22 @@ def retire_clean_snapshots(spec):
                 if attempt.is_symlink() or not attempt.is_file() or attempt.stat().st_size > 8192:
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 payload = json.loads(attempt.read_text())
+                binding = payload.get('binding', {})
+                if binding.get('volume_backings'):
+                    if not inventory_read:
+                        inventory_read = True
+                        try:
+                            names = docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()
+                            inventory = set(names) if len(names) == len(set(names)) and all(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', name) for name in names) else None
+                        except (RuntimeError, OSError, ValueError):
+                            inventory = None
+                    try:
+                        retired = inventory is not None and snapshot_attempt_backings_retired(binding, inventory)
+                    except (RuntimeError, OSError, ValueError, KeyError, TypeError, IndexError):
+                        retired = False
+                    if retired:
+                        attempt.unlink()
+                        continue
                 if not payload.get('completed'):
                     pinned.add(payload['snapshot']['snapshot_id'])
         for snapshot in spec.get('clean_snapshot_retirements', []):

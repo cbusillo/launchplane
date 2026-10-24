@@ -62,6 +62,44 @@ class CleanTestingSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             preview_snapshot(store, self.profile)
 
+    def test_late_capture_and_repeat_completion_keep_the_newest_immutable_source(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary) / "store.sqlite3")
+            )
+            store.ensure_schema()
+            now = datetime.now(timezone.utc)
+            first = self.snapshot.model_copy(update={"captured_at": now.isoformat()})
+            newer = self.snapshot.model_copy(
+                update={
+                    "snapshot_id": "b" * 64,
+                    "captured_at": (now + timedelta(seconds=1)).isoformat(),
+                }
+            )
+            late = self.snapshot.model_copy(
+                update={
+                    "snapshot_id": "c" * 64,
+                    "captured_at": (now - timedelta(seconds=1)).isoformat(),
+                }
+            )
+            for snapshot in (
+                first,
+                newer,
+                late,
+                first.model_copy(update={"captured_at": (now + timedelta(seconds=2)).isoformat()}),
+            ):
+                store.write_clean_testing_snapshot(snapshot)
+            self.assertEqual(
+                store.read_clean_testing_snapshot(self.profile.product, self.context), newer
+            )
+            with self.assertRaises(ValueError):
+                store.write_clean_testing_snapshot(
+                    first.model_copy(update={"database_sha256": "d" * 64})
+                )
+            self.assertEqual(
+                store.read_clean_testing_snapshot(self.profile.product, self.context), newer
+            )
+
     def test_retirement_keeps_latest_two_and_every_unexpired_preview_plan(self) -> None:
         with TemporaryDirectory() as temporary:
             store = PostgresRecordStore(

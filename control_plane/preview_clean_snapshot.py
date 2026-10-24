@@ -3,6 +3,7 @@ import gzip
 import json
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane.odoo_testing_restore import TESTING_COPY_RUNNER
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
@@ -65,6 +66,7 @@ def build_preview_clean_snapshot_script(
 PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
     CLEAN_TESTING_SNAPSHOT_LIBRARY
     + COPY_RUNTIME_INSPECTION_LIBRARY
+    + STORAGE_MAINTENANCE_LIBRARY
     + r"""
 import base64
 import shutil
@@ -91,7 +93,7 @@ def one_inspection(identifier):
     return rows[0]
 
 
-def restore_preview_snapshot(containers):
+def restore_preview_snapshot(containers, source_lock):
     snapshot = spec['snapshot']
     binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
     binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})
@@ -142,20 +144,10 @@ def restore_preview_snapshot(containers):
     if (volume.get('Driver') != 'local' or volume.get('Options')
         or (volume.get('Labels') or {}).get('com.docker.compose.project') != spec['compose_project']):
         raise RuntimeError('Preview data volume is not exclusively owned')
-    if present == '0':
-        budget = snapshot['storage_budget']
-        demands = {}
-        for role, amount in (('data', budget['filestore_bytes']), ('database', budget['database_bytes'])):
-            storage = json.loads(docker('volume', 'inspect', spec['preview_volumes'][role]))[0]
-            backing = Path(storage['Mountpoint'])
-            device = backing.stat().st_dev
-            statvfs = os.statvfs(backing)
-            available = statvfs.f_bavail * statvfs.f_frsize
-            if device not in demands:
-                demands[device] = [available, budget['reserve_bytes']]
-            demands[device][1] += amount
-        if any(available < demand for available, demand in demands.values()):
-            raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
+    if present == '0' and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
+        containers, snapshot['storage_budget'], runner_staging_bytes=(path / 'database.dump').stat().st_size,
+        host_staging_bytes=0):
+        raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
     mounted = docker('ps', '--all', '--filter', 'volume=' + mounts[0]['Name'],
         '--format', '{{.ID}}').decode().splitlines()
     if set(mounted) != {runner, containers['web'][0]}:
@@ -186,6 +178,8 @@ def restore_preview_snapshot(containers):
         if not uid.isdigit() or not gid.isdigit():
             raise RuntimeError('Preview workflow identity is unavailable')
         docker('exec', '-u', 'root', runner, 'chown', '-R', uid + ':' + gid, '/volumes/data', *([dump] if present == '0' else []))
+        fcntl.flock(source_lock, fcntl.LOCK_UN)
+        witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
         arguments = ['exec', '-i']
         environment = {**spec['workflow_environment'], 'PLATFORM_INSTANCE': 'preview',
             'ODOO_FILESTORE_PATH': '/volumes/data/filestore', 'ODOO_FILESTORE_OWNER': uid + ':' + gid,
@@ -195,7 +189,7 @@ def restore_preview_snapshot(containers):
                 raise RuntimeError('Invalid preview workflow environment key')
             arguments.extend(['-e', key + '=' + value])
         output = docker(*arguments, runner, 'python3', '-I', '-', dump, database, spec['readback_spec'],
-            base64.b64encode(spec['readback_program'].encode()).decode(), 'resume' if present == '1' else 'fresh', snapshot['snapshot_id'],
+            base64.b64encode(spec['readback_program'].encode()).decode(), 'resume' if present == '1' else 'fresh', witness,
             'clean-snapshot', stdin=spec['runner'].encode()).decode()
         markers = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if any(markers.get(key) != 'true' for key in ('testing_copy_sanitized',
@@ -218,6 +212,7 @@ def restore_preview_snapshot(containers):
             print(key + '=true')
         write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'completed': True})
         print('odoo_module_update_image_match=true')
+        print('clean_preview_snapshot_id=' + snapshot['snapshot_id'])
         print('clean_preview_snapshot_restored=true')
     finally:
         docker('exec', '-u', 'root', runner, 'rm', '-f', dump)
@@ -226,7 +221,7 @@ def restore_preview_snapshot(containers):
 import fcntl
 containers = inspect_copy_runtime(spec, expected_instance='preview')
 with (clean_snapshot_root(spec['snapshot']['snapshot_id']).parent / 'snapshot.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    restore_preview_snapshot(containers)
+    fcntl.flock(lock, fcntl.LOCK_SH)
+    restore_preview_snapshot(containers, lock)
 """
 )

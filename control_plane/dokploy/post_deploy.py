@@ -248,6 +248,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
         "website_settings_sha256",
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
+        "clean_preview_snapshot_id",
     }
     | READBACK_FAILURE_MARKERS
 )
@@ -445,6 +446,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
+        "clean_preview_snapshot_id",
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
@@ -1076,6 +1078,11 @@ def run_compose_post_deploy_update(
     if fresh_testing_generation is not None and fresh_testing_generation.clean_snapshot_enabled:
         if evidence.get("clean_testing_snapshot_completed") != "true" or not schedule_server_id:
             raise ValueError("Testing refresh lacks its clean snapshot capture proof.")
+        for key in ("clean_snapshot_database_sha256", "clean_snapshot_filestore_sha256"):
+            if re.fullmatch(r"[a-f0-9]{64}", evidence.get(key, "")) is None:
+                raise OdooPostDeployReadbackFailure(
+                    "Testing refresh lacks its clean snapshot integrity proof.", evidence=evidence
+                )
         evidence["clean_snapshot_server_id"] = schedule_server_id
     if (
         clean_preview_snapshot is not None

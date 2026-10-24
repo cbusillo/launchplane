@@ -33,16 +33,22 @@ outside every application volume. It verifies their hashes and atomically
 renames the completed directory. It uses the existing clone-or-copy behavior
 for the filestore; full-copy headroom remains required.
 
-The database-backed published receipt is separate from the current testing
-generation. It advances with successful worker completion. Failed restore,
+The newest qualified immutable database-backed capture is the preview source,
+separate from the current testing generation. Worker completion records it
+atomically; there is no second mutable pointer. Repeated completion preserves
+the original capture receipt. A snapshot-domain publication refusal records
+`clean_snapshot_published=false` on the terminal operation and preserves the
+previous source; database failures still roll back the transaction. Failed restore,
 sanitization, capture or health checks keep the previous receipt. A testing
 hold does not remove that receipt or turn preview selection into a read of
 the staff-used database. Partial captures cannot become preview sources.
 
 ## Preview copy
 
-A new preview selects one completed same-product snapshot. There is no
-production or live-testing fallback. The preview and snapshot must be on
+A new preview selects one completed same-product snapshot. An existing preview
+with a qualified completed deployment keeps its data and needs no snapshot
+lookup, including before the product has published its first snapshot. There
+is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
 The copy receives no source SSH mount or upstream connection. Its filestore
@@ -51,7 +57,9 @@ stopped and runner paused. It restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and
 connection-readback boundary before starting web. Existing preview databases
 and Client edits are preserved. A failed initial clone can resume using its
-private target-bound restore receipt. If a failed import left no database,
+private target-bound restore receipt and a preview-specific completion
+witness. The marker copied from testing cannot prove a preview restore. If a
+failed import left no database,
 filestore replacement requires proof that every remaining byte is also in the
 retained frozen source. Unknown files are preserved and execution refuses.
 Existing successfully deployed previews keep their own data on later builds.
@@ -63,8 +71,9 @@ database copy-on-write.
 
 ## Product transition and custody
 
-OPW's preview repair landed in PR4734. Its transition still needs the Director's actual testing
-hold lift and the existing source/artifact/custody qualification. After source deployment, opt the product in and run its first admitted
+OPW's preview repair landed in PR4734. Its transition still needs the Director's
+actual testing hold lift and the existing source/artifact/custody qualification.
+After source deployment, opt the product in and run its first admitted
 refresh. New preview creation refuses until that refresh publishes a clean
 snapshot. Existing preview data remains intact. Enable the existing daily
 drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
@@ -79,7 +88,11 @@ Snapshot bytes remain in private host custody, independently of testing or
 preview volume retirement. Cleanup keeps the published source and its predecessor,
 unexpired issued preview plans, active or uncertain preview operations, and
 incomplete host clone attempts. Only obsolete copies with matching immutable
-service receipts may be removed. Host copying and retirement share a lock.
+service receipts may be removed. Host copying uses a shared read lock; retirement uses an exclusive lock. The
+read lock is released after copying, before sanitizer and module work. Attempt
+metadata is retired only after every original volume and physical backing is
+proved gone or replaced. Unknown hard-crash partial directories remain in
+custody; they are never swept by filename.
 Unknown reader evidence preserves copies. Reviewed headroom is checked before
 testing stops; insufficient capacity keeps the previous source usable.
 PostgreSQL restore and full filestore-copy headroom are also required for a new

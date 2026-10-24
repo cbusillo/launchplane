@@ -159,7 +159,8 @@ def inspect_copy_runtime(spec, *, expected_instance):
             if mount.get('Source'):
                 source_path = Path(mount['Source']).resolve(strict=False)
                 snapshot_state = Path.home().resolve(strict=True) / CLEAN_SNAPSHOT_STATE_DIRECTORY
-                if (snapshot_state.is_relative_to(source_path) or source_path.is_relative_to(snapshot_state)
+                if ((expected_instance == 'preview' or gen.get('clean_snapshot_enabled') or snapshot_state.exists())
+                    and (snapshot_state.is_relative_to(source_path) or source_path.is_relative_to(snapshot_state))
                     or (expected_instance == 'rehearsal' or mount.get('RW', True))
                     and (private_state.is_relative_to(source_path) or source_path.is_relative_to(private_state))):
                     raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_STATE)

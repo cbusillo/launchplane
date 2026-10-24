@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -35,9 +35,10 @@ class CleanTestingSnapshot(BaseModel):
     @field_validator("captured_at")
     @classmethod
     def aware_capture_time(cls, value: str) -> str:
-        if datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is None:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
             raise ValueError("Snapshot capture time requires a timezone.")
-        return value
+        return moment.astimezone(timezone.utc).isoformat()
 
 
 class CleanTestingSnapshotStore(Protocol):
@@ -163,5 +164,7 @@ def completed_operation_snapshot(
         server_id=server_id,
         evidence=evidence,
         captured_at=captured_at,
-        storage_budget=generation.drill_storage_budget,
+        storage_budget=generation.drill_storage_budget.model_copy(
+            update={"retained_copy_bindings": ()}
+        ),
     )

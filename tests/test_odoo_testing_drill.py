@@ -309,6 +309,14 @@ class TestingDrillScenario(unittest.TestCase):
 
 class TestingDrillTests(TestingDrillScenario):
     def test_snapshot_publication_is_atomic_with_successful_worker_completion(self) -> None:
+        self.snapshot_completion_case(capture_passed=True)
+
+    def test_snapshot_publication_refusal_keeps_terminal_completion_and_previous_source(
+        self,
+    ) -> None:
+        self.snapshot_completion_case(capture_passed=False)
+
+    def snapshot_completion_case(self, *, capture_passed: bool) -> None:
         from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 
         profile = self.profile.model_copy(deep=True)
@@ -362,24 +370,10 @@ class TestingDrillTests(TestingDrillScenario):
                 "result": result,
             }
         )
-        for marker in (
-            "testing_copy_sanitized",
-            "integration_readback_ok",
-            "odoo_restore_completed",
-            "clean_testing_snapshot_completed",
-        ):
-            key = "post_deploy_readback_" + marker
-            result.post_deploy_override_evidence[key] = "false"
-            with self.subTest(marker=marker), self.assertRaises(ValueError):
-                self.store.complete_odoo_stable_target_replacement_operation_record(
-                    record=completed,
-                    lease_owner=operation.lease_owner,
-                )
-            self.assertEqual(self.operation().status, "running")
-            self.assertEqual(
-                self.store.read_clean_testing_snapshot(profile.product, self.context), previous
-            )
-            result.post_deploy_override_evidence[key] = "true"
+        if not capture_passed:
+            result.post_deploy_override_evidence[
+                "post_deploy_readback_clean_testing_snapshot_completed"
+            ] = "false"
         self.assertTrue(
             self.store.complete_odoo_stable_target_replacement_operation_record(
                 record=completed,
@@ -388,8 +382,17 @@ class TestingDrillTests(TestingDrillScenario):
         )
         published = self.store.read_clean_testing_snapshot(profile.product, self.context)
         assert published is not None
-        self.assertEqual(published.snapshot_id, generation_binding(current))
-        self.assertEqual(self.operation().status, "pass")
+        self.assertEqual(
+            published.snapshot_id,
+            generation_binding(current) if capture_passed else previous.snapshot_id,
+        )
+        persisted = self.operation()
+        self.assertEqual(persisted.status, "pass")
+        assert persisted.result is not None
+        self.assertEqual(
+            persisted.result.post_deploy_override_evidence["clean_snapshot_published"],
+            str(capture_passed).lower(),
+        )
 
     def test_snapshot_refresh_slot_turns_over_in_the_nightly_window(self) -> None:
         from control_plane.odoo_testing_drill import CLEAN_SNAPSHOT_REFRESH_HOUR_UTC

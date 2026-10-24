@@ -1294,6 +1294,15 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_resume_rejects_a_copy_from_another_generation_without_dropping_it(self) -> None:
         self.boundary_case("foreign-witness", phase="resume")
 
+    def test_preview_resume_rejects_the_inherited_testing_snapshot_witness(self) -> None:
+        self.boundary_case(
+            "foreign-witness",
+            phase="resume",
+            instance="preview",
+            restore_binding="preview-attempt-binding",
+            inherited_witness="testing-snapshot-binding",
+        )
+
     def boundary_case(
         self,
         fault: str,
@@ -1302,6 +1311,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         instance: str = "testing",
         sanitize_only: bool = False,
         native_attachment: str = "",
+        restore_binding: str = "fixture-copy-binding",
+        inherited_witness: str = "",
     ) -> None:
         import logging
         import sqlite3
@@ -1405,7 +1416,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     "INSERT INTO ir_config_parameter VALUES (?, ?)",
                     (
                         TESTING_COPY_COMPLETION_PARAMETER,
-                        "foreign-copy" if fault == "foreign-witness" else "fixture-copy-binding",
+                        inherited_witness
+                        or ("foreign-copy" if fault == "foreign-witness" else restore_binding),
                     ),
                 )
             connection.commit()
@@ -1561,7 +1573,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         "fixture-spec",
                         base64.b64encode(b"fixture readback").decode(),
                         phase,
-                        "fixture-copy-binding",
+                        restore_binding,
                         "container-export" if native_attachment else "ssh",
                     ],
                 ),
@@ -1590,7 +1602,17 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     exec(compile(program, "<copy-runner>", "exec"), {})
                 else:
                     with self.assertRaises(RuntimeError):
-                        exec(compile(TESTING_COPY_RUNNER, "<copy-runner>", "exec"), {})
+                        exec(
+                            compile(
+                                "expected_copy_instance = "
+                                + repr(instance)
+                                + "\n"
+                                + TESTING_COPY_RUNNER,
+                                "<copy-runner>",
+                                "exec",
+                            ),
+                            {},
+                        )
             if fault == "normal":
                 if sanitize_only:
                     self.assertNotIn("registry", events)

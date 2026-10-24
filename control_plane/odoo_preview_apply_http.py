@@ -215,12 +215,21 @@ def _build_odoo_preview_apply_inputs(
     if profile.preview.clean_testing_snapshot:
         if request.fishbowl_source is not None:
             raise ValueError("Snapshot previews cannot connect to an import source.")
-        snapshot = preview_snapshot(cast(Any, record_store), profile)
-        result = result.model_copy(
-            update={
-                "dry_run_plan": result.dry_run_plan.model_copy(update={"clean_snapshot": snapshot})
-            }
+        retained = preview_has_completed_restore(
+            record_store=record_store,
+            profile=profile,
+            plan=result.dry_run_plan,
+            pr_number=request.pr_number,
         )
+        if not retained:
+            snapshot = preview_snapshot(cast(Any, record_store), profile)
+            result = result.model_copy(
+                update={
+                    "dry_run_plan": result.dry_run_plan.model_copy(
+                        update={"clean_snapshot": snapshot}
+                    )
+                }
+            )
     if request.fishbowl_source is not None:
         source = resolve_fishbowl_preview_source(
             store=cast(PreviewImportSourceStore, record_store),
@@ -519,13 +528,17 @@ def execute_odoo_preview_apply_result(
         }
     )
     upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
-    snapshot_source = service_dry_run_plan.clean_snapshot is not None
+    snapshot_source = (
+        profile.preview.clean_testing_snapshot and service_dry_run_plan.operation == "refresh"
+    )
     retained_copy = (upstream_source or snapshot_source) and preview_has_completed_restore(
         record_store=record_store,
         profile=profile,
         plan=service_dry_run_plan,
         pr_number=issued_plan.plan_request.pr_number,
     )
+    if snapshot_source and not retained_copy and service_dry_run_plan.clean_snapshot is None:
+        raise ValueError("A new snapshot preview requires its issued clean source.")
     driver_result = execute_odoo_preview_dokploy_apply(
         record_store=record_store,
         preview_context=profile.preview.context,
@@ -622,23 +635,22 @@ def preview_has_completed_restore(
                 and result.compose_name == plan.compose_name
                 and result.module_install_update_status == "pass"
                 and (
-                    plan.clean_snapshot is not None
+                    profile.preview.clean_testing_snapshot
                     or (
-                        result.module_install_update_evidence.get("upstream_restore_requested")
+                        result.module_install_update_evidence.get("odoo_restore_completed")
                         == "true"
-                        or result.module_install_update_evidence.get(
-                            "clean_snapshot_restore_requested"
+                        and any(
+                            result.module_install_update_evidence.get(key) == "true"
+                            for key in (
+                                "upstream_restore_requested",
+                                "clean_snapshot_restore_requested",
+                            )
                         )
-                        == "true"
                     )
-                )
-                and (
-                    plan.clean_snapshot is not None
-                    or result.module_install_update_evidence.get("odoo_restore_completed") == "true"
                 )
             ):
                 return True
-    if plan.clean_snapshot is not None and not any(
+    if profile.preview.clean_testing_snapshot and not any(
         item.state in {"ready", "superseded"} for item in generations
     ):
         return False
@@ -1174,6 +1186,8 @@ def _odoo_preview_service_environment(
 ) -> _OdooPreviewServiceEnvironment:
     if plan.operation == "destroy":
         return _OdooPreviewServiceEnvironment(values={})
+    if profile.preview.clean_testing_snapshot and fishbowl_source is not None:
+        raise ValueError("Snapshot previews cannot receive source credentials.")
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
     # The preview runs unmerged code, so it gets only the template lane's site
@@ -1320,14 +1334,6 @@ def _odoo_preview_service_environment(
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
     _merge_preview_addon_settings(environment_values, profile=profile, record_store=record_store)
     if preview_profile.clean_testing_snapshot:
-        if fishbowl_source is not None:
-            raise ValueError("Snapshot previews cannot receive source credentials.")
-        for key in list(environment_values):
-            if (
-                key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_", "OPENUPGRADE_"))
-                or key in connection_keys
-            ):
-                environment_values.pop(key)
         environment_values.update(
             {
                 "BOOTSTRAP": "false",
