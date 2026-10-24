@@ -3,6 +3,7 @@ from collections import defaultdict
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import shlex
@@ -10,8 +11,9 @@ import sys
 import tarfile
 
 from control_plane.merge_train_codeowners import (
-    _CODEOWNERS_PATHS,
-    _paths_require_individual_landing,
+    CODEOWNERS_PATHS,
+    paths_require_individual_landing,
+    parse_codeowner_patterns,
 )
 
 
@@ -19,18 +21,23 @@ def git(root: Path, *arguments: str) -> str:
     return subprocess.check_output(["git", *arguments], cwd=root, text=True).strip()
 
 
+MAX_FOCUSED_MODULES = 24
+
+
 def module_name(path: str) -> str:
-    return path.removesuffix(".py").replace("/", ".")
+    return path.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
 
-def select_modules(sources: dict[str, str], changed: set[str]) -> list[str] | None:
+def select_modules(
+    sources: dict[str, str], changed: set[str], *, max_modules: int = MAX_FOCUSED_MODULES
+) -> list[str] | None:
     consumers: dict[str, set[str]] = defaultdict(set)
     modules = {module_name(path) for path in sources if path.endswith(".py")}
     for path, content in sources.items():
         if not path.endswith(".py"):
             continue
         module = module_name(path)
-        package = module.rsplit(".", 1)[0]
+        package = module if path.endswith("/__init__.py") else module.rsplit(".", 1)[0]
         for node in ast.walk(ast.parse(content)):
             imports: list[str] = []
             if isinstance(node, ast.Import):
@@ -55,9 +62,17 @@ def select_modules(sources: dict[str, str], changed: set[str]) -> list[str] | No
                     imports = [node.args[0].value]
                 else:
                     imports = list(modules)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                imports.extend(
+                    re.findall(r"(?:control_plane|tests)(?:\.[A-Za-z_]\w*)+", node.value)
+                )
             for imported in imports:
-                if imported in modules:
-                    consumers[imported].add(module)
+                while imported and imported not in modules:
+                    imported = imported.rpartition(".")[0]
+                while imported:
+                    if imported in modules:
+                        consumers[imported].add(module)
+                    imported = imported.rpartition(".")[0]
     affected: set[str] = set()
     for path in changed:
         if path.startswith("docs/") and path.endswith(".md") or path in {"README.md", "AGENTS.md"}:
@@ -80,6 +95,8 @@ def select_modules(sources: dict[str, str], changed: set[str]) -> list[str] | No
         if not tests:
             return None
         affected.update(tests)
+        if len(affected) > max_modules:
+            return None
     return sorted(affected)
 
 
@@ -112,16 +129,12 @@ def plan(root: Path, event: dict[str, object], event_name: str) -> list[str] | N
         git(root, "diff", "--name-only", "--no-renames", comparison_base, "HEAD").splitlines()
     )
     files = git(root, "ls-tree", "-r", "--name-only", comparison_base).splitlines()
-    for path in _CODEOWNERS_PATHS:
+    for path in CODEOWNERS_PATHS:
         if path not in files:
             continue
         content = git(root, "show", f"{comparison_base}:{path}")
-        patterns = tuple(
-            words[0]
-            for line in content.splitlines()
-            if (words := line.split()) and not words[0].startswith("#") and len(words) > 1
-        )
-        if _paths_require_individual_landing(tuple(changed), patterns):
+        patterns = parse_codeowner_patterns(content)
+        if paths_require_individual_landing(tuple(changed), patterns):
             return None
         break
     sources: dict[str, str] = {}

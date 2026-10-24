@@ -5262,16 +5262,29 @@ def _required_checks_observation(
     if source_screening and isinstance(raw_checks, list) and isinstance(raw_statuses, list):
         observed_names = {
             str(check.get("name", "")).casefold() for check in raw_checks if isinstance(check, dict)
-        }
-        status_names = {
+        } | {
             str(status.get("context", "")).casefold()
             for status in raw_statuses
             if isinstance(status, dict)
         }
-        if "pr-ci-gate" in observed_names and "ci-gate" not in observed_names | status_names:
+        focused_apps = {
+            app_id
+            for check in raw_checks
+            if isinstance(check, dict)
+            and check.get("name") == "pr-ci-gate"
+            and isinstance(app := check.get("app"), dict)
+            and app.get("slug") == "github-actions"
+            and isinstance(app_id := app.get("id"), int)
+            and not isinstance(app_id, bool)
+            and app_id > 0
+        }
+        if "ci-gate" not in observed_names and len(focused_apps) == 1:
             focused_source = True
+            focused_app = next(iter(focused_apps))
             filtered_requirements = tuple(
-                ("pr-ci-gate" if name.casefold() == "ci-gate" else name, app_id)
+                ("pr-ci-gate", app_id or focused_app)
+                if name.casefold() == "ci-gate"
+                else (name, app_id)
                 for name, app_id in filtered_requirements
             )
     required_status, missing = (

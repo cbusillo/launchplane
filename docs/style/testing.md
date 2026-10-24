@@ -66,7 +66,7 @@ assert instruction wording or config text.
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
 
-The approved [Q778 Launchplane pilot](https://github.com/cbusillo/launchplane/issues/4739)
+The approved [Q778 Launchplane pilot](https://github.com/cbusillo/direction/issues/98#issuecomment-6388120133)
 runs focused ordinary PR checks and the full suite on train candidates. Wait for
 green current-head PR CI and a weighed review before the checked `gh-pr.py ready`
 handoff. `pr-ci-gate` screens focused source heads; it never satisfies the
@@ -75,6 +75,14 @@ still require the full `ci-gate` on the exact candidate SHA. Focused source head
 cannot use the single-entry head-check reuse path. Controllers without focused
 source screening support hold these PRs pending rather than merging them.
 CodeQL, Security, Client acceptance and Ready metadata remain unchanged.
+
+For a protected-branch fallback or a newly individual-routed PR, dispatch the
+CI workflow on its exact source branch through the installed GitHub
+`github_workflow_babysit.py dispatch --repo OWNER/REPO --workflow ci.yml --ref BRANCH`
+helper. Manual CI always runs the full suite and publishes `ci-gate` for that
+head; it never uses focused selection or verified-tree reuse. Wait for that
+run and the unchanged independent required checks before landing. A rerun of
+the earlier focused PR run keeps its selection; use the manual full run.
 
 `control_plane.ci_selection` reads only committed comparison and merge trees.
 For a same-repository PR targeting the default branch, it follows Python imports
@@ -85,12 +93,13 @@ existing static, frontend validation and image/security checks still run.
 CODEOWNERS paths and changes to the ownership rules retain full PR validation.
 Forks, stacked PRs, unsupported paths (including frontend, dependency, workflow
 and packaging changes), unmapped Python changes, invalid syntax and unprovable
-history retain full testing. The conservative fallback costs more CI; it never
+history and broad selections beyond the focused-job module budget retain full testing. The conservative fallback costs more CI; it never
 qualifies an unknown selection as focused.
 
-Train pushes always run the complete unit, PostgreSQL and browser jobs. Their
-aggregate rejects failed, skipped, cancelled or missing broad jobs even when a
-verified-tree result or focused result is supplied. Generated train PRs continue
+New train candidates run the complete unit, PostgreSQL and browser jobs. Their
+aggregate rejects failed, skipped, cancelled or missing broad jobs. The existing
+exact-SHA proof may reuse a successful full main run for a train base or no-op;
+focused results never supply that proof. Generated train PRs continue
 to delegate to that exact push. Main's existing identical-tree reuse and the
 scheduled full run remain in place. The pilot removes repeated pre-train broad
 coverage for supported source changes; it does not remove test inventory.

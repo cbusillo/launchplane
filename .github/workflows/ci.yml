@@ -7,6 +7,7 @@ name: CI
       - main
       - "launchplane/train/**"
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "17 9 * * *"
 
@@ -79,14 +80,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - name: Install uv for test selection
+        if: github.event_name == 'pull_request'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Select affected test modules
+        if: github.event_name == 'pull_request'
         id: tests
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: uv run --extra dev python -m control_plane.ci_selection
+        run: uv run --no-project --no-config python -m control_plane.ci_selection
       - name: Select CI runner pool
         id: select
         env:
@@ -312,7 +315,8 @@ jobs:
             done < <(jq -r '.check_runs[] | select(.app.slug == "github-actions") | .check_suite.id' <<<"${checks}")
             return 1
           }
-          if [ "${EVENT_NAME}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
+          if [ "${EVENT_NAME}" = "push" ] && \
+            [[ "${REF}" == "refs/heads/main" || "${REF}" == refs/heads/launchplane/train/* ]]; then
             if passed_ci "${SHA}" main; then
               echo "Commit ${SHA} already passed main ci-gate."
               echo "verified=true" >> "${GITHUB_OUTPUT}"
@@ -1250,7 +1254,7 @@ jobs:
     if: >-
       !cancelled() &&
       (github.event_name == 'pull_request' || github.event_name == 'push' ||
-      github.event_name == 'schedule')
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     permissions:
       actions: read
       contents: read
@@ -1351,7 +1355,7 @@ jobs:
             echo "repository_pins concluded with: ${REPOSITORY_PINS_RESULT}" >&2
             exit 1
           fi
-          if [ "${VERIFIED_TREE}" = "true" ] && [[ "${REF:-}" != refs/heads/launchplane/train/* ]]; then
+          if [ "${VERIFIED_TREE}" = "true" ]; then
             echo "This exact commit or up-to-date pull request tree already passed ci-gate."
             exit 0
           fi

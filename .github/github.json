@@ -87,8 +87,6 @@
   "qualityGate": {
     "test": {
       "local": "uv run --extra dev python -m unittest {modules}",
-      "prSelection": "uv run --extra dev python -m control_plane.ci_selection",
-      "pr": "uv run --extra dev python -m control_plane.ci_selection run",
       "localSafety": "uv run --extra dev python -m unittest {safety_modules}",
       "odooStartupRehearsal": "LAUNCHPLANE_TEST_STARTUP_IMAGE=\"${LAUNCHPLANE_TEST_STARTUP_IMAGE:?select an already-local immutable image}\" uv run --extra dev python -m unittest tests.test_odoo_slot_startup_rehearsal -v",
       "testingRouteReaderRehearsal": "LAUNCHPLANE_TEST_TRAEFIK_IMAGE=\"${LAUNCHPLANE_TEST_TRAEFIK_IMAGE:?select an already-local immutable Traefik image}\" uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port tests.test_testing_application_activation.ApplicationRuntimeImageTests.test_private_http_program_uses_selected_proxy_without_following_redirects -v",

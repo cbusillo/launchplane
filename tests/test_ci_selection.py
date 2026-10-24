@@ -33,6 +33,20 @@ class AffectedTestSelectionTests(unittest.TestCase):
             ["tests.test_computed", "tests.test_dynamic", "tests.test_service"],
         )
 
+    def test_package_reexports_and_string_patch_targets_keep_their_consumers(self) -> None:
+        self.sources["control_plane/package/implementation.py"] = "value = 1"
+        self.sources["control_plane/package/__init__.py"] = "from .implementation import value"
+        self.sources["tests/test_package.py"] = "from control_plane.package import value"
+        self.sources["tests/test_patch.py"] = 'patch("control_plane.package.implementation.value")'
+        self.assertEqual(
+            select_modules(self.sources, {"control_plane/package/implementation.py"}),
+            ["tests.test_package", "tests.test_patch"],
+        )
+
+    def test_broad_dependency_fanout_retains_sharded_full_ci(self) -> None:
+        self.sources["tests/test_second.py"] = "from control_plane.policy import permit"
+        self.assertIsNone(select_modules(self.sources, {"control_plane/policy.py"}, max_modules=1))
+
     def test_changed_tests_run_with_their_consumers(self) -> None:
         self.sources["tests/test_policy.py"] = "from tests.test_service import Fixture\n"
         self.assertEqual(
@@ -94,6 +108,7 @@ class PullRequestSelectionTests(unittest.TestCase):
             }
             self.assertEqual(plan(root, event, "pull_request"), ["tests.test_policy"])
             self.assertIsNone(plan(root, event, "push"))
+            self.assertIsNone(plan(root, event, "workflow_dispatch"))
             head_repository["full_name"] = "fork/control"
             self.assertIsNone(plan(root, event, "pull_request"))
 
