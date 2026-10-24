@@ -381,7 +381,7 @@ def retained_application_backend(containers, binding, proxy_networks):
     if (json.loads(docker('service','inspect',binding['name']))[0]!=service
         or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
         or read_service_ids()!=service_ids
-        or sorted(docker('ps','-aq').decode().splitlines())!=sorted(item['Id'] for item in containers)
+        or sorted(docker('ps','-aq','--no-trunc').decode().splitlines())!=sorted(item['Id'] for item in containers)
         or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
         or single_local_swarm_node(docker)!=local_nodes):
         raise RuntimeError('Retained inventory changed during route observation')

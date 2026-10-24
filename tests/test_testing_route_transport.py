@@ -258,7 +258,10 @@ class TestingRouteTransportTests(unittest.TestCase):
         result = b""
         proxy_id = self.containers["proxy"]["Id"]
         if command[1:3] == ["ps", "-aq"]:
-            result = "\n".join(item["Id"] for item in self.containers.values()).encode()
+            result = "\n".join(
+                item["Id"] if "--no-trunc" in command else item["Id"][:12]
+                for item in self.containers.values()
+            ).encode()
         elif command[1] == "inspect":
             result = json.dumps(
                 [

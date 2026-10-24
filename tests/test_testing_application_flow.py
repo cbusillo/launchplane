@@ -233,6 +233,7 @@ class ApplicationFlowTests(unittest.TestCase):
         self.stored_service_view: Any = None
         self.after_stored_service_read: Any = None
         self.service_id_resolution: Any = None
+        self.before_service_list: Any = None
         self.tasks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
         self.images: dict[str, str] = {}
@@ -1625,12 +1626,9 @@ class ApplicationFlowTests(unittest.TestCase):
         self.services["neighbor"] = neighbor
         self.adapter.preflight_application_route(self.planned)
         for problem in ("missing", "reordered", "duplicate", "foreign", "malformed", "reread"):
-            calls = 0
 
             def resolve(rows: list[Any]) -> list[Any]:
-                nonlocal calls
-                calls += 1
-                if problem == "missing" or (problem == "reread" and calls > 1):
+                if problem == "missing":
                     return rows[:-1]
                 if problem == "reordered":
                     return list(reversed(rows))
@@ -1644,9 +1642,21 @@ class ApplicationFlowTests(unittest.TestCase):
 
             with self.subTest(problem=problem):
                 self.service_id_resolution = resolve
+                if problem == "reread":
+                    list_calls = 0
+
+                    def change_inventory() -> None:
+                        nonlocal list_calls
+                        list_calls += 1
+                        if list_calls == 2:
+                            neighbor["ID"] = hashlib.sha256(b"changed-neighbor").hexdigest()[:25]
+
+                    self.before_service_list = change_inventory
                 with self.assertRaises(ValueError):
                     self.adapter.preflight_application_route(self.planned)
                 self.assertEqual(routing.effect_count, 0)
+                self.before_service_list = None
+                neighbor["ID"] = hashlib.sha256(b"neighbor-service").hexdigest()[:25]
         self.service_id_resolution = None
         original = neighbor["ID"]
         neighbor["ID"] = self.services["old-app"]["ID"][:12] + "x" * 13
@@ -4335,6 +4345,8 @@ class ApplicationFlowTests(unittest.TestCase):
 
         def command(arguments: list[str], **kwargs: Any) -> Any:
             if arguments[1:3] == ["service", "ls"]:
+                if self.before_service_list is not None:
+                    self.before_service_list()
                 if arguments[3:] not in (["-q"], ["--quiet"]):
                     return subprocess.CompletedProcess(
                         arguments, 125, b"", b"unsupported list option"
