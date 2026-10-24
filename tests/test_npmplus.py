@@ -79,7 +79,7 @@ class _Opener:
             assert isinstance(payload, dict)
             if set(payload) & {"meta", "enabled", "http2_support", "trust_forwarded_proto"}:
                 raise AssertionError("Current NPMplus rejects legacy request properties")
-            return _Response({"id": 78, **payload})
+            return _Response(_proxy_host_response(payload))
         if method == "GET" and path == "/api/nginx/proxy-hosts/78":
             return _Response({**self.host_details, "npmplus_noindex": True})
         if method == "GET" and path == "/api/nginx/proxy-hosts":
@@ -92,7 +92,7 @@ class _Opener:
             return _Response(self.access_list_payload)
         if method == "PUT" and path == "/api/nginx/proxy-hosts/78":
             assert isinstance(payload, dict)
-            return _Response({"id": 78, **payload})
+            return _Response(_proxy_host_response(payload))
         if method == "POST" and path in (
             "/api/nginx/proxy-hosts/78/disable",
             "/api/nginx/proxy-hosts/78/enable",
@@ -101,6 +101,25 @@ class _Opener:
         if method == "DELETE" and path == "/api/nginx/proxy-hosts/78":
             return _Response(True)
         raise AssertionError(f"Unexpected request: {method} {path}")
+
+
+def _access_list_response(payload: dict[str, object]) -> dict[str, object]:
+    access_list_ids = payload["npmplus_access_list_ids"]
+    assert isinstance(access_list_ids, list)
+    return {
+        **{key: value for key, value in payload.items() if key != "npmplus_access_list_ids"},
+        "access_lists": [{"id": access_list_id} for access_list_id in access_list_ids],
+    }
+
+
+def _proxy_host_response(payload: dict[str, object]) -> dict[str, object]:
+    locations = payload["locations"]
+    assert isinstance(locations, list)
+    return {
+        **_access_list_response(payload),
+        "id": 78,
+        "locations": [_access_list_response(location) for location in locations],
+    }
 
 
 def _credentials() -> NpmplusCredentials:
@@ -199,6 +218,41 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
                 }
             )
 
+    def test_proxy_host_response_requires_explicit_legacy_access_list(self) -> None:
+        payload = _proxy_host_payload(id=78)
+        del payload["access_list_id"]
+        with self.assertRaises(ValidationError):
+            NpmplusProxyHost.model_validate(payload)
+
+    def test_proxy_host_response_rejects_unverified_access_list_relations(self) -> None:
+        cases: tuple[dict[str, object], ...] = (
+            {"npmplus_access_list_type": "custom", "access_lists": []},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": 42}, {"id": 43}]},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": 42}, {"id": 42}]},
+            {"npmplus_access_list_type": "public", "access_lists": [{"id": 42}]},
+            {"npmplus_access_list_type": "custom", "access_lists": None},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"name": "staff"}]},
+            {"npmplus_access_list_type": "custom", "access_lists": [42]},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": True}]},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": 0}]},
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": "42"}]},
+            {"access_lists": []},
+            {"npmplus_access_list_type": "custom"},
+            {
+                "npmplus_access_list_type": "custom",
+                "npmplus_access_list_ids": [42],
+                "access_lists": [{"id": 43}],
+            },
+            {
+                "npmplus_access_list_type": "custom",
+                "npmplus_access_list_ids": [True],
+                "access_lists": [{"id": 1}],
+            },
+        )
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                NpmplusProxyHost.model_validate({**_proxy_host_payload(id=78), **fields})
+
     def test_proxy_host_response_rejects_multiple_custom_access_lists(self) -> None:
         with self.assertRaises(ValidationError):
             NpmplusProxyHost.model_validate(
@@ -208,6 +262,49 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
                     "npmplus_access_list_type": "custom",
                 }
             )
+
+    def test_location_response_rejects_unrepresented_access_list_policies(self) -> None:
+        location = {"path": "/app", "forward_scheme": "http", "forward_host": "192.0.2.11"}
+        cases: tuple[dict[str, object], ...] = (
+            {"npmplus_access_list_type": "custom", "access_lists": [{"id": 42}]},
+            {"npmplus_access_list_type": "public", "access_lists": []},
+            {"npmplus_access_list_type": "global", "access_lists": [{"id": 42}]},
+            {"npmplus_access_list_type": "global"},
+            {"access_lists": []},
+            {"npmplus_access_list_type": "global", "npmplus_access_list_ids": [42]},
+            {"npmplus_access_list_type": "global", "access_lists": None},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                NpmplusLocation.model_validate({**location, **fields})
+
+    def test_location_inherited_access_list_readback_preserves_receipt_payload(self) -> None:
+        location = {"path": "/app", "forward_scheme": "http", "forward_host": "192.0.2.11"}
+        observed = NpmplusLocation.model_validate(
+            {**location, "npmplus_access_list_type": "global", "access_lists": []}
+        )
+        self.assertEqual(
+            observed.model_dump(), NpmplusLocation.model_validate(location).model_dump()
+        )
+
+    def test_location_write_and_readback_preserve_host_acl_inheritance(self) -> None:
+        payload = NpmplusProxyHostPayload.model_validate(
+            {
+                **_proxy_host_payload(),
+                "access_list_id": 42,
+                "locations": [
+                    {"path": "/app", "forward_scheme": "http", "forward_host": "192.0.2.11"}
+                ],
+            }
+        )
+        wire = payload.to_api_payload()
+        locations = wire["locations"]
+        assert isinstance(locations, list) and isinstance(locations[0], dict)
+        self.assertEqual(locations[0]["npmplus_access_list_type"], "global")
+        self.assertEqual(locations[0]["npmplus_access_list_ids"], [])
+        client = NpmplusClient(credentials=_credentials(), opener=_Opener())
+        created = client.create_proxy_host(payload)
+        self.assertEqual(created.locations[0].model_dump(), payload.locations[0].model_dump())
 
     def test_location_payload_rejects_unknown_request_fields(self) -> None:
         with self.assertRaises(ValidationError):
@@ -274,6 +371,20 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_selected_host_read_maps_related_access_lists(self) -> None:
+        for access_type, access_lists in (("public", []), ("custom", [{"id": 42}])):
+            with self.subTest(access_type=access_type):
+                opener = _Opener()
+                del opener.host_details["access_list_id"]
+                opener.host_details.update(
+                    npmplus_access_list_type=access_type,
+                    access_lists=access_lists,
+                )
+                client = NpmplusClient(credentials=_credentials(), opener=opener)
+                host = client.get_proxy_host(78, public_only=True)
+                self.assertEqual(host.access_list_id, access_lists[0]["id"] if access_lists else 0)
+                self.assertNotIn("access_lists", host.model_dump())
+
     def test_collection_preserves_foreign_claims_without_route_qualification(self) -> None:
         owned = _proxy_host_payload(id=78)
         cases = (
