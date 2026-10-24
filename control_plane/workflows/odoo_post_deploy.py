@@ -258,6 +258,7 @@ def execute_odoo_post_deploy(
     fresh_native_source: NativeOdooTestingSource | None = None,
     artifact_id: str = "",
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    restore_release_website_settings: bool = False,
     release_operation: bool = False,
     rollback: bool = False,
 ) -> OdooPostDeployResult:
@@ -381,7 +382,11 @@ def execute_odoo_post_deploy(
                             "Website settings differ from the operation artifact."
                         )
                     accepted_settings = release_website_settings
-                    if rollback and accepted_settings is None:
+                    if (
+                        rollback
+                        and accepted_settings is None
+                        and not restore_release_website_settings
+                    ):
                         applied = rendering_record.last_apply.website_settings
                         if (
                             rendering_record.last_apply.website_settings_verified

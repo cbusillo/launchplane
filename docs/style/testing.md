@@ -66,10 +66,51 @@ assert instruction wording or config text.
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
 
-The full sharded suite remains CI's required gate before merge. Wait for green
-current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
-does not replace that evidence. The trial does not change CI workflows or
-required checks.
+The approved [Q778 Launchplane pilot](https://github.com/cbusillo/direction/issues/98#issuecomment-6388120133)
+runs focused ordinary PR checks and the full suite on train candidates. Wait for
+green current-head PR CI and a weighed review before the checked `gh-pr.py ready`
+handoff. `pr-ci-gate` screens focused source heads only in batch planning, recovery and
+lineage reads; default and direct readers require full checks. It never
+satisfies the protected branch's required `ci-gate`. Candidate validation and live landing
+still require the full `ci-gate` on the exact candidate SHA. Focused source heads
+cannot use the single-entry head-check reuse path. Controllers without focused
+source screening support hold these PRs pending rather than merging them.
+CodeQL, Security, Client acceptance and Ready metadata remain unchanged.
+
+For a protected-branch fallback or a newly individual-routed PR, dispatch the
+CI workflow on its exact source branch through the installed GitHub
+`github_workflow_babysit.py dispatch --repo OWNER/REPO --workflow ci.yml --ref BRANCH`
+helper. Manual CI always runs the full suite and publishes `ci-gate` for that
+head; it never uses focused selection or verified-tree reuse. Wait for that
+run and the unchanged independent required checks before landing. If a manual
+full run fails, re-run its failed jobs in that same run; a separate dispatch
+does not supersede the earlier full-gate failure. A rerun of the earlier focused
+PR run keeps its selection; use the manual full run.
+
+`control_plane.ci_selection` reads only committed comparison and merge trees.
+For a same-repository PR targeting the default branch, it follows Python imports
+through callers and test helpers and selects whole affected test modules,
+including the production-source authorization scanner for backend changes.
+Selections touching the canonical PostgreSQL inventory or configured native
+route-reader rehearsal retain the service-backed full path. A source dependency
+that reaches an operational script also retains full CI. The focused job
+executes `qualityGate.test.local` with the selected whole modules. Documentation-only changes need no unrelated Python tests;
+existing static, frontend validation and image/security checks still run.
+Focused PRs defer browser smoke to the full candidate, including backend-only
+changes; a green focused gate is not browser evidence.
+CODEOWNERS paths and changes to the ownership rules retain full PR validation.
+Forks, stacked PRs, unsupported paths (including frontend, dependency, workflow
+and packaging changes), unmapped Python changes, invalid syntax and unprovable
+history and broad selections beyond the focused-job module budget retain full testing. The conservative fallback costs more CI; it never
+qualifies an unknown selection as focused.
+
+New train candidates run the complete unit, PostgreSQL and browser jobs. Their
+aggregate rejects failed, skipped, cancelled or missing broad jobs. The existing
+exact-SHA proof may reuse a successful full main run for a train base or no-op;
+focused results never supply that proof. Generated train PRs continue
+to delegate to that exact push. Main's existing identical-tree reuse and the
+scheduled full run remain in place. The pilot removes repeated pre-train broad
+coverage for supported source changes; it does not remove test inventory.
 
 Each gate checks the change's entire contribution; missing or unprovable
 history fails. An already protected candidate proves an empty contribution,
@@ -106,10 +147,11 @@ generated surfaces or observed failures; the complete 12-shard suite runs only
 in CI, including for safety-classified changes.
 
 `qualityGate.test.ci` names the all-shard equivalent of CI's plan/run/aggregate
-sequence; CI does not invoke that exact command. Same-repository CI plans once
-and runs the complete inventory across 12 shards, with the coverage aggregate
-required by `ci-gate`; fork PRs run the complete inventory through unsharded
-unittest discovery. Both require green CI before `ready` and merge. Reproduce
+sequence; CI does not invoke that exact command. Full same-repository CI plans
+once and runs the complete inventory across 12 shards, with the coverage
+aggregate required by `ci-gate`; fork PRs run the complete inventory through
+unsharded unittest discovery. Focused PR CI uses the pilot selection above.
+Ready requires green current-head PR checks; merge requires full candidate CI. Reproduce
 an individual shard using the frozen plan and the diagnostic commands below,
 rather than substituting a new host-local plan.
 
@@ -375,7 +417,7 @@ on forks. This reduces the browser critical path without reducing coverage;
 it adds one runner job and an evidence job, so shared runner contention and
 the other CI lanes still bound the whole-run saving.
 
-Browser smoke runs in every CI run that needs fresh proof, including main pushes. The verified-tree
+Browser smoke runs in every full CI run that needs fresh proof, including main pushes. The verified-tree
 shortcut above can reuse a previously successful tree; it does not selectively
 skip browser coverage. Keep that reuse rather than duplicating a full browser
 run for the same tree.

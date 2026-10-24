@@ -7,6 +7,7 @@ name: CI
       - main
       - "launchplane/train/**"
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "17 9 * * *"
 
@@ -24,7 +25,7 @@ permissions:
 
 concurrency:
   group: >-
-    ${{ github.workflow }}-${{ github.event_name == 'push' &&
+    ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'manual-' || '' }}${{ github.event_name == 'push' &&
     !(startsWith(github.ref, 'refs/heads/launchplane/train/') &&
     !github.event.created && !github.event.forced) && github.sha ||
     (github.event.pull_request.number || github.ref) }}
@@ -73,9 +74,22 @@ jobs:
       contents: read
     outputs:
       runner: ${{ steps.select.outputs.runner }}
+      focused: ${{ steps.tests.outputs.focused }}
+      modules: ${{ steps.tests.outputs.modules }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      - name: Install uv for test selection
+        if: github.event_name == 'pull_request'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Select affected test modules
+        if: github.event_name == 'pull_request'
+        id: tests
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: uv run --no-project --no-config python -m control_plane.ci_selection
       - name: Select CI runner pool
         id: select
         env:
@@ -183,6 +197,15 @@ jobs:
             schedule)
               BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
               ;;
+            workflow_dispatch)
+              if [[ -z "$DEFAULT_BRANCH" || "$EVENT_REF" != refs/heads/* || "$EVENT_REF" = refs/heads/launchplane/* ]]; then
+                echo "Manual full CI requires a source branch and repository default branch." >&2
+                exit 1
+              fi
+              git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null
+              git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+              BASE_SHA="$(git merge-base "refs/remotes/origin/${DEFAULT_BRANCH}" "$HEAD_SHA")"
+              ;;
             *) echo "No comment comparison range for ${EVENT_NAME}." >&2; exit 1 ;;
           esac
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ ]]; then
@@ -219,14 +242,23 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
           python_gate=true
           image_gate=true
           # Schedules and unprovable diffs retain absolute gates.
-          if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "push" ]; then
+          if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "push" ] || [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             comparison_base="${BASE_SHA}"
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              comparison_base=""
+              if [[ -n "${DEFAULT_BRANCH:-}" && "$REF" = refs/heads/* && "$REF" != refs/heads/launchplane/* ]] &&
+                git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null &&
+                git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"; then
+                comparison_base="refs/remotes/origin/${DEFAULT_BRANCH}"
+              fi
+            fi
             if [[ "${REF}" == refs/heads/launchplane/train/* ]]; then
               comparison_base=origin/main
             fi
@@ -258,8 +290,6 @@ jobs:
   verified_tree:
     needs: candidate_ci
     if: needs.candidate_ci.outputs.delegated == 'false'
-    # Train base pushes can reuse the same commit's successful main CI. Main
-    # also reuses an up-to-date PR tree; new candidate combinations run full CI.
     name: verified-tree
     runs-on: >-
       ${{ fromJSON(
@@ -726,8 +756,8 @@ jobs:
         run: pnpm --dir frontend validate
 
   frontend_browser_smoke:
-    needs: verified_tree
-    if: needs.verified_tree.outputs.verified != 'true'
+    needs: [runner_pool, verified_tree]
+    if: needs.verified_tree.outputs.verified != 'true' && needs.runner_pool.outputs.focused != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -794,8 +824,8 @@ jobs:
           retention-days: 14
 
   frontend_browser_smoke_evidence:
-    needs: [verified_tree, frontend_browser_smoke]
-    if: needs.verified_tree.outputs.verified != 'true'
+    needs: [runner_pool, verified_tree, frontend_browser_smoke]
+    if: needs.verified_tree.outputs.verified != 'true' && needs.runner_pool.outputs.focused != 'true'
     runs-on: >-
       ${{ fromJSON(
       (github.event_name != 'pull_request' ||
@@ -853,6 +883,7 @@ jobs:
     needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
+      needs.runner_pool.outputs.focused != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
@@ -1013,6 +1044,7 @@ jobs:
       !cancelled() && needs.runner_pool.result == 'success' &&
       needs.verified_tree.result == 'success' &&
       needs.verified_tree.outputs.verified != 'true' &&
+      needs.runner_pool.outputs.focused != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
@@ -1132,6 +1164,7 @@ jobs:
     needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
+      needs.runner_pool.outputs.focused != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
@@ -1178,13 +1211,38 @@ jobs:
             postgresql+psycopg://launchplane_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/launchplane_root
         run: uv run --extra dev launchplane ci postgres-integration --shard-count "$SHARD_COUNT" --shard-index "$SHARD_INDEX"
 
+  focused_tests:
+    needs: runner_pool
+    if: >-
+      needs.runner_pool.outputs.focused == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Set up Docker Compose
+        run: bash scripts/setup-ci-compose.sh
+      - name: Run affected whole test modules
+        env:
+          MODULES: ${{ needs.runner_pool.outputs.modules }}
+        run: uv run --extra dev python -m control_plane.ci_selection run
+
   ci_gate:
     # A routing-only PR check must never supersede the push's required ci-gate.
     name: >-
       ${{ github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.head_ref, 'launchplane/train/') &&
-      'candidate-ci-delegated' || 'ci-gate' }}
+      'candidate-ci-delegated' ||
+      (needs.runner_pool.outputs.focused == 'true' && 'pr-ci-gate' || 'ci-gate') }}
     runs-on: >-
       ${{ fromJSON(
       (github.event_name != 'pull_request' ||
@@ -1209,11 +1267,12 @@ jobs:
       - frontend_browser_smoke_evidence
       - test
       - test_fork
+      - focused_tests
       - postgres_integration
     if: >-
       !cancelled() &&
       (github.event_name == 'pull_request' || github.event_name == 'push' ||
-      github.event_name == 'schedule')
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     permissions:
       actions: read
       contents: read
@@ -1291,6 +1350,10 @@ jobs:
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
           REPOSITORY_PINS_RESULT: ${{ needs.repository_pins.result }}
           AUDIT_POLICY_RESULT: ${{ needs.audit_policy.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          FOCUSED: ${{ needs.runner_pool.outputs.focused }}
+          FOCUSED_TESTS_RESULT: ${{ needs.focused_tests.result }}
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
@@ -1327,6 +1390,14 @@ jobs:
             require_success static_checks "${STATIC_CHECKS_RESULT}"
             require_success container_scan "${CONTAINER_SCAN_RESULT}"
             require_success frontend_validate "${FRONTEND_VALIDATE_RESULT}"
+            if [ "${FOCUSED:-false}" = "true" ]; then
+              if [ "${EVENT_NAME:-}" != "pull_request" ]; then
+                echo "Focused checks cannot qualify a candidate or main push." >&2
+                exit 1
+              fi
+              require_success focused_tests "${FOCUSED_TESTS_RESULT}"
+              exit 0
+            fi
             require_success frontend_browser_smoke "${FRONTEND_BROWSER_SMOKE_RESULT}"
             require_success frontend_browser_smoke_evidence "${FRONTEND_BROWSER_SMOKE_EVIDENCE_RESULT}"
             require_success test "${TEST_RESULT}"

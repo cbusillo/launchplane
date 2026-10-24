@@ -45,6 +45,18 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
                 git("mv", "Dockerfile", "archived-image-recipe")
             git("add", ".")
             git("commit", "--quiet", "--allow-empty", "-m", "candidate")
+            if event == "workflow_dispatch":
+                remote = root / "fixture-origin.git"
+                subprocess.run(
+                    ["git", "clone", "--bare", str(root), str(remote)],
+                    check=True,
+                    capture_output=True,
+                )
+                git("remote", "add", "origin", str(remote))
+                subprocess.run(
+                    ["git", "--git-dir", str(remote), "update-ref", "refs/heads/main", base],
+                    check=True,
+                )
             output = root / "outputs"
             subprocess.run(
                 ["bash", "-c", step.run],
@@ -53,6 +65,7 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
                 | {
                     "EVENT_NAME": event,
                     "REF": ref,
+                    "DEFAULT_BRANCH": "main",
                     "BASE_SHA": "missing" if missing_base else base,
                     "RUNNER_TEMP": directory,
                     "GITHUB_OUTPUT": str(output),
@@ -62,6 +75,20 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
                 check=True,
             )
             return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def test_manual_full_run_keeps_dependency_diff_audit_policy(self) -> None:
+        self.assertEqual(
+            self.classify(
+                ("docs/usage.md",), event="workflow_dispatch", ref="refs/heads/work/source"
+            ),
+            {"python_gate": "false", "image_gate": "false"},
+        )
+        self.assertEqual(
+            self.classify(
+                ("pyproject.toml",), event="workflow_dispatch", ref="refs/heads/work/source"
+            ),
+            {"python_gate": "true", "image_gate": "true"},
+        )
 
     def test_unrelated_source_and_docs_report_inherited_advisories(self) -> None:
         result = self.classify(("control_plane/example.py", "docs/example.md"))

@@ -211,6 +211,9 @@ def _announced_changes(
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 COMPLETED_PREFIX = "<!-- launchplane:release-invitation-completed:"
 WHY_NOW = "**Why now:** "
+ENGINEERING_WHY_NOW = (
+    WHY_NOW + "Engineering updates are ready for production and need your release acceptance."
+)
 ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
 
 
@@ -351,6 +354,33 @@ def _request_marker(
     )
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-request:{key} -->"
+
+
+def _accepted_release_in_progress(
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord | None,
+    production: ReleaseVersion,
+    candidate: ReleaseVersion,
+) -> bool:
+    if decision is None or decision.decision != "accepted" or not decision.release_start:
+        return False
+    from control_plane.client_release import read_client_release_run
+
+    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    return run is not None and (
+        any(step.status in {"pending", "running", "reconciliation_required"} for step in run.steps)
+        or (
+            run.state == "waiting"
+            and (
+                any(step.status == "pass" for step in run.steps)
+                or (
+                    production == decision.checklist.production
+                    and candidate == decision.checklist.candidate
+                )
+            )
+        )
+    )
 
 
 def _open_request(
@@ -861,6 +891,8 @@ def publish_release_invitation(
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
             return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
+    if _accepted_release_in_progress(store, profile, last_decision, production, candidate):
+        return False
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
     # checklist without a new candidate, and the Client then needs a fresh request.
@@ -945,8 +977,6 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not notification_links and not urgent_reason:
-                    return False
                 created = github_api_request(
                     path=path,
                     token=token,
@@ -969,10 +999,6 @@ def publish_release_invitation(
                 and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
             ]
             request = _open_request(comments, request_marker, last_decision)
-            # Engineering-only changes never open a release review on their own;
-            # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not notification_links and not urgent_reason:
-                return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
@@ -986,6 +1012,13 @@ def publish_release_invitation(
                 not _ready(latest, profile)
                 or latest.checklist_digest != review.checklist_digest
                 or _last_client_decision(store, profile) != last_decision
+                or _accepted_release_in_progress(
+                    store,
+                    profile,
+                    last_decision,
+                    review.checklist.production,
+                    review.checklist.candidate,
+                )
             ):
                 return False
             if issues[0].get("state") == "closed":
@@ -1124,6 +1157,8 @@ def publish_release_invitation(
             )
             if not request and urgent_reason:
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
+            elif not why_now or why_now == ENGINEERING_WHY_NOW:
+                why_now = "" if notification_links else ENGINEERING_WHY_NOW
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."

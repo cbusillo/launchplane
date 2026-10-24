@@ -171,7 +171,7 @@ _DRILL_STEPS = (
     ClientReleaseStep("backup", 2),
     ClientReleaseStep("promote", 2),
 )
-ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T15:00:00Z"
+ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T19:25:37Z"
 
 
 class ClientReleaseFailureView(BaseModel):

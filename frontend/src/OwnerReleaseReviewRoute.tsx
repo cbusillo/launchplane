@@ -318,7 +318,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
+        <p>Launchplane automatically asks {client} to review every qualified release, including engineering changes. You can also send a request now with a reason in plain words; nothing goes live until {client} accepts it. If {client} was already asked about this release, the existing request and its reason stay unchanged.</p>
         <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
