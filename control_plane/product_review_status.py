@@ -35,7 +35,12 @@ from control_plane.github_app_identity import (
 from control_plane.client_test_notes import change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
-from control_plane.product_review import ProductReviewStore, applicable_product_review_decisions
+from control_plane.product_review import (
+    ProductReviewStore,
+    applicable_product_review_decisions,
+    preview_review_unavailability,
+)
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
@@ -152,6 +157,7 @@ class OwnerReviewStatusPublisher:
         pull_request_number: int,
         context: str = "",
         retire_leftovers: bool = False,
+        preview_request: ProductReconcileRequestRecord | None = None,
     ) -> OwnerReviewStatus | None:
         """Best-effort: never raises. Returns the status written, if any."""
         with ExitStack() as credentials:
@@ -235,6 +241,7 @@ class OwnerReviewStatusPublisher:
                                 pull_request_number=pull_request_number,
                                 facts=facts,
                                 token=token,
+                                preview_request=preview_request,
                                 existing_only=not profile.owner.is_set
                                 and profile.owner.review_label.strip().casefold()
                                 not in facts.labels,
@@ -362,6 +369,7 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
         existing_only: bool = False,
+        preview_request: ProductReconcileRequestRecord | None = None,
     ) -> OwnerReviewStatus | None:
         intent = change_client_review(
             body=facts.body,
@@ -413,6 +421,16 @@ class OwnerReviewStatusPublisher:
             )
         if intent.error and not existing_only:
             status = OwnerReviewStatus(state="failure", description=intent.error)
+        elif intent.review_required and status.state == "pending" and profile.owner.is_set:
+            unavailable = preview_review_unavailability(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                request=preview_request,
+            )
+            if unavailable:
+                status = OwnerReviewStatus(state="pending", description=unavailable)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(

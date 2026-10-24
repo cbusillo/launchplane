@@ -12,7 +12,7 @@ validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -40,8 +40,32 @@ _REDACTED = "[redacted]"
 
 class ProductReconcileRequestReader(Protocol):
     def list_product_reconcile_requests(
-        self, *, product: str
+        self, *, product: str, limit: int | None = None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
+
+def product_preview_requests(
+    store: object, *, product: str
+) -> tuple[ProductReconcileRequestRecord, ...]:
+    if not callable(getattr(store, "list_product_reconcile_requests", None)):
+        return ()
+    return tuple(
+        request
+        for request in cast(ProductReconcileRequestReader, store).list_product_reconcile_requests(
+            product=product, limit=None
+        )
+        if request.product == product
+        and request.target_kind == "preview"
+        and request.last_plan.get("action") != "destroy"
+        and request.last_plan.get("reason") != "pull_request_not_open"
+    )
+
+
+def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
+    summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
+    if not isinstance(summary, str) or not summary.strip():
+        return ""
+    return _safe_text(summary, maximum_length=200)
 
 
 class ProductReconcileRequestView(BaseModel):

@@ -2975,6 +2975,9 @@ def run_product_reconcile_once(
             record_store=record_store,
             control_plane_root=control_plane_root,
             public_origin=public_origin,
+            preview_request=request.model_copy(
+                update={"last_plan": plan, "last_error": outcome.error}
+            ),
         ),
     )
     if feedback is not None:
@@ -3031,6 +3034,7 @@ def _owner_review_status_writer(
     record_store: object,
     control_plane_root: Path | None,
     public_origin: Callable[[], str],
+    preview_request: ProductReconcileRequestRecord | None = None,
 ) -> OwnerReviewStatusWriter | None:
     """Project Client review through the Delivery and Advisory Apps."""
     if control_plane_root is None:
@@ -3045,7 +3049,12 @@ def _owner_review_status_writer(
     ) -> OwnerReviewStatus | None:
         return OwnerReviewStatusPublisher(
             control_plane_root=control_plane_root, public_origin=public_origin() or None
-        ).publish(store=review_store, profile=profile, pull_request_number=pull_request_number)
+        ).publish(
+            store=review_store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            preview_request=preview_request,
+        )
 
     return write
 

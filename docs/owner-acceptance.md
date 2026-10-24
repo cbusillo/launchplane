@@ -69,6 +69,14 @@ publisher rereads the PR and saved decisions, even when there is no new preview
 comment to post, or when an open PR's preview is being destroyed. The open-PR
 sweep also refreshes reviews for products without previews or testing lanes;
 failed publication retries through the same reconcile row on a later sweep.
+A pending Client check invites review only when a ready serving preview matches the
+current PR head. Otherwise it reports that the preview is unavailable, including
+the redacted refresh failure reason when one is recorded, and says there is
+nothing for the Client to review yet. The current reconcile outcome is used
+immediately, before feedback completion saves it. Product Ops projects these
+preview failures and unavailable replacements in its existing product warnings;
+retrying a failed refresh does not clear its warning. A working preview and a
+successful reconcile clear it. Saved Client decisions remain independent.
 When its fresh PR read observes a closed change, the publisher can still deliver
 already-requested saved Client feedback. It skips current review projection,
 decision-base binding, acceptance carry and retired-check maintenance, even if

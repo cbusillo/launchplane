@@ -18,6 +18,8 @@ from control_plane.contracts.product_review import (
     ProductReviewDecisionRecord,
 )
 from control_plane.release_review_shared import repository_key
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+from control_plane.product_reconcile_read import product_preview_requests, preview_refresh_failure
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 
@@ -187,6 +189,36 @@ def resolve_serving_preview(
     if len(serving) != 1:
         return ProductReviewPreview()
     return serving[0]
+
+
+def preview_review_unavailability(
+    *,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str = "",
+    request: ProductReconcileRequestRecord | None = None,
+) -> str:
+    if not profile.preview.enabled:
+        return ""
+    if request is None:
+        request = next(
+            (
+                item
+                for item in product_preview_requests(store, product=profile.product)
+                if item.pull_request_number == pull_request_number
+            ),
+            None,
+        )
+    failure = preview_refresh_failure(request) if request is not None else ""
+    if failure:
+        return f"Preview failed: {failure}; nothing for the Client to review yet"
+    serving = resolve_serving_preview(
+        store=store, profile=profile, pull_request_number=pull_request_number
+    )
+    if not serving.preview_url or (head_sha and serving.head_sha != head_sha.lower()):
+        return "Preview not available; nothing for the Client to review yet"
+    return ""
 
 
 def latest_product_review_decision(
