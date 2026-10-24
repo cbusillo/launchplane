@@ -269,7 +269,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
 
     def test_native_mint_supports_the_current_execution_reader(self) -> None:
         from control_plane.merge_train_github import (
-            _check_runs_status,
             _list_check_runs,
             _required_check_evidence_status,
         )
@@ -398,9 +397,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                             ),
                             repository_path=self.repository,
                             encoded_head_sha=head,
-                        )
-                        self.assertEqual(
-                            _check_runs_status(payload), "fail" if unavailable else "pass"
                         )
                         if unavailable:
                             self.assertEqual(

@@ -932,10 +932,6 @@ def _record_with_target_replacement_canonical(
     )
 
 
-def _merge_required_odoo_install_modules(raw_modules: str) -> str:
-    return merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
-
-
 def _normalize_domain(raw_domain: str) -> str:
     return raw_domain.strip().lower().removeprefix("https://").removeprefix("http://").rstrip("/")
 

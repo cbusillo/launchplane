@@ -20,11 +20,8 @@ from control_plane.merge_train_controller_run_once import (
     _apply_queue_block,
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record

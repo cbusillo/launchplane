@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.secret_relabel import relabel_secret_binding
 
 import json
 import base64
@@ -808,8 +809,8 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         later = (
             datetime.fromisoformat(current.updated_at.replace("Z", "+00:00")) + timedelta(seconds=1)
         ).isoformat()
-        with patch.object(secrets, "utc_now_timestamp", return_value=later):
-            secrets.relabel_secret_binding(
+        with patch("tests.support.secret_relabel.utc_now_timestamp", return_value=later):
+            relabel_secret_binding(
                 record_store=self.store,
                 binding_id=binding.binding_id,
                 binding_key="BOT_ACCESS_RENAMED",
@@ -855,7 +856,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         record = self.store.read_secret_record(binding.secret_id)
         version = self.store.read_secret_version(record.current_version_id)
         value = secrets._decrypt_secret_value(version.ciphertext, version.key_id)
-        secrets.relabel_secret_binding(
+        relabel_secret_binding(
             record_store=self.store,
             binding_id=binding.binding_id,
             binding_key="RENAMED_LOCAL_PASSWORD",

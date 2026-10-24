@@ -40,9 +40,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.merge_train_controller_reply import (
-    validate_merge_train_controller_reply,
-)
+from tests.support.merge_train_controller_reply import validate_merge_train_controller_reply
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
 )

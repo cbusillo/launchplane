@@ -39,10 +39,6 @@ _ROUTE = "service:preview-lifecycle-scheduler"
 _LOGGER = logging.getLogger(__name__)
 
 
-def sweep_slot(now: float) -> int:
-    return int((now - SWEEP_SLOT_OFFSET_SECONDS) // SWEEP_INTERVAL_SECONDS)
-
-
 def _timestamp(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
 

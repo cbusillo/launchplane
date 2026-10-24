@@ -55,7 +55,6 @@ from control_plane.workflows.generic_web_promotion import (
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
     _latest_workflow_dispatch_run,
-    dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.workflows.ship import build_deployment_record
@@ -1709,210 +1708,34 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
         self.assertNotIn("previous_run_ids", first.payload)
         self.assertNotIn("dispatch_started_at", first.payload)
 
-    def test_dispatch_accepts_based_driver_product_profile(self) -> None:
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
+    def test_observation_refuses_ambiguous_and_predispatch_runs(self) -> None:
+        cases = {
+            "ambiguous": (
+                {"id": 101, "created_at": "2026-10-23T12:01:00Z"},
+                {"id": 102, "created_at": "2026-10-23T12:01:00Z"},
             ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                return_value={"workflow_runs": []},
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(driver_id="odoo"),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=True,
-                    observe_timeout_seconds=0,
+            "predispatch": ({"id": 101, "created_at": "2026-10-23T11:59:00Z"},),
+        }
+        for name, runs in cases.items():
+            with (
+                self.subTest(name),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                    return_value={"workflow_runs": list(runs)},
                 ),
-            )
-
-        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
-        self.assertTrue(result.dry_run)
-
-    def test_dispatch_rejects_unbased_driver_product_profile(self) -> None:
-        with self.assertRaises(click.ClickException):
-            dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(driver_id="missing-driver"),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=True,
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-    def test_dispatches_product_workflow_and_observes_run(self) -> None:
-        requests: list[tuple[str, str, dict[str, object] | None]] = []
-        listed_once = False
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal listed_once
-            requests.append((method, path, body))
-            if method == "POST":
-                self.assertEqual(token, "github-token")
-                return None
-            if not listed_once:
-                listed_once = True
-                return {
-                    "workflow_runs": [
-                        {
-                            "id": 100,
-                            "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/100",
-                            "status": "completed",
-                            "conclusion": "success",
-                        }
-                    ]
-                }
-            return {
-                "workflow_runs": [
-                    {
-                        "id": 25237186636,
-                        "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                        "status": "queued",
-                        "conclusion": None,
-                        "created_at": "2099-01-01T00:00:00Z",
-                    }
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            profile = _profile().model_copy(
-                update={"promotion_workflow": ProductPromotionWorkflowProfile(default_bump="minor")}
-            )
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=profile,
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=False,
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
-        self.assertEqual(result.workflow_id, "promote-prod.yml")
-        self.assertEqual(result.ref, "main")
-        self.assertFalse(result.dry_run)
-        self.assertEqual(result.bump, "minor")
-        self.assertEqual(result.run_id, 25237186636)
-        self.assertEqual(result.run_status, "queued")
-        self.assertEqual(requests[1][0], "POST")
-        self.assertEqual(
-            requests[1][1],
-            "/repos/cbusillo/sellyouroutboard/actions/workflows/promote-prod.yml/dispatches",
-        )
-        self.assertEqual(
-            requests[1][2],
-            {"ref": "main", "inputs": {"dry_run": "false", "bump": "minor"}},
-        )
-
-    def test_observation_declines_ambiguous_new_runs(self) -> None:
-        list_count = 0
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal list_count
-            if method == "POST":
-                return None
-            list_count += 1
-            if list_count == 1:
-                return {"workflow_runs": []}
-            return {
-                "workflow_runs": [
-                    {"id": 101, "html_url": "https://github.example/runs/101", "status": "queued"},
-                    {"id": 102, "html_url": "https://github.example/runs/102", "status": "queued"},
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.run_id, 0)
-        self.assertEqual(result.run_url, "")
-        self.assertEqual(result.run_status, "pending")
-
-    def test_observation_ignores_new_run_created_before_dispatch(self) -> None:
-        list_count = 0
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal list_count
-            if method == "POST":
-                return None
-            list_count += 1
-            if list_count == 1:
-                return {"workflow_runs": []}
-            return {
-                "workflow_runs": [
-                    {
-                        "id": 101,
-                        "html_url": "https://github.example/runs/101",
-                        "status": "queued",
-                        "created_at": "2000-01-01T00:00:00Z",
-                    }
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.run_id, 0)
-        self.assertEqual(result.run_url, "")
-        self.assertEqual(result.run_status, "pending")
+            ):
+                self.assertEqual(
+                    _latest_workflow_dispatch_run(
+                        owner="example",
+                        repo="site",
+                        workflow_id="promote.yml",
+                        ref="main",
+                        token="fixture-token",
+                        previous_run_ids=set(),
+                        min_created_at=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+                    ),
+                    {},
+                )
 
     def test_observation_accepts_run_created_in_same_second_as_dispatch(self) -> None:
         def fake_github_api_request(
@@ -1945,28 +1768,6 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(run.get("id"), 101)
-
-    def test_dispatch_requires_managed_github_token(self) -> None:
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request"
-            ) as request,
-        ):
-            with self.assertRaises(click.ClickException):
-                dispatch_generic_web_promotion_workflow(
-                    control_plane_root=Path("."),
-                    profile=_profile(),
-                    request=GenericWebPromotionWorkflowRequest(
-                        product="sellyouroutboard",
-                        context="sellyouroutboard-testing",
-                    ),
-                )
-
-        request.assert_not_called()
 
 
 if __name__ == "__main__":

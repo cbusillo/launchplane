@@ -188,26 +188,6 @@ def fetch_compose_service_runtime(
     }
 
 
-def fetch_compose_running_container_images(
-    *,
-    host: str,
-    token: str,
-    app_name: str,
-    server_id: str = "",
-) -> tuple[str, ...]:
-    """Return the configured image of every running service container of one compose app."""
-
-    return tuple(
-        image
-        for image, _deployment_record_id in fetch_compose_running_container_runtime(
-            host=host,
-            token=token,
-            app_name=app_name,
-            server_id=server_id,
-        )
-    )
-
-
 def fetch_compose_running_container_runtime(
     *,
     host: str,

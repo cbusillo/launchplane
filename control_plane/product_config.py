@@ -1580,48 +1580,6 @@ def _existing_generated_binding(
     return candidates[0] if candidates else None
 
 
-def _retire_disabled_runtime_secret_placeholders(
-    *,
-    record_store: ProductConfigStore,
-    configured_binding: SecretBinding,
-    updated_at: str,
-) -> None:
-    if (
-        configured_binding.integration
-        != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-    ):
-        return
-    context_name = configured_binding.context.strip()
-    instance_name = configured_binding.instance.strip()
-    lookup_kwargs: _SecretBindingLookupKwargs = {
-        "integration": configured_binding.integration,
-        "limit": None,
-    }
-    if context_name:
-        lookup_kwargs["context_name"] = context_name
-    if instance_name:
-        lookup_kwargs["instance_name"] = instance_name
-    for binding in record_store.list_secret_bindings(
-        **lookup_kwargs,
-    ):
-        if binding.binding_id == configured_binding.binding_id:
-            continue
-        if binding.context != context_name or binding.instance != instance_name:
-            continue
-        if binding.binding_key != configured_binding.binding_key:
-            continue
-        if binding.status != "disabled":
-            continue
-        record_store.write_secret_binding(
-            binding.model_copy(
-                update={
-                    "integration": f"retired:{binding.integration}",
-                    "updated_at": updated_at,
-                }
-            )
-        )
-
-
 def _planned_disabled_runtime_secret_placeholder_retirements(
     *,
     record_store: ProductConfigStore,

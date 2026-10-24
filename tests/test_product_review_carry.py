@@ -12,10 +12,8 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
 from control_plane.merge_train_branch_refresh import merge_train_branch_refresh_recorder
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.product_review import require_product_review_store
 from control_plane.product_review_carry import carry_owner_acceptance
 from control_plane.product_review_status import OwnerReviewStatusPublisher

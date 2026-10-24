@@ -13,9 +13,9 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
-    MergeTrainGitHubRequest,
     merge_train_construction_ref,
 )
+from tests.support.merge_train_github import MergeTrainGitHubRequest
 from control_plane.workflows.merge_train_controller import (
     decide_merge_train_controller_record_action,
 )

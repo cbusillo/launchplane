@@ -136,19 +136,6 @@ class GenericWebPreviewAuthzReconcilePlan:
     retirement_authority: GenericWebPreviewRetirementAuthority | None
 
 
-def build_generic_web_preview_authz_reconcile_request(
-    *,
-    current_policy: LaunchplaneAuthzPolicy,
-    request: GenericWebPreviewAuthzPlanRequest,
-    profile: LaunchplaneProductProfileRecord | None = None,
-) -> AuthzManagedPolicyReconcileEnvelope:
-    return plan_generic_web_preview_authz_reconcile(
-        current_policy=current_policy,
-        request=request,
-        profile=profile,
-    ).reconcile_request
-
-
 def plan_generic_web_preview_authz_reconcile(
     *,
     current_policy: LaunchplaneAuthzPolicy,

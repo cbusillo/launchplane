@@ -38,10 +38,8 @@ from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionEntrySelector,
 )
 from control_plane.http_routes.mutation_support import idempotency_scope
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_historical_completion import HistoricalCompletionSnapshot
 from control_plane.merge_train_historical_disposition import (
     HistoricalDispositionAuthority,
