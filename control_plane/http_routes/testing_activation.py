@@ -93,6 +93,8 @@ def register_testing_activation_routes(
                         actor=actor(identity),
                         scope=scope,
                         idempotency_key=idempotency_key.strip(),
+                        trace_id=trace,
+                        observe_original=adapter.observe,
                     )
                 )
                 return accepted_evidence_response(

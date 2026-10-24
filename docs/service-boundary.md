@@ -4387,6 +4387,8 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 `owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+Testing reads its exact current reconcile target; preview history does not
+limit that lookup.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.

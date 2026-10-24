@@ -1,4 +1,7 @@
+from collections.abc import Callable
 from datetime import datetime, timezone
+import json
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -9,12 +12,15 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRefusal,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.provider_operations import ProviderObservation, build_provider_operation_key
 from control_plane.testing_activation import ROUTE, activation_record, preparation_resources
 from control_plane.testing_separation_inspection import inspect_preparation_programs
 from control_plane.testing_separation_resources import (
     SeparationResourcesStatus,
     SeparationProgramInspection,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class TestingActivationInspection(SeparationResourcesStatus):
@@ -35,6 +41,8 @@ def inspect_application_activation(
     actor: str,
     scope: str,
     idempotency_key: str,
+    trace_id: str,
+    observe_original: Callable[[str, str, str], ProviderObservation],
 ) -> TestingActivationInspection:
     if not idempotency_key or request.application is None:
         raise TestingActivationRefusal(
@@ -75,6 +83,28 @@ def inspect_application_activation(
         namespace=record.namespace,
         include_storage=False,
     )
+    if row.state == "reconcile_required" and record.phase == "create_application_mount":
+        observation = observe_original(
+            build_provider_operation_key(
+                scope=row.scope,
+                route_path=row.route_path,
+                idempotency_key=row.idempotency_key,
+                request_fingerprint=row.request_fingerprint,
+                reconciliation_key=row.reconciliation_key,
+            ),
+            row.provider_effect_phase,
+            row.reconciliation_key,
+        )
+        _logger.warning(
+            "%s",
+            json.dumps(
+                {
+                    "event": "testing_activation_original_observation",
+                    "trace_id": trace_id,
+                    "outcome": observation.outcome,
+                }
+            ),
+        )
     return TestingActivationInspection(
         product=product,
         context=request.context,

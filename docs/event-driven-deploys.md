@@ -391,6 +391,8 @@ Each target keeps one reconcile request with its state, attempt count, last
 plan and last error. `GET /v1/product-profiles/{product}/reconcile-requests`
 returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
+It includes every recorded target for that product rather than using the
+worker's queue page limit.
 Exact commit SHAs and `sha256:` digests come back as they are, and so do the
 ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 `*_id` fields, when they are a UUID or a `name-<hex>` id; those ids also stay
