@@ -2,7 +2,7 @@ from collections.abc import Iterable
 import hashlib
 import json
 import re
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
@@ -18,6 +18,11 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
+from control_plane.contracts.snapshot_protocol import (
+    LaneInstance,
+    snapshot_protocol,
+    snapshot_protocol_default,
+)
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
@@ -29,6 +34,18 @@ BumpLevel = Literal["patch", "minor", "major"]
 FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
     {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
 )
+TRANSPORT_DATABASE_PREFIX_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
+PROMOTION_WORKFLOW_INPUTS = (
+    "dry_run",
+    "bump",
+    "artifact_id",
+    "deploy_reference",
+    "source_git_ref",
+    "promotion_intent_id",
+)
+PromotionWorkflowInput = Annotated[
+    str, Field(json_schema_extra=snapshot_protocol(*PROMOTION_WORKFLOW_INPUTS))
+]
 
 
 class ProductProfileChangedError(ValueError):
@@ -336,7 +353,7 @@ class ProductLaneProfile(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
     )
 
-    instance: str
+    instance: LaneInstance
     context: str
     base_url: str = ""
     generic_web_extensions: GenericWebLaneExtensions = Field(
@@ -384,7 +401,7 @@ class ProductPreviewProfile(BaseModel):
 
     enabled: bool = False
     context: str = ""
-    slug_template: str = "pr-{number}"
+    slug_template: str = snapshot_protocol_default("pr-{number}")
     app_name_prefix: str = ""
     app_name_suffix: str = Field(
         default="",
@@ -393,7 +410,7 @@ class ProductPreviewProfile(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
         pattern=r"^(-[a-z0-9-]+)?$",
     )
-    template_instance: str = "testing"
+    template_instance: LaneInstance = "testing"
     generic_web_extensions: GenericWebLaneExtensions = Field(
         default_factory=GenericWebLaneExtensions,
         exclude_if=lambda value: not value.configured,
@@ -502,7 +519,7 @@ class ProductPreviewProfile(BaseModel):
             raise ValueError("preview transport extension requires driver data transport")
         if self.transport_extension and (
             not self.app_name_prefix.strip()
-            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.transport_database_prefix)
+            or not TRANSPORT_DATABASE_PREFIX_PATTERN.fullmatch(self.transport_database_prefix)
         ):
             raise ValueError(
                 "declared PostgreSQL transport requires application and safe database prefixes"
@@ -516,14 +533,14 @@ class ProductPreviewProfile(BaseModel):
 class ProductPromotionWorkflowProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    workflow_id: str = "promote-prod.yml"
-    ref: str = "main"
-    dry_run_input: str = "dry_run"
-    bump_input: str = "bump"
-    artifact_id_input: str = "artifact_id"
-    deploy_reference_input: str = "deploy_reference"
-    source_git_ref_input: str = "source_git_ref"
-    promotion_intent_input: str = "promotion_intent_id"
+    workflow_id: str = snapshot_protocol_default("promote-prod.yml")
+    ref: str = snapshot_protocol_default("main")
+    dry_run_input: PromotionWorkflowInput = "dry_run"
+    bump_input: PromotionWorkflowInput = "bump"
+    artifact_id_input: PromotionWorkflowInput = "artifact_id"
+    deploy_reference_input: PromotionWorkflowInput = "deploy_reference"
+    source_git_ref_input: PromotionWorkflowInput = "source_git_ref"
+    promotion_intent_input: PromotionWorkflowInput = "promotion_intent_id"
     default_bump: str = Field(
         default="patch",
         json_schema_extra={"x-launchplane-snapshot-protocol": list(get_args(BumpLevel))},
@@ -569,7 +586,7 @@ class ProductRuntimeConfigRequirement(BaseModel):
 
     key: str
     context: str = ""
-    instance: str = ""
+    instance: LaneInstance = ""
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductRuntimeConfigRequirement":
@@ -594,9 +611,9 @@ class ProductSecretConfigRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     binding_key: str
-    integration: str = "runtime_environment"
+    integration: str = snapshot_protocol_default("runtime_environment")
     context: str = ""
-    instance: str = ""
+    instance: LaneInstance = ""
     owner_input: ProductOwnerSecretInput | None = None
     external_provider: Literal["discord_bot"] | None = Field(
         default=None,
