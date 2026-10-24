@@ -1570,29 +1570,6 @@ def _outbox_incident_event_id(delivery: OutboxDeliveryRecord) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def reconcile_public_ingress_incident(
-    *,
-    record_store: PublicIngressMonitorStore,
-    record: PublicIngressObservationRecord,
-    incident_eligible: bool = True,
-    write_records: bool = True,
-) -> tuple[PublicIngressIncidentRecord, ...]:
-    plan = _plan_public_ingress_incident_transition(
-        record_store=record_store,
-        record=record,
-        incident_eligible=incident_eligible,
-        recovery_observation_threshold=1,
-    )
-    if write_records:
-        for incident in plan.incidents:
-            record_store.write_public_ingress_incident_record(incident)
-        for incident_event in plan.incident_events:
-            record_store.write_public_ingress_incident_event_record(incident_event)
-        for reminder_state in plan.reminder_states:
-            record_store.write_public_ingress_incident_reminder_state_record(reminder_state)
-    return plan.incidents
-
-
 def _plan_public_ingress_incident_transition(
     *,
     record_store: PublicIngressMonitorStore,
@@ -2493,16 +2470,6 @@ def _incident_reminder_states(
     if not callable(reader):
         return ()
     return tuple(reader(incident_id=incident_id))
-
-
-def _incident_event(*, incident: PublicIngressIncidentRecord) -> PublicIngressIncidentEvent:
-    if incident.status == "resolved":
-        return "resolved"
-    if incident.latest_material_event in {"opened", "updated"}:
-        return cast(PublicIngressIncidentEvent, incident.latest_material_event)
-    if incident.opened_observation_id == incident.latest_observation_id:
-        return "opened"
-    return "updated"
 
 
 def _matching_notification_policies(
@@ -3534,18 +3501,6 @@ def _normalized_url(url: str) -> str:
             parsed.query,
             "",
         )
-    )
-
-
-def public_http_health_check(
-    *,
-    name: str = "public-ingress",
-    require_runtime_identity: bool = False,
-) -> ProductLaneHealthCheck:
-    return ProductLaneHealthCheck(
-        name=name,
-        kind="public_http",
-        require_runtime_identity=require_runtime_identity,
     )
 
 

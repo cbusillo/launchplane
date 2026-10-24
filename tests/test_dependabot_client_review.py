@@ -2,10 +2,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 import unittest
 
-from control_plane.merge_train_github import (
-    GitHubMergeTrainSnapshotReader,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from tests.test_merge_train_github import _github_pull_request
 
 

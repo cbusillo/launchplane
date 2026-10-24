@@ -553,7 +553,7 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             return {"Config": config, **({"State": state} if state is not None else {})}
 
         with patch("control_plane.dokploy.api.dokploy_request", fake_request):
-            running = dokploy_runtime_evidence.fetch_compose_running_container_images(
+            running = dokploy_runtime_evidence.fetch_compose_running_container_runtime(
                 host="https://dokploy.example",
                 token="token",
                 app_name="app-x1",
@@ -564,7 +564,10 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
         # label; c4 belongs to another app; c3 and c6 are not running when
         # inspected, even though c6 was listed as running; c7 is restarting, c8
         # is paused, and c9 is a one-off `compose run` container.
-        self.assertEqual(running, (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE))
+        self.assertEqual(
+            tuple(image for image, _deployment_record_id in running),
+            (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE),
+        )
 
     def test_running_container_without_image_fails_closed(self) -> None:
         def fake_request(*, path: str, **_kwargs: object) -> object:
@@ -576,7 +579,7 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             patch("control_plane.dokploy.api.dokploy_request", fake_request),
             self.assertRaises(dokploy_runtime_evidence.DokployEvidenceProviderError),
         ):
-            dokploy_runtime_evidence.fetch_compose_running_container_images(
+            dokploy_runtime_evidence.fetch_compose_running_container_runtime(
                 host="https://dokploy.example", token="token", app_name="app-x1"
             )
 

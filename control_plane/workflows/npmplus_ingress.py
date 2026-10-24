@@ -115,20 +115,6 @@ class IngressIdentityAccessBinding(BaseModel):
         raise ValueError("Unsupported ingress identity/access provider")
 
 
-def identity_access_from_npmplus_auth_request(
-    auth_request: NpmplusAuthRequest,
-) -> IngressIdentityAccessBinding:
-    if auth_request == "none":
-        return IngressIdentityAccessBinding()
-    if auth_request == "authentik":
-        return IngressIdentityAccessBinding(mode="forward-auth", provider="authentik")
-    if auth_request == "authentik-send-basic-auth":
-        return IngressIdentityAccessBinding(
-            mode="forward-auth", provider="authentik", send_basic_auth=True
-        )
-    return IngressIdentityAccessBinding(mode="forward-auth", provider=auth_request)
-
-
 class NpmplusIngressRouteDesiredState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

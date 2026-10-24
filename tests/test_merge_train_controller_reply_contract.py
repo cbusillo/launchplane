@@ -6,8 +6,8 @@ from pydantic import ValidationError
 
 from control_plane.contracts.merge_train_controller_reply import (
     build_merge_train_controller_reply_schema,
-    validate_merge_train_controller_reply,
 )
+from tests.support.merge_train_controller_reply import validate_merge_train_controller_reply
 
 SCHEMA_PATH = Path("contracts/merge-train-controller-reply.schema.json")
 REGENERATE = (

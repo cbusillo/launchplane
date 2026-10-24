@@ -8,7 +8,6 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressRouteDesiredState,
     apply_npmplus_ingress_route,
-    identity_access_from_npmplus_auth_request,
 )
 
 
@@ -339,23 +338,6 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(route.to_proxy_host_payload().npmplus_auth_request, "authentik")
-
-    def test_identity_access_can_be_derived_from_npmplus_authentik(self) -> None:
-        binding = identity_access_from_npmplus_auth_request("authentik-send-basic-auth")
-
-        self.assertEqual(binding.mode, "forward-auth")
-        self.assertEqual(binding.provider, "authentik")
-        self.assertTrue(binding.send_basic_auth)
-
-    def test_identity_access_round_trips_existing_npmplus_auth_request_modes(self) -> None:
-        for auth_request in ("anubis", "tinyauth", "authelia", "authentik"):
-            with self.subTest(auth_request=auth_request):
-                binding = identity_access_from_npmplus_auth_request(auth_request)
-
-                self.assertEqual(binding.mode, "forward-auth")
-                self.assertEqual(binding.provider, auth_request)
-                self.assertFalse(binding.send_basic_auth)
-                self.assertEqual(binding.to_npmplus_auth_request(), auth_request)
 
     def test_rejects_ambiguous_domain_matches(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(id=78), _proxy_host(id=79)))

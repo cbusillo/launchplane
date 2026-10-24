@@ -11,7 +11,7 @@ from control_plane.merge_train_batch_candidate import (
 from control_plane.merge_train_branch_refresh import (
     require_merge_train_client_review_read_store,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     execute_merge_train_run_once,

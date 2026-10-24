@@ -151,6 +151,15 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
   return [...reasons];
 }
 
+const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
+  isolation_staging: "Deploys held until testing is proven separate from production",
+  staff_testing: "Deploys held while staff test",
+};
+
+export function deployHoldNotice(environment: ProductEnvironmentSummary | null): string | null {
+  return environment?.deploy_hold ? deployHoldNotices[environment.deploy_hold] : null;
+}
+
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
   if (!environment) return "missing";
   if (operationalAttentionReasons(environment, now).length) return "danger";

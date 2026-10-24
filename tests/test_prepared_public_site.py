@@ -12,7 +12,7 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.prepared_public_pause import PreparedPublicPause
 from control_plane.prepared_public_site import prepare_public_site, prepared_public_app
-from control_plane.prepared_public_storage import (
+from tests.support.prepared_public_storage import (
     FilePublicPauseStore,
     load_prepared_site,
     save_prepared_site,

@@ -91,28 +91,6 @@ class TestingReplacementResourcesRequest(BaseModel):
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
-class TestingReplacementResourcesPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    product: str
-    context: str
-    instance: Literal["testing"]
-    operation_id: str
-    plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    retained_target_preserved: Literal[True]
-    fresh_storage_required: Literal[True]
-    published_host_ports: Literal[False]
-    host_ssh_mounts: Literal[False]
-    restore_started: Literal[False]
-    applied: bool
-
-
-class TestingReplacementResourcesResult(TestingReplacementResourcesPlan):
-    resources_verified: Literal[True]
-    resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    schedule_id: str = Field(min_length=1)
-
-
 class TestingReplacementResourcesReadback(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

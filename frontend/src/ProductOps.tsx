@@ -30,7 +30,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -377,6 +377,7 @@ function DirectoryLane({
   const tone = environmentOperationalTone(environment);
   const headline = environment ? ingressHeadline(environment) : "Not recorded";
   const reasons = operationalAttentionReasons(environment);
+  const hold = deployHoldNotice(environment);
   return (
     <span className="directory-lane" data-lane={lane} data-operational={tone}>
       <span className="lane-name">{lane === "prod" ? "Production" : "Testing"}</span>
@@ -385,6 +386,7 @@ function DirectoryLane({
         {headline}
       </strong>
       {reasons.length ? <small className="directory-attention">{reasons.join(" · ")}</small> : null}
+      {hold ? <small className="directory-hold">{hold}</small> : null}
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
       <small className="directory-evidence-detail">
         {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
@@ -779,6 +781,7 @@ function EnvironmentRow({
               {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
             </>
           ) : <small>{ingressHeadline(environment)}</small>}
+          {deployHoldNotice(environment) ? <small>{deployHoldNotice(environment)}</small> : null}
         </div>
         <div>
           <dt>TLS evidence</dt>

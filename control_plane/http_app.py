@@ -1814,21 +1814,6 @@ def _asgi_header_values(*, scope: Scope, name: str) -> list[str]:
     return header_values
 
 
-def _http_status_text(status_code: int) -> str:
-    return {
-        200: "OK",
-        202: "Accepted",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        409: "Conflict",
-        503: "Service Unavailable",
-        500: "Internal Server Error",
-    }.get(status_code, "OK")
-
-
 async def _send_launchplane_error_response(
     *,
     scope: Scope,

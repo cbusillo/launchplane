@@ -15,7 +15,6 @@ from starlette.concurrency import run_in_threadpool
 
 from control_plane.build_provenance import BuildProvenanceTransport
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -1032,19 +1031,3 @@ def _monitor_availability(
 def _time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-
-
-def _write_receipt(store: Store, *, key: str, now: str, payload: dict[str, object]) -> None:
-    store.write_idempotency_record(
-        LaunchplaneIdempotencyRecord(
-            record_id="production-delivery-" + _candidate_key(key),
-            scope=_SCOPE,
-            route_path=_ROUTE,
-            idempotency_key=key,
-            request_fingerprint="production-delivery-monitor-v1",
-            response_status_code=200,
-            response_trace_id="production-delivery-monitor:" + _candidate_key(key),
-            recorded_at=now,
-            response_payload=payload,
-        )
-    )

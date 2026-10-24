@@ -45,7 +45,7 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     MergeTrainReviewConversations,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (

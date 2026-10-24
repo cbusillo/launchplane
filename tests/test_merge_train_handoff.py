@@ -27,9 +27,9 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
     _stack_collapse_commit_message,
 )
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff, handoff_head
 from control_plane.merge_train_release_hold import MergeTrainReleaseHold
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy

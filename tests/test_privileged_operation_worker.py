@@ -65,11 +65,11 @@ from control_plane.privileged_operation_registry import (
 )
 from control_plane.privileged_operation_service import (
     approve_privileged_operation,
-    create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
     PrivilegedOperationNotApprovableError,
     revoke_privileged_operation,
 )
+from tests.support.privileged_operations import create_privileged_operation_plan
 from control_plane.privileged_operation_worker import (
     _construct_approver_authorization,
     OrdinaryAgentDeliveryCleanupState,

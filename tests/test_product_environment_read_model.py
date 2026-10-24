@@ -24,6 +24,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetPolicies,
     DokployTargetIntegrationAllowance,
+    DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -2185,6 +2186,41 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     self.assertTrue(
                         all(warning.severity == "info" for warning in projected.topology.warnings)
                     )
+
+    def test_product_overview_says_which_hold_stops_testing_deploys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site-testing",
+                    instance="testing",
+                    target_type="compose",
+                    target_name="example-site-testing",
+                    policies=DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Prove separation from production first.",
+                            purpose="isolation_staging",
+                        )
+                    ),
+                    updated_at="2026-05-02T22:30:00Z",
+                    source_label="test",
+                )
+            )
+
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: False
+            )
+            store.close()
+
+        holds = {summary.environment: summary.deploy_hold for summary in overview.environments}
+        self.assertEqual(holds, {"testing": "isolation_staging", "prod": None})
+        self.assertNotIn("Prove separation", overview.model_dump_json())
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -23,11 +23,8 @@ from control_plane.merge_train_candidate_failures import (
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
-from control_plane.merge_train_github import (
-    MergeTrainBaseCheckObservation,
-    GitHubMergeTrainClient,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import MergeTrainBaseCheckObservation, GitHubMergeTrainClient
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.github_required_checks import CheckRequirement
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy

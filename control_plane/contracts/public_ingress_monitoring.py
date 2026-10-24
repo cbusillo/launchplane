@@ -1055,17 +1055,6 @@ def build_public_ingress_incident_id(
     )
 
 
-def build_public_ingress_lane_incident_id(
-    *, product: str, context: str, instance: str, check_name: str = ""
-) -> str:
-    check_token = _check_record_token(check_name)
-    return "-".join(
-        _record_token(value)
-        for value in ("public-ingress-incident", product, context, instance, check_token)
-        if _record_token(value)
-    )
-
-
 def build_public_ingress_notification_attempt_id(
     *,
     incident_id: str,

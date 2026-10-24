@@ -558,34 +558,6 @@ def merge_train_policy_provider_expectation_projection(
     return projection
 
 
-def merge_train_repository_policy_delivery_semantics_sha256(
-    policy: MergeTrainRepositoryPolicy,
-) -> str:
-    expectation = policy.provider_delivery_protection_expectation
-    payload = {
-        "repository": policy.repository,
-        "base_branch": policy.base_branch,
-        "enqueue_label": policy.enqueue_label,
-        "blocked_label": policy.blocked_label,
-        "stack_child_disposition_label": policy.stack_child_disposition_label,
-        "merge_method": policy.merge_method,
-        "failure_policy": policy.failure_policy,
-        "engineering_review_mode": policy.engineering_review_mode,
-        "enqueue": {
-            "label_required": policy.enqueue.label_required,
-            "allowed_actor_roles": sorted(policy.enqueue.allowed_actor_roles),
-            "trusted_automation_github_user_ids": sorted(
-                policy.enqueue.trusted_automation_github_user_ids
-            ),
-        },
-        "provider_delivery_protection_expectation": (
-            expectation.model_dump(mode="json") if expectation is not None else None
-        ),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _normalize_required_value(value: str, message: str) -> str:
     normalized = value.strip()
     if not normalized:
