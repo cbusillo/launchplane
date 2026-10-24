@@ -164,7 +164,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             "compose_id": plan.compose_ref,
             "compose_name": plan.compose_name,
             "module_install_update_status": "pass",
-            "module_install_update_evidence": {"odoo_restore_completed": "true"},
+            "module_install_update_evidence": {
+                "odoo_restore_completed": "true",
+                "upstream_restore_requested": "true",
+            },
         }
         operation = SimpleNamespace(
             state="completed",
@@ -198,6 +201,7 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 {"compose_id": "replacement-compose"},
                 {"status": "fail"},
                 {"module_install_update_evidence": {}},
+                {"module_install_update_evidence": {"odoo_restore_completed": "true"}},
                 {"preview_slug": "other-preview"},
             )
             for change in changes:

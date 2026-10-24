@@ -597,6 +597,8 @@ def preview_has_completed_restore(
                 and result.compose_id == plan.compose_ref
                 and result.compose_name == plan.compose_name
                 and result.module_install_update_status == "pass"
+                and result.module_install_update_evidence.get("upstream_restore_requested")
+                == "true"
                 and result.module_install_update_evidence.get("odoo_restore_completed") == "true"
             ):
                 return True

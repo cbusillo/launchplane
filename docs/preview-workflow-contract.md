@@ -408,7 +408,8 @@ smoke check can pass. An Odoo preview with `data_transport_mode="driver"` and
 an upstream source initially runs the existing devkit restore, replacing a partial
 unrecorded database before OpenUpgrade. Later refreshes preserve that copy through
 maintenance only when a successful generation's completed original apply receipt
-proves the restore on the same compose. Unknown history on an existing preview
+proves a requested restore completed on the same compose. The requested mode is
+attached by the control plane, independently of addon output. Unknown history on an existing preview
 refuses a reset. Retained-copy refreshes inspect current storage and never
 bootstrap a missing database. No new database marker is needed.
 
@@ -418,7 +419,9 @@ must run without root, effective/permitted/ambient capabilities, root-directory
 access or privilege escalation. The existing root broker stages the temporary
 identity; it and upstream environment variables are removed after filestore
 transfer, before addon code. The restricted source remains behind that root
-boundary until a later maintenance refresh omits the mount.
+boundary until a later maintenance refresh omits the mount. Qualification, cleanup
+and restore programs run in isolated Python mode so PR files in the working
+directory cannot execute through standard-library imports before that boundary.
 
 The path forces bootstrap off and sanitization on, disables copied crons and
 serves without cron threads. The existing SQL connection-isolation library runs

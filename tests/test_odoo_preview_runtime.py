@@ -1808,7 +1808,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
                 "run_compose_post_deploy_update",
-                return_value=_module_update_evidence(),
+                return_value={**_module_update_evidence(), "upstream_restore_requested": "true"},
             ) as module_update,
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -1834,6 +1834,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.module_install_update_evidence.get("upstream_restore_requested"),
+            str(restore_upstream).lower(),
+        )
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertTrue(result.created_compose)
         self.assertEqual(
@@ -1912,7 +1916,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 module_update.call_args.kwargs["workflow_environment_overrides"][key], value
             )
         self.assertEqual(result.module_install_update_status, "pass")
-        self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
+        self.assertEqual(
+            result.module_install_update_evidence,
+            {
+                **_module_update_evidence(),
+                "upstream_restore_requested": str(restore_upstream).lower(),
+            },
+        )
         self.assertIn("module_install_update", [step.name for step in result.steps])
         smoke_check.assert_called_once()
         return env_map.get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")

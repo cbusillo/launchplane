@@ -201,11 +201,13 @@ def main(argv):
         return 0
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
+        (state_dir / "workflow-executed").touch()
         log("workflow arguments " + " ".join(program[3:]))
         kept_key = "ODOO_RESTORE_KEPT_INTEGRATIONS"
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
-        if program[2] == "-c":
-            return subprocess.run([sys.executable, *program[1:]], env={
+        if "-c" in program[2:4]:
+            program[-1] = program[-1].replace("'/volumes/scripts'", repr(str(state_dir / "modules")))
+            return subprocess.run([sys.executable, *program[1:]], cwd=state_dir / "project", env={
                 **os.environ, "PLATFORM_INSTANCE": "preview", **exec_environment,
                 "PYTHONPATH": str(state_dir / "modules"),
             }).returncode
@@ -213,7 +215,12 @@ def main(argv):
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
         log("exec qualify" + (" -i" if interactive else ""))
+        if ("IDENTITY_DIRECTORY" in program[-1]
+            and os.environ.get("FAKE_CAPTURE_CLEANUP_FAIL_AFTER_WORKFLOW") == "1"
+            and (state_dir / "workflow-executed").exists()):
+            return 43
         return subprocess.run([sys.executable, *program[1:]],
+                              cwd=state_dir / "project",
                               stdin=None if interactive else subprocess.DEVNULL,
                               env={**os.environ, **exec_environment}).returncode
     if program[:2] == ["python3", "-"]:
@@ -828,6 +835,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
+        (self.root / "project").mkdir()
         self.enterContext(
             patch.object(
                 odoo_preview_restore, "PREVIEW_WORKFLOW_SSH_DIRECTORY", self.root / "identity"
@@ -900,7 +908,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         (self.root / "database.json").unlink(missing_ok=True)
         for state_file in self.root.glob("*.state"):
             state_file.unlink()
-        for marker in ("web-stopped", "web-started"):
+        for marker in ("web-stopped", "web-started", "workflow-executed"):
             (self.root / marker).unlink(missing_ok=True)
         (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
@@ -1288,6 +1296,29 @@ def main(arguments: list[str]) -> int:
         self.assertNotEqual(refused.returncode, 0)
         self.assertFalse(refused.web_restarted)
         self.assertNotIn("fixture_addon_after_boundary=true", refused.stdout.splitlines())
+
+    def test_preview_programs_cannot_import_pr_modules_before_cleanup(self) -> None:
+        (self.root / "project" / "pathlib.py").write_text(
+            "raise RuntimeError('unmerged PR code executed before cleanup')\n"
+        )
+        with patch.object(
+            odoo_preview_restore, "preview_source_process_program", return_value="import pathlib\n"
+        ):
+            script = _render_post_deploy_script(
+                None, instance="pr-45", run_destructive_restore=True
+            )
+        run = self._run(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+
+    def test_preview_capture_cleanup_failure_keeps_web_stopped(self) -> None:
+        run = self._run(
+            _render_post_deploy_script(None, instance="pr-45", run_destructive_restore=True),
+            FAKE_CAPTURE_CLEANUP_FAIL_AFTER_WORKFLOW="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+        self.assertFalse(run.web_restarted)
 
     def test_unanswered_database_probe_stops_before_touching_web(self) -> None:
         run = self._run(_render_preview_script(), FAKE_DATABASE_PRESENT="error")

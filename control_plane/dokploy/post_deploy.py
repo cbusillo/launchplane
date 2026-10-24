@@ -2763,7 +2763,7 @@ def _build_dokploy_data_workflow_script(
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
     workflow_command = (
-        "python3 -u -c " + shlex.quote(odoo_preview_restore.preview_restore_program())
+        "python3 -u -I -c " + shlex.quote(odoo_preview_restore.preview_restore_program())
         if preview_restore
         else 'python3 -u /volumes/scripts/run_odoo_data_workflows.py "${workflow_arguments[@]}"'
     )
@@ -2927,7 +2927,7 @@ cleanup_preview_capture() {{
     docker exec -u root \
         -e ODOO_DB_NAME="${{database_name}}" \
         -e ODOO_DATA_WORKFLOW_LOCK_FILE="${{data_workflow_lock_path}}" \
-        "${{script_runner_container_id}}" python3 -c {shlex.quote(odoo_preview_restore.preview_capture_cleanup_program())}
+        "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_capture_cleanup_program())}
 }}
 
 exit_trap() {{
@@ -3013,7 +3013,7 @@ fi
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
 if [ "{int(preview_restore)}" = "1" ]; then
-    docker exec "${{script_runner_container_id}}" python3 -c {shlex.quote(odoo_preview_restore.preview_source_process_program())}
+    docker exec "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_source_process_program())}
 fi
 
 if [ "${{clear_stale_lock}}" = "1" ]; then

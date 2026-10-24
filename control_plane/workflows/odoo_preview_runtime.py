@@ -1833,6 +1833,7 @@ def _execute_refresh(
             provider_mutation_guard=provider_mutation_guard,
             deployment_title=provider_operation_title,
         )
+        module_install_update_evidence["upstream_restore_requested"] = str(restore_upstream).lower()
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             module_install_update_evidence
         )
