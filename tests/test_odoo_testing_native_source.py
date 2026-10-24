@@ -104,6 +104,7 @@ class NativeSourceTransportTests(unittest.TestCase):
             ([{"field": "Env", "difference": private}], ()),
             ([{"field": "Env", "difference": "unequal", "value": private}], ()),
             ([{"field": [], "difference": "unequal"}], ()),
+            (valid + [{"field": "DNSConfig", "difference": "unequal"}], ()),
             (private, ()),
         ):
             with self.subTest(fields=fields):

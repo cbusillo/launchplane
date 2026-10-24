@@ -113,6 +113,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
                 and item["difference"] in ("service_only", "task_only", "unequal")
                 for item in container_fields
             )
+            and len({item["field"] for item in container_fields}) == len(container_fields)
             else ()
         )
         self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
