@@ -480,11 +480,13 @@ def _settled_invitation_line(run: "ClientReleaseRunView") -> str:
             "No action is needed on this invitation."
         )
     drill_steps = {step.name for step in _DRILL_STEPS}
+    went_live = any(step.kind == "promote" and step.status == "pass" for step in run.steps)
     if any(step.status in {"fail", "cancelled"} and step.step in drill_steps for step in run.steps):
-        check = "A follow-up safety check (the rollback drill) did not complete"
+        stopped = "A follow-up safety check (the rollback drill) did not complete"
     else:
-        check = "A release check did not complete after it went live"
-    return f"**Accepted and live in production.** {check} and is being fixed; nothing is needed from you."
+        stopped = "A release step did not complete"
+    went = "It went live in production. " if went_live else ""
+    return f"**Accepted.** {went}{stopped} and is being fixed; nothing is needed from you."
 
 
 def _settle_release_records(

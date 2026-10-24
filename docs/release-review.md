@@ -246,8 +246,9 @@ The publisher reconciles an invitation only if the current Client's saved
 acceptance names the exact candidate now in production and its saved release
 run has finished: it passed, or it stopped on a failed or cancelled step with
 nothing still running or awaiting reconciliation. A stopped run settles with a
-line saying the release is live and which later check did not complete, and that
-nothing is needed from the Client. A stopped release that never reached
+line saying whether its promotion went live and which step did not complete, and
+that nothing is needed from the Client. It claims only what the run recorded, not
+what production serves now; the release record reports that. A stopped release that never reached
 production keeps its request open, since the Client can Accept again. Equal
 versions alone, held approval, a running release, and missing evidence cannot
 complete an invitation. The existing invitation is marked settled without another mention,
