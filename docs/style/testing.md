@@ -146,9 +146,10 @@ for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
 business-write completion and rollback, operation claims, stale lease holders,
 lease recovery, and active-operation partial uniqueness. Column validation reads
 catalog metadata in a batch for each verification, keeping repeated runtime
-resolution from adding one query per required table. Each verification reads
-fresh metadata, including after a previous passing check. Same-repo CI provides
-the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
+resolution from adding one query per required table. PostgreSQL invariant checks
+also batch their column, index, primary-key and check-constraint metadata reads.
+Each verification reads fresh metadata, including after a previous passing check.
+Same-repo CI provides the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
 fork PRs keep the SQLite/unittest path only. Same-repo CI partitions the existing
 integration inventory into one job per workflow matrix entry using the unittest

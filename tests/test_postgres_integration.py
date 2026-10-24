@@ -2140,6 +2140,45 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_schema_invariant_catalog_reads_are_fewer_than_required_tables(self) -> None:
+        from control_plane.storage.schema_invariants import (
+            CRITICAL_POSTGRES_COLUMN_TYPES,
+            CRITICAL_PRIMARY_KEYS,
+            CRITICAL_SCHEMA_INDEXES,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            catalog_queries: list[str] = []
+
+            def record_query(
+                _connection: Any,
+                _cursor: Any,
+                statement: str,
+                _parameters: Any,
+                _context: Any,
+                _executemany: bool,
+            ) -> None:
+                if "pg_catalog" in statement:
+                    catalog_queries.append(statement)
+
+            event.listen(store._engine, "before_cursor_execute", record_query)
+            try:
+                verify_postgres_schema_invariants(store._engine)
+            finally:
+                event.remove(store._engine, "before_cursor_execute", record_query)
+            required_tables = (
+                {item.table_name for item in CRITICAL_POSTGRES_COLUMN_TYPES}
+                | {item.table_name for item in CRITICAL_PRIMARY_KEYS}
+                | {item.table_name for item in CRITICAL_SCHEMA_INDEXES}
+            )
+            self.assertTrue(catalog_queries)
+            self.assertLess(
+                len(catalog_queries),
+                len(required_tables),
+                f"Schema verification issued {len(catalog_queries)} catalog queries for "
+                f"{len(required_tables)} required tables.",
+            )
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 
