@@ -69,7 +69,7 @@ def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        diagnostic=command_diagnostic(arguments,result,environment)
+        diagnostic=command_diagnostic(result)
         raise RehearsalCommandFailure(diagnostic)
     return result.stdout if stdout is None else b''
 
@@ -118,8 +118,7 @@ def bounded_capture(arguments,path,bound,*,filestore=False):
                             output.write(chunk)
         status=process.wait(timeout=30)
         if status and not (filestore and filestore_tar_warning_only(status,errors,error_bytes>len(errors))):
-            diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=diagnostic_tail(errors)),None)
+            diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,status))
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
@@ -330,7 +329,6 @@ def product_command(arguments, *, stdin=None):
         stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
     output=bytearray()
-    errors=b''
     try:
         if stdin is not None:
             process.stdin.write(stdin)
@@ -347,9 +345,7 @@ def product_command(arguments, *, stdin=None):
                     chunk=os.read(event.fd,65536)
                     if not chunk:
                         selector.unregister(event.fileobj)
-                    elif event.data=='error':
-                        errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
-                    else:
+                    elif event.data=='output':
                         if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
                             raise ValueError('Product output exceeds its bound')
                         output.extend(chunk)
@@ -357,9 +353,8 @@ def product_command(arguments, *, stdin=None):
         if status:
             raise ValueError('Product validation failed')
         return bytes(output)
-    except (ValueError,OSError,subprocess.TimeoutExpired) as error:
-        diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-            arguments,process.returncode or -1,stdout=b'',stderr=diagnostic_tail(errors)+b'\n'+str(error).encode()),None)
+    except (ValueError,OSError,subprocess.TimeoutExpired):
+        diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,process.returncode or -1))
         raise RehearsalCommandFailure({**diagnostic,'step':'business_validation'}) from None
     finally:
         process.stdout.close()
@@ -711,20 +706,11 @@ def observe(spec, root, receipt, lock_held=False):
             'custody':custody_observation(spec,root,spec.get('receipt_action',action))}
         custody=result['custody']
         if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
+            result['retained_upgrade_logs_unavailable']=True
             failure=read_command_failure(spec,root)
             if failure is not None:
                 result['child_failure']=failure
-            names=database_names(spec)
-            if (action=='execute' and record['state']=='prepared'
-                    and {copy['database'] for copy in copies}=={names['source']}):
-                try:
-                    containers=inspection(spec,names['upgrade'],spec['target_image'])
-                    if containers['web'][1].get('State',{}).get('Running') is not False:
-                        raise RuntimeError('Failed upgrade writer is active')
-                    result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
-                except (RuntimeError,OSError,ValueError,KeyError):
-                    result['retained_upgrade_logs_unavailable']=True
-            if result.get('child_failure') is not None or result.get('retained_upgrade_logs') is not None:
+            if result.get('child_failure') is not None:
                 result['diagnostics_private']=True
         mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
@@ -836,8 +822,6 @@ def upgrade_final(spec,root,containers):
 
 
 def main():
-    global COMMAND_FAILURE_CONTEXT
-    COMMAND_FAILURE_CONTEXT=None
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
     namespace=record['rehearsal_id']
