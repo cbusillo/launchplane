@@ -133,7 +133,7 @@ class NativePlanningProjectionTests(TestCase):
         self.comment_mock = self.comment.start()
         self.addCleanup(self.comment.stop)
 
-    def record(self) -> Any:
+    def record(self, *, planning_author_ids: tuple[int, ...] = (_BOT,)) -> Any:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
                 repository=_REPO,
@@ -146,7 +146,7 @@ class NativePlanningProjectionTests(TestCase):
             token="fixture",
             recorded_at="2026-10-01T00:00:00Z",
             response_trace_id="projection",
-            planning_author_ids=(_BOT,),
+            planning_author_ids=planning_author_ids,
             planning_scope_resolver=self.graph.scope,
         )
 
@@ -214,6 +214,54 @@ class NativePlanningProjectionTests(TestCase):
         row = self.rows(record)[_REPO, 7]
         self.assertTrue(row["closing_reference"])
         self.assertFalse(row["ok"])
+
+    def test_superseded_reference_preserves_closure_and_other_source_repairs(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = [8]
+        source.pull_body = "Refs #7 (superseded)"
+        source.issue["state_reason"] = "not_planned"
+        completing = self.graph.add(_REPO, 8, state="closed")
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertTrue(_receipt(record)["ok"])
+        self.assertTrue(self.rows(record)[_REPO, 7]["review_required"])
+        self.assertEqual(source.issue, before)
+        self.assertTrue(completing.writes)
+
+    def test_pr_comment_discovery_requires_author_trust(self) -> None:
+        for identity, login, accepted in (
+            (999, "outsider", False),
+            (99, "author", True),
+            (77, "example", True),
+        ):
+            with self.subTest(login=login):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.references = []
+                source.pull_comments = [
+                    {"body": "Refs #7", "user": {"id": identity, "login": login}}
+                ]
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "delivered")
+                self.assertEqual(bool(source.writes), accepted)
+                self.assertEqual(bool(_receipt(record)["issues"]), accepted)
+
+    def test_missing_current_author_trust_keeps_the_neighborhood_read_only(self) -> None:
+        parent = self.graph.add(_REPO, 8)
+        parent.issue["user"] = {"id": 77, "login": "example"}
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record(planning_author_ids=())
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertFalse(record.retryable)
+        self.assertTrue(_receipt(record)["review_required"])
+        self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
 
     def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
         source = self.graph.nodes[_REPO, 7]

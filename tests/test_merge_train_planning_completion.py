@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 
 import click
 from github_plan_status import DEFAULT_STATUS_LABELS
@@ -90,6 +91,7 @@ class PlanningProvider:
         self.missing_project_item = False
         self.references = [7]
         self.pull_title = ""
+        self.pull_author = {"databaseId": 99, "login": "author", "__typename": "User"}
         self.pull_number = 9
         self.pull_body = ""
         self.pull_comments: list[dict[str, Any]] = []
@@ -113,6 +115,7 @@ class PlanningProvider:
                             "defaultBranchRef": {"name": self.default_branch},
                             "object": {"text": json.dumps(self.config)},
                             "pullRequest": {
+                                "author": self.pull_author,
                                 "title": self.pull_title,
                                 "body": self.pull_body,
                                 "merged": self.merged,
@@ -182,8 +185,9 @@ class PlanningProvider:
         if path == "/users/example":
             return {"type": "User"}
         if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/comments?"):
-            page = int(path.rsplit("page=", 1)[1])
-            return copy.deepcopy(self.pull_comments[(page - 1) * 100 : page * 100])
+            query = parse_qs(urlsplit(path).query)
+            page, per_page = int(query["page"][0]), int(query["per_page"][0])
+            return copy.deepcopy(self.pull_comments[(page - 1) * per_page : page * per_page])
         if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/timeline?"):
             return copy.deepcopy(self.timeline)
         if "/comments?" in path:
@@ -242,7 +246,11 @@ class PlanningCompletionTests(TestCase):
         self.addCleanup(self.comment.stop)
 
     def record(
-        self, *, recorded_at: str = "2026-10-01T00:00:00Z", base_branch: str = "main"
+        self,
+        *,
+        recorded_at: str = "2026-10-01T00:00:00Z",
+        base_branch: str = "main",
+        planning_author_ids: tuple[int, ...] = (_BOT,),
     ) -> MergeTrainPrFeedbackRecord:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
@@ -257,7 +265,7 @@ class PlanningCompletionTests(TestCase):
             token="fixture",
             recorded_at=recorded_at,
             response_trace_id="test",
-            planning_author_ids=(_BOT,),
+            planning_author_ids=planning_author_ids,
         )
 
     def test_native_completion_cleans_labels_and_persists_readback_without_driver(self) -> None:
@@ -859,6 +867,15 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(self.provider.writes)
         self.provider.references = []
         self.assertEqual(self.record().delivery_status, "delivered")
+        self.assertFalse(self.provider.writes)
+
+    def test_nonplanning_source_needs_no_automation_author_grant(self) -> None:
+        self.provider.issue["labels"] = [{"name": "bug"}]
+
+        record = self.record(planning_author_ids=())
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertTrue(_receipt(record)["ok"])
         self.assertFalse(self.provider.writes)
 
     def test_reopened_projection_has_a_bounded_pending_window(self) -> None:

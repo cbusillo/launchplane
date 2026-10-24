@@ -41,6 +41,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $config: S
     object(expression: $config) { ... on Blob { text } }
     pullRequest(number: $number) {
       merged mergedAt baseRefName title body mergeCommit { oid }
+      author { login __typename ... on User { databaseId } ... on Bot { databaseId } }
       closingIssuesReferences(first: 100, after: $after) {
         nodes { number repository { nameWithOwner } }
         pageInfo { hasNextPage endCursor }
@@ -173,7 +174,11 @@ def _pages(token: str, path: str) -> list[dict[str, Any]]:
 
 
 def _source_references(
-    token: str, repository: str, number: int, pull: dict[str, Any]
+    token: str,
+    repository: str,
+    number: int,
+    pull: dict[str, Any],
+    trusted_author_ids: tuple[int, ...],
 ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
     if (
         not isinstance(pull.get("title"), str)
@@ -182,8 +187,19 @@ def _source_references(
     ):
         raise PlanningCompletionReview("Planning completion source text was unavailable.")
     references = linked_issues(repository, pull)
+    pull_author_id = normalize_author(pull).get("id")
     path = f"/repos/{repository}/issues/{number}"
     for comment in _pages(token, path + "/comments"):
+        if not (
+            wait_records.author_is_trusted(
+                comment, repository.split("/", 1)[0], author_ids=trusted_author_ids
+            )
+            or (
+                type(pull_author_id) is int
+                and normalize_author(comment).get("id") == pull_author_id
+            )
+        ):
+            continue
         body = comment.get("body")
         if not isinstance(body, str):
             raise PlanningCompletionReview("Planning completion source comment was unavailable.")
@@ -518,6 +534,10 @@ def _source_review(
         or PLAN_MANAGED_PROVENANCE_MARKER not in str(issue.get("body") or "").splitlines()
     ):
         raise _IssueReview("Planning completion preserves reporter-owned source acceptance.")
+    if issue.get("state") == "closed" and issue.get("state_reason") != "completed":
+        raise _OpenFinishLineReview(
+            "Preserve the source's non-completed closure; references do not prove completion."
+        )
     _require_projection(issue, merged_at, attempted)
     if snapshot.wait["state"] != "clear":
         return "Preserve the actual or unread wait; owning agent reviews source completion."
@@ -535,6 +555,7 @@ def _reconcile_target(
     *,
     merged_at: datetime,
     attempted: datetime,
+    author_trust_available: bool,
     config: dict[str, Any] | None = None,
 ) -> None:
     assert target.scope is not None
@@ -560,6 +581,11 @@ def _reconcile_target(
     if not is_planning_issue(snapshot.issue, snapshot.labels):
         row["status"] = "not_planning_issue"
         return
+    if not author_trust_available:
+        raise _IssueReview(
+            "Planning metadata requires owning-agent review because the current policy "
+            "has no trusted automation authors; preserve all target metadata."
+        )
     review = (
         _source_review(snapshot, merged_at=merged_at, attempted=attempted, scope=scope)
         if target.source
@@ -732,7 +758,7 @@ def reconcile_completed_change(
             "Planning completion references exceeded their coverage bound."
         )
     assert merged_at is not None
-    explicit, timeline = _source_references(token, repository, number, pull)
+    explicit, timeline = _source_references(token, repository, number, pull, trusted_author_ids)
     source_scope = PlanningRepositoryScope(repository, base_branch, token, trusted_author_ids)
     scopes: dict[str, PlanningRepositoryScope] = {repository.casefold(): source_scope}
     targets: dict[tuple[str, int], _Target] = {}
@@ -860,6 +886,7 @@ def reconcile_completed_change(
                     row,
                     merged_at=merged_at,
                     attempted=attempted,
+                    author_trust_available=bool(trusted_author_ids),
                     config=config if key == repository.casefold() else None,
                 )
             except PlanningCompletionPending as error:

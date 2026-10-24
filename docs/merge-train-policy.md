@@ -2448,7 +2448,8 @@ reconciliation or grants metadata authority.
 
 For a merged PR on the default branch, completed feedback discovers its native
 closing references and explicit source references in its title, body and issue
-comments, using the catalog's shared reference parser. It refreshes their direct
+comments from the PR author, repository owner or numerically trusted automation,
+using the catalog's shared reference parser. It refreshes their direct
 blocking dependents and parents, including neighbors of non-plan or held sources.
 Timeline-only issue mentions are recorded for review without expanding their
 neighborhood or changing them. The deduplicated neighborhood is bounded
@@ -2475,8 +2476,9 @@ their review is informational and does not prevent successful independent metada
 repairs or delivery of the landing comment. Closing sources still require verified
 completion. The authoring agent supplies completion judgment before Ready, closing
 what the PR completes and splitting remaining work into owned follow-up issues
-with a named next actor. Landing reconciliation records unresolved judgment for the
-existing stranded-work digest; it never treats a reference as completion evidence.
+with a named next actor. Landing reconciliation records unresolved judgment in its
+receipt. The existing stranded-work digest independently reports open linked issues;
+neither treats a reference as completion evidence.
 
 Every target uses its actual default branch's `.github/github.json`, or verified
 standard planning labels when that file is absent. Same-account foreign targets
