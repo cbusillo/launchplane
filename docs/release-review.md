@@ -965,11 +965,16 @@ With `promote_with_rollback_drill` it then runs the rollback drill:
 
 The rollback restores the checklist's production version, so the checklist
 recompiles to the digest the Client accepted, and that acceptance covers the
-second promotion and nothing else. A product drills once. After a release's
-drill passes, both `promote_with_rollback_drill` and `director_standing` behave as
-`promote`. Standing acceptance records the same drill sequence until a drill has
-passed for that product; the first promotion alone or a failed drill does not
-qualify it. Each decision retains the release sequence stamped when it was accepted.
+second promotion and nothing else. A product drills once per version of the
+rollback code. After a release's drill passes, both `promote_with_rollback_drill`
+and `director_standing` behave as `promote`. A drill counts only when its
+acceptance was recorded at or after `ROLLBACK_DRILL_CODE_CHANGED_AT` in
+`control_plane/client_release.py`; a change to the rollback or promotion path
+moves that marker forward in the same pull request, so each product's next
+accepted release drills again on the new code. Standing acceptance records the
+same drill sequence until a drill has passed for that product; the first
+promotion alone or a failed drill does not qualify it. Each decision retains the
+release sequence stamped when it was accepted.
 
 Odoo and generic-web products use this same sequence and acceptance checks.
 Generic web redeploys the explicitly selected passing production deployment's

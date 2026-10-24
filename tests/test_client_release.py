@@ -93,6 +93,7 @@ from tests.test_release_review import BASE, HEAD, decision, github_read, profile
 
 PRODUCT = "example-site"
 CONTEXT = "example-site"
+DRILL_CODE_CHANGED_AT = "control_plane.client_release.ROLLBACK_DRILL_CODE_CHANGED_AT"
 StepStatus = Literal["pass", "fail"]
 
 
@@ -429,10 +430,23 @@ class ClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "passed")
         self.assertEqual(len(run.steps), 5)
-        # The product drilled once; its next acceptance only promotes.
-        self.assertEqual(
-            release_start_for_acceptance(store=self.store, profile=profile_record), "promote"
+        with patch(DRILL_CODE_CHANGED_AT, "2026-09-23T00:59:59Z"):
+            self.assertEqual(
+                release_start_for_acceptance(store=self.store, profile=profile_record), "promote"
+            )
+        with patch(DRILL_CODE_CHANGED_AT, "2026-09-23T01:00:01Z"):
+            self.assertEqual(
+                release_start_for_acceptance(store=self.store, profile=profile_record),
+                "promote_with_rollback_drill",
+            )
+        self.store.write_release_review_decision_record(
+            accepted.model_copy(update={"decided_at": "2026-09-23T01:00:00"})
         )
+        with patch(DRILL_CODE_CHANGED_AT, "2026-09-23T00:59:59Z"):
+            self.assertEqual(
+                release_start_for_acceptance(store=self.store, profile=profile_record),
+                "promote_with_rollback_drill",
+            )
 
         # Odoo's generic promotion has no deploy timestamps, and the drill
         # updates its rollback evidence. Each durable promotion still belongs
