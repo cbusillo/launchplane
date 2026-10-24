@@ -386,7 +386,7 @@ class ProductPathCheckTests(unittest.TestCase):
             _steps(check),
             {
                 "profile_lane": ("clear", "lane_recorded", "none"),
-                "testing_hold": ("blocked", "testing_hold_active", "wait"),
+                "testing_hold": ("blocked", "testing_hold_active", "by_hand"),
                 "testing_deploy": ("clear", "already_deployed", "none"),
             },
         )
@@ -858,7 +858,6 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                             error_response_model=BaseModel,
                         ),
                         read_product_profile_list_identity=lambda: identity,
-                        work_graph_planning_facts_provider=None,
                         workflow_credentials_ready=lambda _context, _repository: True,
                         control_plane_root=Path("."),
                         github_token=lambda: "",

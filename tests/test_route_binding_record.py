@@ -1870,19 +1870,12 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("/v1/route-bindings/backfill/apply", openapi["paths"])
         self.assertEqual(
-            openapi["paths"]["/v1/route-bindings/reconcile"]["post"]["responses"]["202"]["content"][
-                "application/json"
-            ]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        self.assertEqual(
             openapi["components"]["schemas"]["RouteBindingRecordsResponse"]["additionalProperties"],
             False,
         )
         self.assertIn("RouteBindingRecordResponse", openapi["components"]["schemas"])
         self.assertIn("RouteBindingReconcileEnvelope", openapi["components"]["schemas"])
         self.assertIn("RouteBindingExpectedCurrent", openapi["components"]["schemas"])
-        self.assertIn("AcceptedEvidenceResponse", openapi["components"]["schemas"])
 
 
 if __name__ == "__main__":

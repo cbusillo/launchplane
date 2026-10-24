@@ -395,11 +395,12 @@ export function retryBrowserOperation(
 
 export function resetBrowserOperation(
   current: BrowserOperationState,
+  { allowUncertain = false }: { allowUncertain?: boolean } = {},
 ): BrowserOperationState {
   if (
     current.phase === "queued" ||
     current.phase === "submitting" ||
-    current.requiresIdempotencyContinuity
+    (current.requiresIdempotencyContinuity && !allowUncertain)
   ) {
     throw new Error(
       "Cannot discard an in-flight or uncertain browser operation idempotency key.",
@@ -467,7 +468,7 @@ function normalizeRequestValue(value: unknown): unknown {
   return value;
 }
 
-function browserOperationSessionStorage(): BrowserOperationStorage | null {
+export function browserOperationSessionStorage(): BrowserOperationStorage | null {
   if (typeof window === "undefined") {
     return null;
   }

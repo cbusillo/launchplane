@@ -86,7 +86,9 @@ reservation. The webhook request never waits on a deploy.
     text. Agent-facing readers use the code and run id; the error can contain
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
-  - If testing already runs the desired artifact, stop.
+  - If testing already runs the desired artifact, stop unless its declared
+    application testing inputs or product qualification need the existing
+    deployment path again, as described below.
   - Odoo existing-data reconciliation waits with `testing_restore_required` if
     this target's latest attempted restore lacks completion proof. A later failed
     maintenance deploy or a newer artifact cannot repair that missing data.
@@ -94,6 +96,12 @@ reservation. The webhook request never waits on a deploy.
     or prepare an isolated fresh testing generation through the supported bootstrap
     path. These remain separate operations with their normal safety checks; the
     automatic deploy does not create an empty database or replay the failed restore.
+    A completed generation needs no legacy bootstrap queue receipt for an
+    existing-data deploy. The generation reader still checks native publication
+    custody or legacy adoption. An unfinished generation needs its original queue
+    preparation and sanitized restore before maintenance. Native publication does
+    not mint the ordinary testing release tuple; the outstanding verified build
+    can still need its first ordinary ship before release review or promotion.
     Drill records name their selected database. When a no-effect drill restores
     the prior completed generation on the same target, its unused candidate
     database does not hold maintenance of the restored selection. Untagged
@@ -110,7 +118,10 @@ reservation. The webhook request never waits on a deploy.
     replace that failure with a generic cancellation reason. Structured operation
     reads identify Launchplane's recovery cancellation without exposing caller or
     provider free text. After three failed attempts of one
-    artifact the reconcile fails until a newer build.
+    artifact the reconcile fails until a newer build or an explicit reviewed
+    [testing retry](testing-deploy-retry.md) re-arms the exact artifact's budget
+    while retaining data. The service fences inventory and release-tuple changes,
+    preserves failed-operation history and reuses the reconciler's deploy path.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
   - **Generic-web:** the reconcile deploys the verified image itself, in
@@ -132,9 +143,19 @@ reservation. The webhook request never waits on a deploy.
     closed out from runtime evidence records none) fails the reconcile instead of
     being announced; the next verified build or an admin deploy records it. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
-    and fails the reconcile until it settles; one that failed with a recorded
-    result is not retried until a newer build or the lane changes. A complete,
-    correlated terminal provider failure before any application/post-deploy
+    and fails the reconcile until it settles, including when current inventory
+    points at an image whose referenced deployment still has pending qualification.
+    That image identity is not an already-qualified result. Explicit native
+    terminal failure settlement ends that reservation. If ordinary planning selects
+    a deploy, returning to the settled predecessor's exact inputs receives a
+    deterministic successor, including on a fresh lane; an unknown successor needs
+    its own settlement. Settlement does not override already-deployed or
+    failed-qualification decisions when inventory already has the desired image.
+    A newer build, changed lane or deliberate new-key deploy can supply the next
+    attempt.
+    An ordinary recorded failure is not retried until a newer build or the lane
+    changes. A complete, correlated terminal provider failure before any
+    application/post-deploy
     executor runs commits a durable failed result (HTTP 502), including its
     provider deployment ID and times. Timeouts and incomplete/ambiguous provider
     evidence remain unknown; a failed untitled job must settle as the sole new
@@ -158,6 +179,35 @@ reservation. The webhook request never waits on a deploy.
     Before using a new authority key, the reconciler also checks held attempts
     for its testing lane. Matching provider target and
     deploy request reuse the held attempt's key for normal observation/recovery.
+    Application testing attempts with managed inputs can settle obsolete
+    captured inputs or a superseded candidate under the original lease when
+    provider absence and the durable journal prove no image mutation. Any
+    original schedule baseline is restored and verified first, while an
+    inherited hold on an earlier unqualified image stays paused. The failed
+    original retains its input evidence; a fresh candidate earns its own
+    readback receipt. Unknown image effects remain fenced. A return to a
+    settled predecessor's exact inputs receives a deterministic successor key.
+    If an independent inventory correction invalidates an automatic application
+    testing attempt before its first provider effect, the controller can complete
+    that original as failed under its current lease. This requires the exact
+    persisted pending deployment and unchanged empty execution receipt, with no
+    effect checkpoint or settled image. The corrected inventory is preserved;
+    it never becomes the original receipt's baseline. The failed outcome belongs
+    to the completed operation; its pending deployment intent stays unchanged.
+    If completion is interrupted, native lease expiry and absence recovery must
+    re-prove and complete that original before any successor is allowed. The
+    next reconcile uses the same deterministic successor chain. Missing evidence,
+    uncertain effects or failed publication/completion retain the original fence.
+    Manual deploy and recovery callers keep their existing baseline-refusal behavior.
+    A typed safety refusal after a successful image-save reply and before the
+    deploy trigger has its own durable phase. With current target authority,
+    exact original-lease evidence and fresh deployment absence, the same
+    controller settles it failed while preserving the original receipt and
+    holding schedules. It never restores schedules or dispatches the saved
+    image. Revoked bindings need not be regranted; a fresh canonical operation
+    uses valid current inputs and explicit provider-key retirement where needed.
+    Retirement or target repointing remains an authority stop, with no cleanup
+    writes to the old target. An uncertain save or crash earns no refusal proof.
     Otherwise a running attempt defers it, and an unknown or expired attempt
     requires generic-web deploy recovery first, even after a provider-binding
     repair moves the lane to another application.
@@ -168,6 +218,19 @@ reservation. The webhook request never waits on a deploy.
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
     driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
     `no_reconcile_deploy_for_driver`.
+    For generic-web application testing with managed site inputs, a matching
+    image also needs its successful deployment's readback-verified input receipt.
+    Missing legacy evidence or changed site inputs uses this same deployment
+    path once, preserving holds and original-operation recovery. Its separate
+    keyed delivery fingerprint excludes global settings, worker credentials,
+    other lanes and audit timestamps; required managed-secret provenance is
+    part of it. Plaintext values never enter the request or recovery snapshot.
+    A captured desired fingerprint alone is no proof of delivery: the original
+    attempt must have durably recorded provider readback before triggering, and
+    its provider deployment must succeed. Recovery preserves that original
+    evidence without backfilling a legacy attempt from today's inputs. See
+    [application testing delivery](private-testing-transport.md) for retirement,
+    platform-credential and unchanged-reconcile behavior.
     For VeriReel testing, a matching image without deployment-bound migration and
     creator/admin qualification gets one normal deploy of that same verified
     artifact to run the testing-only post-deploy extension. Passing qualification
@@ -190,6 +253,30 @@ reservation. The webhook request never waits on a deploy.
     reservation and generic-web recovery path. After interruption, the recovery
     admin can derive the reserved fixture email from the deployment ID using
     `fixture_email`; no cleanup mutation runs after its effect fence is lost.
+    Unknown VeriReel exchanges emit a fixed reason and catch site in service logs,
+    with allowlisted method, route, HTTP status and resource type when observable.
+    Verification routes omit their fixture identifier; queries, request values and
+    exception text are never logged. The verifier logs the deployment record ID
+    separately for correlation. These diagnostics leave qualification unknown and
+    do not release the reservation or permit cleanup or replay.
+    The verifier buffers each tracked same-origin request using Playwright's
+    upstream fetch, with no retries or redirect following and a finite deadline.
+    Its full response body and successful status acknowledge the exact intercepted
+    request before delivery to the browser. Browser cancellation cannot erase that
+    receipt. Missing bodies, unsuccessful status and write redirects stay unknown;
+    signup, server actions and public verification (which records a scan) share
+    this rule. Native read redirects retain actual browser navigation. Each known
+    same-origin read descendant requires its own successful response and matching
+    finished request, because Playwright does not route redirect descendants.
+    A cancelled native descendant remains unknown. Same-origin sign-in redirects
+    retain their own receipt, so a lost application session can fail the product
+    check and clean up its acknowledged fixture.
+    Closing fences new routed requests before upstream dispatch and waits for
+    handlers already in flight. No cancelled-read or page-close inference completes
+    an exchange. A failed page close remains unknown, with cleanup skipped.
+    Service workers are blocked so they cannot bypass interception. The billing
+    page must render its main heading after signup; transport receipts do not
+    replace the product assertions.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.
@@ -248,14 +335,11 @@ reservation. The webhook request never waits on a deploy.
     A changed lifecycle record, product-profile revision, or destroy reason permits
     a new bounded run;
     reopening the PR resumes normal preview reconciliation.
-    Scheduled reconciliation applies the overall direction's disposable rule
-    to closed PR previews. Current disposable-lane observations must establish
-    unused, reproducible data and isolated resources. Missing, stale or changed
-    observations retain the preview, as do staff-testing holds and only-copy
-    data; the reconcile names the condition holding cleanup. The existing
-    disposable-lane observation service and client supply cleanup-only facts and
-    wake normal reconciliation, without a new recovery endpoint or access grant.
-    Safety holds do not spend failed-reconcile feedback budgets.
+    Scheduled reconciliation tears down previews whose PR is confirmed closed
+    or merged. It requires no usage, custody or data-origin facts, assertions,
+    waivers or preview collectors. Open PR previews remain; unavailable PR state
+    is held. Teardown preserves resources shared with another lane or production,
+    including target aliases and credentials outside the destroy set.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as
@@ -265,7 +349,7 @@ reservation. The webhook request never waits on a deploy.
     insufficient. The normal destroy then persists the destroyed lifecycle;
     the durable runner verifies its current record before reporting success.
     Missing-intent disposal does not claim that historical server-side jobs
-    completed: it discards unused, reproducible, isolated preview output and
+    completed: it discards the closed PR's owned preview output and
     supersedes the old result as a failure. Retained original schedule proof is
     still required when observing or superseding an available original request.
     Missing recorded serving identity or incomplete provider evidence remains
@@ -273,6 +357,15 @@ reservation. The webhook request never waits on a deploy.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.
+  - Odoo preview addon settings explicitly supplied in the product profile's
+    `preview.override_env.ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` survive generated
+    website-bootstrap and import-source payloads. Generated bootstrap retains
+    the preview's canonical URL, and template addon settings remain excluded.
+    Only preview addon settings are carried over; other preview payload fields
+    are superseded by generated settings. Composed settings use the template
+    lane's protected/production store checks, canonical secret transport and
+    delivered runtime keys. Invalid composed payloads fail before provider effects.
+    Without generated settings, the original payload passes through unchanged.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
@@ -461,7 +554,8 @@ finishes.
 - While it's on, the testing reconcile still works out the desired build, then
   records the plan as held with reason `staff_testing` and the hold's reason.
   It records no artifact and queues nothing. A testing lane already running the
-  desired build is reported as `already_deployed`, as before.
+  desired build with current input and product-qualification evidence is
+  reported as `already_deployed`; an input repair still waits behind the hold.
 - A deploy the reconciler queued just before the hold is cancelled by the
   worker before any provider effect. Its cancellation names the hold and the
   reconciler; it doesn't count toward the three failed attempts.
@@ -579,12 +673,27 @@ or a backup gate.
 
 ## Catch-up sweep
 
-Every 30 minutes the worker requests a reconcile of every product's testing
-target, of every preview target with an existing, not yet destroyed preview
-record, and of every open pull request, drafts included (one list of open pull
-requests per product, with the build-provenance token). A missed event is
-corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
-the events, and a missed or out-of-order event is corrected within one sweep.
+Every 30 minutes the worker requests a reconcile of each mapped active product's
+configured testing target, existing previews needing lifecycle work, retained
+preview reservations, and open pull requests, drafts included. Open-PR discovery
+uses bounded paginated Delivery App `repository_read` requests independently of
+testing lanes, preview enablement, and preview context. Its existing installation,
+tracked repository inventory and managed credential binding must be available;
+an unavailable read is reported and retried on the next sweep, without another
+identity or a new grant.
+
+A PR without configured previews and without existing preview lifecycle work or
+retained reservations takes a PR-only reconcile path. It rereads the PR's state
+and refreshes Client review without build-provenance credentials, provider planning,
+or runtime creation. Existing preview and reservation recovery keeps its normal
+path even when previews are disabled. A failed check write remains best-effort;
+the next open-PR sweep reopens the same reconcile row and retries publication.
+No new event, preview comment or retry ledger is required. Closed-PR cleanup
+suppresses current review projection, decision-base binding, acceptance carry and
+retired-check maintenance. Already-requested saved Client feedback can still be
+delivered through **Retry delivery** after closure or merge; cleanup may also
+retry it when it invokes the publisher. Reconciling is idempotent, so a missed
+or out-of-order event is corrected by the same path on a later sweep.
 
 For PRs with no live preview, the sweep also revisits recorded pending feedback
 and failed cleared-feedback delivery. It reads the PR through the normal reconcile

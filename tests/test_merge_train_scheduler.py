@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
@@ -6,6 +7,9 @@ from unittest.mock import MagicMock, patch
 from typing import cast
 
 from control_plane import merge_train_events, merge_train_scheduler
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_github_token import merge_train_github_token_value
+from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train import (
     MergeTrainBranchClient,
     apply_merge_train_branch_update_intent,
@@ -23,7 +27,14 @@ from control_plane.contracts.merge_train_policy import (
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_pr_feedback import write_merge_train_pr_feedback_record
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
+from control_plane.merge_train_wake import (
+    MergeTrainWake,
+    MergeTrainEventReceipt,
+    MergeTrainTargetReceipt,
+)
 from control_plane.merge_train_scheduler import (
     MergeTrainScheduledTargetResult,
     run_merge_train_scheduler_loop,
@@ -74,7 +85,7 @@ def _controller_result() -> MergeTrainControllerRunOnceResult:
             "controller_action": "wait_for_checks",
             "candidate": {"entries": [{"pull_request_number": 7}]},
         },
-        records={"merge_train_controller_state_record_id": "controller-1"},
+        records={"merge_train_batch_candidate_record_id": "candidate-1"},
     )
 
 
@@ -162,6 +173,16 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
         )
+        credential = GitHubAppInstallationToken(
+            token="token",
+            app_id=1,
+            installation_id=2,
+            repository_id=3,
+            repository="cbusillo/alpha",
+            expires_at="unused",
+            permissions=("checks:read",),
+        )
+        self.mocks["resolve_merge_train_github_token"].return_value = credential
         revoked: list[str] = []
         reads: list[str] = []
 
@@ -183,7 +204,17 @@ class MergeTrainSchedulerPassTests(TestCase):
             for _ in range(2):
                 self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
             # The controller still needs its credential after admission evidence completes.
-            provider(path="/repos/cbusillo/alpha/pulls", token=kwargs["token"])
+            self.assertIs(kwargs["token"], credential)
+            self.assertIsInstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            assert isinstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            technical_transport = evaluator.technical_check_client.transport
+            assert isinstance(technical_transport, UrllibMergeTrainGitHubTransport)
+            self.assertEqual(technical_transport.token_permissions, credential.permissions)
+            snapshot_transport = UrllibMergeTrainGitHubTransport(token=credential)
+            self.assertEqual(snapshot_transport.token_permissions, credential.permissions)
+            provider(
+                path="/repos/cbusillo/alpha/pulls", token=merge_train_github_token_value(credential)
+            )
             return _controller_result()
 
         self.mocks["execute_merge_train_controller_run_once"].side_effect = execute
@@ -493,6 +524,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_mutating_controller_pass_delivers_feedback(self) -> None:
+        diagnostic = "missing-security-gate"
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
         )
@@ -500,7 +532,38 @@ class MergeTrainSchedulerPassTests(TestCase):
             "admitted"
         )
 
-        (result,) = self._run()
+        observed = _controller_result()
+        observed.accepted_result["candidate"] = {
+            "entries": [{"pull_request_number": 7}],
+            "required_checks_observation_error": diagnostic,
+        }
+        self.mocks["execute_merge_train_controller_run_once"].return_value = observed
+        self.mocks[
+            "write_merge_train_pr_feedback_record"
+        ].side_effect = write_merge_train_pr_feedback_record
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            for name in (
+                "merge_train_feedback_delivery_lock",
+                "list_merge_train_pr_feedback_records",
+                "write_merge_train_pr_feedback_record",
+            ):
+                getattr(self.record_store, name).side_effect = getattr(store, name)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                return_value={
+                    "action": "created",
+                    "comment_id": 9,
+                    "comment_url": "https://github.com/cbusillo/alpha/issues/7#issuecomment-9",
+                },
+            ):
+                (result,) = self._run()
+            reloaded = FilesystemRecordStore(Path(directory)).list_merge_train_pr_feedback_records(
+                repository="cbusillo/alpha", base_branch="main", pr_number=7
+            )
+            self.assertEqual(len(reloaded), 1)
+            self.assertIn(diagnostic, reloaded[0].comment_markdown)
+            self.assertEqual(reloaded[0].delivery_status, "delivered")
 
         self.assertTrue(
             self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"].mutate
@@ -617,10 +680,43 @@ class MergeTrainSchedulerPassTests(TestCase):
 
 
 class MergeTrainSchedulerLoopTests(TestCase):
+    def test_due_clock_keeps_event_observations_but_does_not_reuse_them_later(self) -> None:
+        receipt = MergeTrainEventReceipt(
+            delivery_id="completion",
+            request_trace_id="receiver-request",
+            received_at="2026-10-19T09:00:00Z",
+            event="check_run",
+        )
+        key = "merge-train-controller:cbusillo:alpha:main"
+        event = MergeTrainWake(
+            frozenset({key}), "event_hints", receipts=(MergeTrainTargetReceipt(key, receipt),)
+        )
+        clock = iter((0.0, 0.0, 300.0, 300.0, 600.0))
+        observations: list[MergeTrainWake] = []
+        with patch.object(
+            merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
+        ) as run:
+            run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                max_passes=3,
+                monotonic=lambda: next(clock),
+                pass_callback=lambda results, wake: observations.append(wake),
+                wait_for_event=MagicMock(side_effect=(event, MergeTrainWake(None, "timer_sweep"))),
+            )
+        startup, coincident, later = [call.kwargs for call in run.call_args_list]
+        self.assertEqual(observations[0].reason, "startup")
+        self.assertIsNone(coincident["target_keys"])
+        self.assertEqual(observations[1].reason, "timer_sweep")
+        self.assertEqual(observations[1].receipts, event.receipts)
+        self.assertEqual(observations[2].receipts, ())
+        self.assertIsNone(startup["target_keys"])
+        self.assertIsNone(later["target_keys"])
+
     def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
         stop_event = MagicMock(spec=Event)
         stop_event.is_set.return_value = False
-        event_wait = MagicMock(return_value=None)
+        event_wait = MagicMock(return_value=MergeTrainWake(None, "timer_sweep"))
         with patch.object(
             merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
         ) as run:
@@ -643,6 +739,13 @@ class MergeTrainSchedulerLoopTests(TestCase):
         stop_event.is_set.return_value = False
         stop_event.wait.side_effect = lambda timeout: waits.append(timeout)
         passes: list[tuple[MergeTrainScheduledTargetResult, ...]] = []
+        observations: list[MergeTrainWake] = []
+
+        def record_pass(
+            results: tuple[MergeTrainScheduledTargetResult, ...], wake: MergeTrainWake
+        ) -> None:
+            passes.append(results)
+            observations.append(wake)
 
         with patch.object(
             merge_train_scheduler,
@@ -655,12 +758,14 @@ class MergeTrainSchedulerLoopTests(TestCase):
                 interval_seconds=300,
                 stop_event=stop_event,
                 max_passes=2,
-                pass_callback=passes.append,
+                pass_callback=record_pass,
                 monotonic=lambda: next(clock),
             )
 
         self.assertEqual(count, 2)
         self.assertEqual(passes, [(), ()])
+        self.assertEqual(observations[0].pass_error_code, RuntimeError.__name__)
+        self.assertEqual(observations[1].pass_error_code, "")
         # The first pass took 40 seconds, so the next one starts 260 seconds later.
         self.assertEqual(waits, [260.0])
 
@@ -674,7 +779,12 @@ class MergeTrainSteadyArrivalTests(TestCase):
             ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
         )
         hinted: list[str] = []
-        store = SimpleNamespace(notify_merge_train=hinted.extend)
+
+        def notify(keys: tuple[str, ...], *, receipt: MergeTrainEventReceipt | None = None) -> None:
+            del receipt
+            hinted.extend(keys)
+
+        store = SimpleNamespace(notify_merge_train=notify)
         inventory = SimpleNamespace(
             current_record=SimpleNamespace(inventory_state="tracked", repository="cbusillo/alpha")
         )
@@ -694,11 +804,13 @@ class MergeTrainSteadyArrivalTests(TestCase):
             assert isinstance(repository_policy, MergeTrainRepositoryPolicy)
             return merge_train_scheduler._target_result(repository_policy, status="ran")
 
-        def record_pass(results: tuple[MergeTrainScheduledTargetResult, ...]) -> None:
+        def record_pass(
+            results: tuple[MergeTrainScheduledTargetResult, ...], _wake: MergeTrainWake
+        ) -> None:
             passes.append((started[-1], tuple(result.repository for result in results)))
             clock[0] += 5
 
-        def wait(timeout: float, _stop: Event) -> frozenset[str] | None:
+        def wait(timeout: float, _stop: Event) -> MergeTrainWake:
             deadline = clock[0] + timeout
             while arrivals and arrivals[0] <= deadline:
                 clock[0] = max(clock[0], arrivals.pop(0))
@@ -711,9 +823,9 @@ class MergeTrainSteadyArrivalTests(TestCase):
                 if hinted:
                     woken = frozenset(hinted)
                     hinted.clear()
-                    return woken
+                    return MergeTrainWake(woken, "event_hints")
             clock[0] = deadline
-            return None
+            return MergeTrainWake(None, "timer_sweep")
 
         with (
             patch.object(

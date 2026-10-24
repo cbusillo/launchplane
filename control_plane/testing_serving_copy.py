@@ -3,6 +3,8 @@
 from pathlib import Path
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.contracts.testing_publication import TestingPublicationRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -11,7 +13,11 @@ from control_plane.odoo_testing_restore import generation_snapshot_matches
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_fences
-from control_plane.testing_publication_storage import read_publication, read_snapshot
+from control_plane.testing_publication_storage import (
+    read_publication,
+    read_snapshot,
+    testing_binding_authority,
+)
 
 
 def published_testing_copy(
@@ -83,12 +89,9 @@ def published_testing_copy(
         or snapshot.target.public_hosts
         or snapshot.target.pending_public_host_effects
         or binding is None
-        or binding.provider_target.target_name != candidate.namespace
         or binding.source.source_versions.get("testing_route") != plan.route.digest
         or candidate_custody != candidate
-        or binding.domains != plan.after.binding.domains
-        or binding.ingress != plan.after.binding.ingress
-        or binding.tls.owner != plan.after.binding.tls.owner
+        or testing_binding_authority(binding) != testing_binding_authority(plan.after.binding)
         or snapshot.runtime is None
     ):
         raise ValueError("Serving testing copy no longer matches its publication custody.")
@@ -118,6 +121,83 @@ def published_testing_copy(
     ):
         raise ValueError("Serving testing copy acquired another lane's alias.")
     return record
+
+
+def require_published_testing_release(store: object, release: ReleaseTupleRecord) -> None:
+    if release.channel != "testing" or not isinstance(store, PostgresRecordStore):
+        return
+    try:
+        _require_published_testing_release(store, release)
+    except (FileNotFoundError, ValueError):
+        raise ValueError("The current testing copy does not qualify its release record.") from None
+
+
+def _require_published_testing_release(
+    store: PostgresRecordStore, release: ReleaseTupleRecord
+) -> None:
+    bindings = tuple(
+        binding
+        for binding in store.list_route_binding_records(
+            context_name=release.context, instance_name="testing"
+        )
+        if binding.source.source_versions.get("testing_publication")
+    )
+    if not bindings:
+        try:
+            identity = store.read_dokploy_target_id_record(
+                context_name=release.context, instance_name="testing"
+            )
+        except FileNotFoundError:
+            identity = None
+        if identity is not None and store.find_testing_candidate_by_target(identity.target_id):
+            raise ValueError("The published testing release has no route provenance.")
+        try:
+            target = store.read_dokploy_target_record(
+                context_name=release.context, instance_name="testing"
+            )
+        except FileNotFoundError:
+            return
+        if target.source_label == "service:testing-rebuild":
+            raise ValueError("The published testing release has no copy custody.")
+        return
+    if len(bindings) != 1:
+        raise ValueError("The published testing release has ambiguous ownership.")
+    publication = published_testing_copy(
+        store, product=bindings[0].product, context=release.context
+    )
+    if publication is None:
+        raise ValueError("The published testing release has no publication receipt.")
+    inventory = store.read_environment_inventory(
+        context_name=release.context, instance_name="testing"
+    )
+    runtime = inventory.runtime_identity
+    if runtime is None or runtime.artifact_id != release.artifact_id:
+        raise ValueError("The testing release does not match its current published copy.")
+    if store.list_odoo_stable_target_replacement_operation_records(
+        context_name=release.context,
+        instance_name="testing",
+        statuses=("pending", "running", "reconciliation_required"),
+    ):
+        raise ValueError("Testing has an unresolved replacement operation.")
+    latest = next(
+        (
+            record
+            for record in store.list_deployment_records(
+                context_name=release.context, instance_name="testing"
+            )
+            if record.resolved_target is None
+            or record.resolved_target.target_id == publication.plan.candidate.compose_id
+        ),
+        None,
+    )
+    if (
+        latest is None
+        or latest.resolved_target is None
+        or not deployment_record_passed(latest)
+        or latest.artifact_identity is None
+        or latest.artifact_identity.artifact_id != release.artifact_id
+    ):
+        raise ValueError("The latest testing deployment does not qualify its release record.")
 
 
 def testing_maintenance_secret_keys(store: PostgresRecordStore, context: str) -> frozenset[str]:

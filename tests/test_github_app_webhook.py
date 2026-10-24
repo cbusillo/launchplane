@@ -11,6 +11,7 @@ from pydantic import JsonValue
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
 from control_plane.github_app_webhook import (
     GitHubAppWebhookDependencies,
     handle_github_app_webhook_request,
@@ -26,6 +27,7 @@ from tests.support.auth import StubVerifier, identity
 from tests.support.http import lifespan_client
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
+from tests.test_merge_train_scheduler import _policy_record
 
 _SECRET = "app-webhook-secret"
 _REPOSITORY_ID = 424242
@@ -148,6 +150,46 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assert_nothing_recorded()
 
+    def test_signed_completion_keeps_its_delivery_receipt_in_the_train_wake(self) -> None:
+        delivery_id = "completion-delivery"
+        head_sha = "a" * 40
+        check_id = 73
+        payload: dict[str, object] = {
+            "action": "completed",
+            "repository": {"id": _REPOSITORY_ID},
+            "check_run": {
+                "id": check_id,
+                "head_sha": head_sha,
+                "pull_requests": [{"number": 7, "base": {"ref": "main"}}],
+            },
+        }
+        policy = _policy_record(
+            (_REPOSITORY, MergeTrainSchedulerPolicy(enabled=True, mutate=False))
+        )
+        with (
+            patch(
+                "control_plane.merge_train_events.resolve_merge_train_policy_record",
+                return_value=policy,
+            ),
+            patch.object(self.store, "notify_merge_train") as notify,
+        ):
+            rejected, _ = self.deliver(payload, event="check_run", signature="sha256=" + "0" * 64)
+            self.assertEqual(rejected, 401)
+            notify.assert_not_called()
+            status, body = self.deliver(payload, event="check_run", delivery_id=delivery_id)
+        self.assertEqual(status, 202)
+        self.assertEqual(body["result"]["reason"], "merge_train_woken")  # type: ignore[index]
+        notify.assert_called_once()
+        receipt = notify.call_args.kwargs["receipt"]
+        self.assertEqual(receipt.delivery_id, delivery_id)
+        self.assertEqual(receipt.received_at, self.clock)
+        self.assertEqual(receipt.request_trace_id, "trace-test")
+        self.assertEqual(receipt.event, "check_run")
+        self.assertEqual(receipt.action, payload["action"])
+        self.assertEqual(receipt.head_sha, head_sha)
+        self.assertEqual(receipt.source_id, str(check_id))
+        self.assert_nothing_recorded()
+
     def test_missing_secret_fails_closed(self) -> None:
         self.secret = ""
 
@@ -156,6 +198,29 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(body["error"]["code"], "github_app_webhook_unconfigured")  # type: ignore[index]
         self.assert_nothing_recorded()
+
+    def test_verified_pr_and_status_receipts_keep_their_payload_identifiers(self) -> None:
+        head_sha = "b" * 40
+        cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            (
+                "pull_request",
+                {"action": "labeled", "pull_request": {"id": 123, "head": {"sha": head_sha}}},
+                "123",
+            ),
+            ("status", {"id": 456, "sha": head_sha, "state": "success"}, "456"),
+        )
+        for event, payload, source_id in cases:
+            with (
+                self.subTest(event=event),
+                patch(
+                    "control_plane.merge_train_events.wake_merge_train_for_event",
+                    return_value=False,
+                ) as wake,
+            ):
+                self.deliver(payload, event=event)
+                receipt = wake.call_args.kwargs["receipt"]
+                self.assertEqual(receipt.head_sha, head_sha)
+                self.assertEqual(receipt.source_id, source_id)
 
     def test_push_build_requests_testing_reconcile(self) -> None:
         status, body = self.deliver(_workflow_run(trigger="push"), event="workflow_run")

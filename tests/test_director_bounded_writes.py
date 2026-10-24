@@ -31,10 +31,11 @@ from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload, _PLAN_ID
 
 
-class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+class DirectorBoundedWritesFixture:
+    def __init__(self, owner: unittest.TestCase) -> None:
+        self.owner = owner
         temporary = TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
+        owner.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.store = PostgresRecordStore(
             database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
@@ -46,8 +47,8 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             self.store, "serialize_existing_preview_refresh", return_value=nullcontext()
         )
         guard.start()
-        self.addCleanup(guard.stop)
-        self.addCleanup(self.store.close)
+        owner.addCleanup(guard.stop)
+        owner.addCleanup(self.store.close)
         self.profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_preview_profile_payload()
         )
@@ -160,7 +161,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         }
         route = f"/v1/product-profiles/{self.profile.product}/production-use"
         dry = await self.post(route, payload)
-        self.assertEqual(dry.status_code, 202, dry.text)
+        self.owner.assertEqual(dry.status_code, 202, dry.text)
         return await self.post(
             route,
             {
@@ -184,11 +185,62 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
     async def preview_apply(self) -> Any:
         return await self.post("/v1/drivers/odoo/preview-apply", self.payload, self.plan_id)
 
+
+class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBoundedWritesFixture):
+    def setUp(self) -> None:
+        DirectorBoundedWritesFixture.__init__(self, self)
+
+    def test_old_clear_review_cannot_remove_new_preview_protection(self) -> None:
+        from control_plane.disposable_lanes import (
+            resolve_disposable_observation_binding,
+            disposable_lane_observation_sha256,
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+
+        scope = dict(
+            product=self.profile.product,
+            context=self.preview.context,
+            instance=self.profile.preview.slug_template.format(
+                number=self.preview.anchor_pr_number
+            ),
+        )
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                self.store.clear_disposable_lane_safety(**scope)
+                if existing:
+                    record_safety(self.store, **scope, preview=self.preview)
+                reviewed = resolve_disposable_observation_binding(
+                    self.store, **scope, preview_id=self.preview.preview_id
+                )
+                previous = disposable_lane_observation_sha256(
+                    self.store.read_disposable_lane_safety(**scope)
+                )
+                record_safety(self.store, **scope, preview=self.preview, usage="in_use")
+                protected = self.store.read_disposable_lane_safety(**scope)
+                with self.assertRaises(ValueError):
+                    self.store.clear_reviewed_disposable_lane_safety(
+                        **scope,
+                        preview_id=self.preview.preview_id,
+                        expected_binding_sha256=reviewed.binding_sha256,
+                        expected_observation_sha256=previous,
+                    )
+                self.assertEqual(self.store.read_disposable_lane_safety(**scope), protected)
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_disposable_lane(
+                        self.store,
+                        product=self.profile.product,
+                        context=self.preview.context,
+                        instance=scope["instance"],
+                        preview=self.preview,
+                        preview_refresh=True,
+                    )
+
     async def test_reviewed_never_live_correction_is_atomic_replayed_and_bounded(self) -> None:
         route = f"/v1/product-profiles/{self.profile.product}/production-use"
         payload = {"production_use": "prelaunch", "reason": "Reviewed product facts."}
         dry = await self.post(route, payload)
-        self.assertEqual(dry.status_code, 202, dry.text)
+        self.owner.assertEqual(dry.status_code, 202, dry.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
         apply = {
             **payload,

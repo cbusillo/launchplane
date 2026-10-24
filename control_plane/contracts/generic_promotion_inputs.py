@@ -112,6 +112,12 @@ def resolve_generic_promotion_inputs(
             artifact_id=source_tuple.artifact_id,
         )
 
+    from control_plane.testing_serving_copy import require_published_testing_release
+
+    try:
+        require_published_testing_release(record_store, source_tuple)
+    except (FileNotFoundError, ValueError) as error:
+        return _blocked_result(request=request, error_message=str(error))
     try:
         artifact_manifest = record_store.read_artifact_manifest(source_tuple.artifact_id)
     except FileNotFoundError:

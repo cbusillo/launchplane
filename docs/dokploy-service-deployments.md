@@ -51,6 +51,88 @@ Production callers import the canonical owning module. The
 and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
+### Environment wire formats
+
+Dokploy application targets consume one dotenv layer. Docker Compose targets
+consume two: Dokploy parses the stored environment and writes those values to
+the generated `.env`, which Compose then reads for interpolation and `env_file`.
+The adapter quotes new or changed literal inputs for both stages, with a
+format comment naming the encoded keys. Readback, merges, credential checks and
+retirement recover their literal values. Untouched legacy values retain their
+original wire meaning, including existing provider references: an unrelated
+image or startup update must not change a password that initialized a retained
+database. This repair does not retroactively qualify or rewrite a legacy value
+that Compose previously transformed. Existing lane replacement/rebuild paths
+create their environment from canonical records; retained databases keep their
+existing credential and recovery checks.
+
+Equal stored strings do not prove literal delivery for non-plain legacy values.
+Runtime apply dry-run reports `compose_transport.unqualified_keys` using names
+only. To qualify unchanged managed inputs, an already-authorized admin caller
+can send this body to `POST /v1/live-target-runtime/apply`:
+
+```json
+{
+  "mode": "dry-run",
+  "product": "example-product",
+  "context": "example-context",
+  "instance": "testing",
+  "requalify_literal_keys": ["APP_SETTINGS", "SMTP_PASSWORD"]
+}
+```
+
+Review those names and the desired runtime records, then use `mode: "apply"`
+with the same names and the API's existing authorization and idempotency headers.
+Only managed keys may be named. Naming an unqualified managed key writes its
+literal transport even when the value delta is empty. Already-qualified keys
+and plain values are no-ops. The response reports transport work separately
+from value changes. Persistence verification checks values and the literal
+transport written by that operation.
+It does not prove that running containers restarted; deployment remains an
+explicit existing operation. Unchanged legacy inputs remain explicitly unqualified in the names-only report.
+Ordinary writes and deploy-only calls preserve their existing consumer semantics;
+that report does not claim retroactive literal delivery.
+
+Requalifying an uncertain `ODOO_DB_PASSWORD` on any retained database is refused before effects, including production.
+For testing, use the existing fresh testing generation, which creates
+its own database, rather than toggling or rotating a retained credential.
+Compatible slots refuse a legacy/literal transport mismatch for shared settings. Historical candidate
+custody and recovery receipts remain intact when exact configuration fails.
+This API field changes no authorization: terminal agents remain unable to apply,
+and Director-agent disposable-lane restrictions still apply. The Live Target Runtime workflow exposes the same optional JSON array of names
+through its existing authorization. Its summary separates value changes and transport
+qualification. `env_written_without_deploy` describes only this call. It does
+not track earlier unapplied writes or running-container values. The installed runtime-sync helper does not expose
+this optional input; use the workflow or the existing authorized service API.
+Historical recipient and activation recovery retains its original parsed-value
+contract, including previously stored runtime identity.
+
+The wire quotes and Compose-supported escapes are transport data, not a product
+storage convention. Metadata survives comment movement and CRLF normalization;
+new provider-only fields and edits that cease to match the encoding remain
+legacy fields rather than making the record unreadable. Canonical reconciliation
+can then replace or retire them through the existing runtime-input path. Swarm
+stack targets retain their separate shell-export format.
+
+Render the target-specific environment before recording its write checkpoint
+or changing its Compose source. New literal inputs support multiline text,
+surrounding/mixed quotes, whitespace, backslashes, controls and dollar expressions,
+including text that resembles provider substitutions. The adapter hides that
+syntax until Compose's own escape/interpolation pass, where dollars become
+literal. NUL remains invalid for container environments and is refused before
+the corresponding effect, without including values in the error; remove NUL
+from the input. New testing-candidate configuration custody also binds the
+wire representation, while historical unmarked hashes retain their recovery
+contract.
+
+`scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
+Dokploy generated-file functions and actual Compose `config`, covering both
+interpolation and service `env_file` consumption with synthetic values only.
+Provision Node through the repository's CI Node setup and Compose through
+`scripts/setup-ci-compose.sh` using the CI-declared version before running it.
+The frontend validation CI job runs this qualification; ordinary unit discovery
+does not depend on a developer's installed Node or Compose. No containers start.
+
 Odoo post-deploy sender verification follows the deployed image's bootstrap
 contract. On a rollback or exact artifact re-deploy, when a company email is
 requested, the maintenance schedule reads and
@@ -147,6 +229,108 @@ immediately persist the matching target records. Routine shared/live target
 setup should use the deployed service route or admin workflow instead. It
 still leaves runtime env, managed secrets, volumes, ports, and health behavior
 as explicit setup rather than inferred provider state.
+
+### Ordinary testing application allocation
+
+Ordinary non-storage `create-application` setup through
+`POST /v1/dokploy-targets/setup` preserves direct apply with its original request
+and `Idempotency-Key`. Send that same key with a dry run to preview the exact
+service-generated names used by apply. Without a key, dry-run names are explicit
+placeholders and `setup.allocation_preview` reports `requires-original-key`; that is
+not an exact allocation review. A dry run creates no provider resource or saved
+allocation intent. Apply saves
+the allocation intent before dispatch and binds that key to the unchanged request,
+even if a later refusal confirms that no effect began. Corrected input uses a
+new key only after confirmed pre-effect refusal; an unknown effect must recover
+or retain the original custody first. The service uses the same durable runner as
+state-volume setup. The service generates unique names for each newly created
+project, environment and application, returned in `setup.allocation`; supplied labels
+are not recovery identities. Existing placement ids remain exact existing
+placement. As in direct setup, a supplied environment selects its actual project;
+a redundant project id does not override that environment. An omitted project name is resolved during adoption; an omitted server
+keeps the provider-selected placement. Every acknowledged identity and each pending dispatch is recorded
+under the original caller scope and key before the next effect.
+
+For recovery, send the unchanged setup request with `mode: readback` and the
+original key. The response includes `allocation_id`, `operation_state`, the
+durable `provider_effect_phase`, `configuration_evidence` and `custody_sha256`.
+Readback does not adopt records or mutate the provider. Repeating apply with
+that same key can continue only from positively identified original resources
+in complete inventory. It preserves current source, ownership, hold, placement,
+usage and lease checks. An absent or ambiguous result for a dispatched create
+remains uncertain and is never blindly repeated. A fresh key cannot bypass
+unresolved allocation custody. Completed receipts from the earlier direct setup
+path continue to replay; they do not acquire retrospective phase evidence.
+
+If continuation cannot be proved, obtain original-key readback and review its
+custody digest. Send the same request and key in apply mode with
+`retain_allocation: true` and
+`expected_allocation_custody_sha256: <custody_sha256>`, plus the normal exact
+confirmation and reason. The existing retention operation requires an expired
+execution lease. Original Director first-setup allocations require current
+exclusive ownership. If that ownership changes while custody is held, restore
+the original product's exclusive context ownership through the authorized
+`POST /v1/product-profiles` path, then obtain fresh original-key readback and
+reviewed retention; never bypass the ownership fence. An original service-scoped allocation instead requires
+current service setup authorization and its exact original caller, request, key
+and reviewed digest. It may retain its own custody after context registration,
+profile edits or ownership changes, which still prevent provider continuation.
+Losing service permission does not allow retention through the narrower Director
+first-setup path. Retention does not acquire product or resource ownership.
+It retains all resource ids and pending effects, fences the old worker and returns
+`allocation_state: retained_uncertain`, `resources_retained: true` and
+`applied: false`. It performs no provider deletion or deployment. Original-key
+apply replays that retained receipt; a new allocation uses a new key and
+independent names. Already adopted allocations recover their original completion
+receipt instead of being retained. The shared custody refusal codes below still
+apply. This adds no grant or cross-caller transfer; preserve original receipts
+when the original caller is unavailable.
+
+Ordinary dry-run and successful apply retain the setup response contract: mode,
+operation, context, instance, applied, route_domain_ids, reason and setup. Apply
+keeps setup.plan, project_id, environment_id and provider_requests; additional
+allocation and configuration evidence stays under setup.allocation. Readback and
+retention retain their custody-specific response contracts.
+
+Dokploy Target Setup accepts mode readback and a closed allocation_control JSON
+input. For ordinary testing applications supply idempotency_key with the same
+value on dry-run, apply, readback and retention dispatches. For retention also
+supply retain_allocation: true and expected_allocation_custody_sha256 from the
+reviewed readback. Keep every other setup input unchanged. Apply retains its
+exact confirmation and reason. Other operations do not accept allocation controls.
+
+The protected generic-web onboarding worker accepts an optional allocation_control
+JSON input. Including mode readback or apply selects recovery only: it never
+applies product records or authorization records. The default key stays
+`generic-web-onboarding:target:<product>:<testing_context>:v1`. An explicit
+idempotency_key selects a stable original key for both normal apply and recovery.
+Use a fresh key only after reviewed retention or a confirmed pre-effect refusal;
+the service refuses fresh keys while unresolved custody still holds the lane.
+A key-only envelope runs normal onboarding under that key. Retention additionally requires
+retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
+the original target request artifact digest even during recovery. Recovery needs
+no product or authorization plan artifacts. Successful product registration keeps
+the adopted target and project names, and compares both target and identity
+snapshots atomically before writing records.
+
+Product Onboarding forwards allocation_control to the protected worker pinned to
+the exact [worker-contract landing](https://github.com/cbusillo/launchplane/pull/4590),
+following the two-landing policy in [GitHub Actions security](github-actions-security.md).
+For readback, keep the original dispatch inputs, select outer mode dry_run and
+supply `{"mode":"readback"}`. The caller renders only the original target request,
+skips repository-token creation and all three planning API calls, and invokes the
+protected worker even though the outer mode is dry_run. The worker retains the
+original workflow identity and allocation key; no product or authorization plan
+is required. Ordinary dry_run without a recovery mode still only plans onboarding.
+
+To continue the original allocation, select outer mode apply, provide its exact
+confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add
+retain_allocation: true and expected_allocation_custody_sha256 to that envelope.
+Use the same explicit idempotency_key if the original apply supplied one. A
+key-only envelope still runs normal onboarding with all plan reviews. Neither
+source landing grants access or activates the new worker trust anchor; those
+remain separate operations. A denied worker identity stays denied and follows
+the recorded activation path without switching callers or scopes.
 
 ### Testing application state volume
 

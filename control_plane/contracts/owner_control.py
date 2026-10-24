@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_bytes, canonical_json_sha256
 from control_plane.contracts.privileged_operation import PrivilegedOperationDescriptorId
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 OWNER_CONTROL_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -20,7 +21,6 @@ OWNER_CONTROL_SIGNATURE_DOMAIN: Final[Literal["launchplane-owner-control-confirm
 )
 OWNER_CONTROL_SIGNATURE_ALGORITHM: Final[Literal["ed25519"]] = "ed25519"
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OPERATION_ID_PATTERN = re.compile(r"^privileged-operation-[0-9a-f]{32}$")
 _NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
@@ -30,7 +30,7 @@ _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _canonical_sha256(value: str, field_name: str) -> str:
-    if _SHA256_PATTERN.fullmatch(value) is None:
+    if SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return value
 
@@ -123,13 +123,13 @@ class ApprovalRequest(BaseModel):
     operation_id: str = Field(pattern=_OPERATION_ID_PATTERN.pattern)
     descriptor_id: PrivilegedOperationDescriptorId
     descriptor_version: Literal[1]
-    request_digest: str = Field(pattern=_SHA256_PATTERN.pattern)
-    plan_digest: str = Field(pattern=_SHA256_PATTERN.pattern)
-    evidence_digest: str = Field(pattern=_SHA256_PATTERN.pattern)
-    pre_state_digest: str = Field(pattern=_SHA256_PATTERN.pattern)
+    request_digest: str = Field(pattern=SHA256_PATTERN.pattern)
+    plan_digest: str = Field(pattern=SHA256_PATTERN.pattern)
+    evidence_digest: str = Field(pattern=SHA256_PATTERN.pattern)
+    pre_state_digest: str = Field(pattern=SHA256_PATTERN.pattern)
     policy_record_id: str = Field(pattern=_IDENTIFIER_PATTERN.pattern)
     policy_revision: int = Field(ge=1, le=2**63 - 1)
-    policy_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    policy_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     owner_github_id: int = Field(ge=1, le=2**63 - 1)
     server_review: ServerReviewPayload
     nonce: str = Field(pattern=_NONCE_PATTERN.pattern)
@@ -171,9 +171,9 @@ class ChallengeResponse(BaseModel):
 
     schema_version: Literal[1] = OWNER_CONTROL_SCHEMA_VERSION
     approval_request: ApprovalRequest
-    approval_request_digest: str = Field(pattern=_SHA256_PATTERN.pattern)
+    approval_request_digest: str = Field(pattern=SHA256_PATTERN.pattern)
     decision: Literal["approved"]
-    channel_binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    channel_binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     confirmed_at: str = Field(pattern=_CANONICAL_TIMESTAMP_PATTERN.pattern)
 
     @model_validator(mode="after")

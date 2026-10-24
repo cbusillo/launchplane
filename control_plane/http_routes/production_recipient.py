@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Annotated
 
 import click
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from fastapi import Depends, Header, Path as PathParameter
 
 from control_plane.contracts.production_recipient import (
@@ -26,7 +28,11 @@ from control_plane.http_routes.support import (
     run_in_worker_thread,
 )
 from control_plane.production_recipient import ROUTE, ProductionRecipientAdapter, custody, plan
-from control_plane.production_recipient_recovery import RECOVERY_ROUTE, RecipientRecoveryAdapter
+from control_plane.production_recipient_recovery import (
+    RECOVERY_ROUTE,
+    RecipientRecoveryAdapter,
+    recovery_request_fingerprint,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
@@ -152,6 +158,17 @@ def register_production_recipient_routes(
 
             result_payload = await run_in_worker_thread(read)
             return accepted_evidence_response(trace_id=trace, records={}, result=result_payload)
+        except BridgeNetworkCapacityRefused as error:
+            raise dependencies.http_error(
+                status_code=409, trace_id=trace, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except (
             ValueError,
             FileNotFoundError,
@@ -230,10 +247,18 @@ def register_production_recipient_routes(
                 if not idempotency_key.strip() or row is None or row.state != "completed":
                     raise ValueError("The completed original recovery receipt is required.")
                 result = RecipientRecoveryPlan.model_validate(row.response_payload.get("result"))
-                if (result.product, result.context, result.preparation_plan_sha256) != (
+                if (
+                    result.product,
+                    result.context,
+                    result.preparation_plan_sha256,
+                    result.purpose,
+                    result.generation,
+                ) != (
                     product,
                     body.context,
                     body.preparation_plan_sha256,
+                    body.purpose,
+                    body.generation,
                 ):
                     raise ValueError("The receipt belongs to another preparation.")
                 return accepted_evidence_response(
@@ -254,9 +279,7 @@ def register_production_recipient_routes(
                     identity=identity,
                     route_path=RECOVERY_ROUTE.format(product=product),
                     idempotency_key=idempotency_key.strip(),
-                    request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
-                    ),
+                    request_fingerprint=recovery_request_fingerprint(product, body),
                     trace_id=trace,
                     adapter=adapter,
                     in_progress_message="Recovery remains under its original key.",

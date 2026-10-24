@@ -203,12 +203,11 @@ durable evidence for adopting only the reviewed secret delta while retaining
 already committed disable events. That capability requires separate design and
 review; this qualification supplies no operational recovery procedure.
 
-The existing transitional authorization selector is `product-retirement` in
-**Manage Launchplane Authorization**, backed by managed set
-`operator.product-retirement` and
-`LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`. Existing workflow
-bindings name both the caller `workflow_ref` and exact immutable
+Existing product-retirement authority is DB-backed in
+`operator.product-retirement`. Its former GitHub-secret reconcile selector is
+removed. Maintain the managed set through the reviewed Access policy proposal
+path. Existing workflow bindings name both the caller `workflow_ref` and exact immutable
 `job_workflow_ref`; derive these from the dispatch wrapper and its `retire`
-job's `uses:` value, never a copied revision. This describes the existing path,
+job's `uses:` value, never a copied revision. This describes the existing bindings,
 not approval to create or expand it. New grants and managed-set changes follow
 [authorization authority](authorization-authority.md#who-can-do-what).

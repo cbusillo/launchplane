@@ -1,0 +1,22 @@
+Public consumer fixtures for the Dokploy Compose environment qualification.
+
+create-env-file.ts is the unmodified getCreateEnvFileCommand export from:
+https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/builders/compose.ts
+
+prepare-environment.ts is the unmodified prepareEnvironmentVariables export from:
+https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts
+
+These are Dokploy v0.29.11 source excerpts, used under Apache-2.0:
+https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/LICENSE
+Copyright 2024 Dokploy.
+
+dotenv/main.cjs and package.json are unmodified dotenv v16.4.5 sources:
+https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js
+https://github.com/motdotla/dotenv/blob/v16.4.5/package.json
+The MIT license and copyright notice are in dotenv/LICENSE.
+
+consume.mjs supplies dependencies to the original functions, removes TypeScript
+types with Node's built-in stripper, and executes the generated file command
+inside the test's temporary directory. No network, provider or application
+containers are used. Docker Compose is provisioned from the repository CI's
+single version declaration; it is not vendored here.

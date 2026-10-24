@@ -38,7 +38,6 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRequester,
     PrivilegedOperationSourceKind,
     build_privileged_operation_event_id,
-    build_privileged_operation_id,
     build_privileged_operation_id_for_actor,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
@@ -674,7 +673,10 @@ def _build_privileged_operation_semantic_review(
         else:
             authz_review_title = "Managed authorization policy review"
             authz_change_summary = (
-                "Managed authorization rules would be reconciled by exact policy CAS."
+                "Only the selected workflow rules would be removed. All other authorization "
+                "rules, administrator access and policy settings remain unchanged."
+                if record.request.workflow_rule_retirement is not None
+                else "Managed authorization rules would be reconciled by exact policy CAS."
             )
         return PrivilegedOperationSemanticReview(
             operation_id=record.operation_id,
@@ -710,10 +712,14 @@ def _build_privileged_operation_semantic_review(
                     if is_terminal_enrollment_requester
                     else "The terminal connection-request access added by this setup."
                     if is_terminal_enrollment_requester_removal
+                    else "Bounded to the exact selected workflow-rule fingerprints."
+                    if record.request.workflow_rule_retirement is not None
                     else "Bounded to one managed authorization rule set."
                 ),
                 affected_count=(
-                    diff.added_rule_count
+                    diff.removed_rule_count
+                    if record.request.workflow_rule_retirement is not None
+                    else diff.added_rule_count
                     + diff.adopted_rule_count
                     + diff.updated_rule_count
                     + diff.removed_rule_count
@@ -1209,44 +1215,6 @@ def create_typed_privileged_operation_plan(
     )
 
 
-def create_privileged_operation_plan(
-    *,
-    record_store: object,
-    requester_github_id: int,
-    requester_login: str,
-    source_event_id: str,
-    request: ManagedSecretReencryptionPlanInput,
-    expires_in_seconds: int = DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
-    now: Callable[[], datetime] = _utc_now,
-) -> PrivilegedOperationWriteResult:
-    """Preserve the original managed-secret planning API and deterministic IDs."""
-
-    actor = PrivilegedOperationActor(
-        identity_type="github_human",
-        github_id=requester_github_id,
-        login=requester_login,
-    )
-    expected_operation_id = build_privileged_operation_id(
-        github_id=requester_github_id,
-        source_event_id=source_event_id,
-    )
-    result = create_typed_privileged_operation_plan(
-        record_store=record_store,
-        descriptor_id="managed-secret-reencryption",
-        actor=actor,
-        source_kind="browser_api",
-        source_event_id=source_event_id,
-        request=request,
-        expires_in_seconds=expires_in_seconds,
-        now=now,
-    )
-    if result.record.operation_id != expected_operation_id:
-        raise PrivilegedOperationConflictError(
-            "Managed-secret privileged-operation identity compatibility was not preserved."
-        )
-    return result
-
-
 def read_privileged_operation(
     *,
     record_store: object,
@@ -1255,22 +1223,6 @@ def read_privileged_operation(
 ) -> PrivilegedOperationRecord:
     store = require_privileged_operation_store(record_store)
     return store.read_privileged_operation_record(operation_id)
-
-
-def list_privileged_operations(
-    *,
-    record_store: object,
-    status: str = "",
-    descriptor_id: str = "",
-    limit: int | None = None,
-    now: Callable[[], datetime] = _utc_now,
-) -> tuple[PrivilegedOperationRecord, ...]:
-    store = require_privileged_operation_store(record_store)
-    return store.list_privileged_operation_records(
-        status=status,
-        descriptor_id=descriptor_id,
-        limit=limit,
-    )
 
 
 def cancel_privileged_operation(

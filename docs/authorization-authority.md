@@ -37,7 +37,9 @@ access to an invalid policy or silently starting with bootstrap authority.
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
   retarget, or dispatch a workflow, secret, or local helper to make a denied
-  operation succeed.
+  operation succeed. Fixing the refusing tool's rule through a reviewed source
+  change, as [Denial Handling](#denial-handling) requires, is not such a
+  workaround.
 
 The [feedback continuation foundation](every-code-feedback-resume.md), which is
 not continued and remains unwired in code, defines
@@ -103,6 +105,71 @@ copying secret values retain write or explicit source permissions. The two
 secret-copy source checks explicitly disable read-role inheritance. Existing
 terminal transport restrictions remain; `local_operator` supplies the full
 planning surface, including mixed plan/apply routes.
+
+Health-monitoring record apply also inherits the authenticated Director-agent
+standing permission for the product's declared lanes, including testing and
+production. It stays classified as
+`write`, with an explicit standing declaration in the same action catalog. It
+changes Launchplane's monitoring records, not the live site, credentials, access
+or merge authority. Only this monitoring route admits the Director's terminal
+transport to its existing browser/bearer mutation path; other terminal mutation
+restrictions remain. Exact product/lane/check and private endpoint validation,
+reviewed plan digest, idempotency, concurrent-profile checks and readback still
+govern apply. Other machine identities retain their existing scoped policy.
+
+The expected-config declaration path remains additive for the authenticated
+Director agent. It may add a positive external-provider purpose to an existing
+nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
+or retiring existing generation intent, or adding a provider declaration that
+shadows a local key requires the existing `product_profile.expected_config.apply`
+authority; a live product also retains its admin boundary. Inert planning retains
+its existing read/plan permission. Completed exact-key receipts replay before
+current-state retirement checks, while a new write compares the same captured
+profile that passed those checks. Odoo's driver-owned local passwords cannot
+be declared external through any profile input path. No grant is added here.
+
+The existing testing-retry route also admits the authenticated Director agent
+through the existing `local_operator` bearer transport under the standing
+permission. Terminal-agent credentials retain their read-only transport boundary.
+This is a testing-only reconciler wakeup, not
+inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
+production/testing scope keeps its policy checks. Other callers still require
+that action on the exact testing lane. Mutation authentication and browser CSRF,
+reviewed digests, original-key replay, generation and custody fences, staff
+holds, active/unknown-operation refusal and the worker's safety checks remain
+in force. See [testing retry](testing-deploy-retry.md).
+
+The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
+also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
+Generic-web deploy recovery dry runs authorize the instance-scoped
+`generic_web_deploy_recovery.plan` action, with the existing execute grant as a
+compatibility alternative. The authenticated Director agent inherits this inert
+plan permission. Both the current lane and the stored original lane must pass
+authorization; exact request, reference, reservation and target checks remain.
+Apply retains `generic_web_deploy.execute` for production, foreign caller originals and
+other identities. The authenticated service-marked Director `local_operator`
+may instead recover its own exact native testing original on the current owned
+lane. The stored caller scope, original route, key, fingerprint, product,
+context and captured target must agree; a current target or caller ownership
+claim alone cannot establish ownership. This route-local alternative does not
+classify the mixed execute action as standing permission.
+The same service-marked Director `local_operator` may use an exact event reference
+to abandon an eligible reconcile-owned testing original and replay that completed
+abandonment. This path admits only `abandon_testing_original`, after read-only
+inspection and before any write branch. This inspection reads the same evidence
+as the already-permitted inert dry run. It does not grant retry, adoption,
+settlement, close-out or foreign-caller recovery authority. Existing testing-only,
+no-cutover, hold, protection, target/reference/digest, execution exclusion and
+journal-custody checks remain required; the original provider history stays unknown.
+Adoption, terminal settlement and completed replay retain their existing proof
+requirements without renewed disposable qualification. New forward retry work
+requires fresh disposable-lane facts and rechecks them at effect admission;
+person use, only-copy data, production sharing and missing evidence refuse with
+`testing_deploy_safety_unknown`. Collect the named factual prerequisites through
+the supported disposable-lane observations route rather than requesting access.
+An unknown provider outcome still holds the original fence; planning never
+settles, retries or releases it.
 
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
@@ -187,6 +254,24 @@ Existing DB grants are preserved for image rollback; an older image may still
 refuse a Director read without a matching rule. Report that as a tool defect.
 
 ## Disposable-lane engineering
+
+The native Odoo testing rebuild also accepts the authenticated Director's existing
+`local_operator` transport without a DB action grant. Only an active Odoo product's
+exclusively owned `testing` lane and `replace-and-cutover` lifecycle qualify.
+The general `odoo_target_replacement_apply.execute` action still requires its
+existing policy on ordinary replacement, production and other callers.
+The queue records `director_testing_rebuild` as source-owned provenance, with
+the original agent subject and token label, no credential value or policy
+rule. Other durable workers refuse that provenance. At each native worker
+checkpoint the configured agent must still exist and match the original
+caller, and the product/lane ownership must still qualify. A missing worker
+bootstrap identity fails closed. Current holds/use, retained-copy custody,
+independent resources, local credentials and health-before-cutover checks
+remain in the native lifecycle; standing authority supplies none of those facts.
+The original authenticated caller can resume its held request or cancel it before
+effects under the same standing scope. Existing held-effect cancellation fences
+remain authoritative. The operation's provenance audits these source-authorized
+admissions rather than a matching DB action-rule decision.
 
 The authenticated Director-agent marker also identifies ordinary disposable-lane
 work under the overall direction. `POST /v1/live-target-runtime/apply` retains
@@ -393,9 +478,13 @@ No production, backup, promotion or Client-access boundary changes.
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with
-compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence. A
-protected GitHub workflow currently reads desired managed sets from repository
-secrets and transports them to that endpoint through GitHub Actions OIDC.
+compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence.
+Managed sets are maintained through the DB-native Access policy workbench and
+Director-approved privileged-operation proposals. The GitHub-secret reconcile
+wrapper and reusable worker are deleted; their removal does not revoke stored
+rules or delete repository secrets. The bootstrap installer is deleted with
+them. Use [agent proposal access](#preparing-agent-proposal-access) for its
+DB-native successor; installing that access still requires Director approval.
 
 Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
 It resolves explicit v1-to-v2, v2-to-v3, and same-schema transitions,
@@ -421,12 +510,11 @@ empty-set readback are recorded on #2006. Its dedicated
 `manager-preview-approval-retirement` wrapper selection is removed after that
 operation; it is no longer a dispatch path.
 
-The `authz-policy-reconcile.yml` workflow is transitional compatibility
-infrastructure. The database remains
-the live decision authority, but GitHub-hosted desired sets still make GitHub
-part of the effective administration chain. Do not interpret the workflow's
-existence, its protected environment, or its listing in repository metadata as
-approval to use GitHub for routine permission administration.
+A PR that retires a caller links the matching grant-removal proposal in the
+same change, prepared with `privileged-policy-propose` through the
+[Launchplane helper](privileged-operations.md#agent-policy-proposals); if that
+path is unavailable, record the exact blocker on the owning issue for the
+Director while continuing independently authorized source cleanup.
 
 ## The Admin
 
@@ -452,6 +540,13 @@ definition of administrator. It does not widen anything else:
 
 ## Denial Handling
 
+The Director agent can conditionally enable an existing product's artifact-scan
+gate through the profile write path after the service qualifies its verified
+image. Only the false-to-true flag change is admitted; profile revision,
+idempotency and compare-and-write checks remain required. This changes no
+credentials, grants, provider state or release authority. See
+[artifact scanning](artifact-security.md) for qualification and recovery.
+
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
@@ -459,9 +554,15 @@ hint. Record the denied action, scope, and trace ID, then:
   Diagnose authentication, the source effect and the installed revision, then
   fix the tool under the overall direction. Do not prepare a grant or ask for
   read-role approval. Continue independent work while installation is pending.
-- **A refused write, grant, or change** is a stop boundary. Ask the Director
-  once for that specific grant or change and continue with work that does not
-  depend on it.
+- **A refused Director-agent write that hits no stop boundary** is also a tool
+  defect, fixed at the blocked work's priority, not a new operation or a
+  question (see [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Fix the tool
+  so that kind of refusal cannot happen again, and never ask the Director for a
+  grant to get around it. A refusal that rightly protects production, a backup,
+  a live site, Client data or merge safety is met, never removed.
+- **A refused grant or access change, or a write that hits a stop boundary**,
+  is a stop. Ask the Director once for that specific change and continue with
+  work that does not depend on it.
 
 Do not work around a denial by borrowing another identity, adding a workflow or
 secret, running a direct database command, or calling the provider. Manual route
@@ -1042,6 +1143,14 @@ The set deliberately leaves out:
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
+  The existing profile POST separately admits authenticated Director agents
+  setting one nonsecret `preview.override_env` key on an existing enabled
+  Odoo preview. It requires a strong matching revision and idempotency key,
+  reconstructs the change from the stored profile, and preserves all other
+  profile authority with atomic CAS. It adds no policy grant. Deletions,
+  secret-bearing settings, Shopify payloads and broader edits remain outside
+  this bounded admission; see [preview settings](preview-settings.md).
+
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
   stays with Launchplane's own onboarding workflow.
@@ -1082,7 +1191,26 @@ planner and the locked write both enforce that boundary. See the
 A `local_operators`
 caller may set an ordinary protective testing hold. Lifting an ordinary staff
 hold remains an administrator action because it requests testing reconciliation,
-which can deploy. The authenticated Director agent has the separate bounded
+which can deploy. The product's testing overview exposes **Review lift** and
+**Lift testing hold** only to the service-verified signed-in administrator.
+The existing testing-hold endpoints accept that browser session, with origin,
+fetch-metadata and single-use CSRF protection on the review and apply requests.
+The card displays the stored reason, recorder, time and an HTTPS issue link
+recorded in the reason. Missing historical metadata is shown as not recorded.
+The administrator
+reviews the current hold, supplies an audit reason and confirms that testing
+can deploy before submitting its digest-bound lift. The existing authenticated
+idempotency receipt retains the original hold, lift reason, actor scope, time
+and trace. A lost response retains the original reviewed request and key for
+retry, including after reloading the tab. If that request cannot settle, an
+administrator can explicitly start a separate review of the current hold;
+the earlier key is shown as unverified in this tab across reloads. Closing the
+tab or clearing its storage discards this local history, not the service's audit
+receipt. This does not claim the earlier request failed or succeeded.
+Isolation staging interlocks retain
+their separate activation flow.
+The Director's agent can set a testing hold but not lift one.
+The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
 the service must have marked its original hold as a qualified rehearsal, and
 the original actor, current safety evidence, bindings and unresolved-effect
@@ -1163,3 +1291,14 @@ mechanical v3 persistence fence remain in place until the separately reviewed
 activation work enables a complete supported path. Once v3 policy or evidence is
 persisted, rollback must use an image that can read it; a source compatibility
 change alone is neither activation nor proof of the deployed policy version.
+
+### Pending Client review withdrawal
+
+`product_review.withdraw` is a write under the Director agent's existing
+standing permission. It creates no DB policy grant, credential, Client decision,
+release acceptance or merge authority. Only an authenticated Director agent or
+admin can apply withdrawal; read-only identities, ordinary scoped agents and workflow
+identities cannot. Dry-run and readback use `product_profile.read`; saved operation
+keys remain bound to the original caller. The [withdrawal contract](owner-acceptance.md#withdrawing-a-pending-request)
+requires a recorded Director decision, reason and exact reviewed head and
+refuses after a current-head Client decision.

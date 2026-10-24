@@ -153,6 +153,20 @@ def _decide_feedback(
     public_origin: Callable[[], str],
     owner_review_status: OwnerReviewStatusWriter | None = None,
 ) -> _Feedback | None:
+    # Review intent depends on fresh PR notes and saved decisions, not whether
+    # the preview can be planned, recovered or delivered. The publisher rereads
+    # those facts itself, including when reconciliation failed before planning.
+    written = None
+    if (
+        request.target_kind == "preview"
+        and request.pull_request_number is not None
+        and owner_review_status is not None
+        and plan.get("reason") != "pull_request_not_open"
+    ):
+        try:
+            written = owner_review_status(profile, request.pull_request_number)
+        except Exception:
+            _LOGGER.warning("Client review status refresh failed.", exc_info=True)
     if plan.get("deferred"):
         # A busy lane or a moved PR runs again and says what it did then.
         return None
@@ -163,7 +177,7 @@ def _decide_feedback(
             plan=plan,
             error=error,
             public_origin=public_origin,
-            owner_review_status=owner_review_status,
+            written=written,
         )
     return _testing_feedback(plan=plan, error=error)
 
@@ -175,7 +189,7 @@ def _preview_feedback(
     plan: dict[str, object],
     error: str,
     public_origin: Callable[[], str],
-    owner_review_status: OwnerReviewStatusWriter | None = None,
+    written: OwnerReviewStatus | None = None,
 ) -> _Feedback | None:
     action = plan.get("action")
     revision = _text(plan.get("head_sha"))
@@ -221,14 +235,6 @@ def _preview_feedback(
     owner_review = ""
     owner_review_url = ""
     owner_review_accepted = ""
-    # Notes and review intent can change without a build or a comment change.
-    # Refresh their check before comment deduplication, including engineering-only
-    # PRs whose earlier missing-note failure must no longer block delivery.
-    written = (
-        owner_review_status(profile, request.pull_request_number)
-        if owner_review_status is not None and status in {"pending", "ready", "failed"}
-        else None
-    )
     if status == "ready" and plan.get("owner_review_requested") is True:
         owner_review, owner_review_url = _owner_review(
             profile=profile,

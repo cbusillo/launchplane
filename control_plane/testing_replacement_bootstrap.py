@@ -156,6 +156,7 @@ def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
+    # Resource helpers consume lane intent, never this endpoint's dispatch mode.
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     operation_id: str = Field(min_length=1)
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
@@ -257,7 +258,7 @@ def require_testing_credential_safety(
             instance_name="testing",
             required_binding_keys=tuple(sorted(bindings)),
         )
-        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+        if safety.get("status") not in {"pass", "skipped"}:
             raise ValueError("Testing credentials lack current non-production safety proof.")
         for binding in bindings.values():
             record = store.read_secret_record(binding.secret_id)
@@ -464,7 +465,7 @@ class TestingReplacementBootstrapAdapter:
             raise ValueError("The independent testing route differs from its reviewed binding.")
         return tuple(dict(item) for item in domains)
 
-    def readback(self) -> dict[str, object]:
+    def readback_generation(self) -> FreshOdooTestingGeneration:
         generation = self.store.read_fresh_odoo_testing_generation(
             self.product, self.request.context
         )
@@ -495,7 +496,6 @@ class TestingReplacementBootstrapAdapter:
         if (
             not generation_snapshot_matches(current, generation)
             or not generation.reconcile_requested_at
-            or not self._domains(generation)
         ):
             raise ValueError("The independent testing route or queue is unverified.")
         if self.request.initial_generation:
@@ -512,6 +512,11 @@ class TestingReplacementBootstrapAdapter:
                 or operation.disposable_supersession.replacement_target_id != generation.target_id
             ):
                 raise ValueError("Testing bootstrap supersession is incomplete.")
+        return generation
+
+    def readback(self) -> dict[str, object]:
+        generation = self.readback_generation()
+        self._require_domains(generation)
         return bootstrap_plan_payload(
             TestingReplacementBootstrapPlan(
                 product=self.product,

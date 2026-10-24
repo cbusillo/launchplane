@@ -6,6 +6,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train import MergeTrainDryRunResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import (
@@ -70,35 +71,29 @@ class MergeTrainRunRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainRunRecord":
-        self.run_id = _normalize_required_value(
-            self.run_id, "merge train run record requires run_id"
-        )
-        self.recorded_at = _normalize_required_value(
+        self.run_id = require_text(self.run_id, "merge train run record requires run_id")
+        self.recorded_at = require_text(
             self.recorded_at, "merge train run record requires recorded_at"
         )
-        self.trace_id = _normalize_required_value(
-            self.trace_id, "merge train run record requires trace_id"
-        )
-        self.repository = _normalize_required_value(
+        self.trace_id = require_text(self.trace_id, "merge train run record requires trace_id")
+        self.repository = require_text(
             self.repository, "merge train run record requires repository"
         )
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train run record requires base_branch"
         )
-        self.status = _normalize_required_value(
-            self.status, "merge train run record requires status"
-        )
-        self.intended_next_action = _normalize_required_value(
+        self.status = require_text(self.status, "merge train run record requires status")
+        self.intended_next_action = require_text(
             self.intended_next_action,
             "merge train run record requires intended_next_action",
         )
         self.selected_head_sha = self.selected_head_sha.strip()
         self.selected_mergeable = self.selected_mergeable.strip()
         self.selected_required_checks_status = self.selected_required_checks_status.strip()
-        self.policy_key = _normalize_required_value(
+        self.policy_key = require_text(
             self.policy_key, "merge train run record requires policy_key"
         )
-        self.policy_sha256 = _normalize_required_value(
+        self.policy_sha256 = require_text(
             self.policy_sha256, "merge train run record requires policy_sha256"
         )
         return self
@@ -159,10 +154,3 @@ def build_merge_train_run_record_id(record: MergeTrainRunRecord) -> str:
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     return f"merge-train-run-{normalized_timestamp}-{digest}"
-
-
-def _normalize_required_value(value: str, error_message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(error_message)
-    return normalized_value

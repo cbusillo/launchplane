@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -34,8 +33,6 @@ ENGINEERING_REVIEW_DECISION_CREATE_ACTION = "engineering_review_decision.create"
 ENGINEERING_REVIEW_DECISION_READ_ACTION = "engineering_review_decision.read"
 ENGINEERING_REVIEW_DECISION_PROJECT_ACTION = "engineering_review_decision.project"
 ENGINEERING_REVIEW_STATUS_CONTEXT = ENGINEERING_REVIEW_CHECK_NAME
-
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EngineeringReviewDecisionRequest(BaseModel):
@@ -173,8 +170,3 @@ def build_engineering_review_decision_binding(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-
-
-def validate_sha256(value: str, field_name: str) -> None:
-    if value and not _SHA256_PATTERN.fullmatch(value):
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest.")

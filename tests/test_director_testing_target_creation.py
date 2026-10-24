@@ -45,12 +45,18 @@ from tests.support.profiles import _generic_site_profile_payload
 
 
 class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
+    def database_url(self) -> str:
+        return f"sqlite+pysqlite:///{self.root / 'state.db'}"
+
     def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.workflows.dokploy_target_adoption.require_bridge_network_capacity")
+        )
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         self.root = root
-        self.store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'state.db'}")
+        self.store = PostgresRecordStore(database_url=self.database_url())
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
         profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
@@ -418,6 +424,27 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             },
         }
         self.created_targets = created
+        original_mutate = self.provider.side_effect
+
+        def create(_host: str, _token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if path == APPLICATION_CREATE_PATH:
+                created["application"].update(
+                    {
+                        **payload,
+                        "appName": payload["appName"] + "-abc123",
+                        "mounts": [],
+                        "deployments": [],
+                        "applicationStatus": "idle",
+                    }
+                )
+                return {
+                    "applicationId": "created-application",
+                    "appName": created["application"]["appName"],
+                }
+            result: dict[str, Any] = original_mutate(_host, _token, path, payload)
+            return result
+
+        self.provider.side_effect = create
         self.enterContext(
             patch(
                 "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
@@ -564,11 +591,24 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
 
         self.provider.side_effect = create_project
         result = await self.post(**self.expected(provider))
-        self.assertEqual(result.status_code, 400, result.text)
+        self.assertEqual(result.status_code, 409, result.text)
         self.provider.assert_called_once()
         self.assertEqual(self.provider.call_args.args[2], PROJECT_CREATE_PATH)
         self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
+        readback = await self.post(mode="readback", **self.expected(provider))
+        self.assertEqual(readback.status_code, 202, readback.text)
+        import json
+
+        self.assertEqual(
+            json.loads(readback.json()["result"]["provider_effect_phase"])["project"],
+            "created-project",
+        )
+        fresh = await self.post(
+            idempotency_key="fresh-after-source-drift", **self.expected(provider)
+        )
+        self.assertEqual(fresh.status_code, 400, fresh.text)
+        self.provider.assert_called_once()
 
     async def test_replacement_needs_positive_evidence_nobody_used_the_lane(self) -> None:
         inventory = EnvironmentInventory(
@@ -608,7 +648,7 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         with self.store.testing_replacement_execution_lock(lock_name) as held:
             self.assertIsNotNone(held)
             result = await self.post(**self.expected(provider))
-        self.assertEqual(result.status_code, 400, result.text)
+        self.assertEqual(result.status_code, 409, result.text)
         self.provider.assert_not_called()
         self.assertEqual(self.current_testing_target_id(), provider.target_id)
 
@@ -627,7 +667,7 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
 
         self.provider.side_effect = create
         result = await self.post(**self.expected(provider))
-        self.assertEqual(result.status_code, 400, result.text)
+        self.assertEqual(result.status_code, 409, result.text)
         self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
 

@@ -61,8 +61,13 @@ def run_break_glass_rollback() -> dict[str, Any]:
     updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
         raw_env_text,
         updates={"DOCKER_IMAGE_REFERENCE": image_reference},
+        target_type=target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
     )
-    image_reference_changed = updated_env_text != raw_env_text
+    image_reference_changed = (
+        control_plane_dokploy.parse_dokploy_env_text(raw_env_text).get("DOCKER_IMAGE_REFERENCE")
+        != image_reference
+    )
     if image_reference_changed:
         control_plane_dokploy.update_dokploy_target_env(
             host=host,

@@ -39,10 +39,9 @@ from tests import test_testing_replacement_resources as resource_tests
 
 class FreshTestingBootstrapScenario(unittest.TestCase):
     def seed(self, store_url: str, *, initial_generation: bool = False) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.database_url = store_url
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(
+            self, database_url=store_url
+        )
         fixture = self.fixture
         self.store = fixture.store
         from tests.support.stores import _write_runtime_key_safety_policy
@@ -972,9 +971,7 @@ class FreshTestingBootstrapObservationTests(unittest.TestCase):
 
 class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(self)
 
     async def post(self, **changes: object) -> Any:
         from tests.support.http import request
@@ -1031,6 +1028,16 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn("private-value", result.text)
         self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
+
+    async def test_retired_certificate_repair_modes_are_rejected(self) -> None:
+        with patch(
+            "control_plane.http_routes.testing_replacement_bootstrap.TestingReplacementBootstrapAdapter"
+        ) as adapter:
+            for mode in ("route-repair-dry-run", "route-repair-apply", "route-repair-readback"):
+                with self.subTest(mode=mode):
+                    result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
+                    self.assertEqual(result.status_code, 400, result.text)
+            adapter.assert_not_called()
 
     async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
         prerequisite = TestingBootstrapPrerequisiteError(

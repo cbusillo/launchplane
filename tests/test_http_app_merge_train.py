@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from tests.support.auth import scoped_agent_test
 from datetime import datetime, timezone
 import asyncio
@@ -2059,6 +2060,89 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_check_diagnostic_survives_keyed_replay_after_restart(self) -> None:
+        diagnostic = "missing-security-gate"
+
+        class MissingChecksClient(_FakeMergeTrainGitHubClient):
+            def observe_batch_candidate_checks(self, **kwargs: Any) -> Any:
+                return kwargs["candidate"].model_copy(
+                    update={
+                        "required_checks_status": "pending",
+                        "status": "ready_for_checks",
+                        "required_checks_observation_error": diagnostic,
+                    }
+                )
+
+        with (
+            TemporaryDirectory() as directory,
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                MissingChecksClient,
+            ),
+        ):
+            state_dir = Path(directory) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            for _ in range(2):
+                response = await _post_merge_train_controller_run_once(app, payload)
+                self.assertEqual(response.status_code, 202, response.text)
+            response = await _post_merge_train_controller_run_once(
+                app, payload, idempotency_key="missing-check-observation"
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertIn(
+                diagnostic,
+                response.json()["result"]["candidate"]["required_checks_observation_error"],
+            )
+
+            restarted_store = FilesystemRecordStore(state_dir)
+            restarted_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: restarted_store,
+            )
+            with patch.object(
+                MissingChecksClient,
+                "observe_batch_candidate_checks",
+                side_effect=AssertionError("replay must not reobserve"),
+            ):
+                replay = await _post_merge_train_controller_run_once(
+                    restarted_app, payload, idempotency_key="missing-check-observation"
+                )
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(replay.json()["result"], response.json()["result"])
+            feedback = build_feedback_payloads(response=replay.json())
+            self.assertTrue(feedback)
+            self.assertTrue(all(diagnostic in str(item["message"]) for item in feedback))
+            records = restarted_store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard"
+            )
+            self.assertTrue(records)
+            self.assertTrue(
+                all(
+                    "required_checks_observation_error"
+                    not in record.candidate.model_dump(mode="json")
+                    for record in records
+                )
+            )
+
     async def test_invalid_batch_pr_retires_and_changed_members_reflow_without_a_fence(
         self,
     ) -> None:
@@ -2347,8 +2431,18 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(served_while_controller_ran)
 
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
+        credential = GitHubAppInstallationToken(
+            token="managed-test-token",
+            app_id=42,
+            installation_id=77,
+            repository_id=123,
+            repository="cbusillo/sellyouroutboard",
+            expires_at="unused",
+            permissions=("checks:read",),
+        )
         for managed_token, expected_status in (
             ("managed-test-token", 202),
+            (credential, 202),
             ("", 503),
             (SQLAlchemyError("database temporarily unavailable"), 503),
         ):
@@ -2358,7 +2452,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict("os.environ", {"GH_TOKEN": "unrelated-bootstrap-token"}, clear=True),
                 patch(
                     "control_plane.http_app.resolve_merge_train_github_token",
-                    return_value=managed_token if isinstance(managed_token, str) else "",
+                    return_value=managed_token
+                    if isinstance(managed_token, (str, GitHubAppInstallationToken))
+                    else "",
                 ) as resolve_token,
                 patch("control_plane.http_app.UrllibMergeTrainGitHubTransport") as transport,
                 patch(
@@ -2406,6 +2502,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                         policy["policies"][0]["github_token"]
                     ),
                     repository=policy["policies"][0]["repository"],
+                    include_permissions=True,
                 )
                 self.assertNotIn("managed-test-token", response.text)
                 self.assertNotIn("unrelated-bootstrap-token", response.text)

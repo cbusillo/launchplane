@@ -23,6 +23,20 @@ class TestingCopy(FrozenRecord):
     runtime_identity: RuntimeIdentity
 
 
+class UnavailableTestingPredecessor(FrozenRecord):
+    copy_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+    availability: Literal["stopped", "absent"]
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    route_applied: bool
+    private_url: None = Field(default=None, exclude=True)
+    resource_binding: None = Field(default=None, exclude=True)
+    runtime_identity: None = Field(default=None, exclude=True)
+
+
+TestingPredecessor = TestingCopy | UnavailableTestingPredecessor
+
+
 class TestingRebuildPlan(FrozenRecord):
     operation_id: str = Field(min_length=1)
     product: str = Field(min_length=1)
@@ -33,7 +47,7 @@ class TestingRebuildPlan(FrozenRecord):
     authority_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     source: Literal["empty", "production", "upstream"]
     source_reference: str = ""
-    old: TestingCopy
+    old: TestingPredecessor
     new: TestingCopy
 
     @model_validator(mode="after")
@@ -52,6 +66,8 @@ class TestingRebuildPlan(FrozenRecord):
         if (self.source == "empty") == bool(self.source_reference):
             raise ValueError("A restore requires its managed source reference; empty does not.")
         for copy in (self.old, self.new):
+            if isinstance(copy, UnavailableTestingPredecessor):
+                continue
             identity = copy.runtime_identity
             # Older managed copies did not install a product field or digest.
             # Keep their observed identity intact; the caller still proves lane
@@ -65,7 +81,7 @@ class TestingRebuildPlan(FrozenRecord):
         for field in ("copy_id", "target_id", "private_url", "resource_binding"):
             if getattr(self.old, field) == getattr(self.new, field):
                 raise ValueError("A candidate requires independent target and resources.")
-        if (
+        if isinstance(self.old, TestingCopy) and (
             self.old.runtime_identity.deployment_record_id
             == self.new.runtime_identity.deployment_record_id
         ):
@@ -101,6 +117,30 @@ class TestingCopyReadiness(FrozenRecord):
     evidence_id: str = Field(min_length=1)
 
 
+class TestingOriginalIngressReadback(FrozenRecord):
+    route_id: str
+    host: str
+    slot_id: str
+    observed_at: datetime
+    plan_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    preimage_sha256: str = Field(pattern=r"^(absent|[a-f0-9]{64})$")
+    exact_preimage: Literal[True] = True
+    predecessor_state: Literal["stopped", "absent", "present"]
+
+
+class TestingStopExclusionReadback(FrozenRecord):
+    copy_id: str
+    host: str
+    observed_at: datetime
+    evidence_id: str = Field(min_length=1)
+    not_dispatched: Literal[True] = True
+    runtime_identity: None = None
+
+
+TestingRetirementRecovery = TestingCopyReadiness | TestingStopExclusionReadback
+
+
 class TestingRouteObservation(FrozenRecord):
     route_id: str
     host: str
@@ -110,6 +150,9 @@ class TestingRouteObservation(FrozenRecord):
     authoritative_router_count: Literal[1]
     observed_at: datetime
     public_health: HealthcheckEvidence | None = None
+
+
+TestingRouteReadback = TestingRouteObservation | TestingOriginalIngressReadback
 
 
 TestingRebuildStep = Literal[
@@ -132,11 +175,11 @@ class TestingRebuildRecord(FrozenRecord):
     ended_at: datetime | None = None
     preparation: TestingCopyReceipt | None = None
     readiness: TestingCopyReadiness | None = None
-    route: TestingRouteObservation | None = None
+    route: TestingRouteReadback | None = None
     retirement_started: bool = False
     publication_started: bool = False
     rollback_started: bool = False
-    retirement_recovery: TestingCopyReadiness | None = None
+    retirement_recovery: TestingRetirementRecovery | None = None
     error: Literal[
         "",
         "candidate_public_health_failed",
@@ -169,6 +212,22 @@ class TestingRebuildRecord(FrozenRecord):
             != (self.plan.old.copy_id, self.plan.host, self.plan.old.runtime_identity)
         ):
             raise ValueError("Retirement recovery requires proof for this operation's old copy.")
+        if (
+            isinstance(self.plan.old, UnavailableTestingPredecessor)
+            and self.retirement_recovery is not None
+            and (not isinstance(self.retirement_recovery, TestingStopExclusionReadback))
+        ):
+            raise ValueError(
+                "Unavailable retirement recovery requires the original undispatched-stop receipt."
+            )
+        if isinstance(self.route, TestingOriginalIngressReadback) and (
+            not isinstance(self.plan.old, UnavailableTestingPredecessor)
+            or (self.route.route_id, self.route.host, self.route.slot_id)
+            != (self.plan.route_id, self.plan.host, self.plan.old.copy_id)
+            or self.route.observation_sha256 != self.plan.old.observation_sha256
+            or self.route.plan_digest != self.plan.digest
+        ):
+            raise ValueError("Original ingress readback belongs to another admitted preimage.")
         for stamp in (
             self.began_at,
             self.updated_at,
@@ -190,25 +249,33 @@ class TestingRebuildRecord(FrozenRecord):
         private_failed = (
             self.step == "failed" and self.error == "candidate_private_readiness_failed"
         )
-        admission_failed = (
-            self.step == "failed" and self.error == "testing_rebuild_admission_changed"
-        )
+        admission_changed = self.error == "testing_rebuild_admission_changed"
+        admission_failed = admission_changed and self.step == "failed" and not self.rollback_started
+        if bool(self.admission_refusal) != admission_changed:
+            raise ValueError("An admission change requires its original recorded cause.")
         if (
-            bool(self.admission_refusal) != admission_failed
-            or admission_failed
+            admission_changed
+            and not admission_failed
             and (
-                self.publication_started
-                or self.retirement_started
-                or self.rollback_started
-                or self.route is None
-                or self.route.slot_id != self.plan.old.copy_id
-                or self.preparation is not None
-                and (self.preparation.plan_digest, self.preparation.copy_id)
-                != (self.plan.digest, self.plan.new.copy_id)
-                or self.readiness is not None
-                and (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
-                != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
+                not isinstance(self.plan.old, UnavailableTestingPredecessor)
+                or self.step in {"preparing", "prepared", "complete"}
+                or self.step == "failed"
+                and not isinstance(self.route, TestingOriginalIngressReadback)
             )
+        ):
+            raise ValueError("Changed admission requires the original inverse and readback.")
+        if admission_failed and (
+            self.publication_started
+            or self.retirement_started
+            or self.rollback_started
+            or self.route is None
+            or self.route.slot_id != self.plan.old.copy_id
+            or self.preparation is not None
+            and (self.preparation.plan_digest, self.preparation.copy_id)
+            != (self.plan.digest, self.plan.new.copy_id)
+            or self.readiness is not None
+            and (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
+            != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
         ):
             raise ValueError(
                 "An admission refusal requires the original copy before traffic effects."

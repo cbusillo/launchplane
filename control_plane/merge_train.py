@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff, ready_handoff_refusal
 
@@ -122,6 +123,8 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     ready_handoff: MergeTrainReadyHandoff | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    recovery_ready_comment_floor: int = Field(default=0, ge=0, exclude_if=lambda value: not value)
+    recovery_ready_unavailable: bool = Field(default=False, exclude_if=lambda value: not value)
     changed_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
@@ -136,6 +139,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
     dependency_update_class: DependencyUpdateClass | None = Field(
@@ -149,14 +153,14 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     def _validate_snapshot(self) -> "MergeTrainPullRequestSnapshot":
         self.url = self.url.strip()
         self.title = self.title.strip()
-        self.created_at = _normalize_required_value(
+        self.created_at = require_text(
             self.created_at, "merge train pull request snapshot requires created_at"
         )
         self.labels = _normalize_unique_values(self.labels)
-        self.actor_role = _normalize_required_value(
+        self.actor_role = require_text(
             self.actor_role, "merge train pull request snapshot requires actor_role"
         )
-        self.head_sha = _normalize_required_value(
+        self.head_sha = require_text(
             self.head_sha, "merge train pull request snapshot requires head_sha"
         )
         self.head_ref = self.head_ref.strip()
@@ -177,10 +181,10 @@ class MergeTrainDryRunSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def _validate_snapshot(self) -> "MergeTrainDryRunSnapshot":
-        self.repository = _normalize_required_value(
+        self.repository = require_text(
             self.repository, "merge train dry-run snapshot requires repository"
         )
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train dry-run snapshot requires base_branch"
         )
         self.base_sha = self.base_sha.strip()
@@ -202,6 +206,7 @@ class MergeTrainQueueEntry(BaseModel):
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     branch_update_required: bool
     eligible: bool
     ineligible_reasons: tuple[str, ...] = ()
@@ -272,16 +277,6 @@ class MergeTrainBranchUpdateResult(BaseModel):
     detail: str
 
 
-class MergeTrainRereadResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["reread", "skipped"]
-    repository: str
-    base_branch: str
-    refreshed_result: MergeTrainDryRunResult | None = None
-    detail: str
-
-
 class MergeTrainWaitResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -310,6 +305,36 @@ class MergeTrainMergeResult(BaseModel):
     detail: str
 
 
+def build_merge_train_queue_entries(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    batch_landing: bool = False,
+    planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
+    planned_handoff_heads: frozenset[tuple[int, str]] = frozenset(),
+) -> tuple[MergeTrainQueueEntry, ...]:
+    repository_policy = policy.find_repository_policy(
+        repository=snapshot.repository, base_branch=snapshot.base_branch
+    )
+    base_pull_requests = tuple(
+        pull_request
+        for pull_request in snapshot.pull_requests
+        if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
+    )
+    return tuple(
+        _build_queue_entry(
+            repository_policy,
+            pull_request,
+            skip_blocked=batch_landing,
+            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
+            in planned_dependency_heads | planned_handoff_heads,
+        )
+        for pull_request in sorted(
+            base_pull_requests, key=lambda item: (item.created_at, item.number)
+        )
+    )
+
+
 def build_merge_train_dry_run_result(
     *,
     policy: MergeTrainPolicy,
@@ -323,22 +348,12 @@ def build_merge_train_dry_run_result(
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
     )
-    base_pull_requests = tuple(
-        pull_request
-        for pull_request in snapshot.pull_requests
-        if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
-    )
-    queue = tuple(
-        _build_queue_entry(
-            repository_policy,
-            pull_request,
-            skip_blocked=batch_landing,
-            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
-            in planned_dependency_heads | planned_handoff_heads,
-        )
-        for pull_request in sorted(
-            base_pull_requests, key=lambda item: (item.created_at, item.number)
-        )
+    queue = build_merge_train_queue_entries(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=batch_landing,
+        planned_dependency_heads=planned_dependency_heads,
+        planned_handoff_heads=planned_handoff_heads,
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
@@ -409,7 +424,11 @@ def build_merge_train_dry_run_result(
         if batch_size is not None and existing_candidate_size is not None:
             batch_size = max(batch_size, existing_candidate_size)
         batch_entries: list[MergeTrainQueueEntry] = []
-        paths_by_number = {pr.number: pr.changed_paths for pr in base_pull_requests}
+        paths_by_number = {
+            pr.number: pr.changed_paths
+            for pr in snapshot.pull_requests
+            if _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
+        }
         group_areas = new_candidate and not any(
             entry.owner_review_required for entry in eligible_entries
         )
@@ -688,33 +707,6 @@ def apply_merge_train_branch_update_intent(
     )
 
 
-def reread_merge_train_after_branch_update(
-    *,
-    branch_update_result: MergeTrainBranchUpdateResult,
-    policy: MergeTrainPolicy,
-    snapshot_reader: MergeTrainSnapshotReader,
-) -> MergeTrainRereadResult:
-    if not branch_update_result.reread_required:
-        return MergeTrainRereadResult(
-            status="skipped",
-            repository=branch_update_result.repository,
-            base_branch=branch_update_result.base_branch,
-            detail="Branch update result does not require a reread.",
-        )
-    snapshot = snapshot_reader.read_merge_train_snapshot(
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-    )
-    refreshed_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
-    return MergeTrainRereadResult(
-        status="reread",
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-        refreshed_result=refreshed_result,
-        detail="Re-read mergeability and required checks after branch update.",
-    )
-
-
 def build_merge_train_wait_result(
     *, dry_run_result: MergeTrainDryRunResult
 ) -> MergeTrainWaitResult:
@@ -811,6 +803,17 @@ def _build_queue_entry(
         repository_policy, pull_request.ready_handoff, pull_request.head_sha
     )
     has_ready_handoff = not handoff_refusal
+    if pull_request.recovery_ready_unavailable:
+        ineligible_reasons.append("recovery Ready evidence is unavailable")
+    if pull_request.recovery_ready_comment_floor and (
+        not has_ready_handoff
+        or (
+            pull_request.ready_handoff is not None
+            and (pull_request.ready_handoff.comment_id or 0)
+            <= pull_request.recovery_ready_comment_floor
+        )
+    ):
+        ineligible_reasons.append("recovered hold requires a fresh checked Ready handoff")
     if (
         skip_blocked
         and pull_request.state == "open"
@@ -843,6 +846,11 @@ def _build_queue_entry(
             if pull_request.required_checks_status != "pass":
                 ineligible_reasons.append(
                     f"current-head required checks are {pull_request.required_checks_status}"
+                    + (
+                        f"; {pull_request.required_checks_observation_error}"
+                        if pull_request.required_checks_observation_error
+                        else ""
+                    )
                 )
             if pull_request.mergeable != "mergeable" and not (
                 pull_request.mergeable == "unknown" and allow_unknown_mergeability
@@ -883,6 +891,7 @@ def _build_queue_entry(
         owner_review_required=pull_request.owner_review_required,
         client_test_notes_error=pull_request.client_test_notes_error,
         required_checks_status=pull_request.required_checks_status,
+        required_checks_observation_error=pull_request.required_checks_observation_error,
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
         ineligible_reasons=tuple(ineligible_reasons),
@@ -1041,16 +1050,21 @@ def _next_action_for_selected_pr(
             "block",
             f"Add {repository_policy.blocked_label}; pull request has merge conflicts.",
         )
+    diagnostic = (
+        f" Check evidence: {selected_pr.required_checks_observation_error}."
+        if selected_pr.required_checks_observation_error
+        else ""
+    )
     if selected_pr.required_checks_status == "fail":
         if selected_pr.owner_review_required:
             return (
                 "block",
                 "Current-head review or required checks failed on pull request "
-                f"#{selected_pr.number}.",
+                f"#{selected_pr.number}." + diagnostic,
             )
         return (
             "block",
-            f"Add {repository_policy.blocked_label}; required checks failed.",
+            f"Add {repository_policy.blocked_label}; required checks failed." + diagnostic,
         )
     if selected_pr.branch_update_required and not skip_branch_update:
         return "update_branch", "Refresh the pull request against the current base branch."
@@ -1058,24 +1072,20 @@ def _next_action_for_selected_pr(
         return (
             "wait_for_checks",
             "Wait for current-head Client review and required checks on pull request "
-            f"#{selected_pr.number}.",
+            f"#{selected_pr.number}." + diagnostic,
         )
     if selected_pr.mergeable == "unknown" or selected_pr.required_checks_status in {
         "pending",
         "unknown",
     }:
-        return "wait_for_checks", "Wait for mergeability and required checks on the head SHA."
+        return (
+            "wait_for_checks",
+            "Wait for mergeability and required checks on the head SHA." + diagnostic,
+        )
     return (
         "merge",
         f"Merge with {repository_policy.merge_method} after confirming current head checks.",
     )
-
-
-def _normalize_required_value(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _normalize_unique_values(values: tuple[str, ...]) -> tuple[str, ...]:

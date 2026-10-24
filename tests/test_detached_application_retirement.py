@@ -643,6 +643,47 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 candidate_application_name="detached-application",
             )
 
+    def test_retired_preview_enablement_does_not_block_retirement(self) -> None:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "record_id": "example-tenant-pr-7",
+            "context": "example",
+            "anchor_repo": "tenant",
+            "anchor_pr_number": 7,
+            "anchor_pr_url": f"https://example.invalid/{CANDIDATE_ID}/pull/7",
+            "anchor_head_sha": "a" * 40,
+            "action": "labeled",
+            "pr_state": "open",
+            "updated_at": NOW,
+            "label_enabled": True,
+            "action_label": "preview",
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            record_dir = state_dir / "launchplane_preview_enablement"
+            record_dir.mkdir(parents=True)
+            (record_dir / "example-tenant-pr-7.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            filesystem = FilesystemRecordStore(state_dir)
+
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            postgres = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            postgres.ensure_schema()
+            try:
+                for store in (filesystem, postgres):
+                    proof = prove_detached_application_authority_absence(
+                        record_store=cast(DetachedApplicationRetirementStore, store),
+                        candidate_target_id=CANDIDATE_ID,
+                        candidate_application_name="detached-application",
+                    )
+                    self.assertEqual(proof.match_count, 0)
+                self.assertEqual(
+                    json.loads((record_dir / "example-tenant-pr-7.json").read_text()), payload
+                )
+            finally:
+                postgres.close()
+
     def test_deployment_authority_uses_consistent_application_target_identity(self) -> None:
         store = _Store()
         protected_target_id = PROTECTED_IDS[0]

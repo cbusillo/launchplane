@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, Mock, patch
 import click
 
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -43,10 +45,56 @@ def context(instance: str = "testing") -> GenericWebPostDeployContext:
         target_type="application",
         artifact_id=f"ghcr.io/example/video@sha256:{'a' * 64}",
         source_git_ref="b" * 40,
+        previous_inventory=None,
     )
 
 
 class CapturedTestingAuthorityTests(unittest.TestCase):
+    def test_retry_count_uses_captured_prior_inventory_or_explicit_absence(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import previous_transient_attempts
+
+        captured = context()
+        previous_count = 2
+        prior = EnvironmentInventory(
+            context=captured.context,
+            instance=captured.instance,
+            source_git_ref=captured.source_git_ref,
+            artifact_identity=ArtifactIdentityReference(artifact_id=captured.artifact_id),
+            deployment_record_id="prior",
+            updated_at="2026-10-20T20:00:00Z",
+            deploy=DeploymentEvidence(
+                target_name=captured.target_name,
+                target_type="application",
+                deploy_mode="application",
+                status="pass",
+            ),
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                evidence={
+                    "failure_kind": "transient",
+                    "transient_attempts": str(previous_count),
+                },
+            ),
+        )
+        self.assertEqual(previous_transient_attempts(captured), 0)
+        self.assertEqual(
+            previous_transient_attempts(captured.model_copy(update={"previous_inventory": prior})),
+            previous_count,
+        )
+        self.assertEqual(
+            previous_transient_attempts(
+                captured.model_copy(
+                    update={
+                        "previous_inventory": prior.model_copy(
+                            update={"source_git_ref": "another-build"}
+                        )
+                    }
+                )
+            ),
+            0,
+        )
+
     def test_qualification_uses_captured_authority_without_rereading_changed_records(self) -> None:
         from control_plane.workflows.verireel_testing_post_deploy import (
             testing_qualification_authority,
@@ -334,17 +382,84 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_lost_lease_is_an_unknown_effect_instead_of_a_cached_failure(self) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
-        with self.assertRaises(ProviderMutationUnknownError):
+        phase = "post_deploy_fixture_signup"
+        with (
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
             checkpoint_testing_effect(
                 GenericWebPostDeployGuard(
                     provider_effect_checkpoint=Mock(side_effect=RuntimeError("lease lost")),
                 ),
-                "post_deploy_fixture_signup",
+                phase,
             )
+        self.assertIn(phase, "\n".join(logs.output))
+
+    def test_unfinished_cleanup_exchange_logs_its_deployment_without_settling_it(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        guard = GenericWebPostDeployGuard()
+
+        def unfinished(*_args: object) -> None:
+            guard.begin_exchange("late-refresh")
+            raise TimeoutError("private-transport-detail")
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.wait_for_verireel_testing_identity"
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_base_url"
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.verify_verireel_testing_product",
+                unfinished,
+            ),
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+        ):
+            result = execute_verireel_testing_post_deploy(
+                Path("."), self.store, self.context, guard
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertIn(self.context.deployment_record_id, "\n".join(logs.output))
+        self.assertNotIn("private-transport-detail", "\n".join(logs.output))
+        with self.assertRaises(ProviderMutationUnknownError):
+            guard.require_completed_exchanges()
+
+    def test_unknown_maintenance_logs_its_action_without_exception_values(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+        from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceAction
+        from control_plane.workflows.verireel_testing_post_deploy import _maintenance
+
+        action: VeriReelAppMaintenanceAction = "grant-sponsored"
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_application",
+                return_value=("testing", self.context.target_id),
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_app_maintenance",
+                side_effect=ProviderMutationUnknownError("private-maintenance-detail"),
+            ),
+            self.assertLogs("control_plane.workflows.verireel_testing_post_deploy") as logs,
+            self.assertRaises(ProviderMutationUnknownError),
+        ):
+            _maintenance(
+                Path("."),
+                self.context,
+                GenericWebPostDeployGuard(),
+                action=action,
+                intent="stable-testing-remote-e2e-grant-sponsored",
+                email=fixture_email(self.context.deployment_record_id),
+            )
+        self.assertIn(action, "\n".join(logs.output))
+        self.assertNotIn("private-maintenance-detail", "\n".join(logs.output))
 
     def test_fixture_identity_is_available_even_if_cleanup_cannot_continue(self) -> None:
         browser = MagicMock()
         page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
+        page.is_closed.return_value = False
+        browser.is_connected.return_value = True
         page.wait_for_load_state.side_effect = RuntimeError("signup failed")
         evidence: dict[str, str] = {}
         with (
@@ -456,6 +571,8 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_browser_failure_cleans_up_its_fixture_and_closes_browser(self) -> None:
         browser = MagicMock()
         page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
+        page.is_closed.return_value = False
+        browser.is_connected.return_value = True
         page.wait_for_load_state.side_effect = RuntimeError("signup failed")
         evidence: dict[str, str] = {}
         with (

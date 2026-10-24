@@ -1,5 +1,6 @@
 import { expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 for (const view of ["products", "workspace", "environment"] as const) {
   for (const trigger of ["timer", "visibility"] as const) {
@@ -89,7 +90,7 @@ for (const view of ["products", "workspace", "environment"] as const) {
       const stoppedReads = evidenceReads;
       await page.clock.runFor(2 * READ_REFRESH_INTERVAL_MS);
       expect(evidenceReads).toBe(stoppedReads);
-      await page.screenshot({ path: `../tmp/browser-smoke/session-${view}-${trigger}-expired-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`session-${view}-${trigger}-expired-${testInfo.project.name}.png`), fullPage: true });
       recovered = true;
       await signIn.click();
       await expect(page.locator(".control-shell")).toBeVisible();
@@ -154,11 +155,11 @@ test("pending identity verification recovers initial load without another sign-i
   await expect(page.locator(".session-card h1")).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
   expect(evidenceReads).toBe(0);
-  await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-pending-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`session-renewal-pending-${testInfo.project.name}.png`), fullPage: true });
   verificationPending = false;
   await page.clock.runFor(60_000);
   await expect(page.locator(".product-directory-row").first()).toBeVisible();
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
-  await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-recovered-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`session-renewal-recovered-${testInfo.project.name}.png`), fullPage: true });
 });

@@ -64,8 +64,7 @@ from control_plane.workflows.odoo_backup_proof import (
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
-    default_odoo_health_url,
-    is_legacy_derived_odoo_health_url,
+    resolve_odoo_health_url,
     verify_odoo_stable_readiness,
 )
 from control_plane.workflows.runtime_identity_health import (
@@ -275,16 +274,10 @@ def build_odoo_prod_backup_restore_plan(
         blockers.append("Production base_url host is not present in the DB-backed target domains.")
     if not expected_domain_hosts:
         blockers.append("Production restore requires DB-backed expected domains.")
-    lane_health_url = lane.health_url.strip()
-    health_url = (
-        lane_health_url
-        if lane_health_url
-        and not is_legacy_derived_odoo_health_url(
-            health_url=lane_health_url,
-            base_url=base_url,
-            profile_health_path=profile.health_path,
-        )
-        else default_odoo_health_url(base_url=base_url)
+    health_url = resolve_odoo_health_url(
+        base_url=base_url,
+        lane_health_url=lane.health_url,
+        profile_health_path=profile.health_path,
     )
 
     filestore_database_path = _filestore_database_path(
@@ -712,6 +705,12 @@ def execute_odoo_prod_backup_restore_apply(
         desired_env["PLATFORM_INSTANCE"] = plan.instance
         desired_env["DOCKER_IMAGE_REFERENCE"] = plan.image_reference
         desired_env.update(runtime_identity_env(runtime_identity))
+        env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         provider_effect_checkpoint("target_env_update_started", "target_env_update")
         dokploy_api.update_dokploy_target_env(
             host=host,
@@ -719,7 +718,7 @@ def execute_odoo_prod_backup_restore_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env),
+            env_text=env_text,
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -1490,16 +1489,10 @@ def _require_restore_replay_record_authority(
     plan: OdooProdBackupRestorePlan,
 ) -> None:
     lane_base_url = lane.base_url.strip().rstrip("/")
-    lane_health_url = lane.health_url.strip()
-    resolved_health_url = (
-        lane_health_url
-        if lane_health_url
-        and not is_legacy_derived_odoo_health_url(
-            health_url=lane_health_url,
-            base_url=lane_base_url,
-            profile_health_path=profile.health_path,
-        )
-        else default_odoo_health_url(base_url=lane_base_url)
+    resolved_health_url = resolve_odoo_health_url(
+        base_url=lane_base_url,
+        lane_health_url=lane.health_url,
+        profile_health_path=profile.health_path,
     )
     expected_domain_hosts = tuple(
         sorted({domain.strip().lower() for domain in target_record.domains if domain.strip()})

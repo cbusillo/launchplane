@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 import click
+from github_plan_status import DEFAULT_STATUS_LABELS
 
 from control_plane import merge_train_planning_completion as completion
 from control_plane.merge_train_pr_feedback import (
@@ -35,7 +36,7 @@ from tempfile import TemporaryDirectory
 
 _REPO = "example/product"
 _BOT = 41
-_LABELS = completion._DEFAULT_LABELS
+_LABELS = DEFAULT_STATUS_LABELS
 
 
 def _wait(state: str = "clear") -> str:
@@ -128,6 +129,15 @@ class PlanningProvider:
                 return {
                     "data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item7"}}}
                 }
+            if "defaultBranchRef" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "defaultBranchRef": {"name": self.default_branch},
+                            "object": {"text": json.dumps(self.config)},
+                        }
+                    }
+                }
             return {
                 "data": {
                     "user": {
@@ -169,8 +179,18 @@ class PlanningProvider:
             return copy.deepcopy(self.blockers)
         if "/sub_issues?" in path:
             return copy.deepcopy(self.children)
-        if method == "GET":
+        if "/dependencies/blocking?" in path:
+            return []
+        if path.endswith("/parent"):
+            raise click.ClickException("not found") from HTTPError(
+                path, 404, "Not Found", Message(), None
+            )
+        if method == "GET" and path == f"/repos/{_REPO}":
+            return {"default_branch": self.default_branch}
+        if method == "GET" and path == f"/repos/{_REPO}/issues/{self.issue['number']}":
             return copy.deepcopy(self.issue)
+        if method == "GET":
+            raise AssertionError(f"Unexpected provider read: {path}")
         self.writes.append((method, path))
         if self.fail_labels:
             error = click.ClickException("temporary provider failure")
@@ -327,6 +347,23 @@ class PlanningCompletionTests(TestCase):
         lease.record.step_payload = {}
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
+            building = build_merge_train_pr_feedback_record(
+                request=MergeTrainPrFeedbackEnvelope(
+                    repository=_REPO,
+                    base_branch="main",
+                    pull_request_number=9,
+                    event="building",
+                    controller_record_id=record.record_id,
+                ),
+                policy_key=policy.policy_key,
+                policy_sha256=record.landing_plan.policy_sha256,
+                token="",
+                recorded_at=(datetime.fromisoformat(record.updated_at) + timedelta(seconds=10))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                response_trace_id="earlier-building",
+            )
+            store.write_merge_train_pr_feedback_record(building)
             with patch.multiple(
                 controller,
                 validate_merge_train_landing_record_for_controller=Mock(),
@@ -351,7 +388,7 @@ class PlanningCompletionTests(TestCase):
                         lease=lease,
                     )
             saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
-            self.assertEqual(len(saved), 1)
+            self.assertEqual([item.event for item in saved], ["completed", "building"])
             self.assertTrue(saved[0].retryable)
             self.assertFalse(_receipt(saved[0])["ok"])
             self.assertFalse(self.provider.writes)
@@ -377,6 +414,71 @@ class PlanningCompletionTests(TestCase):
             self.assertNotIn(
                 _LABELS["active"], {label["name"] for label in self.provider.issue["labels"]}
             )
+
+    def test_landing_recomputes_direct_dependent_from_remaining_blockers_and_wait(self) -> None:
+        for remaining, waiting, expected in (
+            (False, False, "active"),
+            (True, False, "blocked"),
+            (False, True, "waiting"),
+        ):
+            with self.subTest(remaining=remaining, waiting=waiting):
+                self.provider = PlanningProvider()
+                dependent = copy.deepcopy(self.provider.issue)
+                dependent.update(
+                    number=8,
+                    node_id="issue8",
+                    state="open",
+                    state_reason=None,
+                    body="<!-- github-plan:managed-provenance -->\n"
+                    + _wait("waiting" if waiting else "clear"),
+                    labels=[{"name": _LABELS[key]} for key in ("plan", "blocked")],
+                )
+                body_before = dependent["body"]
+                blocker = {
+                    "number": 9,
+                    "state": "open",
+                    "repository_url": f"https://api.github.com/repos/{_REPO}",
+                }
+
+                def request(
+                    *, path: str, method: str = "GET", body: Any = None, **kwargs: Any
+                ) -> Any:
+                    from urllib.parse import unquote
+
+                    if "/issues/7/dependencies/blocking?" in path:
+                        return [
+                            {**dependent, "repository_url": f"https://api.github.com/repos/{_REPO}"}
+                        ]
+                    if path.endswith("/parent"):
+                        raise click.ClickException("not found") from HTTPError(
+                            path, 404, "Not Found", Message(), None
+                        )
+                    if "/issues/8" not in path:
+                        return self.provider.request(path=path, method=method, body=body, **kwargs)
+                    if "/comments?" in path or "/sub_issues?" in path:
+                        return []
+                    if "/dependencies/blocked_by?" in path:
+                        return [blocker] if remaining else []
+                    if method == "GET":
+                        return copy.deepcopy(dependent)
+                    if method == "POST":
+                        dependent["labels"].extend({"name": name} for name in body["labels"])
+                    elif method == "DELETE":
+                        name = unquote(path.rsplit("/", 1)[-1])
+                        dependent["labels"] = [
+                            item for item in dependent["labels"] if item["name"] != name
+                        ]
+                    return None
+
+                with patch.object(completion, "github_api_request", side_effect=request):
+                    result = self.record()
+                self.assertEqual(result.delivery_status, "delivered")
+                names = {item["name"] for item in dependent["labels"]}
+                self.assertEqual(
+                    names & set(_LABELS.values()), {_LABELS["plan"], _LABELS[expected]}
+                )
+                self.assertEqual(dependent["body"], body_before)
+                self.assertEqual(dependent["state"], "open")
 
     def test_standalone_landing_persists_completion_before_returning(self) -> None:
         policy = _policy_record(
@@ -550,6 +652,7 @@ class PlanningCompletionTests(TestCase):
             with self.subTest(change=change):
                 self.provider.issue = copy.deepcopy(original)
                 self.provider.comments, self.provider.blockers, self.provider.children = [], [], []
+                self.provider.writes.clear()
                 if change == "open":
                     self.provider.issue["state"] = "open"
                 elif change == "reporter":
@@ -559,15 +662,25 @@ class PlanningCompletionTests(TestCase):
                 elif change == "unreviewed":
                     self.provider.issue["body"] = "<!-- github-plan:managed-provenance -->"
                 elif change == "blocker":
-                    self.provider.blockers = [{"state": "open"}]
+                    self.provider.blockers = [{"number": 10, "state": "open"}]
                 else:
-                    self.provider.children = [{"state": "open"}]
+                    self.provider.children = [{"number": 11, "state": "open"}]
                 before = copy.deepcopy(self.provider.issue)
                 record = self.record()
                 self.assertEqual(record.delivery_status, "failed")
                 self.assertEqual(record.retryable, change == "open")
-                self.assertEqual(self.provider.issue, before)
-                self.assertFalse(self.provider.writes)
+                self.assertEqual(self.provider.issue["body"], before["body"])
+                self.assertEqual(self.provider.issue["state"], before["state"])
+                if change in {"waiting", "unreviewed"}:
+                    names = {item["name"] for item in self.provider.issue["labels"]}
+                    self.assertIn(_LABELS["done"], names)
+                    self.assertNotIn(_LABELS["active"], names)
+                    self.assertEqual(_LABELS["waiting"] in names, change == "waiting")
+                    self.assertFalse(_receipt(record)["ok"])
+                    self.assertFalse(_receipt(record)["issues"][0]["verified"])
+                else:
+                    self.assertEqual(self.provider.issue, before)
+                    self.assertFalse(self.provider.writes)
 
     def test_foreign_or_quoted_clear_does_not_resolve_a_real_wait(self) -> None:
         self.provider.issue["body"] = "<!-- github-plan:managed-provenance -->\n" + _wait("waiting")
@@ -593,7 +706,7 @@ class PlanningCompletionTests(TestCase):
                 elif reason == "reporter":
                     held.issue["user"]["id"] = 99
                 elif reason == "blocker":
-                    held.blockers = [{"state": "open"}]
+                    held.blockers = [{"number": 10, "state": "open"}]
                 elif reason == "project":
                     self.provider.config = {"planning": {"projects": {"default_project": 2}}}
                     held.missing_project_item = True
@@ -619,8 +732,17 @@ class PlanningCompletionTests(TestCase):
                     {label["name"] for label in self.provider.issue["labels"]},
                     {_LABELS["plan"], _LABELS["done"], "bug"},
                 )
-                self.assertEqual(held.issue, before)
-                self.assertFalse(held.writes)
+                self.assertEqual(held.issue["body"], before["body"])
+                self.assertEqual(held.issue["state"], before["state"])
+                if reason in {"waiting", "project"}:
+                    names = {item["name"] for item in held.issue["labels"]}
+                    self.assertIn(_LABELS["done"], names)
+                    self.assertNotIn(_LABELS["active"], names)
+                    self.assertEqual(_LABELS["waiting"] in names, reason == "waiting")
+                    self.assertEqual(held.project_status, "active")
+                else:
+                    self.assertEqual(held.issue, before)
+                    self.assertFalse(held.writes)
                 self.assertEqual(record.delivery_status, "failed")
                 self.assertEqual(record.retryable, reason in {"open", "reopened"})
                 self.assertEqual(self.comment_mock.called, reason not in {"open", "reopened"})
@@ -631,7 +753,13 @@ class PlanningCompletionTests(TestCase):
                     self.assertEqual(
                         {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
                         {
-                            8: "pending" if reason in {"open", "reopened"} else "review",
+                            8: "review_projection_pending"
+                            if reason in {"open", "reopened"}
+                            else "review_wait_record"
+                            if reason == "waiting"
+                            else "review_related_finish_line"
+                            if reason == "project"
+                            else "review_reporter_acceptance",
                             7: "reconciled",
                         },
                     )
@@ -758,11 +886,12 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(terminal.retryable)
         self.assertEqual(
             {item["number"]: item["status"] for item in _receipt(terminal)["issues"]},
-            {7: "review", 8: "review"},
+            {7: "review_reporter_acceptance", 8: "review_wait_record"},
         )
         self.assertTrue(self.comment_mock.called)
         self.assertFalse(self.provider.writes)
-        self.assertFalse(held.writes)
+        self.assertIn(_LABELS["done"], {item["name"] for item in held.issue["labels"]})
+        self.assertEqual(held.comments[0]["body"], _wait("waiting"))
 
     def test_graphql_failure_classification_requires_transient_evidence(self) -> None:
         for errors, retryable, rate_limited in (
@@ -815,14 +944,23 @@ class PlanningCompletionTests(TestCase):
                 with patch.object(completion, "github_api_request", side_effect=request):
                     result = self.record()
                 self.assertEqual(result.retryable, failure != "malformed")
-                self.comment_mock.assert_not_called()
+                if failure == "malformed":
+                    self.assertTrue(self.comment_mock.called)
+                    self.assertIn(_LABELS["done"], {item["name"] for item in other.issue["labels"]})
+                else:
+                    self.comment_mock.assert_not_called()
                 store = FilesystemRecordStore(Path(directory))
                 store.write_merge_train_pr_feedback_record(result)
                 saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
                 self.assertFalse(_receipt(saved)["ok"])
                 self.assertEqual(
                     {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
-                    {7: "reconciled", 8: "interrupted"},
+                    {
+                        7: "reconciled",
+                        8: "review_wait_record"
+                        if failure == "malformed"
+                        else "reconciliation_failed",
+                    },
                 )
 
     def test_upsert_programming_errors_surface_for_every_feedback_kind(self) -> None:

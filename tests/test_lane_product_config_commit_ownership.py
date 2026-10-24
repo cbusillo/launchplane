@@ -126,15 +126,19 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
             "testing-hold", hold_payload(), "compare_and_write_dokploy_target_record"
         )
 
-    async def test_generic_web_testing_hold_keeps_lane_ownership_at_commit(self) -> None:
-        for caller in ("local_operator", "github_actions", "local_admin"):
-            await self._apply_route(
-                "testing-hold",
-                hold_payload(),
-                "compare_and_write_dokploy_target_record",
-                caller=caller,
-                driver_id="generic-web",
-            )
+    async def test_generic_web_target_policy_keeps_lane_ownership_at_commit(self) -> None:
+        for route, payload in (
+            ("testing-hold", hold_payload()),
+            ("integration-allowances", allowances_payload()),
+        ):
+            for caller in ("local_operator", "github_actions", "local_admin"):
+                await self._apply_route(
+                    route,
+                    payload,
+                    "compare_and_write_dokploy_target_record",
+                    caller=caller,
+                    driver_id="generic-web",
+                )
 
     async def test_other_callers_addon_settings_keep_named_lane_at_commit(self) -> None:
         for caller in ("github_actions", "local_admin"):

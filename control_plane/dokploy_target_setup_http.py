@@ -6,6 +6,7 @@ from collections.abc import Callable
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.browser_route_repair import BrowserRouteRepairRequest
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
@@ -53,6 +54,8 @@ def require_empty_testing_target_creation(
     product: str,
     control_plane_root_path: Path,
     read_provider_source: bool = True,
+    allocation_scope: str = "",
+    allocation_key: str = "",
 ) -> None:
     """Stage new empty resources without borrowing authority over an existing lane."""
     from control_plane.authz_candidate_preparation import (
@@ -63,7 +66,12 @@ def require_empty_testing_target_creation(
     if not request.state_volume_path:
         from control_plane.application_state_volume import require_no_held_state_volume
 
-        require_no_held_state_volume(record_store, request.context)
+        require_no_held_state_volume(
+            record_store,
+            request.context,
+            original_scope=allocation_scope,
+            original_key=allocation_key,
+        )
 
     if (
         request.operation not in {"create-compose", "create-application"}
@@ -237,11 +245,16 @@ class DokployTargetSetupEnvelope(BaseModel):
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    retain_allocation: bool = False
+    expected_allocation_custody_sha256: str = ""
     retain_state_volume_allocation: bool = False
     expected_state_volume_custody_sha256: str = ""
     state_volume_path: str = ""
     state_volume_plan_id: str = ""
     expected_plan_sha256: str = ""
+    browser_review: BrowserRouteRepairRequest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     expected_current_provider_target: DeployedTargetReference | None = None
     expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
@@ -255,6 +268,25 @@ class DokployTargetSetupEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
         supplied_fields = self.model_fields_set.copy()
+        if self.browser_review is not None:
+            if self.operation != "repair-domain-authority":
+                raise ValueError("Browser review is only supported for domain authority repair.")
+            allowed = {
+                "schema_version",
+                "mode",
+                "operation",
+                "product",
+                "context",
+                "instance",
+                "reason",
+                "confirmation",
+                "browser_review",
+            }
+            if supplied_fields - allowed:
+                raise ValueError(
+                    "Browser domain repair derives its provider authority from the lane."
+                )
+            self.browser_review.validate_mode(self.mode)
         if self.product.strip() != "launchplane":
             raise ValueError("Dokploy target setup requires product 'launchplane'.")
         self.product = "launchplane"
@@ -282,8 +314,18 @@ class DokployTargetSetupEnvelope(BaseModel):
             from control_plane.application_state_volume import validate_volume_request
 
             validate_volume_request(self)
-        elif self.mode == "readback":
-            raise ValueError("Setup readback requires an original state-volume plan.")
+        elif (
+            self.mode == "readback"
+            or self.retain_allocation
+            or self.expected_allocation_custody_sha256
+        ):
+            from control_plane.application_state_volume import validate_ordinary_allocation_request
+
+            validate_ordinary_allocation_request(self)
+        if self.state_volume_path and (
+            self.retain_allocation or self.expected_allocation_custody_sha256
+        ):
+            raise ValueError("Storage retention uses its original state-volume custody fields.")
         if self.replaces_operation_id and (
             self.operation != "create-compose"
             or self.instance != "testing"
@@ -340,7 +382,7 @@ class DokployTargetSetupEnvelope(BaseModel):
             self.operation != "repair-domain-authority" or self.mode != "dry-run"
         ):
             raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
-        if self.operation == "repair-domain-authority":
+        if self.operation == "repair-domain-authority" and self.browser_review is None:
             if not self.target_id:
                 raise ValueError("Dokploy domain authority repair requires target_id.")
             if not self.domains:
@@ -631,7 +673,12 @@ def _execute_dokploy_target_setup(
 ) -> dict[str, object]:
     if request.state_volume_path and application_mutate is None:
         raise ValueError("State-volume creation requires its reviewed durable service operation.")
-    if request.mode == "apply" and request.instance == "testing" and not request.state_volume_path:
+    if (
+        request.mode == "apply"
+        and request.instance == "testing"
+        and not request.state_volume_path
+        and application_mutate is None
+    ):
         from control_plane.application_state_volume import require_no_held_state_volume
 
         require_no_held_state_volume(record_store, request.context)
@@ -834,6 +881,8 @@ def _execute_dokploy_target_setup(
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,
+            # Only the durable resource producer supplies recorded partial placement.
+            resuming_create=bool(disposable_placement and any(disposable_placement)),
             required_context_owner=(source_profile.product, request.context)
             if source_profile
             else required_context_owner,

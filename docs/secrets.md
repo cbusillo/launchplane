@@ -9,6 +9,11 @@ title: Secrets
 
 ## Client credential input
 
+The same form also accepts the Director's service-owned artifact scan credential
+at the [artifact credential path](artifact-security.md#verified-artifact-scanning).
+That fixed service request writes the managed-secret bindings directly; the
+product-requested Client flow below remains a submission for admin application.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
@@ -315,31 +320,13 @@ authentication before creating a separate private token file.
   repository, and permission identity, revokes the token after use, and never
   persists or logs the token.
   Do not reuse onboarding, runner-host-hygiene, PAT, or ordinary service tokens.
-- The protected
-  `LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` secret contains
-  the permanent exact Launchplane workflow grants for onboarding and preview
-  authorization maintenance. It is generic worker authority, not per-product
-  policy: do not place product repositories, contexts, targets, domains, or
-  generated preview caller rules in it. Product rules are planned from typed
-  runtime input and persisted in the DB-backed `operator.generic-web-preview`
-  managed set.
-- `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` names a retired
-  compatibility set. `operator.owner-acceptance` accepts only an empty desired
-  policy for removal of existing grants. Current Client review uses the Client
-  on the product profile and has no Client-grant secret prerequisite. This code
-  retirement does not change deployed secrets or authorization records. See
-  [`owner-acceptance.md`](owner-acceptance.md).
-
-- The protected
-  `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` secret contains
-  the complete `operator.product-owner-policy-admin` `local_operators` desired set.
-  Every rule must bind one exact admin subject and token label to one exact
-  product/system scope and exactly the product Client policy and requirement
-  read/write actions. Product identities, repository identities, and Client
-  memberships remain DB-backed runtime records and do not belong in this secret.
-  Those actions belong to the retired Client policy records, whose routes are
-  deleted (see [`product-owner-policy.md`](product-owner-policy.md)), so this
-  set authorizes no current route.
+- The GitHub-secret authorization reconcile wrapper and reusable worker are
+  deleted. Their former `LAUNCHPLANE_AUTHZ_*_MANAGED_SET_JSON` inputs are no
+  longer consumed. The Director deletes those repository secrets by hand after
+  the deletion lands; [#2521](https://github.com/cbusillo/launchplane/issues/2521)
+  records the names. Stored managed rules remain DB-backed and are changed only
+  through the reviewed Access policy path. Current Client review uses the
+  product profile's Client identity and has no Client-grant secret prerequisite.
 
 ## DB-Backed Secret Resolution
 
@@ -354,6 +341,13 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value means origin is unknown or the current
+  version is missing; a missing version also has an empty current-version
+  timestamp. Neither mutable binding metadata nor another version certifies
+  origin. This diagnostic does not qualify external-resource isolation or change
+  observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not
@@ -642,8 +636,9 @@ decryption key state denies the reveal or resolution.
   Launchplane stores it on the binding with who recorded it and when, and a
   later write of the key needs it again. A product-config write that declares
   `shared_safe` on an integration key without one is refused
-  (`sharing_reason_missing`). A key declared `testing` or `non_prod` is a
-  non-production key and needs none.
+  (`sharing_reason_missing`), and so are deploy-time checks, readiness and the
+  read-back for a key already bound without one. A key declared `testing` or
+  `non_prod` is a non-production key and needs none.
 - Nothing in Launchplane checks what a token can actually do. `read_only_source`
   is a person's statement that they verified the token's permissions in the
   provider and recorded it as evidence; Launchplane records it and shows it.
@@ -651,19 +646,27 @@ decryption key state denies the reveal or resolution.
   allowances read (`GET /v1/product-config/integration-allowances`) lists the
   integration keys stored for that lane with their declared class and reason,
   and the product environment read shows both on each managed secret.
-- Keys declared `shared_safe` before reasons existed keep working for one
-  release: deploy-time checks, readiness and the read-back report them instead
-  of refusing them. Record their reasons with a product-config write; the
-  follow-up that ends the transition makes those paths refuse them too.
 - Generic-web deploys, promotions and rollbacks read the lane's integration keys
   back after the deploy: the runtime key-safety rules run over every managed
   secret delivered to the lane whose key names an integration, and the result
   is stored on the deployment record as `integration_key_readback` (`pass`,
-  `reported`, `fail`, `unavailable` or `skipped`, with key names and finding
-  codes only). It records and does not refuse, because the deploy has already
+  `fail`, `unavailable` or `skipped`, with key names and finding codes only;
+  records written before the sharing-reason transition ended may say
+  `reported`). It records and does not refuse, because the deploy has already
   happened and a refused promotion would roll a live site back. Odoo lanes
   read their integration settings back from the database instead
   (`control_plane/integration_readback.py`).
+- A non-production generic-web deploy (testing, or any lane whose instance is
+  not `prod`) runs the same evaluation before the provider deploy and refuses
+  on `fail`, naming the binding keys and finding codes. It also refuses when
+  the lane receives managed runtime keys but no active key-safety policy is
+  readable. An in-place refusal is recorded as a failed deployment with no
+  provider effect; a cutover refusal raises before creating a deployment record.
+  Testing rollbacks also run this check, so unsafe keys must be corrected before
+  retrying a held testing cutover. Production deploys, promotions and production
+  rollbacks keep only the recorded read-back. Previews deploy through their own
+  path, which checks the keys a preview copies from its template lane before
+  creating the preview.
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.
@@ -932,6 +935,26 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+Each immutable managed value version records its service-computed `value_origin`:
+`supplied`, `provider`, `generated`, or unknown for historical values. Copies inherit
+the exact reviewed source version's origin; re-encryption preserves it. Caller
+metadata, binding names, relabels and onboarding updates cannot certify or change
+value origin. The binding's method remains `copy`, so a copy earns neither fresh
+local-generation credit nor the independently supplied key-safety exception.
+The external-resource observer accepts only known supplied/provider versions.
+Generated and unknown values, including copies, remain unavailable. A supported
+product-config value write creates a new version with origin computed by the
+service; historical origin is never inferred from mutable binding metadata.
+Any required secret entry stays in that private value-writing flow, never comments
+or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.

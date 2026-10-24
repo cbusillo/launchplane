@@ -23,9 +23,9 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
 )
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.test_merge_train_github import _github_branch, _github_commit, _github_pull_request

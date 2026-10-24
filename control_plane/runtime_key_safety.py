@@ -15,7 +15,6 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
-    UnreasonedSharedIntegrationKeyMode,
 )
 from control_plane.contracts.secret_record import SecretBinding
 
@@ -32,25 +31,19 @@ SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY
 # outgoing mail, printing, web push and business-system connectors.
 # A binding whose key carries one never takes its classification from a non-production
 # lane. The active policy record can add product-specific markers.
-DEFAULT_INTEGRATION_KEY_MARKERS = (
-    "SHOPIFY",
-    "STRIPE",
-    "PAYPAL",
-    "SQUARE",
-    "BRAINTREE",
-    "AUTHORIZE_NET",
-    "PAYMENT",
-    "SMTP",
-    "MAIL",
-    "SENDGRID",
-    "MAILGUN",
-    "POSTMARK",
-    "RESEND",
-    "PRINTNODE",
-    "REPAIRSHOPR",
-    "FISHBOWL",
-    "CM_DATA",
-    "VAPID",
+INTEGRATION_KEY_MARKERS = {
+    "shopify": ("SHOPIFY",),
+    "payment": ("STRIPE", "PAYPAL", "SQUARE", "BRAINTREE", "AUTHORIZE_NET", "PAYMENT"),
+    "outgoing_mail": ("SMTP", "MAIL", "SENDGRID", "MAILGUN", "POSTMARK", "RESEND"),
+    "incoming_mail": (),
+    "printnode": ("PRINTNODE",),
+    "repairshopr": ("REPAIRSHOPR",),
+    "fishbowl": ("FISHBOWL",),
+    "cm_data": ("CM_DATA",),
+    "web_push": ("VAPID",),
+}
+DEFAULT_INTEGRATION_KEY_MARKERS = tuple(
+    marker for markers in INTEGRATION_KEY_MARKERS.values() for marker in markers
 )
 
 
@@ -81,19 +74,38 @@ def is_credential_runtime_value(key_name: str, value: str) -> bool:
     )
 
 
-def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+def runtime_key_matching_markers(key_name: str, markers: Iterable[str]) -> tuple[str, ...]:
     key_parts = _key_parts(key_name)
-    for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers):
+    matched: list[str] = []
+    for marker in markers:
         marker_parts = _key_parts(marker)
-        if not marker_parts:
-            continue
         width = len(marker_parts)
-        if any(
+        if width and any(
             key_parts[index : index + width] == marker_parts
             for index in range(len(key_parts) - width + 1)
         ):
-            return True
-    return False
+            matched.append("_".join(marker_parts))
+    return tuple(matched)
+
+
+def runtime_key_integrations(key_name: str) -> tuple[str, ...]:
+    matched = set(runtime_key_matching_markers(key_name, DEFAULT_INTEGRATION_KEY_MARKERS))
+    if not matched:
+        return ()
+    if matched == {"MAIL"} and runtime_key_matching_markers(key_name, ("INCOMING_MAIL",)):
+        return ("incoming_mail",)
+    specific = matched - {"MAIL"}
+    return tuple(
+        integration
+        for integration, markers in INTEGRATION_KEY_MARKERS.items()
+        if (specific or matched).intersection(markers)
+    )
+
+
+def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+    return bool(
+        runtime_key_matching_markers(key_name, (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers))
+    )
 
 
 def _key_parts(key_name: str) -> tuple[str, ...]:
@@ -197,7 +209,6 @@ def evaluate_preview_copied_runtime_key_safety(
         ),
         secret_rules=policy_record.rules,
         integration_key_markers=policy_record.integration_key_markers,
-        unreasoned_shared_integration_keys="report",
     )
 
 
@@ -241,7 +252,6 @@ def evaluate_runtime_key_safety_from_store(
     target: RuntimeKeySafetyTarget,
     required_binding_keys: Iterable[str],
     policy_record: RuntimeKeySafetyPolicyRecord | None = None,
-    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     policy = policy_record or latest_active_runtime_key_safety_policy(record_store)
     return evaluate_runtime_key_safety(
@@ -253,7 +263,6 @@ def evaluate_runtime_key_safety_from_store(
         ),
         secret_rules=policy.rules,
         integration_key_markers=policy.integration_key_markers,
-        unreasoned_shared_integration_keys=unreasoned_shared_integration_keys,
     )
 
 
@@ -264,14 +273,12 @@ def evaluate_runtime_key_safety(
     secret_bindings: Iterable[SecretBinding],
     secret_rules: Iterable[RuntimeSecretSafetyRule],
     integration_key_markers: Iterable[str] = (),
-    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     extra_integration_key_markers = tuple(integration_key_markers)
     checked_binding_keys = _normalize_required_binding_keys(required_binding_keys)
     rules_by_binding_key = _rules_by_binding_key(secret_rules)
     bindings_by_binding_key = _bindings_by_binding_key(secret_bindings)
     findings: list[RuntimeKeySafetyFinding] = []
-    reported: list[RuntimeKeySafetyFinding] = []
 
     if target.environment_class == "unknown":
         findings.append(
@@ -340,17 +347,13 @@ def evaluate_runtime_key_safety(
             extra_integration_key_markers=extra_integration_key_markers,
         )
         if missing_reason is not None and not binding_findings:
-            if unreasoned_shared_integration_keys == "refuse":
-                findings.append(missing_reason)
-            else:
-                reported.append(missing_reason)
+            findings.append(missing_reason)
 
     return RuntimeKeySafetyEvaluation(
         status="fail" if findings else "pass",
         target=target,
         checked_binding_keys=checked_binding_keys,
         findings=tuple(findings),
-        reported=tuple(reported),
     )
 
 

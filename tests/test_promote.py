@@ -1,3 +1,5 @@
+from tests.support.runtime_environments import _parse_runtime_environment_definition
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 import os
 import json
 import subprocess
@@ -13,7 +15,6 @@ from click.testing import CliRunner
 
 from control_plane import secrets as control_plane_secrets
 from control_plane import dokploy as control_plane_dokploy
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli import (
     _resolve_dokploy_target,
     _resolve_native_promotion_request,
@@ -196,16 +197,14 @@ def _write_control_plane_dokploy_source_of_truth(repo_root: Path, payload: str) 
 def _write_runtime_environments_file(repo_root: Path, payload: str) -> Path:
     runtime_environments_file = repo_root / "runtime-environments.toml"
     runtime_environments_file.write_text(payload.strip() + "\n", encoding="utf-8")
-    definition = control_plane_runtime_environments._parse_runtime_environment_definition(
+    definition = _parse_runtime_environment_definition(
         tomllib.loads(payload.strip()),
         source_file=runtime_environments_file,
     )
     store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
     store.ensure_schema()
     try:
-        for (
-            record
-        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        for record in build_runtime_environment_records_from_definition(
             definition,
             updated_at="2026-04-22T00:00:00Z",
             source_label="test",
@@ -949,9 +948,12 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=[
-                        {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+                        {
+                            "env": 'DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON=\'{"legacy": "value"}\'\nPROVIDER_ONLY=hello world'
+                        },
                         {
                             "env": (
+                                'LAUNCHPLANE_RUNTIME_IDENTITY_JSON=\'{"legacy": "value"}\'\nPROVIDER_ONLY=hello world\n'
                                 "DOCKER_IMAGE=odoo-runtime\n"
                                 "DOCKER_IMAGE_TAG=latest\n"
                                 "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
@@ -959,7 +961,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                             )
                         },
                     ],
-                ),
+                ) as fetch_payload,
                 patch(
                     "control_plane.dokploy.compose.sync_dokploy_compose_raw_source",
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
@@ -992,11 +994,40 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     artifact_manifest=artifact_manifest,
                     resolved_target=resolved_target,
                 )
+                raw_compose_sync.assert_called_once()
+                rendered_source = raw_compose_sync.call_args.kwargs["compose_file"]
+                raw_compose_sync.reset_mock()
+                fetch_payload.side_effect = None
+                fetch_payload.return_value = {"env": "APP=invalid\x00value"}
+                with self.assertRaises(control_plane_dokploy.api.DokployEnvironmentEncodingError):
+                    _sync_artifact_image_reference_for_target(
+                        context_name="opw",
+                        instance_name="prod",
+                        artifact_manifest=artifact_manifest,
+                        resolved_target=resolved_target,
+                    )
+                raw_compose_sync.assert_not_called()
+                fetch_payload.return_value = {"env": ""}
+                with (
+                    patch(
+                        "control_plane.runtime_environments.resolve_site_runtime_environment",
+                        return_value=_site_environment(
+                            {"GITHUB_TOKEN": "synthetic-platform-credential"}
+                        ),
+                    ),
+                    self.assertRaises(click.ClickException),
+                ):
+                    _sync_artifact_image_reference_for_target(
+                        context_name="opw",
+                        instance_name="prod",
+                        artifact_manifest=artifact_manifest,
+                        resolved_target=resolved_target,
+                    )
+                raw_compose_sync.assert_not_called()
 
-        raw_compose_sync.assert_called_once()
         self.assertIn(
             "Host(`opw-prod.shinycomputers.com`)",
-            raw_compose_sync.call_args.kwargs["compose_file"],
+            rendered_source,
         )
         self.assertEqual(captured_update["target_type"], "compose")
         self.assertEqual(captured_update["target_id"], "compose-123")

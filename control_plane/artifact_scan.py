@@ -18,6 +18,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _MAX_REPORT_BYTES = 32 * 1024 * 1024
 SCAN_RESULT_TTL_SECONDS = 30 * 60
@@ -46,6 +48,23 @@ class ArtifactScanResult(BaseModel):
 
 
 _RESULTS: OrderedDict[tuple[str, str], tuple[float, ArtifactScanResult]] = OrderedDict()
+
+
+def is_artifact_scan_activation(
+    existing: LaunchplaneProductProfileRecord | None,
+    replacement: LaunchplaneProductProfileRecord,
+) -> bool:
+    if (
+        existing is None
+        or not existing.is_active
+        or not existing.is_managed_runtime
+        or existing.image.scan_enabled
+        or not replacement.image.scan_enabled
+    ):
+        return False
+    expected = existing.model_copy(deep=True)
+    expected.image.scan_enabled = True
+    return replacement == expected
 
 
 def scan_product_artifact(image_reference: str) -> ArtifactScanResult:
@@ -91,7 +110,7 @@ def qualify_product_artifact(record_store: object, *, product: str) -> ArtifactS
         profile = store.read_product_profile_record(product)
     except FileNotFoundError:
         raise ValueError("An active product profile is required.") from None
-    if not profile.is_active:
+    if not profile.is_active or not profile.is_managed_runtime:
         raise ValueError("An active product profile is required.")
     try:
         identity = product_repository_identity(store, profile)

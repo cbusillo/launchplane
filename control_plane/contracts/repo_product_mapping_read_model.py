@@ -5,15 +5,11 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-
-
-RepoProductClassification = Literal[
-    "managed_runtime",
-    "active_awareness",
-    "support_dependency",
-    "out_of_scope",
-]
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    RepoProductClassification,
+    product_profiles_share_repository,
+)
 
 
 class RepoProductMappingProductStore(Protocol):
@@ -42,7 +38,11 @@ class RepoProductMappingEntry(BaseModel):
     classification: RepoProductClassification
     product: str = ""
     display_name: str = ""
-    driver_id: str = ""
+    driver_id: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     contexts: tuple[str, ...] = ()
     environments: tuple[str, ...] = ()
     preview_context: str = ""
@@ -66,6 +66,11 @@ class RepoProductMapping(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     generated_at: str
     repositories: tuple[RepoProductMappingEntry, ...]
+    ambiguous_repositories: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_mapping(self) -> "RepoProductMapping":
@@ -84,15 +89,26 @@ def build_repo_product_mapping_from_records(
     work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
 ) -> RepoProductMapping:
     entries: dict[str, RepoProductMappingEntry] = {}
+    ambiguous = {
+        profile.repository.strip().lower()
+        for profile in product_profiles
+        for other in product_profiles
+        if profile.product != other.product and product_profiles_share_repository(profile, other)
+    }
     for profile in product_profiles:
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
             continue
-        entries[repository.lower()] = _product_profile_entry(profile)
+        key = repository.lower()
+        if key in ambiguous:
+            continue
+        entries[key] = _product_profile_entry(profile)
 
     for request in work_requests:
         repository = request.repository.strip()
         if not repository or "/" not in repository:
+            continue
+        if repository.lower() in ambiguous:
             continue
         entries.setdefault(
             repository.lower(),
@@ -107,6 +123,7 @@ def build_repo_product_mapping_from_records(
     return RepoProductMapping(
         generated_at=generated_at,
         repositories=tuple(sorted(entries.values(), key=lambda entry: entry.repository.lower())),
+        ambiguous_repositories=tuple(sorted(ambiguous)),
     )
 
 
@@ -115,7 +132,7 @@ def _product_profile_entry(profile: LaunchplaneProductProfileRecord) -> RepoProd
     environments = tuple(lane.instance for lane in profile.lanes)
     return RepoProductMappingEntry(
         repository=profile.repository,
-        classification="managed_runtime",
+        classification=profile.classification,
         product=profile.product,
         display_name=profile.display_name,
         driver_id=profile.driver_id,
@@ -134,3 +151,27 @@ def _dedupe_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
         if value and value not in normalized:
             normalized.append(value)
     return tuple(normalized)
+
+
+def build_repo_product_mapping_service_payload(
+    *,
+    generated_at: str,
+    product_store: RepoProductMappingProductStore,
+    work_request_store: RepoProductMappingWorkRequestStore,
+) -> dict[str, object]:
+    product_profiles = tuple(
+        profile for profile in product_store.list_product_profile_records() if profile.is_active
+    )
+    work_requests = work_request_store.list_every_code_work_request_records(limit=None)
+    mapping = build_repo_product_mapping_from_records(
+        generated_at=generated_at,
+        product_profiles=product_profiles,
+        work_requests=work_requests,
+    )
+    return {
+        "mapping": mapping.model_dump(mode="json"),
+        "source": {
+            "product_count": len(product_profiles),
+            "work_request_count": len(work_requests),
+        },
+    }

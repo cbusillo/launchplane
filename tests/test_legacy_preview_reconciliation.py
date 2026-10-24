@@ -12,6 +12,7 @@ from control_plane.contracts.preview_desired_state_record import PreviewDesiredS
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane import http_app as http_app_module
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -25,6 +26,7 @@ from control_plane.legacy_preview_reconciliation import (
     bind_legacy_preview,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.launchplane import generate_preview_id
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryResult,
     GenericWebPreviewDestroyResult,
@@ -38,7 +40,7 @@ from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, 
 from tests.support.profiles import _product_profile_payload
 
 
-class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
+class LegacyPreviewReconciliationFixture(unittest.IsolatedAsyncioTestCase):
     def database_url(self) -> str:
         return f"sqlite+pysqlite:///{self.root / 'state.db'}"
 
@@ -58,7 +60,11 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
         self.store.write_product_profile_record(self.profile)
         self.preview = PreviewRecord(
-            preview_id="preview-legacy-1",
+            preview_id=generate_preview_id(
+                context_name=self.profile.preview.context,
+                anchor_repo="example-site",
+                anchor_pr_number=1,
+            ),
             context=self.profile.preview.context,
             anchor_repo="example-site",
             anchor_pr_number=1,
@@ -158,6 +164,41 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             **extra,
         )
 
+    def historical_generation(self) -> PreviewGenerationRecord:
+        slug = resolve_generic_web_preview_slug(
+            profile=self.profile,
+            preview_slug="",
+            anchor_pr_number=self.preview.anchor_pr_number,
+            label="Reconciliation",
+        )
+        return PreviewGenerationRecord(
+            generation_id="historical-generation",
+            preview_id=self.preview.preview_id,
+            sequence=1,
+            state="ready",
+            requested_reason="historical",
+            requested_at=self.preview.created_at,
+            finished_at=self.preview.created_at,
+            resolved_manifest_fingerprint="historical-manifest",
+            runtime_identity=_build_preview_runtime_identity(
+                profile=self.profile,
+                preview_slug=slug,
+                image_reference="ghcr.io/example/site@sha256:" + "b" * 64,
+                anchor_head_sha="a" * 40,
+                deployed_at=self.preview.created_at,
+            ),
+            anchor_summary=PreviewPullRequestSummary.model_validate(
+                {
+                    "repo": self.profile.repository,
+                    "pr_number": 1,
+                    "head_sha": "a" * 40,
+                    "pr_url": self.preview.anchor_pr_url,
+                }
+            ),
+        )
+
+
+class LegacyPreviewReconciliationTests(LegacyPreviewReconciliationFixture):
     async def test_inspection_plan_apply_and_independent_readback(self) -> None:
         inspect = await self.call("inspect")
         self.assertEqual(inspect.status_code, 202, inspect.text)
@@ -226,39 +267,6 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.apply(plan)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), changed)
-
-    def historical_generation(self) -> PreviewGenerationRecord:
-        slug = resolve_generic_web_preview_slug(
-            profile=self.profile,
-            preview_slug="",
-            anchor_pr_number=self.preview.anchor_pr_number,
-            label="Reconciliation",
-        )
-        return PreviewGenerationRecord(
-            generation_id="historical-generation",
-            preview_id=self.preview.preview_id,
-            sequence=1,
-            state="ready",
-            requested_reason="historical",
-            requested_at=self.preview.created_at,
-            finished_at=self.preview.created_at,
-            resolved_manifest_fingerprint="historical-manifest",
-            runtime_identity=_build_preview_runtime_identity(
-                profile=self.profile,
-                preview_slug=slug,
-                image_reference="ghcr.io/example/site@sha256:" + "b" * 64,
-                anchor_head_sha="a" * 40,
-                deployed_at=self.preview.created_at,
-            ),
-            anchor_summary=PreviewPullRequestSummary.model_validate(
-                {
-                    "repo": self.profile.repository,
-                    "pr_number": 1,
-                    "head_sha": "a" * 40,
-                    "pr_url": self.preview.anchor_pr_url,
-                }
-            ),
-        )
 
     async def test_historical_generations_survive_reconciliation(self) -> None:
         generation = self.historical_generation()
@@ -564,6 +572,15 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             updated_at=sibling.updated_at,
         )
         self.store.write_dokploy_target_id_record(target)
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context=target.context,
+                instance=target.instance,
+                target_type="application",
+                target_name="example-site-preview-pr-7",
+                updated_at=target.updated_at,
+            )
+        )
         self.search.return_value = ({"applicationId": target.target_id},)
         with (
             patch(
@@ -630,6 +647,44 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.call("plan", key="mixed-case")
         self.assertEqual(response.status_code, 409)
+
+    def test_integrated_retirement_source_proof_accepts_equivalent_git_url_forms(self) -> None:
+        from control_plane.legacy_preview_reconciliation import observe_legacy_preview
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+            ),
+            allow_tracked=True,
+        )
+        self.search.return_value = ({"applicationId": "untracked-preview"},)
+        for source in (
+            "https://git.example/" + self.profile.repository + ".git",
+            "ssh://git@git.example/" + self.profile.repository + ".git",
+            "git@git.example:" + self.profile.repository + ".git",
+        ):
+            with (
+                self.subTest(source=source),
+                patch(
+                    "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "untracked-preview",
+                        "name": bound.application_name,
+                        "appName": bound.application_name + "-suffix",
+                        "customGitUrl": source,
+                    },
+                ),
+                patch(
+                    "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                    return_value=({"host": "pr-1.example.test"},),
+                ),
+            ):
+                result = observe_legacy_preview(
+                    control_plane_root=self.root, bound=bound, retirement_peers=(bound,)
+                )
+                self.assertEqual(result["provider_state"], "present")
+                self.assertEqual(result["candidate_target_ids"], ("untracked-preview",))
 
     async def test_malformed_domain_inventory_is_not_absence(self) -> None:
         self.search.return_value = ({"applicationId": "other-app"},)

@@ -23,17 +23,9 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
-from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
-from control_plane.contracts.preview_request_metadata import (
-    LaunchplaneCompanionPullRequestReference,
-    LaunchplanePreviewRequestMetadata,
-    LaunchplanePreviewRequestParseResult,
-)
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PromotionRecord,
@@ -79,21 +71,19 @@ from control_plane.cli_runtime_environments import (
 from control_plane.cli_records import RecordsCliCallbacks, register_record_commands
 from control_plane.cli_service import ServiceCliCallbacks, register_service_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
-from control_plane.cli_work_graph import register_work_graph_core_commands
+from control_plane.cli_merge_train import register_merge_train_commands
 from control_plane.config_authority_audit import (
     build_config_authority_audit,
     evaluate_config_authority_gate,
     render_config_authority_markdown,
 )
 from control_plane.launchplane_rendering import (
-    build_launchplane_action_script as _build_launchplane_action_script,
     build_launchplane_backup_gate_write_recipe_script as _build_launchplane_backup_gate_write_recipe_script,
     build_launchplane_environment_ship_recipe_script as _build_launchplane_environment_ship_recipe_script,
     build_launchplane_promotion_execute_recipe_script as _build_launchplane_promotion_execute_recipe_script,
     build_launchplane_promotion_resolve_recipe_script as _build_launchplane_promotion_resolve_recipe_script,
     int_from_json_value as _int_from_json_value,
     json_object_items as _json_object_items,
-    launchplane_action_slug as _launchplane_action_slug,
     launchplane_environment_bundle_relative_path as _launchplane_environment_bundle_relative_path,
     launchplane_inventory_bucket as _launchplane_inventory_bucket,
     launchplane_preview_bundle_relative_path as _launchplane_preview_bundle_relative_path,
@@ -123,7 +113,6 @@ from control_plane.workflows.launchplane import (
     build_preview_status_payload,
     launchplane_anchor_repo_context,
     ProductProfileListStore,
-    resolve_pull_request_event_manifest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_prod_backup_gate import (
@@ -364,7 +353,12 @@ def _sync_launchplane_bootstrap_policy(
             target_type=target_type,
             target_id=target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(
+                env_map,
+                target_type=target_type,
+                compose_type=str(target_payload.get("composeType") or "docker-compose"),
+                current_env_text=raw_env_text,
+            ),
             launchplane_service_target=True,
         )
     current_policy_sha256 = ""
@@ -486,330 +480,6 @@ def _build_launchplane_environment_action_payload(
             source_git_ref=source_git_ref,
         ),
     }
-
-
-def _launchplane_preview_enablement_actionable_payload(
-    *,
-    context_name: str,
-    anchor_repo: str,
-    anchor_pr_number: int,
-    anchor_pr_url: str,
-    anchor_head_sha: str,
-    state: str,
-    summary: str,
-    baseline_release_tuple_id: str,
-    resolved_manifest_fingerprint: str,
-    source_map: list[dict[str, object]] | None = None,
-    companion_summaries: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
-    preview_request_payload = {
-        "schema_version": 1,
-        "context": context_name,
-        "anchor_repo": anchor_repo,
-        "anchor_pr_number": anchor_pr_number,
-        "anchor_pr_url": anchor_pr_url,
-        "state": "pending",
-        "created_at": "<utc-timestamp>",
-        "updated_at": "<utc-timestamp>",
-        "eligible_at": "<utc-timestamp>",
-    }
-    generation_request_payload = {
-        "schema_version": 1,
-        "context": context_name,
-        "anchor_repo": anchor_repo,
-        "anchor_pr_number": anchor_pr_number,
-        "anchor_pr_url": anchor_pr_url,
-        "anchor_head_sha": anchor_head_sha,
-        "state": "resolving",
-        "requested_reason": "operator_requested_enablement",
-        "requested_at": "<utc-timestamp>",
-        "resolved_manifest_fingerprint": resolved_manifest_fingerprint,
-        "baseline_release_tuple_id": baseline_release_tuple_id,
-        "source_map": source_map
-        if source_map is not None
-        else [
-            {
-                "repo": anchor_repo,
-                "git_sha": anchor_head_sha,
-                "selection": "anchor",
-            }
-        ],
-        "companion_summaries": companion_summaries or [],
-        "deploy_status": "pending",
-        "verify_status": "pending",
-        "overall_health_status": "pending",
-    }
-    action_slug = _launchplane_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
-    recipe = _build_launchplane_action_script(
-        command_name="request-generation",
-        file_payloads=(
-            (
-                "PREVIEW_FILE",
-                f"/tmp/launchplane-{action_slug}-preview.json",
-                preview_request_payload,
-            ),
-            (
-                "GENERATION_FILE",
-                f"/tmp/launchplane-{action_slug}-generation.json",
-                generation_request_payload,
-            ),
-        ),
-        command_args=(
-            "--preview-input-file",
-            '"$PREVIEW_FILE"',
-            "--generation-input-file",
-            '"$GENERATION_FILE"',
-        ),
-    )
-    if state == "requested":
-        headline = "Materialize requested Launchplane preview"
-    else:
-        headline = "Request Launchplane preview"
-    return {
-        "status": "actionable",
-        "tone": "warn",
-        "headline": headline,
-        "summary": summary,
-        "recipe": recipe,
-        "recipe_id": f"enablement-{action_slug}-request-generation",
-    }
-
-
-def _launchplane_preview_companion_snapshot_source_map_payload(
-    *,
-    anchor_repo: str,
-    anchor_head_sha: str,
-    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
-) -> list[dict[str, object]]:
-    companion_rows: list[dict[str, object]] = [
-        {
-            "repo": summary.repo,
-            "git_sha": summary.head_sha,
-            "selection": "companion",
-        }
-        for summary in request_metadata_companion_summaries
-    ]
-    return [
-        {
-            "repo": anchor_repo,
-            "git_sha": anchor_head_sha,
-            "selection": "anchor",
-        },
-        *companion_rows,
-    ]
-
-
-def _launchplane_preview_companion_summaries_payload(
-    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
-) -> list[dict[str, object]]:
-    return [summary.model_dump(mode="json") for summary in request_metadata_companion_summaries]
-
-
-def _launchplane_preview_unresolved_companion_payload(*, detail: str) -> dict[str, object]:
-    return {
-        "status": "blocked",
-        "tone": "bad",
-        "headline": "Companion PR snapshots are required before Launchplane can request this preview.",
-        "summary": detail,
-        "recipe": "",
-    }
-
-
-def _build_launchplane_preview_enablement_action_payload(
-    *,
-    control_plane_root: Path | None,
-    context_name: str,
-    anchor_repo: str,
-    anchor_pr_number: int,
-    anchor_pr_url: str,
-    anchor_head_sha: str,
-    state: str,
-    request_metadata_status: str,
-    request_metadata_baseline_channel: str,
-    request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...],
-    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
-    preview_row: dict[str, object] | None,
-) -> dict[str, object]:
-    if preview_row is not None:
-        return {
-            "status": "existing_preview",
-            "tone": "neutral",
-            "headline": "Preview detail already exists.",
-            "summary": "Use the preview detail page or live route instead of requesting a second initial preview action from the tenant page.",
-            "recipe": "",
-        }
-    if state not in {"candidate", "requested"}:
-        return {
-            "status": "none",
-            "tone": "neutral",
-            "headline": "No preview action available.",
-            "summary": "This preview row does not need an initial Launchplane request recipe right now.",
-            "recipe": "",
-        }
-    if request_metadata_status == "invalid":
-        return {
-            "status": "blocked",
-            "tone": "bad",
-            "headline": "Preview metadata must be fixed before Launchplane can request this preview.",
-            "summary": "The saved PR snapshot says the Launchplane preview metadata is invalid, so Launchplane avoids printing a request recipe that would drift from the PR contract.",
-            "recipe": "",
-        }
-    request_metadata = LaunchplanePreviewRequestParseResult(status="missing")
-    if request_metadata_status == "valid":
-        request_metadata = LaunchplanePreviewRequestParseResult(
-            status="valid",
-            metadata=LaunchplanePreviewRequestMetadata(
-                baseline_channel=request_metadata_baseline_channel,
-                companions=request_metadata_companions,
-            ),
-        )
-    if control_plane_root is None:
-        if request_metadata_companions and not request_metadata_companion_summaries:
-            return _launchplane_preview_unresolved_companion_payload(
-                detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
-            )
-        return _launchplane_preview_enablement_actionable_payload(
-            context_name=context_name,
-            anchor_repo=anchor_repo,
-            anchor_pr_number=anchor_pr_number,
-            anchor_pr_url=anchor_pr_url,
-            anchor_head_sha=anchor_head_sha,
-            state=state,
-            summary=(
-                "Launchplane cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
-            ),
-            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
-            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
-            source_map=(
-                _launchplane_preview_companion_snapshot_source_map_payload(
-                    anchor_repo=anchor_repo,
-                    anchor_head_sha=anchor_head_sha,
-                    request_metadata_companion_summaries=request_metadata_companion_summaries,
-                )
-                if request_metadata_companion_summaries
-                else None
-            ),
-            companion_summaries=_launchplane_preview_companion_summaries_payload(
-                request_metadata_companion_summaries
-            ),
-        )
-    if not anchor_pr_url or not anchor_head_sha:
-        return {
-            "status": "missing_evidence",
-            "tone": "neutral",
-            "headline": "Launchplane needs the latest PR URL and head SHA before it can request this preview.",
-            "summary": "The current tenant snapshot is missing the exact anchor PR evidence needed for a typed request-generation recipe.",
-            "recipe": "",
-        }
-    if request_metadata_companions and not request_metadata_companion_summaries:
-        return _launchplane_preview_unresolved_companion_payload(
-            detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
-        )
-
-    synthetic_event = GitHubPullRequestEvent(
-        action="opened",
-        repo=anchor_repo,
-        pr_number=anchor_pr_number,
-        pr_url=anchor_pr_url,
-        occurred_at="<utc-timestamp>",
-        state="open",
-        merged=False,
-        head_sha=anchor_head_sha,
-    )
-    try:
-        resolved_manifest = resolve_pull_request_event_manifest(
-            control_plane_root=control_plane_root,
-            event=synthetic_event,
-            resolved_context=context_name,
-            preview=None,
-            request_metadata=request_metadata,
-            companion_summaries_snapshot=request_metadata_companion_summaries,
-        )
-    except click.ClickException as exc:
-        if request_metadata_companions and not request_metadata_companion_summaries:
-            return _launchplane_preview_unresolved_companion_payload(
-                detail=(
-                    "The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane could not prove their exact head SHAs from stored evidence. "
-                    f"Resolve the companion snapshots before running the request recipe: {exc}"
-                ),
-            )
-        return _launchplane_preview_enablement_actionable_payload(
-            context_name=context_name,
-            anchor_repo=anchor_repo,
-            anchor_pr_number=anchor_pr_number,
-            anchor_pr_url=anchor_pr_url,
-            anchor_head_sha=anchor_head_sha,
-            state=state,
-            summary=(
-                "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
-                f"Use the typed request recipe below after replacing the baseline placeholders: {exc}"
-            ),
-            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
-            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
-            source_map=(
-                _launchplane_preview_companion_snapshot_source_map_payload(
-                    anchor_repo=anchor_repo,
-                    anchor_head_sha=anchor_head_sha,
-                    request_metadata_companion_summaries=request_metadata_companion_summaries,
-                )
-                if request_metadata_companion_summaries
-                else None
-            ),
-            companion_summaries=_launchplane_preview_companion_summaries_payload(
-                request_metadata_companion_summaries
-            ),
-        )
-    if resolved_manifest is None:
-        if request_metadata_companions and not request_metadata_companion_summaries:
-            return _launchplane_preview_unresolved_companion_payload(
-                detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
-            )
-        return _launchplane_preview_enablement_actionable_payload(
-            context_name=context_name,
-            anchor_repo=anchor_repo,
-            anchor_pr_number=anchor_pr_number,
-            anchor_pr_url=anchor_pr_url,
-            anchor_head_sha=anchor_head_sha,
-            state=state,
-            summary=(
-                "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
-                "Use the typed request recipe below after replacing the baseline tuple id and manifest fingerprint placeholders."
-            ),
-            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
-            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
-            source_map=(
-                _launchplane_preview_companion_snapshot_source_map_payload(
-                    anchor_repo=anchor_repo,
-                    anchor_head_sha=anchor_head_sha,
-                    request_metadata_companion_summaries=request_metadata_companion_summaries,
-                )
-                if request_metadata_companion_summaries
-                else None
-            ),
-            companion_summaries=_launchplane_preview_companion_summaries_payload(
-                request_metadata_companion_summaries
-            ),
-        )
-
-    return _launchplane_preview_enablement_actionable_payload(
-        context_name=context_name,
-        anchor_repo=anchor_repo,
-        anchor_pr_number=anchor_pr_number,
-        anchor_pr_url=anchor_pr_url,
-        anchor_head_sha=anchor_head_sha,
-        state=state,
-        summary=(
-            "This tenant PR is preview-eligible but still inactive. Run Launchplane's typed request-generation flow to create the initial preview route from the default testing baseline."
-            if state != "requested"
-            else "A preview request exists, but Launchplane has not produced a serving route yet. Run the typed request-generation flow to materialize the preview from the saved PR snapshot."
-        ),
-        baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
-        resolved_manifest_fingerprint=resolved_manifest.resolved_manifest_fingerprint,
-        source_map=[item.model_dump(mode="json") for item in resolved_manifest.source_map],
-        companion_summaries=[
-            item.model_dump(mode="json") for item in resolved_manifest.companion_summaries
-        ],
-    )
 
 
 def _launchplane_promotion_check_status(
@@ -1142,234 +812,8 @@ def _build_launchplane_promotion_detail_payload(
     }
 
 
-def _launchplane_preview_enablement_item_tone(state: str) -> str:
-    if state == "running":
-        return "good"
-    if state in {"requested", "paused"}:
-        return "warn"
-    return "neutral"
-
-
-def _launchplane_preview_enablement_item_source(
-    *,
-    preview_row: dict[str, object] | None,
-    latest_requested_reason: str,
-) -> str:
-    if latest_requested_reason.startswith("operator_requested"):
-        return "launchplane"
-    if preview_row is not None:
-        return "history"
-    return "none"
-
-
-def _launchplane_preview_enablement_item_state(
-    *, preview_row: dict[str, object] | None, pr_state: str
-) -> str:
-    preview_state = (
-        str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
-    )
-    serving_generation_id = (
-        str(preview_row.get("serving_generation_id", "")).strip() if preview_row is not None else ""
-    )
-    if preview_state == "destroyed":
-        return "retained"
-    if preview_state == "paused":
-        return "paused"
-    if preview_row is not None and serving_generation_id:
-        return "running"
-    if preview_row is not None:
-        return "requested"
-    if pr_state == "open":
-        return "candidate"
-    return ""
-
-
-def _launchplane_preview_enablement_item_request_summary(*, state: str, source: str) -> str:
-    if state == "candidate":
-        return "Eligible tenant PR. No preview request is active yet."
-    if state == "retained":
-        return "Launchplane is keeping this PR's preview history as retained evidence."
-    if source == "launchplane":
-        return "Launchplane explicitly requested this preview."
-    if state == "paused":
-        return (
-            "Launchplane is intentionally holding this preview in place until an admin resumes it."
-        )
-    return "Launchplane still has preview evidence from an earlier request."
-
-
-def _launchplane_preview_enablement_item_status_summary(
-    *, state: str, preview_row: dict[str, object] | None
-) -> str:
-    if preview_row is not None:
-        status_summary = str(preview_row.get("status_summary", "")).strip()
-        if status_summary:
-            return status_summary
-    if state == "candidate":
-        return "Ready for opt-in preview enablement."
-    if state == "requested":
-        return "Preview request recorded; Launchplane has not materialized a serving route yet."
-    return "No additional preview lifecycle evidence recorded yet."
-
-
-def _build_launchplane_preview_enablement_items(
-    *,
-    control_plane_root: Path | None,
-    record_store: FilesystemRecordStore,
-    context_name: str,
-    anchor_repo: str,
-    previews: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], dict[str, int]]:
-    enablement_records = list(
-        record_store.list_preview_enablement_records(
-            context_name=context_name,
-            anchor_repo=anchor_repo,
-        )
-    )
-    enablement_by_key: dict[tuple[str, int], PreviewEnablementRecord] = {}
-    for record in enablement_records:
-        key = (record.anchor_repo, record.anchor_pr_number)
-        enablement_by_key.setdefault(key, record)
-
-    preview_by_key: dict[tuple[str, int], dict[str, object]] = {}
-    for row in previews:
-        row_anchor_repo = str(row.get("anchor_repo", "")).strip()
-        row_pr_number = _int_from_json_value(row.get("anchor_pr_number", 0))
-        if not row_anchor_repo or row_pr_number <= 0:
-            continue
-        preview_by_key.setdefault((row_anchor_repo, row_pr_number), row)
-
-    keys = set(enablement_by_key) | set(preview_by_key)
-    items: list[dict[str, object]] = []
-    for item_anchor_repo, item_pr_number in keys:
-        preview_row = preview_by_key.get((item_anchor_repo, item_pr_number))
-        enablement_record = enablement_by_key.get((item_anchor_repo, item_pr_number))
-        pr_state = enablement_record.pr_state if enablement_record is not None else "open"
-        state = _launchplane_preview_enablement_item_state(
-            preview_row=preview_row,
-            pr_state=pr_state,
-        )
-        if not state:
-            continue
-
-        preview_id = (
-            str(preview_row.get("preview_id", "")).strip() if preview_row is not None else ""
-        )
-        latest_requested_reason = ""
-        if preview_id:
-            latest_generations = record_store.list_preview_generation_records(
-                preview_id=preview_id, limit=1
-            )
-            if latest_generations:
-                latest_requested_reason = latest_generations[0].requested_reason
-
-        source = _launchplane_preview_enablement_item_source(
-            preview_row=preview_row,
-            latest_requested_reason=latest_requested_reason,
-        )
-        request_metadata_status = (
-            enablement_record.request_metadata_status
-            if enablement_record is not None
-            else "missing"
-        )
-        anchor_head_sha = enablement_record.anchor_head_sha if enablement_record is not None else ""
-        request_metadata_baseline_channel = (
-            enablement_record.request_metadata_baseline_channel
-            if enablement_record is not None
-            else ""
-        )
-        request_metadata_companions = (
-            enablement_record.request_metadata_companions if enablement_record is not None else ()
-        )
-        request_metadata_companion_summaries = (
-            enablement_record.request_metadata_companion_summaries
-            if enablement_record is not None
-            else ()
-        )
-
-        timestamps = [
-            str(preview_row.get("updated_at", "")).strip() if preview_row is not None else "",
-            enablement_record.updated_at if enablement_record is not None else "",
-        ]
-        updated_at = max((value for value in timestamps if value), default="")
-        anchor_pr_url = (
-            str(preview_row.get("anchor_pr_url", "")).strip()
-            if preview_row is not None
-            else enablement_record.anchor_pr_url
-            if enablement_record is not None
-            else ""
-        )
-        preview_label = (
-            str(preview_row.get("preview_label", "")).strip()
-            if preview_row is not None
-            else f"{context_name}/{item_anchor_repo}/pr-{item_pr_number}"
-        )
-        action_payload = _build_launchplane_preview_enablement_action_payload(
-            control_plane_root=control_plane_root,
-            context_name=context_name,
-            anchor_repo=item_anchor_repo,
-            anchor_pr_number=item_pr_number,
-            anchor_pr_url=anchor_pr_url,
-            anchor_head_sha=anchor_head_sha,
-            state=state,
-            request_metadata_status=request_metadata_status,
-            request_metadata_baseline_channel=request_metadata_baseline_channel,
-            request_metadata_companions=request_metadata_companions,
-            request_metadata_companion_summaries=request_metadata_companion_summaries,
-            preview_row=preview_row,
-        )
-        items.append(
-            {
-                "anchor_repo": item_anchor_repo,
-                "anchor_pr_number": item_pr_number,
-                "anchor_pr_url": anchor_pr_url,
-                "anchor_head_sha": anchor_head_sha,
-                "preview_id": preview_id,
-                "preview_label": preview_label,
-                "canonical_url": str(preview_row.get("canonical_url", "")).strip()
-                if preview_row is not None
-                else "",
-                "state": state,
-                "tone": _launchplane_preview_enablement_item_tone(state),
-                "request_source": source,
-                "request_summary": _launchplane_preview_enablement_item_request_summary(
-                    state=state, source=source
-                ),
-                "status_summary": _launchplane_preview_enablement_item_status_summary(
-                    state=state, preview_row=preview_row
-                ),
-                "updated_at": updated_at,
-                "request_metadata_status": request_metadata_status,
-                "request_metadata_baseline_channel": request_metadata_baseline_channel,
-                "request_metadata_companion_summaries": [
-                    item.model_dump(mode="json") for item in request_metadata_companion_summaries
-                ],
-                "preview_state": str(preview_row.get("state", "")).strip()
-                if preview_row is not None
-                else "",
-                "action": action_payload,
-            }
-        )
-
-    priority = {"candidate": 0, "requested": 1, "paused": 2, "running": 3, "retained": 4}
-    items.sort(
-        key=lambda item: _int_from_json_value(item.get("anchor_pr_number", 0)),
-        reverse=True,
-    )
-    items.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
-    items.sort(key=lambda item: priority.get(str(item.get("state", "")).strip(), 9))
-
-    counts = {"candidate": 0, "requested": 0, "running": 0, "paused": 0, "retained": 0}
-    for item in items:
-        item_state_value = str(item.get("state", "")).strip()
-        if item_state_value in counts:
-            counts[item_state_value] += 1
-    return items, counts
-
-
 def _build_launchplane_tenant_payload(
     *,
-    control_plane_root: Path | None = None,
     record_store: FilesystemRecordStore,
     context_name: str,
     anchor_repo: str = "",
@@ -1416,15 +860,7 @@ def _build_launchplane_tenant_payload(
     else:
         environments = {"testing": None, "prod": None}
 
-    preview_enablement, preview_enablement_counts = _build_launchplane_preview_enablement_items(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        context_name=resolved_context,
-        anchor_repo=resolved_anchor_repo,
-        previews=previews,
-    )
-
-    if not previews and not preview_enablement and not any(environments.values()):
+    if not previews and not any(environments.values()):
         return None
 
     preview_counts = {
@@ -1445,9 +881,6 @@ def _build_launchplane_tenant_payload(
             and str(row.get("serving_generation_id", "")).strip()
         ),
     }
-    preview_candidates = [
-        item for item in preview_enablement if str(item.get("state", "")).strip() == "candidate"
-    ]
 
     testing_environment = environments.get("testing")
     prod_environment = environments.get("prod")
@@ -1516,9 +949,6 @@ def _build_launchplane_tenant_payload(
         "anchor_repo": resolved_anchor_repo,
         "tenant_label": "/".join(part for part in (resolved_context, resolved_anchor_repo) if part),
         "preview_counts": preview_counts,
-        "preview_enablement_counts": preview_enablement_counts,
-        "preview_enablement": preview_enablement,
-        "preview_candidates": preview_candidates,
         "previews": previews,
         "environments": environments,
         "environment_actions": environment_actions,
@@ -1540,7 +970,6 @@ def _write_launchplane_site_bundle(
         context_name=context_name,
     )
     tenant_payload = _build_launchplane_tenant_payload(
-        control_plane_root=_control_plane_root(),
         record_store=record_store,
         context_name=context_name,
     )
@@ -1850,12 +1279,6 @@ def _launchplane_service_env_alias_value(
     return ""
 
 
-def _launchplane_service_env_alias_present(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> bool:
-    return bool(_launchplane_service_env_alias_value(env_map=env_map, env_keys=env_keys))
-
-
 def _launchplane_service_any_env_keys_present(
     *, env_map: dict[str, str], env_keys: tuple[str, ...]
 ) -> bool:
@@ -1863,16 +1286,6 @@ def _launchplane_service_any_env_keys_present(
         _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
         for env_key in env_keys
     )
-
-
-def _launchplane_present_env_keys(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> list[str]:
-    return [
-        env_key
-        for env_key in env_keys
-        if _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
-    ]
 
 
 def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
@@ -2387,13 +1800,6 @@ def _resolve_dokploy_target(
     return resolved_target, deploy_timeout_seconds
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
-    return promotion_ship_resolution.resolve_deploy_mode(
-        configured_ship_mode=configured_ship_mode,
-        target_type=target_type,
-    )
-
-
 def _load_runtime_environment_values(*, context_name: str, instance_name: str) -> dict[str, str]:
     try:
         return control_plane_runtime_environments.resolve_runtime_environment_values(
@@ -2568,14 +1974,7 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-        override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
-        )
+        override_runtime_store = PostgresRecordStore(database_url=database_url)
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -2597,8 +1996,7 @@ def _run_compose_post_deploy_update(
             )
             raise
         finally:
-            if override_runtime_store is not None:
-                override_runtime_store.close()
+            override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
@@ -3008,7 +2406,10 @@ def _sync_artifact_image_reference_for_target(
     retired_keys = site_environment.retired_keys
     try:
         control_plane_live_target_runtime.validate_provider_key_retirement(
-            retired_keys=set(retired_keys), application_keys=set()
+            retired_keys=set(retired_keys),
+            application_keys=set(),
+            context_name=context_name,
+            instance_name=instance_name,
         )
     except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
         raise click.ClickException(str(error)) from error
@@ -3070,6 +2471,18 @@ def _sync_artifact_image_reference_for_target(
     finally:
         postgres_store.close()
 
+    # Validate the complete wire environment before changing the Compose source.
+    prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+        desired_env_map,
+        target_type=resolved_target.target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
+        current_env_text=str(target_payload.get("env") or ""),
+    )
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=prepared_env_text,
+        current_env_text=str(target_payload.get("env") or ""),
+        target="Ship runtime environment sync",
+    )
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
         target_domains: tuple[str, ...] = ()
@@ -3118,7 +2531,7 @@ def _sync_artifact_image_reference_for_target(
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=prepared_env_text,
         )
         target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -3132,6 +2545,16 @@ def _sync_artifact_image_reference_for_target(
         for env_key, env_value in desired_env_map.items()
         if refreshed_env_map.get(env_key, "") != env_value
     )
+    if resolved_target.target_type == "compose" and target_payload.get("composeType") != "stack":
+        missing_or_mismatched_keys = sorted(
+            set(missing_or_mismatched_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(target_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
+                )
+            )
+        )
     if missing_or_mismatched_keys:
         raise click.ClickException(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
@@ -3261,6 +2684,7 @@ def _read_source_release_tuple_for_promotion(
             f"Ship artifact {request.artifact_id} into {request.context}/{request.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,
         context_name=request.context,
@@ -3289,6 +2713,7 @@ def _read_source_release_tuple_for_promotion_record(
             f"Write or mint {promotion_record.context}/{promotion_record.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=artifact_id,
         context_name=promotion_record.context,
@@ -3489,22 +2914,6 @@ def _build_environment_overview_payloads(
     ]
 
 
-def _build_runtime_environment_rows(
-    *,
-    entries: dict[str, object],
-    source_name: str,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "key": key_name,
-            "value": str(entries[key_name]),
-            "source": source_name,
-            "overrides": (),
-        }
-        for key_name in sorted(entries)
-    ]
-
-
 def _summarize_secret_binding_record(binding: SecretBinding) -> dict[str, object]:
     return {
         "binding_id": binding.binding_id,
@@ -3524,14 +2933,9 @@ def main() -> None:
     """Control-plane CLI."""
 
 
-@main.group("work-graph")
-def work_graph() -> None:
-    """Work graph recommendation commands."""
-
-
-register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
+register_runner_lane_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_preview_workflow_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_merge_train_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]

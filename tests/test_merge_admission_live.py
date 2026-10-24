@@ -17,7 +17,8 @@ from tests.test_merge_train_github import (
     _github_commit,
     _combined_status,
     _conversation_rule,
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
 )
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -44,7 +45,7 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     MergeTrainReviewConversations,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
@@ -412,8 +413,10 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     [pull],
                     [handoff],
                     pull,
+                    _protected_branch_with_checks("ci-status", app_id=None),
+                    [],
                     _combined_status(state=state),
-                    {"check_runs": [_check_run("completed", "success")]},
+                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                     _conversation_rule(),
                     [],
                     *(
@@ -559,8 +562,14 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                             [],
                             pull_request,
                             {"permission": "read"},
+                            _protected_branch_with_checks("ci-status", app_id=None),
+                            [],
                             _combined_status(),
-                            {"check_runs": [_check_run("completed", "success")]},
+                            {
+                                "check_runs": [
+                                    _required_check_run("ci-status", "completed", "success")
+                                ]
+                            },
                             _conversation_rule(),
                             [],
                         )

@@ -8,11 +8,13 @@ record's ``scheduler`` block stays the switch: ``enabled`` selects the target an
 ``mutate`` decides whether the pass may act.
 """
 
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+
 import logging
 import time
 from contextlib import nullcontext
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event
 from typing import cast
@@ -54,7 +56,11 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     UrllibMergeTrainGitHubTransport,
 )
-from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_github_token import (
+    resolve_merge_train_github_token,
+    merge_train_github_token_value,
+)
+from control_plane.merge_train_planning_scope import PlanningScopeResolver, planning_scope_resolver
 from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
@@ -78,6 +84,7 @@ from control_plane.merge_train_stack_collapse import (
     require_merge_train_stack_collapse_plan_record_store,
 )
 from control_plane.repository_evidence import GitHubRepositoryEvidenceProvider
+from control_plane.merge_train_wake import MergeTrainWake
 from control_plane.workflows.launchplane import github_api_request
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -192,14 +199,15 @@ def run_merge_train_scheduler_loop(
     interval_seconds: int = DEFAULT_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS,
     stop_event: Event | None = None,
     max_passes: int | None = None,
-    pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...]], None] | None = None,
+    pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...], MergeTrainWake], None]
+    | None = None,
     monotonic: Callable[[], float] = time.monotonic,
-    wait_for_event: Callable[[float, Event], Collection[str] | None] | None = None,
+    wait_for_event: Callable[[float, Event], MergeTrainWake] | None = None,
 ) -> int:
     """Sweep every target on the interval; between sweeps, run only the woken trains.
 
-    ``wait_for_event`` returns the controller keys an event woke, or None when
-    the wait ended without naming trains; a sweep runs then, and whenever one is due.
+    ``wait_for_event`` reports routing keys and advisory observations. A full
+    sweep runs when no keys are specified, and whenever the independent clock is due.
     """
     if interval_seconds < 1:
         raise ValueError("Merge train scheduler interval_seconds must be positive.")
@@ -209,10 +217,13 @@ def run_merge_train_scheduler_loop(
     passes = 0
     # No trains named yet, so the first pass is a sweep.
     next_sweep_at = 0.0
-    woken: Collection[str] | None = None
+    woken = MergeTrainWake(None, "startup")
     while not scheduler_stop_event.is_set():
         started_at = monotonic()
-        sweep = woken is None or started_at >= next_sweep_at
+        sweep = woken.target_keys is None or started_at >= next_sweep_at
+        if sweep and woken.target_keys is not None:
+            woken = replace(woken, target_keys=None, reason="timer_sweep")
+        woken = replace(woken, pass_started_at=utc_now_timestamp())
         if sweep:
             # Sweeps start on the interval; event passes in between never delay one.
             next_sweep_at = started_at + interval_seconds
@@ -221,21 +232,22 @@ def run_merge_train_scheduler_loop(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
                 should_stop=scheduler_stop_event.is_set,
-                target_keys=None if sweep else woken,
+                target_keys=None if sweep else woken.target_keys,
             )
-        except Exception:  # noqa: BLE001 - a bad pass (say, an unreadable policy) waits one interval.
+        except Exception as error:  # noqa: BLE001 - a bad pass waits one interval.
             _LOGGER.exception("Scheduled merge train pass failed.")
             results = ()
+            woken = replace(woken, pass_error_code=type(error).__name__)
         passes += 1
         if pass_callback is not None:
-            pass_callback(results)
+            pass_callback(results, woken)
         if max_passes is not None and passes >= max_passes:
             break
         # A long landing only shortens the wait for the next sweep.
         timeout = max(0.0, next_sweep_at - monotonic())
         if wait_for_event is None:
             scheduler_stop_event.wait(timeout=timeout)
-            woken = None
+            woken = MergeTrainWake(None, "timer_sweep")
         else:
             woken = wait_for_event(timeout, scheduler_stop_event)
     return passes
@@ -278,6 +290,7 @@ def _run_scheduled_target(
         source=repository_policy.github_token,
         repository=repository_policy.repository,
         control_plane_root=control_plane_root,
+        include_permissions=True,
     )
     if not token:
         return _target_result(
@@ -309,7 +322,7 @@ def _run_level1(
     record_store: object,
     policy_record: MergeTrainPolicyRecord,
     repository_policy: MergeTrainRepositoryPolicy,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     now: Callable[[], str],
 ) -> MergeTrainScheduledTargetResult:
@@ -349,7 +362,7 @@ def _run_controller(
     control_plane_root: Path,
     policy_record: MergeTrainPolicyRecord,
     repository_policy: MergeTrainRepositoryPolicy,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     now: Callable[[], str],
 ) -> MergeTrainScheduledTargetResult:
@@ -364,8 +377,8 @@ def _run_controller(
         store=record_store,
         repository_evidence_provider=GitHubRepositoryEvidenceProvider(
             control_plane_root=control_plane_root,
-            github_token=lambda **_: token,
-            github_token_scope=lambda **_: nullcontext(token),
+            github_token=lambda **_: merge_train_github_token_value(token),
+            github_token_scope=lambda **_: nullcontext(merge_train_github_token_value(token)),
             github_api=github_api_request,
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
             reuse_commit_trees=True,
@@ -407,13 +420,24 @@ def _run_controller(
             record_store=record_store,
             policy_record=policy_record,
             repository_policy=repository_policy,
-            token=token,
+            token=merge_train_github_token_value(token),
             trace_id=trace_id,
             response={
                 "result": controller_result.accepted_result,
                 "records": controller_result.records,
             },
             now=now,
+            planning_resolver=planning_scope_resolver(
+                policy=policy_record.policy,
+                source_repository=repository_policy.repository,
+                authorize=lambda target: target.service_authz == repository_policy.service_authz,
+                resolve_token=lambda target: resolve_merge_train_github_token(
+                    source=target.github_token,
+                    repository=target.repository,
+                    control_plane_root=control_plane_root,
+                    raise_resolution_errors=True,
+                ),
+            ),
         )
     diagnosis = controller_result.accepted_result.get("last_controller_result")
     reason = (
@@ -476,6 +500,7 @@ def _deliver_controller_feedback(
     trace_id: str,
     response: dict[str, object],
     now: Callable[[], str],
+    planning_resolver: PlanningScopeResolver | None = None,
 ) -> tuple[int, int]:
     payloads = build_feedback_payloads(
         response=response, source=MERGE_TRAIN_SCHEDULER_FEEDBACK_SOURCE
@@ -505,6 +530,7 @@ def _deliver_controller_feedback(
             response_trace_id=trace_id,
             defer_until=backoff,
             planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
+            planning_scope_resolver=planning_resolver,
         )
         if feedback_record.delivery_status == "failed":
             failed += 1
@@ -552,6 +578,7 @@ def _deliver_controller_feedback(
                 token=token,
                 attempted_at=attempted_at,
                 planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
+                planning_scope_resolver=planning_resolver,
             )
             feedback_store.write_merge_train_pr_feedback_record(recovered)
         if recovered.delivery_status == "delivered":

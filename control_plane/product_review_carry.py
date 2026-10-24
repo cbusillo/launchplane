@@ -44,7 +44,7 @@ from control_plane.contracts.product_review import (
 from control_plane.merge_train_branch_refresh import (
     optional_merge_train_branch_refresh_read_store,
 )
-from control_plane.product_review import ProductReviewStore
+from control_plane.product_review import ProductReviewStore, applicable_product_review_decisions
 from control_plane.source_control_change import change_fingerprint as _change_fingerprint
 from control_plane.source_control_change import patch_positions_match_base_update
 
@@ -72,13 +72,17 @@ def carry_owner_acceptance(
     if not base_branch.strip():
         return None
     head = head_sha.strip().lower()
-    decisions = store.list_product_review_decision_records(
-        repository=profile.repository, pull_request_number=pull_request_number
+    decisions = applicable_product_review_decisions(
+        decisions=store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=pull_request_number
+        ),
+        profile=profile,
+        pull_request_number=pull_request_number,
     )
     if not decisions or any(record.head_sha.strip().lower() == head for record in decisions):
         return None
     accepted = decisions[0]
-    if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
+    if not _carryable(accepted) or accepted.base_branch != base_branch.strip():
         # Accepted on another base (or one never recorded): the change is not the same.
         return None
     accepted_head = accepted.head_sha.strip().lower()
@@ -185,8 +189,12 @@ def carry_owner_acceptance(
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
-        latest = store.list_product_review_decision_records(
-            repository=profile.repository, pull_request_number=pull_request_number, limit=1
+        latest = applicable_product_review_decisions(
+            decisions=store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            ),
+            profile=profile,
+            pull_request_number=pull_request_number,
         )
         if not latest or latest[0].record_id != accepted.record_id:
             # The Client decided again while this was checked; that decision stands.
@@ -291,15 +299,9 @@ def _has_none_trailer(message: object) -> bool:
     return impacts == ["none"]
 
 
-def _carryable(
-    decision: ProductReviewDecisionRecord, profile: LaunchplaneProductProfileRecord
-) -> bool:
+def _carryable(decision: ProductReviewDecisionRecord) -> bool:
     return (
         decision.decision == "accepted"
-        and decision.product == profile.product
-        and profile.owner.is_set
-        # A new Client decides for themselves.
-        and decision.owner_github_id == profile.owner.github_id
         and bool(decision.head_sha.strip())
         and not (decision.feedback_requested and not decision.feedback_url)
     )
@@ -388,8 +390,12 @@ def record_decision_base(
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
-        latest = store.list_product_review_decision_records(
-            repository=profile.repository, pull_request_number=pull_request_number, limit=1
+        latest = applicable_product_review_decisions(
+            decisions=store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            ),
+            profile=profile,
+            pull_request_number=pull_request_number,
         )
         if not latest or latest[0].head_sha.strip().lower() != head or latest[0].base_branch:
             return

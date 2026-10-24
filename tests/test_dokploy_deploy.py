@@ -15,6 +15,49 @@ from control_plane.workflows.dokploy_deploy import (
 
 
 class DokployDeployRegistryTests(unittest.TestCase):
+    def test_compose_encoding_refuses_before_effect_checkpoint_or_write(self) -> None:
+        from unittest.mock import Mock
+
+        from control_plane.dokploy import api
+
+        checkpoint = Mock()
+        effect = Mock()
+        with (
+            patch.object(
+                api, "fetch_dokploy_target_payload", return_value={"env": "APP=bad\x00value"}
+            ),
+            patch.object(api, "dokploy_request") as request,
+            self.assertRaises(api.DokployEnvironmentEncodingError),
+        ):
+            update_dokploy_target_artifact(
+                host="https://provider.invalid",
+                token="synthetic",
+                target_type="compose",
+                target_id="synthetic",
+                artifact_id="synthetic.invalid/example:next",
+                before_provider_mutation=checkpoint,
+                effect_started=effect,
+            )
+        checkpoint.assert_not_called()
+        effect.assert_not_called()
+        request.assert_not_called()
+
+    def test_stack_environment_keeps_the_shell_export_format(self) -> None:
+        from control_plane.dokploy import api
+
+        values = {"APP": '"literal" $NAME\nnext'}
+        text = api.serialize_dokploy_env_text(values)
+        with patch.object(api, "dokploy_request") as request:
+            api.update_dokploy_target_env(
+                host="https://provider.invalid",
+                token="synthetic",
+                target_type="compose",
+                target_id="synthetic",
+                target_payload={"env": "", "composeType": "stack"},
+                env_text=text,
+            )
+        self.assertEqual(request.call_args.kwargs["payload"]["env"], text)
+
     def test_registry_host_normalization_matches_docker_image_rules(self) -> None:
         self.assertEqual(_docker_image_registry_host("ubuntu:24.04"), "docker.io")
         self.assertEqual(_docker_image_registry_host("library/postgres:16"), "docker.io")

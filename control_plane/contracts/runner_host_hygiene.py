@@ -12,6 +12,7 @@ from control_plane.contracts.runner_host_hygiene_idle import (
     RunnerHostHygieneIdleScope,
     RunnerHostHygieneIdleSource,
 )
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerHostHygieneStatus = Literal["healthy", "attention"]
@@ -101,6 +102,7 @@ RunnerHostHygieneApplyBlockerCode = Literal[
 ]
 RunnerHostHygieneFindingCode = Literal[
     "docker_reclaimable_above_limit",
+    "builder_cache_unqualified",
     "free_disk_below_minimum",
     "generated_cache_above_limit",
     "generated_cache_measurement_partial",
@@ -208,7 +210,7 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_usage(self) -> "RunnerHostHygieneRunnerWorkdirUsage":
-        self.root_key = _required_text(
+        self.root_key = require_text(
             _normalized_token(self.root_key),
             "runner host hygiene workdir usage requires root_key",
         )
@@ -339,7 +341,7 @@ class RunnerHostHygieneCacheClassTelemetry(BaseModel):
             self.source,
             "runner host hygiene cache-class telemetry requires source",
         )
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at,
             "runner host hygiene cache-class telemetry requires observed_at",
         )
@@ -383,6 +385,91 @@ class RunnerHostHygieneCacheClassTelemetry(BaseModel):
         return self
 
 
+class RunnerHostHygieneBuilderCacheUsage(BaseModel):
+    """One existing daemon or named-container cache, with no cleanup authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cache_key: str
+    source: Literal["docker_engine", "buildctl"] = "buildctl"
+    target_bytes: int | None = Field(default=None, ge=1)
+    effective_target_bytes: int | None = Field(default=None, ge=1)
+    availability: RunnerHostHygieneEvidenceAvailability
+    logical_bytes: int | None = Field(default=None, ge=0)
+    budgeted_bytes: int | None = Field(default=None, ge=0)
+    protected_bytes: int | None = Field(default=None, ge=0)
+    in_use_bytes: int | None = Field(default=None, ge=0)
+    recent_bytes: int | None = Field(default=None, ge=0)
+    shared_bytes: int | None = Field(default=None, ge=0)
+    reason_code: str = ""
+    recovery_owner: str = "admin"
+
+    @model_validator(mode="after")
+    def _validate_usage(self) -> "RunnerHostHygieneBuilderCacheUsage":
+        self.cache_key = _required_public_token(self.cache_key, "builder cache requires key")
+        self.recovery_owner = _required_public_token(
+            self.recovery_owner, "builder cache requires recovery assignment"
+        )
+        if self.availability == "available" and (
+            self.logical_bytes is None or self.budgeted_bytes is None or self.reason_code
+        ):
+            raise ValueError(
+                "available builder cache requires measured bytes and no failure reason"
+            )
+        if self.availability != "available" and not self.reason_code:
+            raise ValueError("incomplete builder cache requires a reason")
+        if self.logical_bytes is not None and any(
+            value is not None and value > self.logical_bytes
+            for value in (
+                self.budgeted_bytes,
+                self.protected_bytes,
+                self.in_use_bytes,
+                self.recent_bytes,
+                self.shared_bytes,
+            )
+        ):
+            raise ValueError("builder cache subsets cannot exceed total logical bytes")
+        if self.effective_target_bytes is not None and (
+            self.target_bytes is None or self.effective_target_bytes < self.target_bytes
+        ):
+            raise ValueError("effective cache target must include the configured target")
+        if (
+            self.protected_bytes is not None
+            and self.budgeted_bytes is not None
+            and self.protected_bytes > self.budgeted_bytes
+        ):
+            raise ValueError("protected cache cannot exceed budgeted usage")
+        return self
+
+    @property
+    def qualification(self) -> str:
+        if self.target_bytes is None and self.reason_code == "builder_not_running":
+            return "stopped_unmeasured_report_only"
+        if self.availability != "available" or self.budgeted_bytes is None:
+            return "unbudgeted_unmeasured_report_only" if self.target_bytes is None else "unknown"
+        if self.target_bytes is None:
+            return "unbudgeted_report_only"
+        target = self.effective_target_bytes or self.target_bytes
+        if self.budgeted_bytes <= target:
+            return "within_target"
+        if (
+            self.protected_bytes is not None
+            and self.budgeted_bytes - self.protected_bytes <= target
+        ):
+            return "protected_cache"
+        return "maintenance_required"
+
+    @property
+    def accounted_for(self) -> bool:
+        return self.qualification in {
+            "within_target",
+            "protected_cache",
+            "unbudgeted_report_only",
+            "stopped_unmeasured_report_only",
+            "unbudgeted_unmeasured_report_only",
+        }
+
+
 class RunnerHostHygieneObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -400,6 +487,8 @@ class RunnerHostHygieneObservation(BaseModel):
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
+    builder_cache_usage: tuple[RunnerHostHygieneBuilderCacheUsage, ...] = ()
+    require_builder_cache_evidence: bool = False
     idle_convergences: tuple[RunnerHostHygieneIdleConvergence, ...] = ()
     docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
@@ -415,10 +504,10 @@ class RunnerHostHygieneObservation(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_observation(self) -> "RunnerHostHygieneObservation":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene observation requires host_name"
         )
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at, "runner host hygiene observation requires observed_at"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
@@ -502,7 +591,7 @@ class RunnerHostHygieneImageInventoryItem(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_item(self) -> "RunnerHostHygieneImageInventoryItem":
-        self.image_id = _required_text(
+        self.image_id = require_text(
             self.image_id, "runner host hygiene image inventory item requires image_id"
         )
         self.repository = self.repository.strip().lower()
@@ -524,10 +613,10 @@ class RunnerHostHygieneVolumeInventoryItem(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_item(self) -> "RunnerHostHygieneVolumeInventoryItem":
-        self.name = _required_text(
+        self.name = require_text(
             self.name, "runner host hygiene volume inventory item requires name"
         )
-        self.driver = _required_text(
+        self.driver = require_text(
             self.driver, "runner host hygiene volume inventory item requires driver"
         )
         self.mountpoint = self.mountpoint.strip()
@@ -543,7 +632,7 @@ class RunnerHostHygieneFinding(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_finding(self) -> "RunnerHostHygieneFinding":
-        self.message = _required_text(self.message, "runner host hygiene finding requires message")
+        self.message = require_text(self.message, "runner host hygiene finding requires message")
         return self
 
 
@@ -566,6 +655,8 @@ class RunnerHostHygieneReport(BaseModel):
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
+    builder_cache_usage: tuple[RunnerHostHygieneBuilderCacheUsage, ...] = ()
+    require_builder_cache_evidence: bool = False
     idle_convergences: tuple[RunnerHostHygieneIdleConvergence, ...] = ()
     docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
@@ -583,7 +674,7 @@ class RunnerHostHygieneReport(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_report(self) -> "RunnerHostHygieneReport":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene report requires host_name"
         )
         self.observed_at = self.observed_at.strip()
@@ -615,7 +706,7 @@ class RunnerHostHygieneReport(BaseModel):
         ):
             raise ValueError("volume inventory truncation must match total count")
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
-        self.summary = _required_text(self.summary, "runner host hygiene report requires summary")
+        self.summary = require_text(self.summary, "runner host hygiene report requires summary")
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
         if self.status == "healthy" and self.findings:
             raise ValueError("healthy runner host hygiene report cannot include findings")
@@ -729,7 +820,7 @@ class RunnerHostHygieneApplyBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerHostHygieneApplyBlocker":
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner host hygiene apply blocker requires message"
         )
         return self
@@ -750,15 +841,13 @@ class RunnerHostHygieneApplyPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerHostHygieneApplyPlan":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene apply plan requires host_name"
         )
         self.audit_record_key = self.audit_record_key.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(
-            self.summary, "runner host hygiene apply plan requires summary"
-        )
+        self.summary = require_text(self.summary, "runner host hygiene apply plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready runner host hygiene apply plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -780,7 +869,7 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerHostHygieneApplyAuditRecord":
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key, "runner host hygiene apply audit record requires key"
         )
         self.message = self.message.strip()
@@ -924,15 +1013,15 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_envelope(self) -> "RunnerHostHygieneAuditDeliveryEnvelope":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             _normalized_host_name(self.host_name),
             "runner host hygiene audit delivery envelope requires host_name",
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner host hygiene audit delivery envelope requires audit_record_key",
         )
-        self.planned_idempotency_key = _required_text(
+        self.planned_idempotency_key = require_text(
             self.planned_idempotency_key,
             "runner host hygiene audit delivery envelope requires planned idempotency key",
         )
@@ -941,11 +1030,11 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
             r"[0-9a-f]{64}", self.executor_intent_sha256
         ):
             raise ValueError("runner host hygiene audit delivery requires executor intent sha256")
-        self.created_at = _required_text(
+        self.created_at = require_text(
             self.created_at,
             "runner host hygiene audit delivery envelope requires created_at",
         )
-        self.updated_at = _required_text(
+        self.updated_at = require_text(
             self.updated_at,
             "runner host hygiene audit delivery envelope requires updated_at",
         )
@@ -1006,7 +1095,7 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
                 raise ValueError("runner host hygiene terminal audit must be completed or failed")
             if self.terminal_audit.audit_record_key != self.audit_record_key:
                 raise ValueError("runner host hygiene terminal audit key must match envelope")
-            self.terminal_idempotency_key = _required_text(
+            self.terminal_idempotency_key = require_text(
                 self.terminal_idempotency_key,
                 "runner host hygiene terminal audit requires idempotency key",
             )
@@ -1017,6 +1106,16 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
                     "runner host hygiene terminal audit requires terminal-recorded execution state"
                 )
         return self
+
+    @property
+    def maintenance_completed(self) -> bool:
+        return (
+            self.terminal_audit is not None
+            and self.terminal_audit.status == "completed"
+            and self.terminal_audit.request.mutate
+            and self.planned_delivery_state == "delivered"
+            and self.terminal_delivery_state == "delivered"
+        )
 
 
 class RunnerHostHygieneAdapterPolicy(BaseModel):
@@ -1046,7 +1145,7 @@ class RunnerHostHygieneAdapterPolicy(BaseModel):
         )
         self.required_pre_apply_evidence = _normalized_tokens(self.required_pre_apply_evidence)
         self.required_post_apply_evidence = _normalized_tokens(self.required_post_apply_evidence)
-        self.audit_record_key_prefix = _required_text(
+        self.audit_record_key_prefix = require_text(
             self.audit_record_key_prefix,
             "runner host hygiene adapter policy requires audit record key prefix",
         )
@@ -1084,7 +1183,7 @@ class RunnerHostHygieneAdapterProposal(BaseModel):
             tuple[RunnerHostHygienePrivilegedScope, ...],
             _normalized_values(self.privileged_scopes, _normalized_token),
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key, "runner host hygiene adapter proposal requires audit_record_key"
         )
         self.rollback_plan = self.rollback_plan.strip()
@@ -1101,7 +1200,7 @@ class RunnerHostHygieneAdapterBoundaryBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerHostHygieneAdapterBoundaryBlocker":
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner host hygiene adapter boundary blocker requires message"
         )
         return self
@@ -1123,24 +1222,24 @@ class RunnerHostHygieneAdapterBoundaryPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerHostHygieneAdapterBoundaryPlan":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene adapter boundary plan requires host_name"
         )
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane,
             "runner host hygiene adapter boundary plan requires execution_lane",
         )
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user,
             "runner host hygiene adapter boundary plan requires service_user",
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner host hygiene adapter boundary plan requires audit_record_key",
         )
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(
+        self.summary = require_text(
             self.summary, "runner host hygiene adapter boundary plan requires summary"
         )
         if self.status == "ready" and self.blockers:
@@ -1156,6 +1255,21 @@ def evaluate_runner_host_hygiene(
     observation: RunnerHostHygieneObservation,
 ) -> RunnerHostHygieneReport:
     findings: list[RunnerHostHygieneFinding] = []
+    unqualified_builders = tuple(
+        f"{item.cache_key}:{item.qualification}:recovery={item.recovery_owner}"
+        for item in observation.builder_cache_usage
+        if not item.accounted_for
+    )
+    if unqualified_builders or (
+        observation.require_builder_cache_evidence and not observation.builder_cache_usage
+    ):
+        findings.append(
+            _finding(
+                "builder_cache_unqualified",
+                "builder cache retention needs qualification: "
+                + (", ".join(unqualified_builders) or "measurement unavailable; recovery=admin"),
+            )
+        )
     if observation.free_disk_bytes < policy.minimum_free_disk_bytes:
         findings.append(
             _finding(
@@ -1318,6 +1432,8 @@ def evaluate_runner_host_hygiene(
         generated_cache_allocated_bytes=observation.generated_cache_allocated_bytes,
         generated_cache_usage=observation.generated_cache_usage,
         cache_class_telemetry=cache_class_telemetry,
+        builder_cache_usage=observation.builder_cache_usage,
+        require_builder_cache_evidence=observation.require_builder_cache_evidence,
         idle_convergences=observation.idle_convergences,
         docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
@@ -2354,7 +2470,7 @@ def _normalized_public_token(value: str) -> str:
 
 
 def _required_public_token(value: str, message: str) -> str:
-    return _required_text(_normalized_public_token(value), message)
+    return require_text(_normalized_public_token(value), message)
 
 
 def _normalized_optional_timestamp(value: str) -> str:
@@ -2410,10 +2526,3 @@ def _normalized_repository(value: str) -> str:
     if not owner or not name:
         raise ValueError("runner host hygiene adapter requires repository formatted as owner/name")
     return normalized_repository
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { browserSmokeArtifactDir, smokeArtifact } from "../browser-smoke-paths.mjs";
 
 const shard = process.env.BROWSER_SMOKE_SHARD;
 const args = [fileURLToPath(import.meta.resolve("@playwright/test/cli")), "test"];
@@ -10,13 +11,13 @@ if (shard !== undefined) {
     throw new Error("BROWSER_SMOKE_SHARD must be a valid Playwright shard index/count");
   }
   args.push(`--shard=${shard}`, "--reporter=line,json",
-    `--output=../tmp/browser-smoke/test-results/shard-${match[1]}`);
-  env.PLAYWRIGHT_JSON_OUTPUT_FILE = fileURLToPath(
-    new URL(`../../tmp/browser-smoke/reports/shard-${match[1]}.json`, import.meta.url));
+    `--output=${smokeArtifact("test-results", `shard-${match[1]}`)}`);
+  env.PLAYWRIGHT_JSON_OUTPUT_FILE = smokeArtifact("reports", `shard-${match[1]}.json`);
 }
 const run = spawnSync(process.execPath, args, {
   cwd: fileURLToPath(new URL("../", import.meta.url)), env, stdio: "inherit",
 });
+console.log(`Browser smoke artifacts: ${browserSmokeArtifactDir}`);
 if (run.status !== 0) process.exit(run.status ?? 1);
 // CI checks the combined evidence after every shard succeeds. The ordinary
 // local command still requires the complete screenshot set immediately.

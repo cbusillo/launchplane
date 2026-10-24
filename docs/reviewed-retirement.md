@@ -109,3 +109,43 @@ is checked again after planning so a concurrent change invalidates the result.
 This route has **no apply mode** (`apply_supported: false`). A later Director
 access-removal decision needs this exact plan and a supported reviewed admin
 policy operation; a plan digest never grants execution authority.
+
+### Reviewed workflow-rule removal
+
+The existing `managed-authz-policy-set` privileged-operation proposal accepts
+an optional `workflow_rule_retirement` containing that exact snapshot and selection
+with `mode: plan`. For this contraction, `managed_set_id` is empty and
+`desired_policy` is an empty schema-v2 or schema-v3 fragment. No managed set is
+reconciled. Schema migration, adoption, quorum changes and nonempty desired rules
+are rejected. The active schema, settings and every unselected rule remain exact.
+Only unmanaged selections are accepted. Contract a managed rule through its own
+reviewed managed set so its independent source cannot silently restore it.
+
+Prepare a private `managed-authz-policy-set` envelope with that request, a stable
+`source_event_id`, `reason` and optional `related_issue`. Submit it through the
+installed Launchplane helper's `privileged-policy-propose --payload-file` command.
+The helper keeps its existing private admin transport, response validation and
+full review URL. It never approves or applies. Keep the identical envelope and
+source event after an uncertain submission; inspect or replay that proposal
+rather than creating another. Older installed clients need the companion
+[helper update](https://github.com/cbusillo/codex-skills/issues/2633) before
+they accept this optional request field.
+
+The existing proposer grant and signed-in Director approval govern the request;
+no new grant or operation descriptor is installed. The Director's review shows
+each selected workflow's full scope and permissions, including unmanaged rules.
+The ordinary managed-reconcile HTTP route rejects this contraction: execution
+belongs to the existing approved-operation worker. Approval binds the selection,
+reason, original active policy and candidate digest. The worker replans against
+fresh state, writes through the existing locked policy CAS and audit transaction,
+and verifies the resulting complete policy digest. An interrupted execution uses
+the same operation's existing completion receipt and recovery path.
+
+The inspect/plan route remains inert. Delivering this source performs no
+retirement. After approval, read the active inventory again and compare it with
+the reviewed candidate; a proposal or historical worker receipt alone does not
+prove current absence or unchanged survivors.
+
+After the first proposal containing this request is persisted, retain a rollback
+image with this request reader. Older strict readers cannot load that new proposal;
+rolling back the service image never restores removed authorization data.

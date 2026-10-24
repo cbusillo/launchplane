@@ -7,7 +7,7 @@ import unittest
 from contextlib import chdir
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_args
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -23,6 +23,10 @@ from control_plane.agent_operator_contract import (
 from control_plane.openapi_export import (
     build_deterministic_export_app,
     canonical_openapi_document,
+)
+from control_plane.testing_replacement_resources import (
+    ROUTE as TESTING_RESOURCE_ROUTE,
+    TestingReplacementResourcesRequest,
 )
 
 
@@ -59,6 +63,18 @@ class AgentOperatorContractTests(unittest.TestCase):
         )
         for operation in operations:
             self.assertRegex(operation["schema_fingerprint_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_resource_modes_agree_with_the_accepted_request(self) -> None:
+        artifact = build_agent_operator_contract()
+        operation = next(
+            operation
+            for operation in artifact["contract"]["operations"]
+            if operation["path"] == TESTING_RESOURCE_ROUTE
+        )
+        self.assertEqual(
+            set(operation["modes"]),
+            set(get_args(TestingReplacementResourcesRequest.model_fields["mode"].annotation)),
+        )
 
     def test_noise_and_provenance_do_not_change_semantic_digest(self) -> None:
         document = copy.deepcopy(self.document)

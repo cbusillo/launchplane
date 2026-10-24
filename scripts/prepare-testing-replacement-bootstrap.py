@@ -20,7 +20,10 @@ from control_plane.testing_replacement_bootstrap import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
+    parser.add_argument(
+        "mode",
+        choices=("dry-run", "apply", "readback"),
+    )
     parser.add_argument("--operator-helper", type=Path, required=True)
     for field in ("product", "context", "operation-id", "reason"):
         parser.add_argument(f"--{field}", required=True)
@@ -78,9 +81,9 @@ def main() -> int:
             plan = TestingReplacementBootstrapPlan.model_validate(saved["plan"])
             if plan.applied:
                 raise ValueError("The review is not a dry run.")
-            body.update(mode="apply", reviewed_plan_sha256=plan.plan_sha256)
+            body.update(mode=args.mode, reviewed_plan_sha256=plan.plan_sha256)
         elif args.mode == "readback":
-            body.update(mode="readback")
+            body.update(mode=args.mode)
         submitted = args.mode == "apply"
         response = transport["request_launchplane"](
             service_url=settings["service_url"],

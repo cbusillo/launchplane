@@ -1,6 +1,11 @@
 import type {
+  ApplyProductOnboardingData,
+  ApplyTestingHoldData,
+  SetupDokployTargetData,
+  ReconcileRouteBindingData,
   SubmitTestingRebuildData,
   LookupTestingRebuildData,
+  SettleTestingRebuildData,
   ResumeTestingRebuildData,
   DecideBackupPolicyProposalData,
   ExecuteProductRetirementData,
@@ -25,7 +30,6 @@ import type {
   EnqueueOdooProdPromotionData,
   EnqueueOdooProdRollbackData,
   EnqueueProductionBackupGateData,
-  RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PrepareAuthorizationCandidateData,
   WriteProductReviewDecisionData,
@@ -39,8 +43,13 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productOnboarding: "/v1/product-onboarding/apply" satisfies ApplyProductOnboardingData["url"],
+  testingHoldApply: "/v1/product-config/testing-hold/apply" satisfies ApplyTestingHoldData["url"],
+  domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],
+  routeBindingRepair: "/v1/route-bindings/reconcile" satisfies ReconcileRouteBindingData["url"],
   testingRebuild: "/v1/products/{product}/testing-rebuild" satisfies SubmitTestingRebuildData["url"],
   testingRebuildLookup: "/v1/products/{product}/testing-rebuild/lookup" satisfies LookupTestingRebuildData["url"],
+  testingRebuildSettle: "/v1/products/{product}/testing-rebuild/settle" satisfies SettleTestingRebuildData["url"],
   testingRebuildResume: "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume" satisfies ResumeTestingRebuildData["url"],
   backupPolicyDecision: "/v1/production-backup-authority/proposals/{operation_id}/decision" satisfies DecideBackupPolicyProposalData["url"],
   localConsumerDelivery: "/v1/local-consumer-deliveries" satisfies DeliverTestingLocalConsumerData["url"],
@@ -76,8 +85,6 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/odoo-prod-promotions" satisfies EnqueueOdooProdPromotionData["url"],
   odooProdRollbackEnqueue:
     "/v1/odoo-prod-rollbacks" satisfies EnqueueOdooProdRollbackData["url"],
-  workGraphRank:
-    "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
   productReviewFeedbackRetry:

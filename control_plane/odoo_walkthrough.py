@@ -1,5 +1,7 @@
 """Testing-only account custody. All external effects remain inside the service."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -23,13 +25,20 @@ from control_plane.contracts.odoo_walkthrough import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
-from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
+from control_plane.dokploy.native_copy_stream import (
+    inspect_native_testing_receiver,
+    NativeProgramFailed,
+    NativeSourceUnavailable,
+)
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.odoo_walkthrough import (
+    TestingRead,
+    read_testing_connection_isolation,
+    read_testing_task_usage,
     testing_account_command,
     testing_account_dispatch_finished,
     testing_task_unused,
-    testing_connection_isolated,
 )
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
@@ -64,6 +73,7 @@ WALKTHROUGH_SECRET_INTEGRATION = "odoo_walkthrough"
 
 
 class WalkthroughPrerequisite(StrEnum):
+    NOT_REACHED = "testing_task_prerequisite_not_reached"
     IDENTITY = "testing_task_identity_unavailable"
     GENERATION = "testing_task_generation_unverified"
     GENERATION_MISSING = "testing_task_generation_missing"
@@ -74,15 +84,50 @@ class WalkthroughPrerequisite(StrEnum):
     ORIGIN = "testing_task_origin_unverified"
     DATABASE = "testing_task_database_unverified"
     ISOLATION_OR_USAGE = "testing_task_isolation_or_usage_unverified"
+    # Observed negatives of the native isolation-or-usage read. Its unreadable
+    # or invalid outcome stays ISOLATION_OR_USAGE and is reported as unknown.
+    RUNNER_UNSELECTED = "testing_task_runner_unselected"
+    RUNNER_CHANGED = "testing_task_runner_changed"
+    COPY_WITNESS_CHANGED = "testing_task_copy_witness_changed"
+    ISOLATION_REFUSED = "testing_task_isolation_refused"
+    PROTECTED_SIGNIN = "testing_task_protected_signin_observed"
     CREDENTIAL = "testing_task_credential_custody_unavailable"
 
 
 class WalkthroughPrerequisiteError(ValueError):
     """Only a code-owned checkpoint may leave the private planning boundary."""
 
-    def __init__(self, code: WalkthroughPrerequisite) -> None:
+    def __init__(
+        self,
+        code: WalkthroughPrerequisite | ReadbackPredicate,
+        *,
+        native_failure: NativeProgramFailed | None = None,
+    ) -> None:
         self.code = code
+        self.diagnostic_code = native_failure.code if native_failure is not None else code.value
         super().__init__("The testing task prerequisite did not pass: " + code.value + ".")
+
+
+class WalkthroughEvidenceUnavailable(RuntimeError):
+    """A native read returned no usable evidence; never a failed predicate."""
+
+
+_OBSERVED_READ_REFUSALS = {
+    TestingRead.RUNNER_UNSELECTED: WalkthroughPrerequisite.RUNNER_UNSELECTED,
+    TestingRead.RUNNER_CHANGED: WalkthroughPrerequisite.RUNNER_CHANGED,
+    TestingRead.COPY_CHANGED: WalkthroughPrerequisite.COPY_WITNESS_CHANGED,
+    TestingRead.ISOLATION_REFUSED: WalkthroughPrerequisite.ISOLATION_REFUSED,
+    TestingRead.PROTECTED_SIGNIN: WalkthroughPrerequisite.PROTECTED_SIGNIN,
+}
+
+
+def _require_clear_read(read: TestingRead) -> None:
+    if read is TestingRead.CLEAR:
+        return
+    if read in _OBSERVED_READ_REFUSALS:
+        raise WalkthroughPrerequisiteError(_OBSERVED_READ_REFUSALS[read])
+    # Unavailable evidence, or an outcome this read mode cannot produce.
+    raise WalkthroughEvidenceUnavailable
 
 
 @contextmanager
@@ -91,6 +136,8 @@ def _prerequisite(code: WalkthroughPrerequisite) -> Iterator[None]:
         yield
     except WalkthroughPrerequisiteError:
         raise
+    except NativeProgramFailed as error:
+        raise WalkthroughPrerequisiteError(error.predicate, native_failure=error) from None
     except Exception:
         # Provider, validation and secret-store failures can carry credentials
         # or private topology. Never serialize their type, text or traceback.
@@ -125,12 +172,18 @@ def read_walkthrough_prerequisites(
     context: str,
     request: OdooWalkthroughRequest | None = None,
 ) -> tuple[
-    tuple[WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]],
+    tuple[
+        WalkthroughPrerequisite,
+        WalkthroughPrerequisite | ReadbackPredicate,
+        Literal["clear", "blocked", "unknown"],
+    ],
     ...,
 ]:
     checks: list[
         tuple[
-            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+            WalkthroughPrerequisite,
+            WalkthroughPrerequisite | ReadbackPredicate,
+            Literal["clear", "blocked", "unknown"],
         ]
     ] = []
     _walkthrough_preflight(store, root, product, context, request=request, checks=checks)
@@ -147,7 +200,9 @@ def _walkthrough_preflight(
     actor: str = "",
     checks: list[
         tuple[
-            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+            WalkthroughPrerequisite,
+            WalkthroughPrerequisite | ReadbackPredicate,
+            Literal["clear", "blocked", "unknown"],
         ]
     ]
     | None = None,
@@ -166,7 +221,11 @@ def _walkthrough_preflight(
             with _prerequisite(code):
                 yield True
             return
-        if any(item not in passed for item in requires) or (task_required and request is None):
+        if any(item not in passed for item in requires):
+            checks.append((code, WalkthroughPrerequisite.NOT_REACHED, "unknown"))
+            yield False
+            return
+        if task_required and request is None:
             checks.append((code, code, "unknown"))
             yield False
             return
@@ -174,9 +233,15 @@ def _walkthrough_preflight(
             yield True
         except WalkthroughPrerequisiteError as error:
             checks.append((code, error.code, "blocked"))
+        except NativeProgramFailed as error:
+            checks.append((code, error.predicate, "unknown" if error.unavailable else "blocked"))
+        except NativeSourceUnavailable:
+            checks.append((code, ReadbackPredicate.NATIVE_READ, "unknown"))
         except OdooRuntimeReadError as error:
             checks.append((code, code, "unknown" if error.status_code >= 500 else "blocked"))
-        except (DrillEvidenceUnavailable, DrillUsageUnreadable):
+        except DrillUsageUnreadable:
+            checks.append((code, ReadbackPredicate.USAGE, "unknown"))
+        except DrillEvidenceUnavailable:
             checks.append((code, code, "unknown"))
         except ValueError:
             checks.append((code, code, "blocked"))
@@ -232,6 +297,7 @@ def _walkthrough_preflight(
                 context=context,
                 instance="testing",
                 task_account_cleanup=operation == "cleanup",
+                resource_qualification=checks is not None and operation != "cleanup",
             )
             if generation is None:
                 raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
@@ -343,24 +409,21 @@ def _walkthrough_preflight(
             assert selection is not None
             assert generation is not None
             if operation == "cleanup":
-                clear = testing_connection_isolated(
+                read = read_testing_connection_isolation(
                     host=connection.host,
                     token=connection.token,
                     server_id=connection.server_id,
                     intent=readback_intent,
                 )
             else:
-                clear = testing_task_unused(
+                read = read_testing_task_usage(
                     host=connection.host,
                     token=connection.token,
                     server_id=connection.server_id,
                     require_task=False,
                     intent=readback_intent,
                 )
-            if not clear:
-                raise ValueError(
-                    "Testing connection isolation or protected usage readback did not pass."
-                )
+            _require_clear_read(read)
     with checkpoint(
         WalkthroughPrerequisite.CREDENTIAL,
         (WalkthroughPrerequisite.GENERATION,),
@@ -426,6 +489,16 @@ class WalkthroughAdapter:
         )
         self.transient_screenshots: tuple[str, ...] = ()
         self.dispatch_deadline = int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.request.product,
+            context=self.request.context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.plan.connection.evidence.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -514,6 +587,7 @@ class WalkthroughAdapter:
                     instance_name="testing",
                     actor=self.actor,
                     source_label="service_testing_task",
+                    value_origin="generated",
                 )
                 secret = self.store.find_secret_record(
                     scope="context_instance",

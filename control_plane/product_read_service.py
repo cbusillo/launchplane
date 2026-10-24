@@ -68,13 +68,6 @@ def require_product_environment_read_model_store(
     return cast(ProductEnvironmentReadModelStore, record_store)
 
 
-def is_product_environment_detail_request(params: Mapping[str, str]) -> bool:
-    return any(
-        key in params
-        for key in ("activity", "config_status", "environment", "environments", "product")
-    )
-
-
 def build_product_profile_list_service_payload(
     *, record_store: ProductReadModelStore, driver_id: str
 ) -> dict[str, object]:

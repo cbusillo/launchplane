@@ -31,6 +31,7 @@ DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
+ODOO_DATABASE_IMAGE = "postgres:17"
 ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND = (
     "test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py"
 )
@@ -223,6 +224,7 @@ x-odoo-env: &odoo-env
   ODOO_DB_NAME: ${{ODOO_DB_NAME:?missing}}
   ODOO_DB_USER: ${{ODOO_DB_USER:?missing}}
   ODOO_DB_PASSWORD: ${{ODOO_DB_PASSWORD:?missing}}
+  ODOO_FILESTORE_PATH: ${{ODOO_FILESTORE_PATH:-/volumes/data/filestore}}
   ODOO_ADMIN_LOGIN: ${{ODOO_ADMIN_LOGIN:-}}
   ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
   ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
@@ -275,7 +277,7 @@ services:
 {web_route_labels}
 
   database:
-    image: postgres:17
+    image: {ODOO_DATABASE_IMAGE}
 {private_network}
     restart: unless-stopped
     ulimits:

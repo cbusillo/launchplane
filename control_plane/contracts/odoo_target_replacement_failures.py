@@ -7,6 +7,10 @@ provider text that names targets, hosts and databases.
 """
 
 import click
+from control_plane.contracts.provider_schedule import (
+    SCHEDULE_MATERIALIZATION_TOO_LARGE,
+    SCHEDULE_MATERIALIZATION_DESCRIPTION,
+)
 
 
 class OdooProviderSafetyRefusedError(click.ClickException):
@@ -106,6 +110,8 @@ def deploy_blocked_code_for_runtime_error(runtime_error_code: str) -> str:
 
 def deploy_failure_description(code: str) -> str:
     """The fixed description of ``code``, or "" when Launchplane does not describe it here."""
+    if code == SCHEDULE_MATERIALIZATION_TOO_LARGE:
+        return SCHEDULE_MATERIALIZATION_DESCRIPTION
     if code == DEPLOY_FAILED_CODE:
         return _DEPLOY_FAILED_DESCRIPTION
     if code == TESTING_RESTORE_REQUIRED_CODE:

@@ -3,12 +3,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
+from control_plane.contracts.record_fields import (
+    normalize_git_sha,
+    normalize_optional_git_sha,
+    normalize_sha256,
+    required_token,
+)
 
 
 MergeReadinessState = Literal[
@@ -117,53 +122,22 @@ MERGE_READINESS_POLICY_DIMENSIONS: tuple[MergeReadinessPolicyDimension, ...] = (
     "admission_algorithm",
 )
 
-_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
 
 def _normalize_repository(value: str) -> str:
-    normalized = _required_token(value, "repository").lower()
+    normalized = required_token(value, "repository").lower()
     if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("repository must use owner/name")
-    return normalized
-
-
-def _normalize_git_sha(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA")
-    return normalized
-
-
-def _normalize_optional_git_sha(value: str, field_name: str) -> str:
-    normalized = value.strip().lower()
-    if normalized and _GIT_SHA_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a Git SHA when present")
-    return normalized
-
-
-def _normalize_sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return normalized
 
 
 def _normalize_optional_sha256(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
-    return _normalize_sha256(value, field_name)
+    return normalize_sha256(value, field_name)
 
 
 def _normalize_timestamp(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name)
+    normalized = required_token(value, field_name)
     try:
         parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as error:
@@ -199,7 +173,7 @@ class MergeReadinessTarget(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported merge readiness target schema version.")
         object.__setattr__(self, "repository", _normalize_repository(self.repository))
-        object.__setattr__(self, "base_branch", _required_token(self.base_branch, "base_branch"))
+        object.__setattr__(self, "base_branch", required_token(self.base_branch, "base_branch"))
         for field_name in (
             "base_sha",
             "pull_request_head_sha",
@@ -209,7 +183,7 @@ class MergeReadinessTarget(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_git_sha(str(getattr(self, field_name)), field_name),
+                normalize_git_sha(str(getattr(self, field_name)), field_name),
             )
         return self
 
@@ -223,8 +197,8 @@ class MergeReadinessAdvisoryObservation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "MergeReadinessAdvisoryObservation":
-        object.__setattr__(self, "name", _required_token(self.name, "name"))
-        object.__setattr__(self, "state", _required_token(self.state, "state"))
+        object.__setattr__(self, "name", required_token(self.name, "name"))
+        object.__setattr__(self, "state", required_token(self.state, "state"))
         return self
 
 
@@ -238,9 +212,9 @@ class MergeReadinessTechnicalCheckEvidence(BaseModel):
 
     @model_validator(mode="after")
     def _validate_evidence(self) -> "MergeReadinessTechnicalCheckEvidence":
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
         normalized_checks = tuple(
-            sorted({_required_token(check, "required_checks") for check in self.required_checks})
+            sorted({required_token(check, "required_checks") for check in self.required_checks})
         )
         if any(is_launchplane_projected_check(check) for check in normalized_checks):
             raise ValueError("Launchplane advisory checks cannot be required technical checks")
@@ -273,13 +247,13 @@ class MergeReadinessEngineeringEvidenceReference(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reference(self) -> "MergeReadinessEngineeringEvidenceReference":
-        object.__setattr__(self, "run_id", _required_token(self.run_id, "run_id"))
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
-        object.__setattr__(self, "tree_sha", _normalize_git_sha(self.tree_sha, "tree_sha"))
+        object.__setattr__(self, "run_id", required_token(self.run_id, "run_id"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "tree_sha", normalize_git_sha(self.tree_sha, "tree_sha"))
         object.__setattr__(
             self,
             "evidence_digest",
-            _normalize_sha256(self.evidence_digest, "evidence_digest"),
+            normalize_sha256(self.evidence_digest, "evidence_digest"),
         )
         return self
 
@@ -296,7 +270,7 @@ class MergeReadinessPolicyFingerprintEvidence(BaseModel):
         object.__setattr__(
             self,
             "expected_sha256",
-            _normalize_sha256(self.expected_sha256, "expected_sha256"),
+            normalize_sha256(self.expected_sha256, "expected_sha256"),
         )
         object.__setattr__(
             self,
@@ -353,7 +327,7 @@ class MergeReadinessCandidateEvidence(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
+                normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
             )
         return self
 
@@ -387,12 +361,12 @@ class MergeReadinessFenceEvidence(BaseModel):
         object.__setattr__(
             self,
             "expected_lease_owner",
-            _required_token(self.expected_lease_owner, "expected_lease_owner"),
+            required_token(self.expected_lease_owner, "expected_lease_owner"),
         )
         object.__setattr__(
             self,
             "observed_effect_sha",
-            _normalize_optional_git_sha(self.observed_effect_sha, "observed_effect_sha"),
+            normalize_optional_git_sha(self.observed_effect_sha, "observed_effect_sha"),
         )
         if self.lease_expires_at:
             object.__setattr__(
@@ -430,14 +404,14 @@ class MergeReadinessOwnerFacet(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(self, "binding_sha256", self.binding_sha256.strip().lower())
         if self.binding_sha256:
             object.__setattr__(
                 self,
                 "binding_sha256",
-                _normalize_sha256(self.binding_sha256, "binding_sha256"),
+                normalize_sha256(self.binding_sha256, "binding_sha256"),
             )
         object.__setattr__(self, "event_id", self.event_id.strip())
         if self.state not in {"ready", "blocked_owner_evidence", "unknown"}:
@@ -458,9 +432,9 @@ class MergeReadinessTechnicalChecksFacet(BaseModel):
 
     @model_validator(mode="after")
     def _validate_facet(self) -> "MergeReadinessTechnicalChecksFacet":
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", normalize_git_sha(self.head_sha, "head_sha"))
         normalized_checks = tuple(
-            sorted({_required_token(check, "required_checks") for check in self.required_checks})
+            sorted({required_token(check, "required_checks") for check in self.required_checks})
         )
         if any(is_launchplane_projected_check(check) for check in normalized_checks):
             raise ValueError("Launchplane advisory checks cannot be required technical checks")
@@ -500,17 +474,17 @@ class MergeReadinessEngineeringReviewFacet(BaseModel):
 
     @model_validator(mode="after")
     def _validate_facet(self) -> "MergeReadinessEngineeringReviewFacet":
-        object.__setattr__(self, "status", _required_token(self.status, "status"))
+        object.__setattr__(self, "status", required_token(self.status, "status"))
         object.__setattr__(self, "decision_id", self.decision_id.strip())
         digest = self.decision_binding_sha256.strip().lower()
         if digest:
-            digest = _normalize_sha256(digest, "decision_binding_sha256")
+            digest = normalize_sha256(digest, "decision_binding_sha256")
         object.__setattr__(self, "decision_binding_sha256", digest)
         for field_name in ("head_sha", "tree_sha"):
             object.__setattr__(
                 self,
                 field_name,
-                _normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
+                normalize_optional_git_sha(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(
             self,
@@ -651,7 +625,7 @@ class MergeReadinessResult(BaseModel):
         )
         expected_digest = merge_readiness_digest(self)
         if self.readiness_digest:
-            normalized_digest = _normalize_sha256(self.readiness_digest, "readiness_digest")
+            normalized_digest = normalize_sha256(self.readiness_digest, "readiness_digest")
             if normalized_digest != expected_digest:
                 raise ValueError("Merge readiness digest does not match the deterministic payload")
         object.__setattr__(self, "readiness_digest", expected_digest)

@@ -25,7 +25,6 @@ from control_plane.contracts.product_profile_record import (
     product_target_owner_products,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.product_config import ProductConfigMode, ProductConfigStore
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     latest_active_runtime_key_safety_policy,
@@ -48,6 +47,10 @@ class ProductConfigProfileReader(Protocol):
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+class ProductConfigOwnershipMismatchError(control_plane_product_config.ProductConfigError):
+    """Readable product profiles positively disagree with the requested ownership."""
 
 
 def resolve_product_config_profile(
@@ -79,7 +82,7 @@ def resolve_product_config_profile(
         lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
         for lane in profile.lanes
     ):
-        raise control_plane_product_config.ProductConfigError(
+        raise ProductConfigOwnershipMismatchError(
             "Product config target is not owned by the named product.",
             code="product_config_lane_not_owned",
         )
@@ -88,7 +91,7 @@ def resolve_product_config_profile(
         context=context,
         instance="" if context_wide else instance,
     ) != frozenset((product,)):
-        raise control_plane_product_config.ProductConfigError(
+        raise ProductConfigOwnershipMismatchError(
             "Product config requires the named product to own the target alone.",
             code="product_config_lane_not_owned",
         )
@@ -235,32 +238,6 @@ def read_lane_provider_env(
             key for key in env if live_target_runtime.provider_key_retirement_blocked(key, declared)
         ),
     )
-
-
-def apply_product_config_service_request(
-    *,
-    record_store: ProductConfigStore,
-    payload: dict[str, object],
-    mode: ProductConfigMode,
-    actor: str,
-    source_label: str,
-) -> tuple[dict[str, object] | None, ProductConfigServiceError | None]:
-    try:
-        return (
-            control_plane_product_config.apply_product_config_bundle(
-                record_store=record_store,
-                payload=payload,
-                mode=mode,
-                actor=actor,
-                source_label=source_label,
-            ),
-            None,
-        )
-    except (
-        control_plane_product_config.ProductConfigError,
-        RuntimeEnvironmentConflictError,
-    ) as error:
-        return None, product_config_service_error(error)
 
 
 def product_config_service_error(

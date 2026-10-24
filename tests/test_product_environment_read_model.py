@@ -9,6 +9,8 @@ from typing import cast
 import unittest
 import os
 
+from control_plane.action_effects import ACTION_DECLARATIONS
+from control_plane.integration_readback import integration_credential_warnings
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
@@ -18,7 +20,12 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetPolicies,
+    DokployTargetIntegrationAllowance,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -669,6 +676,82 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def test_lane_status_warns_for_stored_credentials_without_integration_allowance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{directory}/state.sqlite3"
+            )
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
+            store.write_product_profile_record(profile)
+            lane = profile.lanes[0]
+            binding = SecretBinding(
+                binding_id="shopify-token",
+                secret_id="token",
+                integration="runtime_environment",
+                binding_key="ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
+                context=lane.context,
+                instance=lane.instance,
+                status="configured",
+                created_at=profile.updated_at,
+                updated_at=profile.updated_at,
+            )
+            store.write_secret_binding(binding)
+            target = DokployTargetRecord(
+                context=lane.context, instance=lane.instance, updated_at=profile.updated_at
+            )
+            store.write_dokploy_target_record(target)
+
+            def warnings() -> tuple[str, ...]:
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment=lane.instance,
+                    action_allowed=lambda *_: False,
+                )
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: False,
+                )
+                summary = next(
+                    item for item in overview.environments if item.environment == lane.instance
+                )
+                expected = integration_credential_warnings(
+                    store.read_lane_summary(context_name=lane.context, instance_name=lane.instance),
+                    record_store=store,
+                )
+                detail_warnings = tuple(item for item in detail.warnings if item in expected)
+                self.assertEqual(detail_warnings, expected)
+                self.assertEqual(
+                    detail_warnings,
+                    tuple(item for item in summary.warnings if item in expected),
+                )
+                return detail_warnings
+
+            self.assertTrue(warnings())
+            store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+            self.assertFalse(warnings())
+            store.write_secret_binding(binding)
+            store.write_dokploy_target_record(
+                target.model_copy(
+                    update={
+                        "policies": DokployTargetPolicies(
+                            integration_allowances=(
+                                DokployTargetIntegrationAllowance(
+                                    integration="shopify",
+                                    kind="dev_store",
+                                    reason="Isolated development store",
+                                    recorded_by="test",
+                                    recorded_at=profile.updated_at,
+                                ),
+                            )
+                        )
+                    }
+                )
+            )
+            self.assertFalse(warnings())
+
     def setUp(self) -> None:
         keys = patch.dict(
             os.environ,
@@ -714,11 +797,11 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     action_allowed=lambda *_: False,
                 )
 
-    def test_action_authz_map_matches_live_service_handlers(self) -> None:
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/post-deploy"],
-            "odoo_post_deploy.execute",
-        )
+    def test_action_authz_map_names_declared_actions(self) -> None:
+        self.assertTrue(ACTION_AUTHZ_BY_ROUTE)
+        for route, authz_action in ACTION_AUTHZ_BY_ROUTE.items():
+            with self.subTest(route=route):
+                self.assertIn(authz_action, ACTION_DECLARATIONS)
 
     def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -2103,6 +2186,41 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     self.assertTrue(
                         all(warning.severity == "info" for warning in projected.topology.warnings)
                     )
+
+    def test_product_overview_says_which_hold_stops_testing_deploys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site-testing",
+                    instance="testing",
+                    target_type="compose",
+                    target_name="example-site-testing",
+                    policies=DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Prove separation from production first.",
+                            purpose="isolation_staging",
+                        )
+                    ),
+                    updated_at="2026-05-02T22:30:00Z",
+                    source_label="test",
+                )
+            )
+
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: False
+            )
+            store.close()
+
+        holds = {summary.environment: summary.deploy_hold for summary in overview.environments}
+        self.assertEqual(holds, {"testing": "isolation_staging", "prod": None})
+        self.assertNotIn("Prove separation", overview.model_dump_json())
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

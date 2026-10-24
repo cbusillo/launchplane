@@ -26,7 +26,11 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    TRANSPORT_DATABASE_PREFIX_PATTERN,
+    LaunchplaneProductProfileRecord,
+)
+from control_plane.contracts.public_dns import public_dns_addresses, public_dns_name
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_BYTES,
     SNAPSHOT_MAX_ROWS,
@@ -177,6 +181,25 @@ class _Scrubber:
             if expression == value.strip():
                 expression = f"{(minute + 1) % 60} {hour} * * {weekday}"
             return expression
+        if (
+            protocol
+            and name == "transport_database_prefix"
+            and TRANSPORT_DATABASE_PREFIX_PATTERN.fullmatch(value)
+            and (maximum_length is None or len(value) <= maximum_length)
+        ):
+            return f"snapshot_{digest[:12]}"
+        if (
+            protocol
+            and name == "public_name"
+            and (public_name := _normalized(public_dns_name, value))
+        ):
+            return f"snapshot-{self._digest(public_name)[:12]}.invalid"
+        if (
+            protocol
+            and name == "addresses"
+            and (addresses := _normalized(public_dns_addresses, (value,)))
+        ):
+            return self._public_address(addresses[0])
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -194,6 +217,10 @@ class _Scrubber:
         if value.startswith("/"):
             return f"/snapshot-{digest[:12]}"
         return f"snapshot-{digest[:12]}"
+
+    def _public_address(self, address: str) -> str:
+        digest = self._digest(address)
+        return ".".join(("8", *(str(int(digest[index : index + 2], 16)) for index in (0, 2, 4))))
 
     def scrub(
         self,
@@ -248,9 +275,16 @@ class _Scrubber:
                 scrubbed["policy_key"] = f"{scrubbed['repository']}:{scrubbed['base_branch']}"
             return scrubbed
         if isinstance(value, list):
+            positional = schema.get("prefixItems", [])
             return [
-                self.scrub(item, schema.get("items", {}), root, name, declared=declared)
-                for item in value
+                self.scrub(
+                    item,
+                    positional[index] if index < len(positional) else schema.get("items", {}),
+                    root,
+                    name,
+                    declared=declared,
+                )
+                for index, item in enumerate(value)
             ]
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
@@ -276,6 +310,13 @@ class _Scrubber:
                 pseudonym = self.number(str(value))
                 return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
+
+
+def _normalized(normalize: Callable[[Any], Any], value: object) -> Any:
+    try:
+        return normalize(value)
+    except ValueError:
+        return None
 
 
 def _statement_timeout_ms(remaining: int) -> int:

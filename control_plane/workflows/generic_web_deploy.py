@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+from time import monotonic
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebSourceQualificationStore,
+)
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    require_recorded_execution,
+)
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -37,7 +47,12 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.integration_key_readback import integration_key_readback
+from control_plane.integration_key_readback import (
+    evaluate_delivered_integration_keys,
+    integration_key_readback,
+    lane_receives_managed_runtime_bindings,
+)
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployRuntimeArtifactProvider,
@@ -53,6 +68,7 @@ from control_plane.workflows.generic_web_deploy_provider import GenericWebResolv
 from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
 from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
+    qualify_testing_application_observation,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.generic_web_application_snapshot import (
@@ -68,6 +84,9 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+
+
+GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID = "control-plane-dokploy"
 
 
 class GenericWebDeployStore(Protocol):
@@ -105,6 +124,9 @@ class GenericWebDeployRequest(BaseModel):
         if not self.source_git_ref.strip():
             raise ValueError("Generic web deploy requires source_git_ref.")
         return self
+
+
+GenericWebDeploymentPublisher = Callable[[DeploymentRecord, EnvironmentInventory | None], None]
 
 
 class GenericWebDeployResult(BaseModel):
@@ -162,6 +184,7 @@ class GenericWebPostDeployContext(BaseModel):
     artifact_id: str
     source_git_ref: str
     authority_digest: str = ""
+    previous_inventory: EnvironmentInventory | None
 
     @model_validator(mode="after")
     def _validate_context(self) -> "GenericWebPostDeployContext":
@@ -202,6 +225,18 @@ class GenericWebPostDeployContext(BaseModel):
 class GenericWebPostDeployGuard:
     provider_effect_checkpoint: Callable[[str], None] | None = None
     deployment_title: str = ""
+    execution_recorder: ExecutionRecorder | None = None
+    exchanges: dict[str, bool] = field(default_factory=dict, compare=False)
+
+    def begin_exchange(self, name: str) -> None:
+        self.exchanges[name] = False
+
+    def complete_exchange(self, name: str) -> None:
+        self.exchanges[name] = True
+
+    def require_completed_exchanges(self) -> None:
+        if not all(self.exchanges.values()):
+            raise ProviderMutationUnknownError("Testing product exchange completion is unknown.")
 
     def checkpoint_effect(self, phase: str) -> None:
         if self.provider_effect_checkpoint is not None:
@@ -251,6 +286,8 @@ def _canonical_generic_web_lane(lane: ProductLaneProfile) -> ProductLaneProfile:
 
 
 def product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileRecord) -> bool:
+    if not profile.is_managed_runtime:
+        return False
     driver_id = profile.driver_id.strip()
     if driver_id == "generic-web":
         return True
@@ -338,6 +375,7 @@ def _build_post_deploy_context(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     artifact_id: str,
     source_git_ref: str,
+    previous_inventory: EnvironmentInventory | None,
     authority_digest: str = "",
 ) -> GenericWebPostDeployContext:
     resolved_target = resolved_deploy_target.resolved_target
@@ -363,6 +401,7 @@ def _build_post_deploy_context(
         artifact_id=artifact_id,
         source_git_ref=source_git_ref,
         authority_digest=authority_digest,
+        previous_inventory=previous_inventory,
     )
 
 
@@ -473,15 +512,21 @@ def execute_generic_web_deploy(
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
+    before_failure_records_commit: Callable[[], None] | None = None,
+    before_deployment_records: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -534,6 +579,13 @@ def execute_generic_web_deploy(
                 raise ValueError(
                     "two-slot releases cannot run an unqualified post-deploy extension"
                 )
+            integration_key_refusal = _non_production_integration_key_refusal(
+                record_store=record_store,
+                context_name=current_lane.context,
+                instance_name=current_lane.instance,
+            )
+            if integration_key_refusal:
+                raise ValueError(integration_key_refusal)
             if not rollback:
                 require_forward_lane_build(
                     record_store=record_store,
@@ -569,6 +621,7 @@ def execute_generic_web_deploy(
                 rollback=rollback,
                 checkpoint=provider_effect_checkpoint or (lambda _phase: None),
                 before_records_commit=before_records_commit or (lambda: None),
+                before_deployment_records=before_deployment_records,
             )
             return cutover_deploy_result(
                 deployment,
@@ -584,15 +637,21 @@ def execute_generic_web_deploy(
             lane=lane,
             post_deploy_executor=post_deploy_executor,
             post_deploy_authority_digest=post_deploy_authority_digest,
+            execution_recorder=execution_recorder,
+            publish_deployment=publish_deployment,
             deploy_provider=deploy_provider,
             resolved_deploy_target=resolved_deploy_target,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
             before_records_commit=before_records_commit,
+            before_failure_records_commit=before_failure_records_commit,
+            before_deployment_records=before_deployment_records,
             recorded_artifact=recorded_artifact,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
+            proved_no_effect_retry=proved_no_effect_retry,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -607,15 +666,21 @@ def _execute_generic_web_deploy_unserialized(
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
+    before_failure_records_commit: Callable[[], None] | None = None,
+    before_deployment_records: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
+    established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -658,6 +723,20 @@ def _execute_generic_web_deploy_unserialized(
     )
     started_at = utc_now_timestamp()
     fallback_request: ShipRequest | None = None
+    post_deploy_update = PostDeployUpdateEvidence()
+    verified_build_evidence: dict[str, str] = {}
+    prior_attempt_exists = True
+    try:
+        prior_attempt = record_store.read_deployment_record(record_id)
+    except FileNotFoundError:
+        prior_attempt_exists = False
+    else:
+        # A refusal before dispatch must retain the original attempt's receipts.
+        verified_build_evidence = dict(prior_attempt.runtime_source)
+        if recorded_application_lifecycle(prior_attempt) is not None:
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence=prior_attempt.post_deploy_update.evidence
+            )
 
     try:
         fallback_request = _fallback_ship_request(
@@ -691,15 +770,21 @@ def _execute_generic_web_deploy_unserialized(
                 artifact_id=request.artifact_id,
                 include_deploy_reference=False,
             )
+        if execution_recorder is not None:
+            require_recorded_execution(execution_recorder.receipt)
+        if before_failure_records_commit is not None:
+            before_failure_records_commit()
         record_store.write_deployment_record(
             build_deployment_record(
                 request=fallback_request,
                 record_id=record_id,
-                deployment_id="control-plane-dokploy",
+                deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                 deployment_status="fail",
                 started_at=started_at,
                 finished_at=finished_at,
                 delegated_executor=resolved_deploy_provider.delegated_executor,
+                post_deploy_update=post_deploy_update,
+                runtime_source=verified_build_evidence,
             )
         )
         return GenericWebDeployResult(
@@ -716,27 +801,38 @@ def _execute_generic_web_deploy_unserialized(
     deploy_completed = False
     provider_effect_attempted = False
     image_effect_attempted = False
+    last_provider_phase = ""
+    dispatch_refused = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
-    post_deploy_update = PostDeployUpdateEvidence()
-    try:
-        prior_attempt = record_store.read_deployment_record(record_id)
-    except FileNotFoundError:
-        pass
-    else:
-        if recorded_application_lifecycle(prior_attempt) is not None:
-            # Pre-effect refusals must not erase the original attempt's receipt.
-            post_deploy_update = PostDeployUpdateEvidence(
-                evidence=prior_attempt.post_deploy_update.evidence
-            )
     key_readback: IntegrationKeyReadbackEvidence | None = None
-    verified_build_evidence: dict[str, str] = {}
     application_lifecycle: GenericWebApplicationLifecycle | None = None
+    runtime_deadline: float | None = None
+    runtime_failure_proved = False
+
+    def write_pending(record: DeploymentRecord) -> None:
+        if execution_recorder is not None:
+            execution_recorder.write_pending(record)
+        else:
+            record_store.write_deployment_record(record)
 
     def checkpoint_provider(phase: str) -> None:
-        nonlocal post_deploy_update
+        nonlocal post_deploy_update, last_provider_phase, dispatch_refused
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
-        if phase == "provider_dispatch_prepared":
+        last_provider_phase = phase
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        dispatch_refused = dispatch_refused or phase == TESTING_DISPATCH_REFUSED_PHASE
+        if phase in {"provider_dispatch_prepared", "runtime_inputs_verified"}:
+            from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+
+            if phase == "runtime_inputs_verified":
+                verified_build_evidence[DELIVERY_RECEIPT_KEY] = (
+                    prepared_deploy_target.testing_runtime_verified_digest
+                )
+            else:
+                # A retried dispatch earns delivery credit only at fresh readback.
+                verified_build_evidence.pop(DELIVERY_RECEIPT_KEY, None)
             # Value-free provider references join the already reserved original
             # request/target before any env write or deploy trigger can happen.
             post_deploy_update = post_deploy_update.model_copy(
@@ -749,11 +845,11 @@ def _execute_generic_web_deploy_unserialized(
                     }
                 }
             )
-            record_store.write_deployment_record(
+            write_pending(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
-                    deployment_id="control-plane-dokploy",
+                    deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                     deployment_status="pending",
                     started_at=started_at,
                     finished_at="",
@@ -769,12 +865,49 @@ def _execute_generic_web_deploy_unserialized(
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
 
+    def require_cleanup_authority() -> None:
+        if prepared_deploy_target.testing_runtime_digest:
+            from control_plane.generic_web_testing_inputs import (
+                require_testing_application_target_authority,
+            )
+
+            require_testing_application_target_authority(
+                record_store,
+                resolved_profile,
+                resolved_lane,
+                target_id=resolved_target.target_id,
+                provider_id=resolved_deploy_provider.provider_id,
+            )
+
+    def lifecycle_checkpoint(phase: str) -> None:
+        if dispatch_refused:
+            require_cleanup_authority()
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+
     def mark_image_effect_started() -> None:
         nonlocal image_effect_attempted
-        image_effect_attempted = True
+        if last_provider_phase not in {"runtime_environment_update", "runtime_registry_prepare"}:
+            image_effect_attempted = True
         mark_provider_effect_started()
 
     try:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebTestingRuntimePreflightProvider,
+            prepare_generic_web_testing_runtime,
+        )
+
+        # Recovered targets carry captured authority, never serialized values.
+        # Legacy snapshots deliberately have no authority to backfill.
+        prepare_generic_web_testing_runtime(
+            prepared_deploy_target, record_store, resolved_profile, resolved_lane, capture=False
+        )
+        if prepared_deploy_target._testing_runtime_prepare is not None:
+            prepared_deploy_target._testing_runtime_prepare()
+        if isinstance(resolved_deploy_provider, GenericWebTestingRuntimePreflightProvider):
+            resolved_deploy_provider.preflight_testing_runtime(
+                control_plane_root=control_plane_root, target=prepared_deploy_target
+            )
         if request.reset:
             from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
 
@@ -791,6 +924,7 @@ def _execute_generic_web_deploy_unserialized(
                     cast(DisposableLaneStore, record_store),
                     product=resolved_profile.product,
                     context=resolved_lane.context,
+                    recovery=True,
                     instance=resolved_lane.instance,
                 )
             except (ValueError, AttributeError) as error:
@@ -832,7 +966,14 @@ def _execute_generic_web_deploy_unserialized(
             raise click.ClickException(
                 "Declared product verification has no supported post-deploy executor."
             )
-        verified_build_evidence = lane_build_proof(desired_build)
+        integration_key_refusal = _non_production_integration_key_refusal(
+            record_store=record_store,
+            context_name=resolved_lane.context,
+            instance_name=resolved_lane.instance,
+        )
+        if integration_key_refusal:
+            raise click.ClickException(integration_key_refusal)
+        verified_build_evidence.update(lane_build_proof(desired_build))
         snapshot = application_snapshot_for_deploy(
             store=record_store,
             product=resolved_profile.product,
@@ -846,6 +987,8 @@ def _execute_generic_web_deploy_unserialized(
             extensions=resolved_lane.generic_web_extensions,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
+            proved_no_effect_retry=proved_no_effect_retry,
+            established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -857,19 +1000,29 @@ def _execute_generic_web_deploy_unserialized(
             provider=resolved_deploy_provider,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
-            checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+            checkpoint=lifecycle_checkpoint,
             effect_started=mark_provider_effect_started,
         )
         if application_lifecycle is not None:
-            application_lifecycle.capture()
-            post_deploy_update = PostDeployUpdateEvidence(
-                evidence=application_lifecycle.snapshot.evidence(),
+            application_lifecycle.capture(
+                require_unchanged_baseline=proved_no_effect_retry,
             )
-            record_store.write_deployment_record(
+            if hasattr(application_lifecycle, "execution_recorder"):
+                application_lifecycle.execution_recorder = execution_recorder
+        if application_lifecycle is not None or execution_recorder is not None:
+            if before_deployment_records is not None:
+                before_deployment_records()
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence={
+                    **(application_lifecycle.snapshot.evidence() if application_lifecycle else {}),
+                    **(execution_recorder.evidence() if execution_recorder else {}),
+                },
+            )
+            write_pending(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
-                    deployment_id="control-plane-dokploy",
+                    deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                     deployment_status="pending",
                     started_at=started_at,
                     finished_at="",
@@ -880,9 +1033,19 @@ def _execute_generic_web_deploy_unserialized(
                     runtime_source=verified_build_evidence,
                 )
             )
+        if application_lifecycle is not None:
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("application_lifecycle_prepared")
             application_lifecycle.prepare()
+        testing_application = (
+            resolved_lane.instance == "testing"
+            and prepared_deploy_target.resolved_target.target_type == "application"
+        )
+        runtime_deadline = (
+            monotonic() + prepared_deploy_target.deploy_timeout_seconds
+            if testing_application
+            else None
+        )
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -919,7 +1082,83 @@ def _execute_generic_web_deploy_unserialized(
                 raise click.ClickException(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
+        if testing_application:
+            qualified = qualify_testing_application_observation(
+                provider=resolved_deploy_provider,
+                control_plane_root=control_plane_root,
+                target=prepared_deploy_target,
+                observation=provider_deployment_observation
+                or GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="control-plane-dokploy",
+                    started_at=started_at,
+                    finished_at=utc_now_timestamp(),
+                ),
+                deployment_record_id=record_id,
+                wait=True,
+                deadline=runtime_deadline,
+            )
+            if qualified.outcome != "present":
+                raise click.ClickException("Application testing runtime rollout is not qualified.")
+            if not generic_web_provider_deployment_succeeded(qualified.deployment_status):
+                runtime_failure_proved = True
+                raise GenericWebProviderDeploymentFailed(qualified)
+            if (
+                execution_recorder is not None
+                and provider_deployment_observation is not None
+                and qualified.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            ):
+                execution_recorder.record_settled_image(qualified.deployment_id)
         deploy_completed = True
+        previous_inventory = None
+        if post_deploy_executor is not None:
+            try:
+                previous_inventory = cast(
+                    GenericWebSourceQualificationStore, record_store
+                ).read_environment_inventory(
+                    context_name=resolved_lane.context, instance_name=resolved_lane.instance
+                )
+            except FileNotFoundError:
+                pass
+        if (
+            execution_recorder is not None
+            and publish_deployment is not None
+            and (application_lifecycle is not None or post_deploy_executor is not None)
+        ):
+            assert provider_deployment_observation is not None
+            progress = build_deployment_record(
+                request=ship_request,
+                record_id=record_id,
+                deployment_id=provider_deployment_observation.deployment_id,
+                deployment_status="pass",
+                started_at=provider_deployment_observation.started_at,
+                finished_at=provider_deployment_observation.finished_at,
+                resolved_target=resolved_target,
+                deployed_target=prepared_deploy_target.deployed_target,
+                delegated_executor=resolved_deploy_provider.delegated_executor,
+                post_deploy_update=PostDeployUpdateEvidence(
+                    attempted=True,
+                    status="pending",
+                    evidence={**post_deploy_update.evidence, **execution_recorder.evidence()},
+                ),
+                runtime_identity=_build_runtime_identity(
+                    profile=resolved_profile,
+                    lane=resolved_lane,
+                    ship_request=ship_request,
+                    deployment_record_id=record_id,
+                    deployed_at=provider_deployment_observation.finished_at,
+                ),
+                runtime_source=verified_build_evidence,
+            )
+            publish_deployment(
+                progress,
+                build_environment_inventory(
+                    deployment_record=progress,
+                    updated_at=provider_deployment_observation.finished_at,
+                ),
+            )
+            post_deploy_update = progress.post_deploy_update
         key_readback = integration_key_readback(
             record_store=record_store,
             context_name=resolved_lane.context,
@@ -946,6 +1185,7 @@ def _execute_generic_web_deploy_unserialized(
                     artifact_id=ship_request.artifact_id,
                     source_git_ref=ship_request.source_git_ref,
                     authority_digest=qualification_authority,
+                    previous_inventory=previous_inventory,
                 ),
                 post_deploy_executor=post_deploy_executor,
                 guard=GenericWebPostDeployGuard(
@@ -953,6 +1193,7 @@ def _execute_generic_web_deploy_unserialized(
                     deployment_title=_generic_web_post_deploy_operation_title(
                         normalized_provider_operation_title
                     ),
+                    execution_recorder=execution_recorder,
                 ),
             )
             post_deploy_update = extension_update.model_copy(
@@ -975,11 +1216,46 @@ def _execute_generic_web_deploy_unserialized(
                     **application_lifecycle.snapshot.evidence(),
                 },
             )
-    except click.ClickException as exc:
+    except (click.ClickException, TestingInputSafetyRefused) as exc:
+        if (
+            isinstance(exc, GenericWebPromotionSourceRefused)
+            and not prior_attempt_exists
+            and not provider_effect_attempted
+        ):
+            # This first admission refusal precedes dispatch. Do not turn it
+            # into a failed deployment that prevents the same accepted retest.
+            raise
+        provider_failure_observed = isinstance(exc, GenericWebProviderDeploymentFailed)
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
+            if runtime_deadline is not None:
+                provider_failure_observed = runtime_failure_proved
+                if not runtime_failure_proved:
+                    failed = qualify_testing_application_observation(
+                        provider=resolved_deploy_provider,
+                        control_plane_root=control_plane_root,
+                        target=prepared_deploy_target,
+                        observation=exc.observation,
+                        deployment_record_id=record_id,
+                        wait=True,
+                        deadline=runtime_deadline,
+                    )
+                    provider_failure_observed = failed.outcome == "present" and not (
+                        generic_web_provider_deployment_succeeded(failed.deployment_status)
+                    )
+        if (
+            execution_recorder is not None
+            and runtime_deadline is not None
+            and provider_failure_observed
+            and not deploy_completed
+            and provider_deployment_observation is not None
+            and provider_deployment_observation.deployment_id
+            != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+        ):
+            execution_recorder.record_settled_image(provider_deployment_observation.deployment_id)
         if application_lifecycle is not None:
             try:
+                require_cleanup_authority()
                 if (
                     image_effect_attempted
                     or application_lifecycle.snapshot.resume_from_hold
@@ -994,7 +1270,13 @@ def _execute_generic_web_deploy_unserialized(
                     application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
                     application_lifecycle.snapshot.state = "restored"
-            except click.ClickException as restore_error:
+            except (
+                click.ClickException,
+                TestingInputSafetyRefused,
+                FileNotFoundError,
+            ) as restore_error:
+                if dispatch_refused:
+                    application_lifecycle.snapshot.state = "held"
                 exc = click.ClickException(f"{exc}\n{restore_error}")
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=application_lifecycle.effect_attempted,
@@ -1010,7 +1292,7 @@ def _execute_generic_web_deploy_unserialized(
         recorded_deployment_id = (
             provider_deployment_observation.deployment_id
             if provider_deployment_observation is not None
-            else "control-plane-dokploy"
+            else GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
         )
         recorded_started_at = (
             provider_deployment_observation.started_at
@@ -1022,7 +1304,7 @@ def _execute_generic_web_deploy_unserialized(
             if provider_deployment_observation is not None
             else finished_at
         )
-        if deploy_completed and post_deploy_update.status == "skipped":
+        if deploy_completed and post_deploy_update.status in {"skipped", "pending"}:
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=True,
                 status="fail",
@@ -1054,16 +1336,36 @@ def _execute_generic_web_deploy_unserialized(
             runtime_identity=runtime_identity,
             runtime_source=verified_build_evidence,
         ).model_copy(update={"integration_key_readback": key_readback})
+        if execution_recorder is not None:
+            deployment_record.post_deploy_update.evidence.update(execution_recorder.evidence())
         if isinstance(exc, LaneMovementRefused):
             deployment_record = deployment_record.model_copy(
                 update={"failure": exc.record_failure()}
             )
-        if before_records_commit is not None:
+        if execution_recorder is not None:
+            require_recorded_execution(execution_recorder.receipt)
+        if before_failure_records_commit is not None:
+            before_failure_records_commit()
+        elif before_records_commit is not None:
             before_records_commit()
-        record_store.write_deployment_record(deployment_record)
+        if publish_deployment is not None:
+            publish_deployment(
+                deployment_record,
+                build_environment_inventory(
+                    deployment_record=deployment_record, updated_at=recorded_finished_at
+                )
+                if deploy_completed
+                else None,
+            )
+        else:
+            record_store.write_deployment_record(deployment_record)
+        if isinstance(exc, TestingInputSafetyRefused) and not provider_effect_attempted:
+            # The durable runner releases a pre-effect refusal after publishing
+            # its failed record; effects already attempted stay result-classified.
+            raise exc
         if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
             raise
-        if deploy_completed:
+        if deploy_completed and publish_deployment is None:
             record_store.write_environment_inventory(
                 build_environment_inventory(
                     deployment_record=deployment_record,
@@ -1086,9 +1388,7 @@ def _execute_generic_web_deploy_unserialized(
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
             provider_failure_proved=(
-                isinstance(exc, GenericWebProviderDeploymentFailed)
-                and application_lifecycle is None
-                and not deploy_completed
+                provider_failure_observed and application_lifecycle is None and not deploy_completed
             ),
             image_effect_attempted=image_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
@@ -1099,7 +1399,7 @@ def _execute_generic_web_deploy_unserialized(
     recorded_deployment_id = (
         provider_deployment_observation.deployment_id
         if provider_deployment_observation is not None
-        else "control-plane-dokploy"
+        else GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
     )
     recorded_started_at = (
         provider_deployment_observation.started_at
@@ -1131,15 +1431,20 @@ def _execute_generic_web_deploy_unserialized(
         ),
         runtime_source=verified_build_evidence,
     ).model_copy(update={"integration_key_readback": key_readback})
+    if execution_recorder is not None:
+        require_recorded_execution(execution_recorder.receipt)
     if before_records_commit is not None:
         before_records_commit()
-    record_store.write_deployment_record(deployment_record)
-    record_store.write_environment_inventory(
-        build_environment_inventory(
-            deployment_record=deployment_record,
-            updated_at=recorded_finished_at,
-        )
+    if execution_recorder is not None:
+        deployment_record.post_deploy_update.evidence.update(execution_recorder.evidence())
+    inventory = build_environment_inventory(
+        deployment_record=deployment_record, updated_at=recorded_finished_at
     )
+    if publish_deployment is not None:
+        publish_deployment(deployment_record, inventory)
+    else:
+        record_store.write_deployment_record(deployment_record)
+        record_store.write_environment_inventory(inventory)
     target_fields = _deploy_result_target_fields(resolved_deploy_target=prepared_deploy_target)
     return GenericWebDeployResult(
         deployment_record_id=record_id,
@@ -1160,7 +1465,7 @@ def _execute_generic_web_deploy_unserialized(
     )
 
 
-def record_observed_generic_web_deploy(
+def build_observed_generic_web_deploy(
     *,
     record_store: GenericWebDeployStore,
     profile: LaunchplaneProductProfileRecord,
@@ -1169,7 +1474,7 @@ def record_observed_generic_web_deploy(
     observation: GenericWebProviderDeploymentObservation,
     deployment_record_id: str,
     post_deploy_unobserved: bool,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[DeploymentRecord, dict[str, object], dict[str, object]]:
     if observation.outcome != "present":
         raise ValueError("Observed generic web deploy evidence must be present.")
     lane = _canonical_generic_web_lane(lane)
@@ -1235,39 +1540,110 @@ def record_observed_generic_web_deploy(
         ),
         post_deploy_update=post_deploy_update,
         runtime_identity=runtime_identity,
+        runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
-    record_store.write_deployment_record(deployment_record)
-    if deploy_status == "pass":
+    records, result = generic_web_record_result(
+        record=deployment_record,
+        product=profile.product,
+        target=resolved_deploy_target,
+        observation=observation,
+    )
+    return deployment_record, records, result
+
+
+def generic_web_record_result(
+    *,
+    record: DeploymentRecord,
+    product: str,
+    target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if record.deploy.status not in {"pass", "fail"}:
+        raise ValueError("Original deployment has no final image result.")
+    fields = _deploy_result_target_fields(resolved_deploy_target=target)
+    result = GenericWebDeployResult(
+        deployment_record_id=record.record_id,
+        deploy_status=record.deploy.status,
+        deploy_started_at=record.deploy.started_at or observation.started_at,
+        deploy_finished_at=record.deploy.finished_at or observation.finished_at,
+        product=product,
+        context=record.context,
+        instance=record.instance,
+        target_name=fields.target_name,
+        target_id=fields.target_id,
+        target_category=fields.target_category,
+        provider_id=fields.provider_id,
+        provider_target_type=fields.provider_target_type,
+        post_deploy_status=_generic_web_deploy_post_deploy_status(record.post_deploy_update),
+        error_message=record.post_deploy_update.detail
+        if record.post_deploy_update.status == "fail"
+        else observation.error_message,
+    )
+    return {"deployment_record_id": record.record_id}, result.model_dump(mode="json")
+
+
+def record_observed_generic_web_deploy(
+    *,
+    record_store: GenericWebDeployStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
+    post_deploy_unobserved: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    record, records, result = build_observed_generic_web_deploy(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        resolved_deploy_target=resolved_deploy_target,
+        observation=observation,
+        deployment_record_id=deployment_record_id,
+        post_deploy_unobserved=post_deploy_unobserved,
+    )
+    record_store.write_deployment_record(record)
+    if record.deploy.status == "pass":
         record_store.write_environment_inventory(
             build_environment_inventory(
-                deployment_record=deployment_record,
-                updated_at=deployment_record.deploy.finished_at or finished_at,
+                deployment_record=record,
+                updated_at=record.deploy.finished_at or observation.finished_at,
             )
         )
-    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
-    result = GenericWebDeployResult(
-        deployment_record_id=deployment_record_id,
-        deploy_status=deploy_status,
-        deploy_started_at=deployment_record.deploy.started_at or started_at,
-        deploy_finished_at=deployment_record.deploy.finished_at or finished_at,
-        product=profile.product,
-        context=lane.context,
-        instance=lane.instance,
-        target_name=target_fields.target_name,
-        target_id=target_fields.target_id,
-        target_category=target_fields.target_category,
-        provider_id=target_fields.provider_id,
-        provider_target_type=target_fields.provider_target_type,
-        post_deploy_status=_generic_web_deploy_post_deploy_status(
-            deployment_record.post_deploy_update
-        ),
-        error_message=(
-            deployment_record.post_deploy_update.detail
-            if deployment_record.post_deploy_update.status == "fail"
-            else observation.error_message
-        ),
+    return records, result
+
+
+def _non_production_integration_key_refusal(
+    *, record_store: object, context_name: str, instance_name: str
+) -> str:
+    """Why a non-production deploy must stop before the provider, or "" to proceed.
+
+    Each deploy path raises the refusal in its own pre-execution style.
+
+    Production keeps only the recorded read-back: refusing there would block a
+    release. Without a readable policy, a lane that receives managed bindings is
+    refused rather than deployed unchecked.
+    """
+    if runtime_key_safety_environment_class(instance_name) == "prod":
+        return ""
+    evidence = evaluate_delivered_integration_keys(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
     )
-    return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
+    if evidence.status == "unavailable" and lane_receives_managed_runtime_bindings(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
+    ):
+        return (
+            "Generic web deploy refused before the provider deploy: the lane receives "
+            "managed runtime keys but no active runtime key-safety policy is readable."
+        )
+    if evidence.status != "fail":
+        return ""
+    findings = ", ".join(
+        f"{finding.binding_key or '-'}: {finding.code}" for finding in evidence.findings
+    )
+    return (
+        "Generic web deploy refused before the provider deploy: integration key safety "
+        f"failed for {context_name}/{instance_name} ({findings})."
+    )
 
 
 def _prove_untitled_deployment_effect(
@@ -1305,6 +1681,7 @@ def _prove_untitled_deployment_effect(
             ),
             expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
             expected_deployment_record_id=deployment_record_id,
+            expected_provider_reference=resolved_deploy_target.ship_request.deploy_reference,
         )
     except (FileNotFoundError, ValueError) as error:
         raise click.ClickException(
@@ -1372,16 +1749,37 @@ def _run_post_deploy_extension(
     post_deploy_executor: GenericWebPostDeployExecutor,
     guard: GenericWebPostDeployGuard,
 ) -> PostDeployUpdateEvidence:
+    recorder = guard.execution_recorder
+    index = (
+        recorder.begin(
+            "product_executor",
+            getattr(post_deploy_executor, "__name__", type(post_deploy_executor).__name__),
+            context.target_id,
+            {"authority": context.authority_digest},
+        )
+        if recorder
+        else -1
+    )
     try:
         guard.checkpoint_effect("post_deploy_started")
-        return _terminal_post_deploy_update(
+        result = _terminal_post_deploy_update(
             post_deploy_executor(control_plane_root, record_store, context, guard)
         )
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
+        return result
     except ProviderMutationUnknownError:
         raise
     except click.ClickException:
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
         raise
     except Exception as exc:
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
         raise click.ClickException(str(exc)) from exc
 
 

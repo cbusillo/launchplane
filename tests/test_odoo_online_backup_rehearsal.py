@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
 
+from control_plane.dokploy.compose import ODOO_DATABASE_IMAGE
 from control_plane.dokploy.post_deploy import (
     ODOO_BACKUP_GATE_RESULT_MARKER,
     _build_dokploy_odoo_backup_gate_script,
@@ -76,7 +77,7 @@ class OdooOnlineBackupRehearsalTests(unittest.TestCase):
             "POSTGRES_DB=fixture",
             "-e",
             "POSTGRES_HOST_AUTH_METHOD=trust",
-            "postgres:17",
+            ODOO_DATABASE_IMAGE,
         )
         for service in ("script-runner", "web"):
             arguments = [

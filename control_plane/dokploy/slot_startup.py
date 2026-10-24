@@ -79,6 +79,23 @@ def merge_startup_environment(
     return "".join(lines)
 
 
+def merge_provider_startup_environment(
+    raw: str,
+    settings: dict[str, Any],
+    payload_key: str,
+    indexing_key: str,
+    *,
+    compose_type: str = "docker-compose",
+) -> str:
+    merged = merge_startup_environment(raw, settings, payload_key, indexing_key)
+    return api.serialize_dokploy_env_text(
+        api.parse_dokploy_env_text(merged),
+        target_type="compose",
+        compose_type=compose_type,
+        current_env_text=raw,
+    )
+
+
 def startup_file_program() -> str:
     # Use the same merger for provider records and the host's durable env file.
     # The host needs only its existing Python and Compose, not this package.
@@ -405,11 +422,12 @@ class DokploySlotStartup:
                     target_type="compose",
                     target_id=project.slot.compose_id,
                 )
-                merge_startup_environment(
+                merge_provider_startup_environment(
                     str(target.get("env") or ""),
                     intent.settings.model_dump(mode="json"),
                     ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
                     WEBSITE_INDEXING_PARAMETER,
+                    compose_type=str(target.get("composeType") or "docker-compose"),
                 )
 
     def __call__(
@@ -438,11 +456,12 @@ class DokploySlotStartup:
                 target_type="compose",
                 target_id=project.slot.compose_id,
             )
-            desired = merge_startup_environment(
+            desired = merge_provider_startup_environment(
                 str(current.get("env") or ""),
                 intent.settings.model_dump(mode="json"),
                 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
                 WEBSITE_INDEXING_PARAMETER,
+                compose_type=str(current.get("composeType") or "docker-compose"),
             )
             api.update_dokploy_target_env(
                 host=self.host,

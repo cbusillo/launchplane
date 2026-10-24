@@ -176,18 +176,22 @@ The supported source is:
   `merge_train_github_app`, binding key `private_key`, in that exact context.
   One configured binding to a context-scoped, write-only current secret is
   required; global, instance-scoped and duplicate bindings are refused. The
-  policy's merge identity must have kind `github_app`. Each resolution mints a
-  fresh installation token for exactly the policy's repository, with Contents
-  and Pull requests write, Workflows write, and Checks
+  policy's merge identity must have kind `github_app`. Resolution reuses an
+  unexpired exact-repository token or mints a fresh one, with Contents,
+  Issues and Pull requests write, Workflows write, and Checks
   and Commit statuses read. The installation must provide at least those grants;
   it may also serve other approved operations. The freshly issued train token
-  must contain only the native train permissions, regardless of the installation's
-  broader capabilities. App and
+  must contain only these mandatory permissions plus Actions read when the
+  same verified installation already grants Actions read or write. It never
+  requests Actions write or a new installation grant. App and
   installation identity, returned repository ID/name, token permissions and
   expiry are verified; a token that fails verification is revoked. Tokens are
   not stored as runtime configuration. No Administration permission is used.
-  Every train token has this same permission set, including tokens resolved for
-  reads; Workflows write lets branch updates and merges include workflow files.
+  Read resolutions use the same selected token permissions. Workflows write
+  lets branch updates and merges include workflow files.
+  Issues write projects graph-derived planning labels after a landing, within
+  the selected App's already-accepted installation grants. Missing installation
+  grants refuse before minting; an issued token missing this capability is revoked.
   The event reconciler also mints narrower tokens from a product repository's
   App: a read-only build-provenance token, and a pull-request feedback token
   with only Pull requests write and Contents read
@@ -226,7 +230,7 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui`; both take the normal technical merge flow, and retired human admission paths do not qualify a merge.
 - Repository classifications use exact immutable identity and CAS admin recovery without heuristics or PR label fallback.
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
-- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, reads the live required-status-check policy, filters admission projection contexts out of that policy, enforces strict base freshness when configured, and rechecks all three immediately before an expected-SHA merge. Missing or malformed required-check policy or evidence fails closed. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
+- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, and uses the [shared required-check evaluation](#candidate-validation) for the target branch and exact head. It enforces base freshness when the effective classic or ruleset policy requires strict checks, then rechecks admission, technical evidence and identity immediately before an expected-SHA merge. Its readiness evaluation and fresh pre-merge evaluation use the train's existing [Client gate](owner-acceptance.md#current-client-review): valid notes, current-head review where required, and saved vetoes for the current Client. A saved veto blocks even with engineering-only notes or a stale successful projection. Missing named checks remain pending; unreadable or malformed policy or evidence cannot qualify a merge. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
 - Advisory `launchplane/engineering-review` and
   `launchplane/owner-acceptance` check runs are visibility projections and are
@@ -634,12 +638,64 @@ the exact closed, unmerged generated batch PR supplies GitHub-side chronology.
 No comparison depends on agreement between the service clock and GitHub's clock.
 A generic or unattributable hold remains held rather than acquiring invented
 provenance. Recovery binds repository, base, policy key and the original blocked
-label. Changes to enqueue, token-source or admission settings do not strand the
+label. Repository names match whatever their casing, as elsewhere in the train;
+a candidate or pull request skipped for another target logs a warning and keeps
+its hold. Changes to enqueue, token-source or admission settings do not strand the
 old label; current checks and review authority are read again, and the subsequent
 ready/admission path enforces the full current policy.
 
-The same blocked head never qualifies, including after a green rerun. Recovery
-also refuses pending, failing or unreadable current-head evidence, conflicting
+An unchanged blocked head has one narrow recovery: a superseded singleton's
+only failed checks are a GitHub Actions browser shard and its CI aggregate;
+the bound job failed dependency installation before browser execution, its
+bounded provider log proves `ERR_PNPM_ENOENT` copying from the pnpm store into
+frontend dependencies, and independent frontend validation and a browser sibling
+passed in that same candidate/run/attempt. A complete immutable base-to-head
+comparison must show only application/test Python and Markdown documentation
+changes. Install inputs, workflow/runner changes, frontend changes, unknown or
+truncated evidence, other failures and source-file ENOENT do not qualify.
+This recovers the already-applied false culprit block; it does not change
+normal failure classification or fix the store lifecycle.
+
+Before removing the proven label, the fenced controller checkpoints its result
+and persists value-free job/run/attempt identifiers, the pre-release comment-ID
+floor and source/log digests in one keyed native feedback reservation. Its key
+binds repository, PR and head across bases and policy revisions. The existing
+per-PR feedback lock serializes reservation; PostgreSQL commits it before the
+provider effect. A different failure cannot overwrite it. No candidate schema
+or table migration is needed, and admission reads the one exact key rather
+than scanning candidate history. The blocked checkpoint retains legacy failure
+provenance independently of later feedback or comment delivery.
+That consumes one recovery per PR head. Existing retry lineage on the exact
+failed singleton also exhausts this path; an unrelated multi-entry or generated
+body retry never spends another PR's causal allowance. Dry runs spend nothing.
+Restarted attempts must match the saved proof and original label event; a new
+hold or different failed candidate cannot obtain another allowance. Storage
+failure prevents removal. Failure-job evidence uses all check runs and the
+original run-attempt job list, so a later passing rerun cannot erase the
+attribution. Provider logs are bounded to 2 MiB, never persisted,
+and fetched from HTTPS storage without forwarding the API credential.
+
+The supported operation remains the ordinary controller dry run, then its
+mutating pass through the deployed service. There is no manual label release,
+caller-supplied causal assertion, rerun-forcing commit, grant or direct merge.
+After release, obtain fresh checked Ready and normal train admission/candidate
+validation. Admission requires a trusted current-head Ready comment newer than
+the saved floor even when an enqueue label remains present. Supervisor owns
+operational continuation when assigned by the brief. An exhausted allowance stays
+held. Fix the owning CI defect first; a genuine later source change can use the
+existing new-head recovery path. Do not invent a commit, reset the allowance or
+remove the label by hand to obtain another attempt.
+
+The optional Actions evidence capability is never a grant prerequisite: a
+known missing permission skips the read; denied or unavailable evidence leaves
+that PR held while unrelated queue work continues. Storage-download failures
+are evidence failures, never GitHub authentication failures.
+The reservation uses the existing feedback envelope; older binaries can still
+read the candidate and feedback records. They do not enforce the new reservation
+or fresh-Ready gate, so recovery and subsequent admission require this controller
+version or newer. Never delete a reservation to reset its allowance.
+
+Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,
 drafts, a different base, forks and unresolved required review conversations.
 Review request/receipt parsing follows the catalog's producer contract, including
@@ -823,6 +879,42 @@ expected-commit comparison; exhaustion still fails closed as stale state.
 
 ### Candidate Validation
 
+The GitHub adapter uses the shared workflow execution selector to distinguish
+current Actions executions from superseded runs and independent suites.
+Identity-verified failing Actions jobs trigger a bounded, complete exact-head
+workflow inventory. A job is removed only when a
+proved newer execution supersedes its workflow, event, branch, source repository
+and PR target family, with matching head, job link, run and suite identities.
+Other workflows remain independent; their pending jobs do not preserve a
+superseded failure. A reported current required job that is still running remains
+pending. Removing a superseded failure without finding its required replacement
+also leaves that requirement pending. Successful, neutral or skipped reported
+checks count as passing. Otherwise-green reported requirements retain their
+existing path without a workflow-history dependency; these reads do not prove
+that every newly dispatched workflow has reported its jobs.
+The native token selects Actions read only when the policy's verified installation
+already advertises it, and verifies the issued token against that exact selection.
+It never requests Actions write or changes installation grants. Its issued scopes
+travel with the credential through HTTP, scheduler, admission, governance and
+recovery readers, including cache hits. For a proved private repository, a known
+absent Actions read skips the inventory request and records `actions_read_not_granted`. Public or unknown
+visibility keeps the provider-read path with the same credential, since public
+workflow history needs no Actions grant. Visibility comes from the exact issued
+token's repository response. Pending-only and otherwise-green polls retain their
+existing read path.
+Cached tokens retain their verified scopes until normal refresh; no additional
+capability is inferred. Unavailable execution metadata emits a bounded warning
+and a head/candidate diagnostic. Unproved supersession retains the failing
+blocker. An unrelated optional failure or its missing history cannot invalidate
+passing required checks.
+The diagnostic does not create extra dependency-hold reasons.
+Provider refusals include the HTTP status and a redacted route, without provider
+bodies or credentials. A refused or invalid mint still fails closed without an
+alternate credential or retry through another carrier.
+Transient provider failures preserve their original controller retry and quota evidence.
+This applies to original-head, candidate, base and technical-admission check reads
+without changing required-check identities, admission, or landing protection.
+
 Required checks must pass on the candidate commit that includes the queued PRs
 being considered for the batch. Checks on each PR's own head are useful
 screening evidence, but they do not prove the combined tree is safe to land.
@@ -842,16 +934,49 @@ pass rebuilds with full CI. Landing uses fresh structural admission evidence
 and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
-All adapter check reads supersede attempts within their provider check suite.
-Push and PR workflows can publish identical job names from the same App on one
-SHA; a passing job in one suite cannot erase a failing or pending job in another.
-This applies to PR-head screening, candidate observation, base verification,
-head-check reuse and failure diagnostics. Failed suites on a source head can
-prevent reuse and require full candidate CI. A failing candidate enters the
-existing recovery path instead of planning a landing that fresh admission will
-refuse. A passing rerun in the failed suite can establish exact-SHA recovery
-under the existing retry budget; a new suite alone cannot clear the failure.
-When that suite cannot be rerun, recovery needs a new candidate SHA.
+Head screening, candidate observation, base verification, head-check reuse and
+native/tenant admission share one required-check evaluator. Only signals matching
+a live required name and its App binding determine the required-check verdict.
+Same-name commit statuses and check runs both participate when they match that
+requirement; one source's pass cannot erase another matching failure or pending
+signal. A required check with no matching evidence remains pending. Optional
+checks do not fail the required verdict. Passing owner/configuration facets
+cannot replace an unavailable required verdict. Missing names are retained in
+head/candidate observations and waiting feedback. Stacked children use the train
+base's technical requirements while preserving their actual parent branch and
+comparison/review bindings.
+
+An unprotected train base or one with no enforced required checks remains visible
+in read-only queue snapshots with an unknown check verdict and a policy diagnostic.
+A policy containing only Launchplane advisory projections also leaves the
+independent technical verdict unknown unless an independently verified current
+configuration comparison supplies that facet. Candidate validation, check reuse and landing still require
+usable protected-branch technical requirements; retaining the queue view cannot
+qualify delivery.
+
+The optional `required_checks_observation_error` belongs to observation/result
+projections. The canonical batch-candidate record builder omits it from its own
+copy before hashing and persistence, preserving the old stored payload and digest
+shape. The original observation retains the diagnostic for waiting feedback.
+Native scheduler feedback records save it in their existing comment body; keyed
+service responses retain it in their existing idempotency envelope and replay it
+after restart. A direct response without an idempotency key has no such durable
+response guarantee. This introduces no stored candidate field, table, migration
+or reader-first rollback prerequisite. A private installation without Actions read still
+cannot prove a failing job superseded and retains that blocker with a diagnostic.
+An App-pinned commit status needs explicit App attribution; a creator identity
+does not establish it. These retained evidence limits do not authorize grants or
+an alternate credential and do not promise complete provider-verdict equivalence.
+
+Check-run attempts are superseded within their proved provider identity, with
+Actions execution selection as described above. Identical names from different
+Apps, workflows or independent suites are not interchangeable. A reported
+technical check-run head SHA that contradicts the requested SHA is rejected before
+supersession. Missing identity is not proof of supersession. Existing native
+compatibility for observations without a reported check-run head SHA does not
+override a present contradiction or admission's existing identity requirements.
+A failed source head cannot qualify reuse; candidate recovery still requires
+fresh exact-SHA evidence under the existing retry and landing guards.
 
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from
@@ -875,23 +1000,25 @@ spelling, keep their full CI path. Security, CodeQL and the required-check polic
 are unchanged. Actions still records two workflow events for a batch candidate,
 but only the push executes the full CI suite.
 
-Candidate observation reads the target branch's live required-status-check
-policy and requires every named check, including any pinned GitHub App id, to be
-present and successful on the candidate SHA. Partial workflow evidence cannot
-promote a candidate. It reads the enforced required-check projection from
+Shared check readers load the target branch's live requirements as the union of
+enforced classic protection and effective active branch rules, preserving each
+required name and GitHub App binding. The protected-branch projection comes from
 GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branches#get-a-branch),
-which requires `contents: read` for the repository. For a protected branch whose
-classic check projection has disabled enforcement, it reads the active rules
-applying to that branch through GitHub's effective branch-rules endpoint and
-uses their required checks, preserving any integration IDs. This endpoint needs
-only metadata read permission. Disabled and
-evaluate-only rulesets do not appear on that endpoint. Unprotected branches,
-missing protection metadata, unreadable or incomplete rule evidence, and empty
-enforced check lists fail closed; observation requests no administration access. A pinned
-app id must be proven by check-run evidence; commit statuses can satisfy only unpinned or
-GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
-missing pinned or named evidence is surfaced explicitly instead of remaining an
-unexplained pending candidate.
+using `contents: read`. Effective branch rules require metadata read and exclude
+disabled or evaluate-only rulesets. Both sources participate when classic checks
+are enforced; rulesets are not a fallback. All pages of effective rules, commit
+statuses and check runs participate, with exact-SHA and provider-identity
+validation.
+
+Unprotected branches, missing protection metadata, unreadable or incomplete
+policy, and an empty enforced native check list fail closed; observation requests
+no administration access. A pinned App requirement needs explicit matching App
+identity on its check run or commit status; a creator login cannot supply that
+identity. Commit statuses without verified App attribution can satisfy unpinned
+or `app_id = -1` any-App requirements. Tenant admission records an unprotected
+policy as unavailable. A missing named or pinned check is explicitly pending even after
+unrelated checks finish. Failed, pending, stale or unavailable required evidence
+cannot qualify a candidate.
 
 Native landing admission reads that same required-check projection. The train
 always requires current-base freshness, independently of GitHub's optional
@@ -1073,36 +1200,88 @@ branch, close a child, or rewrite historical admission or collapse proof.
 
 ### Blocker Isolation
 
-When the combined candidate fails checks, Launchplane does not assume all queued
-entries are bad. On the next pass over an unchanged queue and base, the controller reads the failed
-candidate's check runs, commit statuses and the annotations of failed runs:
+Failure diagnosis starts from an actual required-check failure under the
+[shared evaluation](#candidate-validation), on the unchanged candidate and base.
+An optional failure or missing required evidence alone cannot start isolation or
+blame a queued PR. The controller reads the relevant failed checks, statuses and
+bounded job annotations. Supporting Actions cause and counterevidence must
+belong to the same verified run and suite as the implicated required failure;
+unrelated optional workflows cannot change its classification:
 
-- **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
-  cancelled run (lost communication, a shutdown signal, or a job never acquired
-  by a runner) marks the failure as infrastructure; jobs that depend on the lost
-  job fail with a generic exit-code annotation, so they do not count against it.
+- **Infrastructure failure.** Within that verified execution, GitHub's runner-loss
+  annotation on a failed or cancelled run (lost communication, a shutdown signal,
+  or a job never acquired by a runner) marks the failure as infrastructure;
+  generic dependent-job exit annotations do not establish a separate product failure.
   Runs that were cancelled, went stale or failed to start count only when no
   run failed outright, because fail-fast also cancels the siblings of a real
-  failure. A named failed test or a failing commit status always rules
+  failure. A named failed test in that execution or a matching required failing commit status rules
   infrastructure out. The controller rebuilds the same members once on a new
   `-infrastructure-retry` candidate ref, recording `infrastructure_retry_of`;
   nobody is blamed. If the retry fails on infrastructure again, the candidate
   stays stopped with `reason_code: infrastructure_retry_used` until the queue or
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
-- **Base checks.** Before splitting or blaming a pull request, the controller
-  reads the base's required checks and the checks that failed on the candidate,
-  on the candidate's exact base commit. Unrelated base-only checks do not stop
-  isolation. If a candidate check fails there too, or the base's required checks are pending,
-  missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
-  and a reason naming the base branch. No pull request gets `blocked_label`, and
-  the failed candidate stays active for fresh reads on the next pass. A rerun
-  passing on the same base allows isolation to resume; a changed base or eligible
-  queue uses the existing replacement path.
-  Feedback names the base failure or missing evidence as needing attention;
-  pending checks are reported as waiting. A repository without required-check
-  evidence on its base stays stopped without blame; evidence must be supplied
-  before isolation can identify a culprit.
+- **Base checks.** Before blaming a pull request, the controller
+  reads the base's effective technical requirements on the candidate's exact
+  base commit. It retains the name and App binding of each required identity
+  that actually caused the candidate's failure. Those identities need actual
+  successful base evidence. Skipped or neutral rows supply no positive proof,
+  but do not erase an actual success for the same required identity. Matching
+  failure, pending or unreadable evidence still vetoes attribution. Missing
+  evidence or a superseded required job without its replacement cannot authorize blame.
+  A changed required identity also stops attribution with a named policy mismatch.
+  Same-execution leaf jobs remain cause and counterevidence, rather than becoming
+  additional base requirements. A successful required aggregate can therefore
+  prove a verified-tree reuse base whose optional shards were intentionally
+  skipped. A genuinely required shard still needs its own successful base evidence.
+  Advisory projections are excluded consistently; configuration checks retain
+  their separate current-comparison facet when configured. If a required
+  candidate identity fails there too, its evidence is unproved, or the base's
+  required checks are pending or missing, no pull request gets `blocked_label`.
+  A successful read returning fail or unknown can start the bounded
+  exploration below. Pending base checks retain their ordinary wait. A
+  provider/read exception stops with
+  `reason_code: base_checks_not_green`; an error is never permission to explore.
+  Without conclusive current candidate failure evidence naming actual required
+  identities, exploration also stays stopped. A lone failed eligible member stays
+  stopped for fresh base reads. The reason names the base branch and missing or
+  unproved required identities, and the same diagnostic appears in controller details.
+  A rerun passing on the same base allows ordinary isolation to resume.
+- **Non-blaming base exploration.** A failed candidate on an unproved base can
+  test roots individually in queue order, so a repair can land while another
+  change still fails. Its stable queue comes from the ordinary policy projection
+  before contextual Client readiness, batch caps or area grouping. Each trial
+  defers every other policy-eligible root, including unready Client and engineering
+  heads, then applies current Ready, Client and readiness checks to its sole root.
+  Holds use the same policy queue for current membership and active isolation.
+  Ineligible and manually held heads stay excluded. Full stack topology remains
+  available for discovery or the exact recorded collapse proof.
+  Base-conflict and dependency holds retain their current head/base lifetimes;
+  earlier contextual exclusion cannot discard their proof. Pairwise conflicts
+  are released because the conflicting peer is absent. Temporary
+  `failure_isolation` holds are reconsidered between probes. Ordinary conflict
+  planning retains its preceding-head lineage checks.
+  Exact base, source heads and compatible policy scope the failure history across
+  restarts, preventing repeated failed probes. Historical failure schedules work;
+  it never proves blame. Fresh same-SHA passing evidence can recover a singleton
+  using its existing bounded replacement-ref retry; exploration dispatches no rerun.
+  Unsupported stacks and preparation waits defer to later roots. Fresh discovery
+  uses ordinary disposition preparation and fenced plan persistence; the failed
+  parent retires only after its replacement or stack plan persists. Exploration
+  runs no unrelated block recovery or retired-stack restoration.
+  With no plannable probe, `base_failure_exploration_exhausted` reports a wait.
+  Deferred stack causes remain in the message and diagnostics; missing-label
+  preparation belongs to the controller, provider failure to the provider, and
+  structural or policy fixes to the repository agent. A dry run creates no label.
+  Skipped historical reads do not overwrite the failed source in diagnostics;
+  actual rerun recovery retains its own source. Deferred roots report waiting;
+  surviving conflict holds report blocked. Exhausted polls keep the existing
+  feedback scope. Changed heads, queue, base or incompatible policy supply new
+  inputs; operational changes preserving the authority binding retain history.
+  The sweep neither searches arbitrary PR combinations nor clears unchanged
+  `merge-blocked` heads. Infrastructure retry budgets stay unchanged. Every repair
+  still passes exact-tree candidate, protected landing and fresh admission gates.
+  Fresh green-base evidence permits ordinary culprit isolation afterward.
 - **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while
@@ -1213,11 +1392,12 @@ pull request and head is recorded as `held_out` with reason `entry_conflict` and
 merge onto the base). The controller result reports the probe as
 `conflict_probe`, and PR feedback tells each held-out pull request which pull
 requests it conflicts with. Each hold also records `probe_base_sha` and the
-ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
-the base, held head, and accepted preceding PR/head sequence are unchanged. A
-changed base or preceding membership/head permits a fresh observation without
-requiring a speculative PR refresh. Legacy holds without probe lineage are
-re-observed once; their missing history is not reconstructed. On the first
+ordered `conflicts_with_head_shas`. A base-only conflict lasts while its base,
+held head and policy eligibility are unchanged. A pairwise conflict also needs
+the same accepted preceding PR/head sequence from the current planning mode's
+contextual queue. A changed base or preceding membership/head permits a fresh
+observation without requiring a speculative PR refresh. Legacy holds without
+probe lineage are re-observed once; their missing history is not reconstructed. On the first
 mutating pass, this may supersede and rebuild an in-flight candidate and close
 its service batch PR, so its CI runs once more. Trailing queue
 additions do not invalidate a hold. An unchanged real conflict stays held and
@@ -1446,7 +1626,7 @@ uv run launchplane merge-train-policies list \
 The contract is available to dry-run tooling with:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml \
   --repository cbusillo/codex-skills \
   --base-branch main
@@ -1455,7 +1635,7 @@ uv run launchplane work-graph merge-train-policy \
 Admins can validate an external TOML before importing it as a policy record:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml
 ```
 
@@ -1467,7 +1647,7 @@ The ordered queue dry-run accepts a JSON snapshot of candidate pull requests and
 reports queue order plus the next intended action without mutating GitHub:
 
 ```sh
-uv run launchplane work-graph merge-train-dry-run \
+uv run launchplane merge-train-dry-run \
   --snapshot-file path/to/merge-train-snapshot.json \
   --policy-file path/to/merge-train-policy.toml
 ```
@@ -1477,14 +1657,15 @@ repository/base branch and reports the same worker-step intent without mutating
 by default:
 
 ```sh
-GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
+GH_TOKEN=... uv run launchplane merge-train-run-once \
   --policy-file path/to/merge-train-policy.toml
 ```
 
 This local rehearsal command reads its explicit `--github-token-env` option
 (default `GH_TOKEN`) independently of the policy's managed credential source.
-The deployed merge train resolves the policy's `github_app` source instead. The work-graph read credential remains a
-separate consumer of `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN`.
+The deployed merge train resolves the policy's `github_app` source instead.
+See the [configuration boundary](config-boundary.md#bootstrap-env-only) for
+retired chooser-source settings and self-deploy cleanup.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
 fresh snapshot. Use it only from the intended admin environment for the smoke
@@ -1624,10 +1805,16 @@ envelope:
 
 The response `records` object contains durable record ids for records written or
 selected by this call. The response `result` object is the controller decision.
-It always includes `repository`, `base_branch`, `mode`, and
-`controller_action`; it may also include redacted `dry_run_result`, `candidate`,
-`landing_plan`, `stack_discovery`, `stack_collapse_plan`, and matching record id
-fields. Callers may report controller action, record ids, PR numbers, check
+[`contracts/merge-train-controller-reply.schema.json`](../contracts/merge-train-controller-reply.schema.json)
+publishes every field of this accepted reply as JSON Schema. It is generated from
+`control_plane/contracts/merge_train_controller_reply.py`, and the test suite
+checks every controller reply it produces against that contract, so a new reply
+field fails Launchplane's tests until the contract declares it. Regenerate the
+published file with
+`uv run --extra dev python -m control_plane.contracts.merge_train_controller_reply contracts/merge-train-controller-reply.schema.json`.
+Clients pin this published schema rather than copying the field list; the
+codex-skills merge-train helper does, and its CI fails when its pin differs.
+Callers may report controller action, record ids, PR numbers, check
 states, binding-safe labels from policy, trace id, and compact details. They
 must not report GitHub tokens, raw request headers, private API base URLs, local
 paths, or unchecked provider responses.
@@ -1766,7 +1953,39 @@ Controller actions have these retry/stop semantics:
   checks pass, fail, or remain pending.
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
-  evidence. If the eligible queue/base changes, the next controller action may
+  evidence. Before isolation, the controller can retry proven failed push checks
+  once on the same candidate SHA by deleting and recreating only its canonical
+  train ref at that exact SHA. It never force-resets a moved ref or requests
+  Actions write. Each write rechecks the controller lease. The original execution
+  IDs/attempts and `check_rerun_requested_at` are persisted after prerequisite
+  reads and before publication, reserving the retry for this queue/base across
+  restarts. Read failures leave that budget unused. A crash after reservation
+  but before deletion conservatively retains the reservation: an existing ref
+  cannot prove whether publication happened before a reply was lost.
+  A replacement already carrying
+  check, infrastructure or generated-body retry lineage gets no additional retry;
+  infrastructure-only failures keep their existing rebuild budget.
+  Dry-run reports `candidate_checks_retry_requested` without consuming it.
+  Restart restores an absent ref with a create-only request before reading
+  check evidence, even after the wait deadline; it never deletes an already
+  restored ref again. Fresh workflow inventory must prove a newer
+  completed execution before repeat failures enter isolation. After ten minutes
+  without that proof, `candidate_check_retry_unavailable` preserves the hold
+  rather than waiting indefinitely under a pending reason. Passing checks use
+  the existing audited closed-batch recovery; the batch PR is never reopened.
+  Conflicting current success/failure runs of the same required check and App
+  on this SHA instead report `candidate_checks_disagree`. This transient conflict
+  cannot blame a member or authorize landing. Earlier superseded attempts do
+  not count as current conflicts. Admin holds are never retried or blamed.
+  Missing Actions read, non-push checks and unproved execution provenance skip
+  automatic republication and retain existing failure handling. Transient
+  Actions read failures preserve the hold without consuming the retry.
+  No permission
+  is added here. The existing stall monitor names recovery waits and reports
+  any open head retaining the train's blocked label for thirty minutes,
+  including candidate-failure blocks. This remains visible with an empty
+  eligible queue or while other candidates progress.
+  If the eligible queue/base changes, the next controller action may
   become `plan_candidate` for a superseding candidate. A failed candidate with
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build
@@ -2215,66 +2434,91 @@ the controller lease.
 
 Both native controller and standalone batch landings persist pending completed
 feedback before candidate cleanup or returning to the caller. The existing
-terminal-feedback recovery drains it even during an otherwise idle worker pass;
-repeated cleanup does not queue the same landing again. Queueing performs no
-provider calls under the controller lease. For a merged PR on the default branch,
-completed feedback reconciles planning metadata for its native closing references. For a managed
-issue authored by an identity already trusted by the repository's enqueue
-policy, it requires completed closure, a reviewed clear wait, and closed native
-blockers and sub-issues. It preserves open finish lines and reporter-owned
-issues. It never closes or reopens an issue. The repository's
-`.github/github.json` planning labels and configured Project select the metadata;
-otherwise the planning protocol's standard labels apply. Unrelated labels and
-the issue body remain intact. Its saved comment carries a hidden
-`launchplane-planning-reconciliation` receipt with the landing SHA and issue
-readbacks. The persisted record schema stays compatible with older workers
-during rolling deployment and rollback. A receipt is evidence, never authority;
-each retry uses the current policy's trusted identities.
+terminal-feedback recovery drains it even during an otherwise idle worker pass.
+The feedback delivery lock serializes queue observation and persistence. An earlier
+building record for the same landing cannot suppress completion, even when its
+clock is later: the new receipt retains that later observed timestamp and its
+fresh creation order. A completed record with a saved planning receipt is not
+queued again; legacy completion without that receipt can recover. Newer feedback
+from a different controller attempt remains protected. Queueing performs no
+provider calls under the controller lease.
 
-Completed feedback also covers closed stack children and release-branch trains.
-Those preserve their existing completion comment with an explicit
-`not_applicable`, `ok: false` receipt: no issue discovery or metadata mutation
-applies, and the receipt is not planning-completion proof. The provider must
-return a real merged flag, matching feedback/PR base and a known default branch;
-missing or mismatched identity evidence remains a global hold. A null merge
-timestamp is normal for an unmerged stack child and is not parsed on this path.
+For a merged PR on the default branch, completed feedback discovers its native
+closing references and their direct blocking dependents and parents, including
+neighbors of non-plan or held sources. The deduplicated neighborhood is bounded
+to 100 records and is discovered before metadata writes; it is not recursive.
+Each planning target's status and labels derive from its current open native
+blockers and trusted structured wait through the same pinned pure package used
+by the catalog. The last blocker closing makes an otherwise clear open target
+active; remaining blockers and actual waits remain visible. Open stale/done
+scope holds and unread open waits preserve their labels for owning review.
+Closed lifecycle cleanup preserves actual waits and recorded waiting when the
+wait history is unread. No issue is closed or reopened, and no issue body,
+comment, wait record or native relationship is rewritten.
 
-A held, reporter-owned or not-yet-closed source does not prevent other eligible
-sources in the same PR from being reconciled. The held source stays unchanged,
-and its diagnostic keeps the overall planning receipt incomplete. Provider
-metadata-write failures still stop that delivery through existing retry/denial
-handling.
-Issue-specific Project membership gaps are preflight holds, so they also preserve
-only that issue. Unresolvable Project configuration, permissions, mutations and
-readback failures stop delivery. Saved receipts retain successful source readbacks
-even when a later source's provider operation fails; that source is marked
-interrupted. Once every source has been visited and only terminal source holds
-remain, the landed PR comment is published with a visible incomplete-planning
-note and a failed, nonretryable receipt. This preserves landing feedback without
-claiming all source metadata is complete. Pending projection and global/provider
-failures still withhold the comment.
+Full source completion retains the stronger existing guards: a managed issue
+created by a numerically trusted automation identity, completed native closure,
+a reviewed clear wait, and closed native blockers and sub-issues. Reporter-owned
+sources and open finish lines require source acceptance review. A closed managed source
+with an actual or unread wait can receive only lifecycle label cleanup; its
+full completion remains unverified. An issue-specific Project membership gap
+also permits label cleanup while keeping full completion in review. Configured
+Project mutations retain their existing capability and readback requirements.
+
+Every target uses its actual default branch's `.github/github.json`, or verified
+standard planning labels when that file is absent. Same-account foreign targets
+require an existing authorized repository policy and their own exact repository
+token and trusted author IDs. HTTP delivery checks the current identity before
+target token resolution and again for the actual default-branch policy. The
+scheduler admits only the active service authorization scope. Enrollment alone
+supplies no authority. Missing target scope and another account require review;
+there is no source-token, default-main or alternate-credential fallback. Current
+policy reconstructs this resolver for initial delivery and terminal retries;
+tokens and callbacks are never persisted in feedback.
+Scoped token resolution preserves failed-mint transport evidence for that retry
+path. A proved transient mint failure retries; a missing binding or grant remains
+review, and a real provider refusal never selects another credential.
+An unissued target credential that fails authentication, installation validation
+or resolution holds only that repository for owning review. Independent scopes
+and the landing comment continue. Authentication failure using an issued token
+still follows the existing delivery-wide stop rule.
+
+Fresh issue, native graph, wait and configuration reads guard writes and verify
+readback. The hidden `launchplane-planning-reconciliation` receipt retains the
+landing SHA and every known target, including skipped targets and verified
+prior results. Per-row success, verified evidence, coverage and full source
+completion are distinct. A known repository denial prevents that repository's
+writes while independent authorized repositories can continue. A global identity
+failure or unknown write outcome stops later writes. Discovery-time failures
+apply before any metadata write and retain already discovered neighbors. Failed
+source provider evidence withholds comment delivery; terminal source holds can
+publish the existing incomplete-planning note. These outcomes do not undo the
+landing or grant access.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
-Explicit transient GraphQL errors, including HTTP-200 rate-limit responses, use
-that same retry path; authorization denial takes precedence. Unknown GraphQL
-failures need review. GitHub's delayed keyword-closure projection waits only within
-15 minutes of the verified PR merge time. This includes an issue reopened before
-a later merge whose new closure has not projected yet. Any still-open source
-after that window requires owning review and stays unchanged. A merge timestamp
-slightly ahead of the worker clock waits within the same bounded grace, before
-any issue IO. Missing, invalid, inconsistent or further-future timestamps need
-owning review. A real wait, incomplete prerequisite, cross-repository closing link,
-untrusted author, malformed evidence or readback mismatch leaves a failed
-receipt for owning-agent review. This failure does not undo the landing. Queueing
-does no GitHub IO, but metadata delivery adds requests to the serial scheduler;
-latency can delay later targets and shared App quota can affect other repositories.
-Permission failures remain failures, without
-a credential or identity fallback. Configured Projects require the existing
-token's Projects capability; no new grant is requested by this path.
-An owning agent can review these cases and use the catalog's supported
-`gh-plan.py reconcile-landing --pr N --apply` for retrospective repair.
-Historical feedback records without a planning receipt are not proof that
-planning was reconciled.
+Completion and retry share a sanitized classification cached on the original
+HTTP error, so a one-shot secondary-quota body is consumed only once. Explicit
+transient GraphQL errors, including HTTP-200 rate-limit responses, use that same
+retry path; authorization denial takes precedence. Unknown GraphQL failures need
+review. No raw error body or token is stored in planning receipts.
+
+Completed feedback for unmerged closed stack children or release-branch trains
+preserves its existing comment with an explicit `not_applicable`, `ok: false`
+receipt: no issue discovery or metadata mutation applies. Missing or mismatched
+provider identity remains a hold. GitHub's keyword-closure projection and a
+slightly future merge timestamp wait only within 15 minutes of the verified
+merge time. Every still-open closing source receives this projection check before
+its planning, authorship or wait-history guards, so a non-plan or reporter-owned
+source cannot leave a delivered receipt before its dependent sees closure.
+Still-open sources after that grace require owning review.
+
+The persisted feedback record schema remains compatible with older workers
+through rolling deployment and rollback. A receipt is evidence, never authority.
+Metadata delivery adds requests to the serial scheduler; shared App quota and
+latency can affect other repositories. An owning agent can review partial cases
+and use the catalog's supported `gh-plan.py reconcile-landing --pr N --apply` or
+explicit `reconcile-status` recovery. Historical feedback without a planning
+receipt does not prove reconciliation.
 
 ## Original review recovery
 

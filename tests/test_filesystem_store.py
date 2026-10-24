@@ -1269,6 +1269,88 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [failed_record.audit_record_key],
         )
 
+    def test_registration_audit_keys_round_trip_in_bounded_contained_filenames(self) -> None:
+        keys = (
+            "runner-lane-registration/" + "a" * 400,
+            "runner-lane-registration/" + "é" * 200 + "/apply",
+            'runner-lane-registration/../odd\\name?\x00inner\n"key',
+        )
+        for key in keys:
+            with self.subTest(key=key), TemporaryDirectory() as directory:
+                state_dir = Path(directory)
+                store = FilesystemRecordStore(state_dir=state_dir)
+                record = _runner_lane_registration_audit_record(audit_record_key=key)
+
+                written = store.write_runner_lane_registration_audit_record(record)
+                read_records = FilesystemRecordStore(
+                    state_dir=state_dir
+                ).list_runner_lane_registration_audit_records()
+
+                self.assertEqual(written.parent.parent, state_dir)
+                self.assertLess(len(written.name.encode("utf-8")), 255)
+                self.assertRegex(written.name, r"^[A-Za-z0-9_.-]+$")
+                self.assertEqual(read_records, (record,))
+
+    def test_registration_audit_long_shared_prefix_keys_remain_distinct_and_repeatable(
+        self,
+    ) -> None:
+        prefix = "runner-lane-registration/" + "same-prefix-" * 30
+        first = _runner_lane_registration_audit_record(audit_record_key=prefix + "/first")
+        second = _runner_lane_registration_audit_record(audit_record_key=prefix + "/second")
+        replacement = first.model_copy(update={"message": "replacement evidence"})
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            first_path = store.write_runner_lane_registration_audit_record(first)
+            second_path = store.write_runner_lane_registration_audit_record(second)
+            replacement_path = store.write_runner_lane_registration_audit_record(replacement)
+            records = FilesystemRecordStore(
+                state_dir=Path(directory)
+            ).list_runner_lane_registration_audit_records()
+
+        self.assertNotEqual(first_path, second_path)
+        self.assertEqual(replacement_path, first_path)
+        self.assertCountEqual(records, (replacement, second))
+
+    def test_registration_audit_normal_short_key_reuses_legacy_record(self) -> None:
+        key = "runner-lane-registration/2026-06-08/example/lane-1"
+        record = _runner_lane_registration_audit_record(audit_record_key=key)
+        replacement = record.model_copy(update={"message": "replacement evidence"})
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            # A persisted pre-hardening filename is a compatibility fixture.
+            legacy_path = (
+                Path(directory)
+                / "launchplane_runner_lane_registration_audits"
+                / "runner-lane-registration-2026-06-08-example-lane-1-50319c75ff52dcd9.json"
+            )
+            legacy_path.parent.mkdir()
+            legacy_path.write_text(record.model_dump_json())
+
+            self.assertEqual(store.list_runner_lane_registration_audit_records(), (record,))
+            written = store.write_runner_lane_registration_audit_record(replacement)
+            records = store.list_runner_lane_registration_audit_records()
+
+        self.assertEqual(written, legacy_path)
+        self.assertEqual(records, (replacement,))
+
+    def test_registration_audit_listing_handles_absent_directory_and_unwritten_long_key(
+        self,
+    ) -> None:
+        present_key = "runner-lane-registration/" + "present-" * 50
+        absent_key = "runner-lane-registration/" + "absent-" * 50
+        record = _runner_lane_registration_audit_record(audit_record_key=present_key)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            self.assertEqual(store.list_runner_lane_registration_audit_records(), ())
+            store.write_runner_lane_registration_audit_record(record)
+            keys = {
+                value.audit_record_key
+                for value in store.list_runner_lane_registration_audit_records()
+            }
+
+        self.assertIn(present_key, keys)
+        self.assertNotIn(absent_key, keys)
+
     def test_write_and_list_merge_train_pr_feedback_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

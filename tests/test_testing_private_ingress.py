@@ -1,6 +1,7 @@
 """Exercise testing hostname creation against real records and fake providers."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -23,6 +24,7 @@ from control_plane.npmplus import (
     NpmplusCertificate,
     NpmplusClient,
     NpmplusProxyHost,
+    NpmplusProxyHostClaim,
 )
 from control_plane.provider_operations import (
     ProviderOperationLease,
@@ -219,7 +221,14 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
             }
         if path == "/api/domain.create":
             self.dokploy_calls.append(path)
-            domain = {"domainId": "testing-domain", **kwargs["payload"]}
+            domain = {
+                "domainId": "testing-domain",
+                "customEntrypoint": None,
+                "middlewares": [],
+                "forwardAuthEnabled": False,
+                "enabled": True,
+                **kwargs["payload"],
+            }
             self.domains.append(domain)
             return domain
         raise AssertionError(f"Unexpected provider mutation {path}")
@@ -238,6 +247,29 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
         digest = self.adapter().plan()["plan_sha256"]
         self.adapter(mode="apply", reviewed_plan_sha256=digest).apply("original-key", self.lease)
 
+    def private_domain(self) -> dict[str, Any]:
+        """Hydrated provider defaults, including fields not accepted by domain.create."""
+        return {
+            "domainId": "testing-domain",
+            "host": "bridge-testing.example.test",
+            "path": "/",
+            "internalPath": "/",
+            "port": self.profile.runtime_port,
+            "https": False,
+            "applicationId": self.target_id.target_id,
+            "certificateType": "none",
+            "customCertResolver": None,
+            "composeId": None,
+            "serviceName": None,
+            "domainType": "application",
+            "previewDeploymentId": None,
+            "stripPath": False,
+            "customEntrypoint": None,
+            "middlewares": [],
+            "forwardAuthEnabled": False,
+            "enabled": True,
+        }
+
     async def post(self, **changes: Any) -> Any:
         return await request(
             self.app,
@@ -252,6 +284,22 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
+        from control_plane import http_error_evidence
+
+        private = "private-provider-diagnostic-sentinel"
+        self.factory.side_effect = ValueError(private)
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(evidence["sites"])
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def test_historical_cleanup_receipt_requires_exact_successful_ownership(self) -> None:
         self.create()
         receipt = self.store.list_ingress_route_audit_records()[0]
@@ -486,8 +534,23 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
 
     def test_refuses_foreign_target_hostname_claims(self) -> None:
         hostname = "bridge-testing.example.test"
+        unrelated = self.target.model_copy(
+            update={"instance": "prod", "domains": ("https://unrelated.example.test/path",)}
+        )
+        with patch.object(
+            self.store, "list_dokploy_target_records", return_value=(self.target, unrelated)
+        ):
+            self.adapter().plan()
         for update in (
             {"domains": (hostname,)},
+            {"domains": ("BRIDGE-TESTING.EXAMPLE.TEST.",)},
+            {"domains": (f"https://{hostname}/",)},
+            {"domains": (f"https://{hostname}/path",)},
+            {"domains": ("*.example.test",)},
+            {"domains": ("https://*.example.test/",)},
+            {"domains": ("~^bridge-testing[.]example[.]test$",)},
+            {"domains": ("https://",)},
+            {"domains": ("https://[invalid",)},
             {"public_hosts": (hostname,)},
             {
                 "pending_public_host_effects": (
@@ -541,8 +604,13 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.client.proxy_hosts = [
             _npmplus_proxy_host().model_copy(update={"domain_names": ("*.example.test",)})
         ]
-        with self.assertRaises(ValueError):
-            self.adapter().plan()
+        claims = tuple(
+            NpmplusProxyHostClaim(id=host.id, domain_names=host.domain_names)
+            for host in self.client.proxy_hosts
+        )
+        with patch.object(self.client, "list_proxy_hosts", return_value=claims):
+            with self.assertRaises(ValueError):
+                self.adapter().plan()
         self.client.proxy_hosts = []
         self.client.other_domains = ("bridge-testing.example.test",)
         with self.assertRaises(ValueError):
@@ -657,6 +725,61 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         with self.assertRaises(ValueError):
             self.adapter().plan()
 
+    def test_accepts_exact_existing_private_origin_with_provider_defaults(self) -> None:
+        self.domains = [self.private_domain()]
+        self.create()
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(len(self.client.proxy_hosts), 1)
+
+    def test_optional_provider_default_metadata_preserves_reviewed_private_domain_plan(
+        self,
+    ) -> None:
+        domain = self.private_domain()
+        optional_defaults = {
+            key: domain.pop(key)
+            for key in ("customEntrypoint", "middlewares", "forwardAuthEnabled", "enabled")
+        }
+        self.domains = [domain]
+        digest = self.adapter().plan()["plan_sha256"]
+        # A provider upgrade can hydrate default-only metadata after review. It
+        # must not invalidate the unchanged origin or require another creation.
+        domain.update(optional_defaults)
+        self.adapter(mode="apply", reviewed_plan_sha256=digest).apply("original-key", self.lease)
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(len(self.client.proxy_hosts), 1)
+
+    def test_refuses_application_origin_routing_overrides(self) -> None:
+        domain = self.private_domain()
+        for changes in (
+            {"host": "other.example.test"},
+            {"host": "*.example.test"},
+            {"path": "/another-path"},
+            {"internalPath": "/another-path"},
+            {"https": True},
+            {"certificateType": "letsencrypt"},
+            {"customCertResolver": "another-resolver"},
+            {"applicationId": "another-application"},
+            {"port": self.profile.runtime_port + 1},
+            {"serviceName": "another-service"},
+            {"composeId": "another-compose"},
+            {"previewDeploymentId": "another-preview"},
+            {"stripPath": True},
+            {"domainType": "compose"},
+            {"middlewares": ["unreviewed-middleware"]},
+            {"customEntrypoint": "websecure"},
+            {"forwardAuthEnabled": True},
+            {"enabled": False},
+        ):
+            with self.subTest(changes=changes):
+                self.domains = [{**domain, **changes}]
+                with self.assertRaises(ValueError):
+                    self.adapter().plan()
+        self.domains = [domain, {**domain, "domainId": "second-domain"}]
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertFalse(self.client.proxy_hosts)
+
     def test_stale_plan_refuses_before_any_write(self) -> None:
         digest = self.adapter().plan()["plan_sha256"]
         self.store.write_private_health_endpoint_record(
@@ -744,6 +867,18 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         deploy = Mock()
         deploy.target_key.return_value = dokploy_generic_web_provider_target_key(self.provider)
         deploy.reconciliation_key.return_value = "next-testing-image"
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        deploy.provider_target_origin = Mock(
+            return_value=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.provider.context,
+                instance=self.provider.instance,
+                provider_id=self.provider.provider_id,
+                target_type=self.provider.target_category,
+                target_id=self.provider.target_id,
+            )
+        )
 
         def complete_deploy(key: str, lease: ProviderOperationLease) -> ProviderMutationOutcome:
             lease.checkpoint_effect("deploy_testing_image")

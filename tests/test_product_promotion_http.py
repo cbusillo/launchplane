@@ -2221,12 +2221,40 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
     def _seed_store(store: PostgresRecordStore) -> None:
         store.write_product_profile_record(_profile())
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        store.write_environment_inventory(
-            _inventory(
+        testing_inventory = _inventory(
+            instance="testing",
+            artifact_id=TESTING_ARTIFACT,
+            source_git_ref=TESTING_SOURCE_REF,
+            updated_at=now,
+        )
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=testing_inventory.context,
                 instance="testing",
-                artifact_id=TESTING_ARTIFACT,
-                source_git_ref=TESTING_SOURCE_REF,
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="application",
+                target_id="app-testing",
+                display_name=testing_inventory.deploy.target_name,
                 updated_at=now,
+            )
+        )
+        store.write_environment_inventory(testing_inventory)
+        store.write_deployment_record(
+            DeploymentRecord(
+                record_id=testing_inventory.deployment_record_id,
+                artifact_identity=testing_inventory.artifact_identity,
+                context=testing_inventory.context,
+                instance=testing_inventory.instance,
+                source_git_ref=testing_inventory.source_git_ref,
+                runtime_identity=testing_inventory.runtime_identity,
+                deploy=testing_inventory.deploy,
+                destination_health=testing_inventory.destination_health,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application",
+                    target_id="app-testing",
+                    target_name=testing_inventory.deploy.target_name,
+                ),
             )
         )
         prod_inventory = _inventory(
@@ -2290,14 +2318,17 @@ class GenericWebPromotionAdapterInventoryTests(unittest.TestCase):
             )
             store.ensure_schema()
             FastApiProductPromotionTests._seed_store(store)
-            store.write_environment_inventory(
-                _inventory(
-                    instance="testing",
-                    artifact_id=TESTING_ARTIFACT,
-                    source_git_ref=TESTING_SOURCE_REF,
-                    image_reference=TESTING_DEPLOY_REFERENCE,
-                    updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                )
+            testing = _inventory(
+                instance="testing",
+                artifact_id=TESTING_ARTIFACT,
+                source_git_ref=TESTING_SOURCE_REF,
+                image_reference=TESTING_DEPLOY_REFERENCE,
+                updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            )
+            store.write_environment_inventory(testing)
+            record = store.read_deployment_record(testing.deployment_record_id)
+            store.write_deployment_record(
+                record.model_copy(update={"runtime_identity": testing.runtime_identity})
             )
             profile = store.read_product_profile_record("atlas-commerce")
             lane = next(candidate for candidate in profile.lanes if candidate.instance == "prod")

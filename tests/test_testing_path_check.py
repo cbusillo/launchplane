@@ -21,9 +21,7 @@ from tests.support.http import request
 
 class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resources.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resources.TestingReplacementResourceFixture(self)
         self.store = self.fixture.store
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -56,7 +54,15 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
         # Legacy successful replacement is not an eligible stranded-operation anchor.
         self.store.write_odoo_stable_target_replacement_operation_record(
-            self.fixture.operation.model_copy(update={"status": "pass", "phase": "completed"})
+            self.fixture.operation.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "finished_at": self.fixture.operation.updated_at,
+                    "error_code": "",
+                    "error_message": "",
+                }
+            )
         )
         self.query = urlencode(
             {
@@ -130,6 +136,21 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_copy_hold_and_unreadable_source_are_not_cleared(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 
+        operation = self.fixture.operation.model_copy(
+            update={
+                "operation_id": self.fixture.operation.operation_id + "-held-read",
+                "idempotency_key": self.fixture.operation.idempotency_key + "-held-read",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        self.assertTrue(self.store.prepare_disposable_testing_replacement(operation, "fixture"))
+        self.query = urlencode(
+            {
+                "path": "testing",
+                "operation_id": operation.operation_id,
+                "intent": "generation",
+            }
+        )
         target = self.store.read_dokploy_target_record(
             context_name=self.fixture.context, instance_name="testing"
         )
@@ -153,6 +174,9 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await self.read()
         steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
         self.assertEqual(steps["testing_generation_use"]["state"], "blocked")
+        for step_id in ("testing_generation_use", "testing_resource_allocation"):
+            self.assertEqual(steps[step_id]["code"], steps["testing_hold"]["code"])
+            self.assertEqual(steps[step_id]["fix"], steps["testing_hold"]["fix"])
         self.assertEqual(steps["testing_restore_source"]["state"], "unknown")
         self.assertNotIn("private-source", response.text)
 

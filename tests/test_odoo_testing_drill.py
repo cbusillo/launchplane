@@ -308,6 +308,20 @@ class TestingDrillScenario(unittest.TestCase):
 
 
 class TestingDrillTests(TestingDrillScenario):
+    def test_native_copy_refusal_keeps_its_predicate_without_queueing(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        cause = NativeProgramFailed(
+            "private-provider-value", predicate=ReadbackPredicate.RUNNER_RUNNING, kind="refused"
+        )
+        self.signins.side_effect = cause
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().step, cause.code)
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().operation_id, "")
+        self.assertNotIn("private-provider-value", self.evidence().model_dump_json())
+
     def setUp(self) -> None:
         root = Path(self.enterContext(TemporaryDirectory()))
         self.seed(f"sqlite+pysqlite:///{root / 'state.db'}")

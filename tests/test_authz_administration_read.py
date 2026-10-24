@@ -391,8 +391,16 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
             {"added_rule_count": 2, "removed_rule_count": 1},
         )
         self.assertEqual(len(audit_payload["audit_sha256"]), 64)
+        # Random trace ids can contain any short digit string, such as 9001.
         serialized = json.dumps(
-            {"administration": administration_payload, "history": history_payload},
+            {
+                "administration": {
+                    key: value for key, value in administration_payload.items() if key != "trace_id"
+                },
+                "history": {
+                    key: value for key, value in history_payload.items() if key != "trace_id"
+                },
+            },
             sort_keys=True,
         )
         for private_value in (

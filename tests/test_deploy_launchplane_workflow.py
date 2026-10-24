@@ -9,8 +9,10 @@ from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 
+from control_plane.config_authority_audit import WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES
 from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
+from control_plane.workflows.launchplane_self_deploy import _RETIRED_WORK_GRAPH_ENV_KEYS
 
 
 class DeployLaunchplaneWorkflowTests(unittest.TestCase):
@@ -73,6 +75,53 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 line.split("=", 1) for line in output.read_text().splitlines() if "=" in line
             )
             return cast(dict[str, object], json.loads(Path(values["payload_file"]).read_text()))
+
+    def test_registry_login_uses_workflow_token_and_propagates_failure(self) -> None:
+        actor = "workflow-actor"
+        workflow_token = "workflow-test-token"
+        for token, docker_status in ((workflow_token, 0), ("", 0), (workflow_token, 1)):
+            with self.subTest(token_present=bool(token), docker_status=docker_status):
+                with TemporaryDirectory() as directory_name:
+                    directory = Path(directory_name)
+                    docker = directory / "docker"
+                    docker.write_text(
+                        "#!/usr/bin/env bash\n"
+                        'printf "%s\\n" "$@" > "$RUNNER_TEMP/docker-args"\n'
+                        'cat > "$RUNNER_TEMP/docker-password"\n'
+                        'exit "$DOCKER_STATUS"\n'
+                    )
+                    docker.chmod(0o700)
+                    result = self._run_step(
+                        "deploy",
+                        "Log in to GHCR",
+                        {
+                            "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                            "GITHUB_ACTOR": actor,
+                            "GHCR_USERNAME": "obsolete-user",
+                            "GHCR_TOKEN": "obsolete-token",
+                            "DOCKER_STATUS": str(docker_status),
+                        },
+                        directory,
+                        expression_values={
+                            expression: token
+                            for expression in WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES[
+                                ".github/workflows/deploy-launchplane.yml"
+                            ]["DEFAULT_GITHUB_TOKEN"]
+                        },
+                    )
+                    if not token:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse((directory / "docker-args").exists())
+                        continue
+                    self.assertEqual(result.returncode, docker_status, result.stderr)
+                    arguments = (directory / "docker-args").read_text().splitlines()
+                    self.assertEqual(arguments[0], "login")
+                    self.assertIn("ghcr.io", arguments)
+                    self.assertIn("--password-stdin", arguments)
+                    self.assertEqual(arguments[arguments.index("--username") + 1], actor)
+                    self.assertNotIn(token, arguments)
+                    self.assertEqual((directory / "docker-password").read_text(), token)
+                    self.assertNotIn(token, result.stdout + result.stderr)
 
     def test_rollback_reuses_prepared_budget_without_resolving_dependencies(self) -> None:
         with TemporaryDirectory() as directory_name:
@@ -355,6 +404,25 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         self.assertTrue(retired.keys().isdisjoint(removals))
         self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
 
+    def test_self_deploy_removes_project_source_even_when_old_inputs_are_present(self) -> None:
+        retired = dict.fromkeys(_RETIRED_WORK_GRAPH_ENV_KEYS, "synthetic-retired-value")
+        payload = self._render(
+            "Render Launchplane self deploy request",
+            {
+                "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                "DEPLOYMENT_MARKER": "deploy-marker",
+                "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
+                "IMAGE_REPOSITORY": "ghcr.io/example/service",
+                "LAUNCHPLANE_WORK_GRAPH_GH_TOKEN": "synthetic-retired-credential",
+                **retired,
+            },
+        )
+        deploy = cast(dict[str, object], payload["deploy"])
+        delivered = cast(dict[str, str], deploy["oauth_env"])
+        self.assertTrue(retired.keys().isdisjoint(delivered))
+        removed = cast(list[str], deploy.get("oauth_env_removals", []))
+        self.assertTrue(retired.keys() <= set(removed))
+
     def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
         self,
     ) -> None:
@@ -389,7 +457,12 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                     },
                 )
                 deploy = cast(dict[str, object], payload["deploy"])
-                self.assertEqual(deploy.get("oauth_env_removals"), removals)
+                removed = set(cast(list[str], deploy.get("oauth_env_removals", [])))
+                self.assertTrue(set(removals or ()).issubset(removed))
+                if token:
+                    self.assertNotIn("LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN", removed)
+                if omit_npmplus == "false":
+                    self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET", removed)
 
     def test_self_deploy_rejects_multiline_previous_image_reference(self) -> None:
         with TemporaryDirectory() as directory_name:

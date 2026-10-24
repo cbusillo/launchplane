@@ -1,4 +1,5 @@
 import { setClockTime, expect, test } from "./state";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "stale", "unknown", "absent"] as const;
 
@@ -118,7 +119,7 @@ for (const state of cases) {
     });
     expect(contrast).toBeGreaterThanOrEqual(3);
     if (state === "healthy" || state === "absent" || state === "failed") {
-      await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${theme}-${testInfo.project.name}.png`, fullPage: false });
+      await page.screenshot({ path: smokeArtifact(`sidebar-${state}-${theme}-${testInfo.project.name}.png`), fullPage: false });
     }
     if (state === "healthy") {
       const signals = await page.locator('.rail-product-link [data-lane="testing"]').evaluateAll(icons =>

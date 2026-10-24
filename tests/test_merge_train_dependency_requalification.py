@@ -301,6 +301,9 @@ async def _controller(
                     "created_at": state.created_at,
                     "mergeable": state.mergeable,
                     "required_checks_status": state.checks,
+                    "required_checks_observation_error": "actions_read_not_granted"
+                    if state.checks == "fail"
+                    else "",
                 }
             )
             if state.landed:

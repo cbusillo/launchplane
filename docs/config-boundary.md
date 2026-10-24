@@ -111,7 +111,12 @@ through managed secret records scoped to Launchplane/Every Code. Do not add a
 service-host env var or checked-in file containing the webhook URL, channel, or
 real destination authority.
 
-| Work graph and legacy environment-bound train token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and train policies explicitly bound to this variable. Other train policies can explicitly select the resolved `LAUNCHPLANE_GITHUB_TOKEN` from a DB-backed runtime context; see [merge-train credential sources](merge-train-policy.md#credential-source-and-policy-readback). The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |
+The removed chooser no longer consumes a GitHub Project or issue-inbox
+environment bundle ([Q545](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6274378052)).
+Self-deploy removes the former source settings and `GH_TOKEN` from the service
+target environment. These retired keys are accepted for removal only; this
+cleanup does not activate a Project, inbox or chooser provider.
+
 
 ### DB Authoritative
 
@@ -122,7 +127,6 @@ Launchplane records/secrets instead of repo files or admin-local env.
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Merge-train repository policy                            | `launchplane_merge_train_policies`                                                                                       | DB-backed Launchplane policy record | Defines supported repository/base branch merge-train policies. The service fails closed when no active policy record exists and for unsupported pairs before GitHub calls. Repo TOML files are not a supported live authority.                                                                                                                                                  |
 | Tenant repository classification and admission authority | `launchplane_tenant_repository_classifications`, trusted-maintenance policies/evidence, and managed authz policy records | DB-backed Launchplane records       | Numeric repository classification selects engineering or tenant UI normal flow; both are admitted through the normal technical merge checks. Manager preview approval and the technical human waiver are deleted. Revisions/events remain DB authority, filesystem records are rehearsal/import input, and no service-host env or checked-in repository list decides admission. |
-| Work graph GitHub source configuration                   | Transitional `LAUNCHPLANE_WORK_GRAPH_PROJECT_*` and `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_*` service env                   | None: retired                       | Work graphs inside Launchplane are retired (see [DIRECTION.md](../DIRECTION.md)). Do not build DB-backed source records; issue #2520 deletes the work-graph subsystem with this env.                                                                                                                                                                                            |
 
 The tenant-admission row describes current runtime authority. Client review of
 previews and releases is separate and grants no merge authority; see
@@ -494,8 +498,8 @@ Product retirement does not add checked-in product or provider authority. The
 workflow accepts admin-supplied product, instance, target digest, reason,
 issue, reviewed plan, and idempotency values; the service resolves all real
 context, provider target, runtime, and secret authority from DB-backed records.
-Authorization managed-set secrets are transitional desired input routed through
-the protected reconciliation workflow. They are not live policy authority and
-must not become a product catalog or the routine durable permissions editor.
-Do not add new routine managed sets or grants through those secrets; granting
-access is a stop boundary, see `authorization-authority.md`.
+The GitHub-secret authorization reconcile wrapper and reusable worker are
+deleted. Existing managed sets remain DB-backed; maintain them through the
+Access policy workbench and Director-approved privileged-operation proposals.
+Their obsolete repository secrets are removed separately by the Director.
+Granting or removing access is a stop boundary; see `authorization-authority.md`.

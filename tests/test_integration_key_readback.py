@@ -88,13 +88,13 @@ class IntegrationKeyReadbackTests(unittest.TestCase):
             instance_name=instance,
         )
 
-    def test_unreasoned_shared_production_key_is_reported_not_refused(self) -> None:
+    def test_unreasoned_shared_production_key_fails(self) -> None:
         evidence = self._readback(
             _binding("REPAIRSHOPR_API_TOKEN", declared_secret_class="shared_safe"),
             _binding("CONTACT_ALERT_DISCORD_WEBHOOK_URL"),
         )
 
-        self.assertEqual(evidence.status, "reported")
+        self.assertEqual(evidence.status, "fail")
         self.assertEqual(evidence.checked_binding_keys, ("REPAIRSHOPR_API_TOKEN",))
         self.assertEqual(
             [(finding.binding_key, finding.code) for finding in evidence.findings],

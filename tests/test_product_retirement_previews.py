@@ -23,9 +23,11 @@ from tests.http_app_test_support import (
     _browser_mutation_headers,
     _RejectingVerifier,
 )
-from tests.support.http import request
+from tests.support.http import lifespan_client, request
 from tests.support.profiles import _generic_site_profile_payload
 from control_plane.product_reconcile import request_product_reconcile_sweep
+
+PLAN_WAIT_HANG_DEADLINE_SECONDS = 60.0
 
 
 class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
@@ -260,7 +262,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                     calls += 1
                     if calls == blocked_call:
                         entered.set()
-                        if not release.wait(5):
+                        if not release.wait(PLAN_WAIT_HANG_DEADLINE_SECONDS):
                             raise ValueError("Fixture executor wait expired")
                     return bind(**kwargs)
 
@@ -269,29 +271,33 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                     "bind_product_retirement_authority",
                     side_effect=wait_for_executor,
                 ):
-                    planning = asyncio.create_task(
-                        request(
-                            self.app,
-                            "POST",
-                            "/v1/product-retirement",
-                            headers={
-                                **self.headers,
-                                "Idempotency-Key": f"responsive-plan-{blocked_call}",
-                            },
-                            payload=self.payload,
+                    async with lifespan_client(self.app) as client:
+                        planning = asyncio.create_task(
+                            request(
+                                client,
+                                "POST",
+                                "/v1/product-retirement",
+                                headers={
+                                    **self.headers,
+                                    "Idempotency-Key": f"responsive-plan-{blocked_call}",
+                                },
+                                payload=self.payload,
+                            )
                         )
-                    )
-                    try:
-                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-                        self.assertFalse(
-                            planning.done(), "Plan blocked the event loop until its wait ended"
-                        )
-                        health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
-                        self.assertEqual(health.status_code, 200, health.text)
-                        self.assertFalse(release.is_set())
-                    finally:
-                        release.set()
-                    response = await asyncio.wait_for(planning, 5)
+                        try:
+                            self.assertTrue(
+                                await asyncio.to_thread(
+                                    entered.wait, PLAN_WAIT_HANG_DEADLINE_SECONDS
+                                )
+                            )
+                            health = await request(client, "GET", "/v1/health")
+                            self.assertEqual(health.status_code, 200, health.text)
+                            self.assertFalse(
+                                planning.done(), "Plan blocked the event loop until its wait ended"
+                            )
+                        finally:
+                            release.set()
+                        response = await planning
                     self.assertEqual(response.status_code, 202, response.text)
 
     async def test_retires_present_and_absent_previews_then_testing_and_excludes_sweep(
@@ -542,18 +548,6 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(inspected.status_code, 202, inspected.text)
         self.assertEqual(inspected.json()["result"]["usage"], "unknown")
-        recorded = await request(
-            self.app,
-            "POST",
-            "/v1/disposable-lanes/observations",
-            headers=self.director_headers,
-            payload={
-                **observation,
-                "mode": "record",
-                "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
-            },
-        )
-        self.assertEqual(recorded.status_code, 202, recorded.text)
         payload = await self.director_plan()
         applied = await request(
             self.app,

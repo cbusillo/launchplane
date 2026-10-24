@@ -21,6 +21,10 @@ from control_plane.storage.delivery_evidence import (
     source_changed,
 )
 
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceSnapshot,
+    generic_web_source_target_key,
+)
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -148,7 +152,6 @@ from control_plane.odoo_stable_lane import (
     odoo_stable_lane_cancellation_is_allowed,
     odoo_stable_lane_operation_priority,
 )
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
@@ -244,7 +247,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
@@ -269,6 +275,7 @@ from control_plane.storage.product_authority_bundle import (
     odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
+    require_product_profile_writes,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -390,6 +397,12 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if isinstance(model, LaunchplaneProductProfileRecord):
+            require_product_profile_writes(
+                (model,),
+                self._list_product_profile_records_locked(),
+                inventory_records=self._iter_repository_inventory_records_locked(),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -534,8 +547,33 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            require_product_profile_writes(
+                bundle.product_profiles,
+                profiles,
+                inventory_records=self._iter_repository_inventory_records_locked(),
+                absent_product_ids=bundle.absent_product_ids,
+            )
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            for model_type, record_type, expected_records in (
+                (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
+                (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
+            ):
+                for expected in expected_records:
+                    try:
+                        current = self._read_model_locked(
+                            model_type,
+                            record_type,
+                            _context_instance_record_id(expected.context, expected.instance),
+                        )
+                    except FileNotFoundError as error:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target disappeared before onboarding commit."
+                        ) from error
+                    if current != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")
@@ -1098,18 +1136,26 @@ class FilesystemRecordStore:
         persisted_record = sanitize_runner_host_hygiene_audit_record_for_persistence(record)
         return self._write_model(
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(persisted_record.audit_record_key),
+            _runner_audit_record_id(persisted_record.audit_record_key),
             persisted_record,
         )
 
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> Path:
-        return self._write_model(
-            "launchplane_runner_lane_registration_audits",
-            _runner_lane_registration_audit_record_id(record.audit_record_key),
-            record,
-        )
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        record_type = "launchplane_runner_lane_registration_audits"
+        record_id = _runner_audit_record_id(record.audit_record_key)
+        with self._product_authority_bundle_lock():
+            try:
+                existing = self._read_model_locked(
+                    RunnerLaneRegistrationAuditRecord, record_type, record_id
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                validate_runner_lane_registration_audit_identity(existing, record)
+            return self._write_model_locked(record_type, record_id, record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
@@ -1201,6 +1247,11 @@ class FilesystemRecordStore:
                 return "replayed"
             self._write_model_locked(record_type, record.record_id, record)
             return "written"
+
+    def _iter_repository_inventory_records_locked(self) -> Iterator[RepositoryInventoryRecord]:
+        yield from self._list_models_locked(
+            RepositoryInventoryRecord, "launchplane_repository_inventory_records"
+        )
 
     def list_repository_inventory_records(
         self,
@@ -2209,6 +2260,16 @@ class FilesystemRecordStore:
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 
+    def read_merge_train_pr_feedback_record(
+        self, feedback_id: str
+    ) -> MergeTrainPrFeedbackRecord | None:
+        try:
+            return self._read_model(
+                MergeTrainPrFeedbackRecord, "launchplane_merge_train_pr_feedback", feedback_id
+            )
+        except FileNotFoundError:
+            return None
+
     def list_merge_train_pr_feedback_records(
         self,
         *,
@@ -2948,7 +3009,7 @@ class FilesystemRecordStore:
         return self._read_model(
             RunnerHostHygieneApplyAuditRecord,
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(audit_record_key),
+            _runner_audit_record_id(audit_record_key),
         )
 
     def list_runner_lane_registration_audit_records(
@@ -4768,6 +4829,33 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        with self._product_authority_bundle_lock():
+            profile = self._read_product_profile_record_path(
+                self._record_path("launchplane_product_profiles", product)
+            )
+            inventory = self._read_model_locked(
+                EnvironmentInventory, "inventory", f"{context_name}-{instance_name}"
+            )
+            deployment = self._read_model_locked(
+                DeploymentRecord, "deployments", inventory.deployment_record_id
+            )
+            target = self._read_model_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+                _context_instance_record_id(context_name, instance_name),
+            )
+            target_key = generic_web_source_target_key(target, deployment.deploy.target_type)
+            held = tuple(
+                record
+                for record in self._list_models_locked(LaunchplaneIdempotencyRecord, "idempotency")
+                if record.state in {"running", "reconcile_required"}
+                and record.provider_target_key == target_key
+            )
+            return GenericWebSourceSnapshot(profile, inventory, deployment, target, held)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         with self._product_authority_bundle_lock():
@@ -7260,38 +7348,6 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> Path:
-        return self._write_model("launchplane_preview_enablement", record.record_id, record)
-
-    def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
-        return PreviewEnablementRecord.model_validate(
-            self._read_model(
-                PreviewEnablementRecord, "launchplane_preview_enablement", record_id
-            ).model_dump(mode="json")
-        )
-
-    def list_preview_enablement_records(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        pr_state: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewEnablementRecord, ...]:
-        records = [
-            record
-            for record in self._list_models(
-                PreviewEnablementRecord, "launchplane_preview_enablement"
-            )
-            if (not context_name or record.context == context_name)
-            and (not anchor_repo or record.anchor_repo == anchor_repo)
-            and (not pr_state or record.pr_state == pr_state)
-        ]
-        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
-        if limit is not None:
-            records = records[:limit]
-        return tuple(records)
-
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
         return self._write_model("launchplane_preview_generations", record.generation_id, record)
 
@@ -7811,7 +7867,7 @@ def _odoo_stable_bootstrap_lane_reservation_id(
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
 
 
-def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
+def _runner_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
     normalized_key = audit_record_key.strip()
     filename_prefix = "".join(
@@ -7819,11 +7875,6 @@ def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
         for character in normalized_key
     )[:200]
     return f"{filename_prefix or 'audit'}-{digest}"
-
-
-def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
-    digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
-    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
 
 
 def _context_instance_record_id(context: str, instance: str) -> str:

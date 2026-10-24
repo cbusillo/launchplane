@@ -6,6 +6,7 @@ from unittest.mock import patch
 from typing import cast
 
 import click
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
 from control_plane.contracts.artifact_identity import (
     ArtifactAddonSource,
@@ -659,6 +660,11 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             for index, (notes, labels, blocked) in enumerate(
                 (
+                    (
+                        f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release.",
+                        [],
+                        False,
+                    ),
                     ("Nothing for the Client to test: CI only.", [], False),
                     ("Nothing for the Client to test", [], True),
                     ("Nothing for the owner to test", [{"name": "owner-review"}], True),
@@ -683,6 +689,7 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                     review = build_release_review(store=store, profile=profile(), read=read)
                     assert review.checklist is not None
                     self.assertEqual(bool(checklist_blockers(review.checklist)), blocked)
+                    self.assertFalse(review.approved)
                     if not blocked:
                         accepted = ReleaseReviewDecisionRecord(
                             record_id=f"engineering-accepted-{review.checklist_digest}",

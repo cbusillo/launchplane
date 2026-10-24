@@ -19,6 +19,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.live_target_runtime import (
     LiveTargetRuntimeError,
     apply_live_target_runtime_environment,
+    validate_provider_key_retirement,
 )
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
@@ -53,6 +54,145 @@ def _runtime_record(*, retired: tuple[str, ...] = ()) -> RuntimeEnvironmentRecor
         updated_at="2026-09-27T00:00:00Z",
         source_label="test",
     )
+
+
+class TestingOverridePointerRetirementTests(unittest.TestCase):
+    def test_current_consumers_protect_pointers_without_generation_or_secret_resolution(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooAddonSettingOverride,
+            OdooConfigParameterOverride,
+            OdooInstanceOverrideRecord,
+            OdooOverrideValue,
+            OdooOverrideApplyPhase,
+        )
+        from control_plane.odoo_instance_overrides import (
+            addon_setting_secret_env_key,
+            config_parameter_secret_env_key,
+        )
+
+        cases: tuple[str, ...] = (
+            "unused",
+            "runtime_declaration",
+            "secret_declaration",
+            "context",
+            "instance",
+            "target",
+            "other_lane",
+            "wrong_product",
+            "production",
+            "ambiguous_owner",
+            "inferred_owner",
+            "missing_owner",
+        )
+        cases += tuple(
+            f"{kind}_{phase}"
+            for kind in ("config", "addon")
+            for phase in ("restore", "deploy", "promotion")
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temporary_directory:
+                database_url = _sqlite_database_url(Path(temporary_directory) / "records.sqlite3")
+                store = PostgresRecordStore(database_url=database_url)
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                key = (
+                    config_parameter_secret_env_key("private.fixture")
+                    if case.startswith("config_")
+                    else addon_setting_secret_env_key(addon_name="fixture", setting_name="token")
+                )
+                profile = _profile().model_dump(mode="json")
+                if case.endswith("declaration"):
+                    name, field = (
+                        ("runtime_environment_keys", "key")
+                        if case == "runtime_declaration"
+                        else ("managed_secret_bindings", "binding_key")
+                    )
+                    profile["expected_config"][name] = [
+                        {field: key, "context": "example-site", "instance": "testing"}
+                    ]
+                if case != "missing_owner":
+                    store.write_product_profile_record(
+                        LaunchplaneProductProfileRecord.model_validate(profile)
+                    )
+                if case == "ambiguous_owner":
+                    store.write_product_profile_record(
+                        _profile().model_copy(update={"product": "other-product"})
+                    )
+                if case in {"context", "instance", "other_lane"}:
+                    store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context" if case == "context" else "instance",
+                            context="example-site",
+                            instance=""
+                            if case == "context"
+                            else ("preview" if case == "other_lane" else "testing"),
+                            env={key: "private-value"},
+                            updated_at=_runtime_record().updated_at,
+                            source_label="test",
+                        )
+                    )
+                if case == "target":
+                    _seed_tracked_target_records(
+                        database_url=database_url,
+                        context="example-site",
+                        instance="testing",
+                        target_id="fixture-app",
+                        target_type="application",
+                        target_name="fixture-app",
+                    )
+                    target = store.read_dokploy_target_record(
+                        context_name="example-site", instance_name="testing"
+                    )
+                    store.write_dokploy_target_record(
+                        target.model_copy(update={"env": {key: "private-value"}})
+                    )
+                if case.startswith(("config_", "addon_")):
+                    value = OdooOverrideValue(
+                        source="secret_binding", secret_binding_id="fixture-binding"
+                    )
+                    store.write_odoo_instance_override_record(
+                        OdooInstanceOverrideRecord(
+                            context="example-site",
+                            instance="testing",
+                            apply_on=(cast(OdooOverrideApplyPhase, case.split("_")[1]),),
+                            updated_at=_runtime_record().updated_at,
+                            config_parameters=(
+                                OdooConfigParameterOverride(key="private.fixture", value=value),
+                            )
+                            if case.startswith("config_")
+                            else (),
+                            addon_settings=(
+                                OdooAddonSettingOverride(
+                                    addon="fixture", setting="token", value=value
+                                ),
+                            )
+                            if case.startswith("addon_")
+                            else (),
+                        )
+                    )
+
+                def validate() -> None:
+                    validate_provider_key_retirement(
+                        retired_keys={key},
+                        application_keys=set(),
+                        record_store=store,
+                        product_name="other-product"
+                        if case == "wrong_product"
+                        else (
+                            "" if case in {"inferred_owner", "ambiguous_owner"} else "example-site"
+                        ),
+                        context_name="example-site",
+                        instance_name="prod" if case == "production" else "testing",
+                    )
+
+                if case in {"unused", "other_lane", "inferred_owner"}:
+                    validate()
+                else:
+                    with self.assertRaises(LiveTargetRuntimeError) as caught:
+                        validate()
+                    self.assertEqual(caught.exception.code, "runtime_retirement_conflict")
 
 
 class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +233,75 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
             "reason": "Retire the reviewed obsolete provider key.",
             "runtime_env": {"retired_provider_keys": [key]},
         }
+
+    async def test_unused_pointers_allow_config_edits_but_protect_every_override_phase(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooConfigParameterOverride,
+            OdooInstanceOverrideRecord,
+            OdooOverrideValue,
+        )
+        from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+
+        key = config_parameter_secret_env_key("private.fixture")
+        self.store.write_runtime_environment_record(_runtime_record(retired=(key,)))
+        payload = self._payload()
+        payload["runtime_env"] = {"env": {"APP_MODE": "new-private-mode"}}
+        for phase in (None, "restore", "deploy", "promotion"):
+            with self.subTest(phase=phase):
+                if phase is not None:
+                    self.store.write_odoo_instance_override_record(
+                        OdooInstanceOverrideRecord(
+                            context="example-site",
+                            instance="testing",
+                            apply_on=(phase,),
+                            updated_at=_runtime_record().updated_at,
+                            config_parameters=(
+                                OdooConfigParameterOverride(
+                                    key="private.fixture",
+                                    value=OdooOverrideValue(
+                                        source="secret_binding", secret_binding_id="fixture-binding"
+                                    ),
+                                ),
+                            ),
+                        )
+                    )
+                response = await _post_product_config_apply(
+                    self.app, payload, authorization="Bearer local-operator-token"
+                )
+                if phase is not None:
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "runtime_retirement_conflict"
+                    )
+                else:
+                    self.assertEqual(response.status_code, 202, response.text)
+                    applied = await _post_product_config_apply(
+                        self.app,
+                        {**payload, "mode": "apply"},
+                        authorization="Bearer local-operator-token",
+                        idempotency_key="qualified-edit",
+                    )
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                    self.assertIn(
+                        key, self.store.list_runtime_environment_records()[0].retired_provider_keys
+                    )
+
+    async def test_incomplete_generation_does_not_block_unrelated_config_edit(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        key = "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"
+        self.store.write_runtime_environment_record(_runtime_record(retired=(key,)))
+        self.store.write_fresh_odoo_testing_generation(
+            generation().model_copy(update={"product": "example-site", "context": "example-site"})
+        )
+        payload = self._payload()
+        payload["runtime_env"] = {"env": {"APP_MODE": "new-private-mode"}}
+        response = await _post_product_config_apply(
+            self.app, payload, authorization="Bearer local-operator-token"
+        )
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def test_retirement_requires_exact_review_and_replays_persisted_intent(self) -> None:
         apply_payload = self._payload(mode="apply")
@@ -151,7 +360,6 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
             "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
             "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED",
             "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED",
-            "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
         ):
             with self.subTest(key=key):
                 response = await _post_product_config_apply(
@@ -371,10 +579,13 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
             self.assertEqual(records[0].env["APP_MODE"], "updated")
 
     def test_changed_authority_or_failed_removal_prevents_deployment(self) -> None:
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+
         for failure in (
             "retirement_changed",
             "application_changed",
             "declaration_changed",
+            "override_changed",
             "provider_retained_key",
         ):
             with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
@@ -384,9 +595,12 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 store.ensure_schema()
                 self.addCleanup(store.close)
                 store.write_product_profile_record(_profile())
-                store.write_runtime_environment_record(
-                    _runtime_record(retired=("LEGACY_PASSWORD",))
+                retired_key = (
+                    addon_setting_secret_env_key(addon_name="fixture", setting_name="token")
+                    if failure == "override_changed"
+                    else "LEGACY_PASSWORD"
                 )
+                store.write_runtime_environment_record(_runtime_record(retired=(retired_key,)))
                 _seed_tracked_target_records(
                     database_url=database_url,
                     context="example-site",
@@ -414,6 +628,31 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                                     source_label="test",
                                 )
                             )
+                        elif failure == "override_changed":
+                            from control_plane.contracts.odoo_instance_override_record import (
+                                OdooAddonSettingOverride,
+                                OdooInstanceOverrideRecord,
+                                OdooOverrideValue,
+                            )
+
+                            store.write_odoo_instance_override_record(
+                                OdooInstanceOverrideRecord(
+                                    context="example-site",
+                                    instance="testing",
+                                    apply_on=("restore",),
+                                    updated_at=_runtime_record().updated_at,
+                                    addon_settings=(
+                                        OdooAddonSettingOverride(
+                                            addon="fixture",
+                                            setting="token",
+                                            value=OdooOverrideValue(
+                                                source="secret_binding",
+                                                secret_binding_id="fixture-binding",
+                                            ),
+                                        ),
+                                    ),
+                                )
+                            )
                         elif failure == "declaration_changed":
                             profile = _profile().model_dump(mode="json")
                             profile["expected_config"]["runtime_environment_keys"].append(
@@ -428,7 +667,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                             )
                     return {
                         "name": "test-app",
-                        "env": "APP_MODE=private-mode-value\nLEGACY_PASSWORD=private-old-secret",
+                        "env": f"APP_MODE=private-mode-value\n{retired_key}=private-old-secret",
                     }
 
                 deploy = Mock()
@@ -463,6 +702,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                     "retirement_changed": "runtime_retirement_changed",
                     "application_changed": "runtime_retirement_conflict",
                     "declaration_changed": "runtime_retirement_conflict",
+                    "override_changed": "runtime_retirement_conflict",
                     "provider_retained_key": "dokploy_target_verification_failed",
                 }[failure]
                 self.assertEqual(refusal.exception.code, expected_code)
@@ -477,9 +717,12 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 deploy.assert_not_called()
 
     def test_a_key_only_a_managed_secret_supplies_can_be_retired(self) -> None:
-        for plain_setting_too in (False, True):
+        from itertools import product
+
+        pointer = "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"
+        for key, plain_setting_too in product(("ALERT_TOKEN", pointer), (False, True)):
             with (
-                self.subTest(plain_setting_too=plain_setting_too),
+                self.subTest(key=key, plain_setting_too=plain_setting_too),
                 TemporaryDirectory() as temporary_directory,
                 patch.dict(
                     os.environ,
@@ -494,13 +737,13 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 store.ensure_schema()
                 self.addCleanup(store.close)
                 store.write_product_profile_record(_profile())
-                store.write_runtime_environment_record(_runtime_record(retired=("ALERT_TOKEN",)))
+                store.write_runtime_environment_record(_runtime_record(retired=(key,)))
                 if plain_setting_too:
                     store.write_runtime_environment_record(
                         RuntimeEnvironmentRecord(
                             scope="context",
                             context="example-site",
-                            env={"ALERT_TOKEN": "private-plain-value"},
+                            env={key: "private-plain-value"},
                             updated_at="2026-09-27T00:00:00Z",
                             source_label="test",
                         )
@@ -511,7 +754,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                     integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
                     name="alert-token",
                     plaintext_value="private-lane-secret",
-                    binding_key="ALERT_TOKEN",
+                    binding_key=key,
                     context_name="example-site",
                     instance_name="testing",
                     actor="test",
@@ -525,7 +768,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                     target_type="application",
                     target_name="test-app",
                 )
-                provider_env = "APP_MODE=private-mode-value\nALERT_TOKEN=private-lane-secret"
+                provider_env = f"APP_MODE=private-mode-value\n{key}=private-lane-secret"
                 updates: list[dict[str, object]] = []
 
                 def update(**kwargs: object) -> None:
@@ -577,5 +820,5 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                         deploy_trigger=Mock(),
                     )
                 self.assertEqual(len(updates), 1)
-                self.assertNotIn("ALERT_TOKEN", provider_env)
+                self.assertNotIn(key, provider_env)
                 self.assertIn("APP_MODE=private-mode-value", provider_env)

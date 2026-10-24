@@ -415,7 +415,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
     def test_engineering_reclassification_cannot_clear_batch_member_veto(self) -> None:
         state = {"value": "neutral", "engineering": "yes"}
         rejection = _client_veto_record(
-            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+            repository=self.provider.repository_name, number=2, head_sha="before-base-update"
         )
         self._require_client_review_for_second_member(state, [rejection])
         with self.assertRaises(MergeAdmissionDeniedError):

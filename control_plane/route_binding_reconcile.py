@@ -24,7 +24,14 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
     route_binding_record_sha256,
 )
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    is_native_testing_binding,
+)
+from control_plane.contracts.text_fields import require_text
 
+
+NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
 
 _EVIDENCE_SCAN_LIMIT = 1000
 _EVIDENCE_FRESHNESS_WINDOW = timedelta(hours=24)
@@ -119,17 +126,33 @@ class RouteBindingReconcileRequest(BaseModel):
     def _validate_request(self) -> "RouteBindingReconcileRequest":
         if self.schema_version != 1:
             raise ValueError("Unsupported route binding reconcile schema version")
-        self.product = _required_text(self.product, "route binding reconcile requires product")
-        self.context = _required_text(self.context, "route binding reconcile requires context")
-        self.instance = _required_text(self.instance, "route binding reconcile requires instance")
-        self.source_label = _required_text(
+        self.product = require_text(self.product, "route binding reconcile requires product")
+        self.context = require_text(self.context, "route binding reconcile requires context")
+        self.instance = require_text(self.instance, "route binding reconcile requires instance")
+        self.source_label = require_text(
             self.source_label, "route binding reconcile requires source_label"
         )
-        self.evaluated_at = _required_text(
+        self.evaluated_at = require_text(
             self.evaluated_at, "route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
         return self
+
+
+class RouteBindingSourceChanged(ValueError):
+    """An exact reviewed source row was removed or changed before its atomic write."""
+
+
+class RouteBindingReviewSources(BaseModel):
+    """Private exact source snapshots for the browser's commit guard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_target: ProviderTargetRecord
+    dokploy_target: DokployTargetRecord
+    dokploy_target_id: DokployTargetIdRecord
+    edge_endpoint: EdgeEndpointRecord
+    ingress_audit: IngressRouteAuditRecord
 
 
 class RouteBindingReconcilePlan(BaseModel):
@@ -138,6 +161,9 @@ class RouteBindingReconcilePlan(BaseModel):
     status: Literal["ready", "unchanged", "blocked", "conflict"]
     operation: Literal["create", "refresh", "none"] = "none"
     findings: tuple[RouteBindingReconcileFinding, ...] = ()
+    review_target_id: str = Field(default="", exclude=True)
+    review_sources: RouteBindingReviewSources | None = Field(default=None, exclude=True)
+    native_review_sources: TestingRouteRefreshSources | None = Field(default=None, exclude=True)
     current_record_sha256: str = ""
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
@@ -186,6 +212,18 @@ def plan_route_binding_reconcile(
             current_record_sha256=current_record_sha256,
         )
 
+    if current_record is not None and is_native_testing_binding(current_record):
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code=NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
+                    detail="The Odoo testing route refresh controller owns this published binding; run that controller to observe and renew its route.",
+                ),
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+
     candidate = build_route_binding_candidate(
         record_store=record_store,
         request=request,
@@ -195,12 +233,15 @@ def plan_route_binding_reconcile(
     if candidate.record is None:
         return candidate
     record = candidate.record
+    review_target_id = candidate.review_target_id
     candidate_record_sha256 = route_binding_record_sha256(record)
     if current_record is None:
         return RouteBindingReconcilePlan(
             status="ready",
             operation="create",
             candidate_record_sha256=candidate_record_sha256,
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             record=record,
         )
     external_handoff = _is_relinquished_external_operator_binding(current_record)
@@ -215,6 +256,8 @@ def plan_route_binding_reconcile(
     if external_handoff:
         return RouteBindingReconcilePlan(
             status="ready",
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             operation="refresh",
             findings=(
                 RouteBindingReconcileFinding(
@@ -251,6 +294,8 @@ def plan_route_binding_reconcile(
     ):
         return RouteBindingReconcilePlan(
             status="ready",
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             operation="refresh",
             current_record_sha256=current_record_sha256,
             candidate_record_sha256=candidate_record_sha256,
@@ -259,6 +304,8 @@ def plan_route_binding_reconcile(
         )
     return RouteBindingReconcilePlan(
         status="unchanged",
+        review_target_id=review_target_id,
+        review_sources=candidate.review_sources,
         current_record_sha256=current_record_sha256,
         candidate_record_sha256=current_record_sha256,
         current_record=current_record,
@@ -486,6 +533,14 @@ def build_route_binding_candidate(
         current_record=current_record,
         current_record_sha256=current_record_sha256,
         candidate_record_sha256=route_binding_record_sha256(record),
+        review_target_id=provider_target.target_id,
+        review_sources=RouteBindingReviewSources(
+            provider_target=provider_target,
+            dokploy_target=dokploy_target,
+            dokploy_target_id=dokploy_target_id,
+            edge_endpoint=edge_endpoint,
+            ingress_audit=audit_record,
+        ),
     )
 
 
@@ -889,10 +944,3 @@ def _normalized_domains(
         if domain not in domains:
             domains.append(domain)
     return tuple(domains), None
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

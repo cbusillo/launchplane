@@ -6,9 +6,11 @@ import re
 
 from control_plane.dokploy import api, source
 
+REHEARSAL_PROJECT_DESCRIPTION = "Isolated Odoo rehearsal"
+
 
 class IsolatedPlacementObservationRequired(ValueError):
-    """A dispatched create lacks its identity; observe the original operation."""
+    """Placement is uncertain; preserve its original observation and custody."""
 
 
 def create_isolated_placement(
@@ -88,12 +90,71 @@ def create_isolated_placement(
             api.dokploy_request(host=host, token=token, path=path, method="POST", payload=payload())
         )
         identifier = (response or {}).get(response_key)
+        nested = (response or {}).get(response_key.removesuffix("Id"))
+        if isinstance(nested, dict):
+            nested_identifier = nested.get(response_key)
+            if identifier is not None and identifier != nested_identifier:
+                raise IsolatedPlacementObservationRequired("Creation identities disagree.")
+            identifier = nested_identifier
         if not isinstance(identifier, str) or not identifier.strip():
             raise IsolatedPlacementObservationRequired(
                 "Isolated creation is uncertain; use original-key observation."
             )
         record_identity(field, identifier)
         identities[field] = identifier
+
+
+def observe_empty_isolated_project(root: Path, namespace: str) -> str:
+    """Qualify only the empty project left at the original project-create phase.
+
+    This is observation, not adoption. Its caller must prove the original
+    operation checkpoint and take the execution lease before recording custody.
+    No absent, ambiguous, populated or later-phase placement is retry-safe.
+    """
+    if not re.fullmatch(r"lp-rehearsal-[a-f0-9]{32}", namespace):
+        raise ValueError("Original rehearsal namespace required.")
+    host, token = source.read_dokploy_config(control_plane_root=root)
+    projects = [
+        project
+        for project in api.fetch_dokploy_projects(host=host, token=token)
+        if project.get("name") == namespace
+    ]
+    if len(projects) != 1:
+        raise ValueError("Original project is absent or ambiguous.")
+    project = projects[0]
+    identifier = project.get("projectId")
+    environments = project.get("environments")
+    if (
+        not isinstance(identifier, str)
+        or not identifier.strip()
+        or project.get("description") != REHEARSAL_PROJECT_DESCRIPTION
+        or not isinstance(environments, list)
+        or len(environments) != 1
+    ):
+        raise ValueError("Original project custody is unverified.")
+    environment = environments[0]
+    if (
+        not isinstance(environment, dict)
+        or environment.get("name") != "production"
+        or environment.get("isDefault") is not True
+        or not isinstance(environment.get("environmentId"), str)
+        or not environment["environmentId"]
+        or any(
+            environment.get(key) != []
+            for key in (
+                "applications",
+                "postgres",
+                "mysql",
+                "mariadb",
+                "mongo",
+                "redis",
+                "libsql",
+            )
+        )
+        or [environment[key] for key in ("compose", "composes") if key in environment] != [[]]
+    ):
+        raise ValueError("Original project is not provably empty.")
+    return identifier
 
 
 def created_placement(root: Path, namespace: str) -> tuple[str, str, str]:
@@ -106,33 +167,39 @@ def created_placement(root: Path, namespace: str) -> tuple[str, str, str]:
     if not matches:
         return "", "", ""
     if len(matches) != 1 or not matches[0].get("projectId"):
-        raise ValueError("Fresh project inventory is ambiguous.")
+        raise IsolatedPlacementObservationRequired("Fresh project inventory is ambiguous.")
     project = matches[0]
     environments = project.get("environments")
     if not isinstance(environments, list):
-        raise ValueError("Fresh project placement is not empty.")
+        raise IsolatedPlacementObservationRequired("Fresh project placement is not empty.")
     matching = []
     for candidate in environments:
         if not isinstance(candidate, dict):
-            raise ValueError("Fresh environment inventory is malformed.")
+            raise IsolatedPlacementObservationRequired("Fresh environment inventory is malformed.")
         for key in ("applications", "postgres", "mysql", "mariadb", "mongo", "redis"):
             if candidate.get(key):
-                raise ValueError("Fresh placement contains another resource.")
+                raise IsolatedPlacementObservationRequired(
+                    "Fresh placement contains another resource."
+                )
         if candidate.get("name") == namespace:
             matching.append(candidate)
         elif any(candidate.get(key) not in (None, []) for key in ("compose", "composes")):
-            raise ValueError("Fresh project contains another compose.")
+            raise IsolatedPlacementObservationRequired("Fresh project contains another compose.")
     if not matching:
         return str(project["projectId"]), "", ""
     if len(matching) != 1 or not matching[0].get("environmentId"):
-        raise ValueError("Fresh environment inventory is ambiguous.")
+        raise IsolatedPlacementObservationRequired("Fresh environment inventory is ambiguous.")
     environment = matching[0]
     wrappers = [environment[key] for key in ("compose", "composes") if key in environment]
     if len(wrappers) != 1:
-        raise ValueError("Fresh compose inventory is incomplete or ambiguous.")
+        raise IsolatedPlacementObservationRequired(
+            "Fresh compose inventory is incomplete or ambiguous."
+        )
     composes = wrappers[0]
     if not isinstance(composes, list) or len(composes) > 1:
-        raise ValueError("Fresh compose inventory is incomplete or ambiguous.")
+        raise IsolatedPlacementObservationRequired(
+            "Fresh compose inventory is incomplete or ambiguous."
+        )
     compose_id = ""
     if composes:
         compose = composes[0]
@@ -141,6 +208,8 @@ def created_placement(root: Path, namespace: str) -> tuple[str, str, str]:
             or compose.get("name") != namespace
             or not compose.get("composeId")
         ):
-            raise ValueError("Fresh compose inventory has another identity.")
+            raise IsolatedPlacementObservationRequired(
+                "Fresh compose inventory has another identity."
+            )
         compose_id = str(compose["composeId"])
     return str(project["projectId"]), str(environment["environmentId"]), compose_id

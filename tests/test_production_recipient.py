@@ -23,6 +23,7 @@ from control_plane.production_recipient import (
     custody,
     plan,
     qualified_render,
+    read_provider_compose,
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
@@ -34,6 +35,14 @@ class ProductionRecipientTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -261,6 +270,27 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.provider["old-recipient"]["env"], "OLD_VALUE=preserve")
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_operation()
+            self.assertEqual(self.effects, [])
+            self.assertIsNone(custody(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(
+            self.capacity_read.call_args.kwargs["server_id"], self.body.destination_server_id
+        )
+
     def test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete(self) -> None:
         first = self.run_operation()
         self.assertEqual(first.response_status_code, 202, first)
@@ -273,6 +303,40 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertTrue(saved.qualified_at)
         output = json.dumps(plan(saved))
         self.assertNotIn(self.values["DB_PASSWORD"], output)
+        self.assert_old_preserved()
+
+    def test_unencodable_input_retains_prior_fences_without_configure_checkpoint(self) -> None:
+        from control_plane.dokploy import api
+
+        self.values["APP_SETTING"] = "fixture\x00value"
+        effects: list[str] = []
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def record_checkpoint(**kwargs: Any) -> Any:
+            effects.append(kwargs["effect_phase"])
+            return checkpoint(**kwargs)
+
+        with (
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=record_checkpoint
+            ),
+            patch.object(
+                api, "serialize_dokploy_env_text", wraps=api.serialize_dokploy_env_text
+            ) as render,
+        ):
+            result = self.run_operation()
+        self.assertEqual(result.response_status_code, 409)
+        self.assertTrue(
+            any(
+                call.args[0].get("APP_SETTING") == "fixture\x00value"
+                for call in render.call_args_list
+            )
+        )
+        self.assertNotIn("configure_recipient", effects)
+        self.assertTrue(effects)
+        self.assertIn("/api/compose.create", self.effects)
+        self.assertNotIn("/api/compose.update", self.effects)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
         self.assert_old_preserved()
 
     def test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch(self) -> None:
@@ -606,3 +670,28 @@ class ProductionRecipientTests(unittest.TestCase):
         document["services"]["web"]["environment"]["DB_HOST"] = "database"
         document["services"]["web"]["environment"]["DATABASE_URL"] = "mysql://database:3306/example"
         qualified_render(record.model_copy(update={"compose_source": json.dumps(document)}), values)
+
+
+class ProviderComposeReaderTests(unittest.TestCase):
+    def test_json_primitives_keep_their_source_semantics(self) -> None:
+        document = {
+            "services": {
+                "web": {
+                    "image": "example/site",
+                    "command": ["serve", "--title=Shipping \U0001f680"],
+                    "environment": {
+                        "DISPLAY_NAME": "Shipping \U0001f680",
+                        "RATE": 1e-7,
+                        "LARGE": 1e20,
+                        "COUNT": 3,
+                        "EMPTY": None,
+                        "ON_WORD": "on",
+                        "HEX_LIKE": "0x10",
+                    },
+                    "init": True,
+                    "read_only": False,
+                }
+            },
+            "volumes": {},
+        }
+        self.assertEqual(read_provider_compose(json.dumps(document)), document)

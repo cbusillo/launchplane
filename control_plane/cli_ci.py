@@ -44,8 +44,14 @@ LOCAL_RUN_RECORD_TYPE = "unittest_local_shard_run"
 LOCAL_PROCESS_POLL_SECONDS = 0.05
 LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
 POSTGRES_INTEGRATION_MODULES = (
+    "tests.test_testing_rebuild_settlement.TestingRebuildSettlementPostgresTests",
+    "tests.test_public_host_schema_compatibility",
+    "tests.test_generic_web_execution_postgres",
+    "tests.test_generic_web_testing_abandonment_postgres",
+    "tests.test_disposable_observation_clear_postgres",
     "tests.test_postgres_integration",
     "tests.test_testing_private_ingress_postgres",
+    "tests.test_testing_override_sanitization_postgres",
     "tests.test_solo_administration_confirmation_postgres",
     "tests.test_merge_train_historical_disposition_postgres",
     "tests.test_merge_train_stall_monitor.StallMonitorPostgresTests",
@@ -85,8 +91,19 @@ def ci() -> None:
 @click.option("--verbosity", type=int, default=2, show_default=True)
 @click.option("--shard-count", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--shard-index", type=int, default=0, show_default=True)
+@click.option(
+    "--warn-after-seconds",
+    type=click.FloatRange(min=0, min_open=True),
+    default=900.0,
+    show_default=True,
+    help="Warn while the test subprocess is still running; never stop or retry it.",
+)
 def run_postgres_integration_tests(
-    database_url: str, verbosity: int, shard_count: int, shard_index: int
+    database_url: str,
+    verbosity: int,
+    shard_count: int,
+    shard_index: int,
+    warn_after_seconds: float,
 ) -> None:
     """Run real-PostgreSQL schema and concurrency integration tests."""
     normalized_database_url = database_url.strip()
@@ -97,12 +114,14 @@ def run_postgres_integration_tests(
         )
     environment = os.environ.copy()
     environment["LAUNCHPLANE_TEST_POSTGRES_URL"] = normalized_database_url
+    discovery_started_at = time.monotonic()
     try:
         targets = postgres_integration_shard_targets(
             shard_count=shard_count, shard_index=shard_index
         )
     except UnittestShardingError as error:
         raise click.ClickException(str(error)) from error
+    discovery_seconds = time.monotonic() - discovery_started_at
     click.echo(
         json.dumps(
             {"shard_count": shard_count, "shard_index": shard_index, "tests": list(targets)},
@@ -114,23 +133,35 @@ def run_postgres_integration_tests(
         "-m",
         "unittest",
         "-v" if verbosity > 1 else "",
+        "--durations=0",
         *(POSTGRES_INTEGRATION_MODULES if shard_count == 1 else targets),
     ]
     command = [argument for argument in command if argument]
     started_at = time.monotonic()
-    result = subprocess.run(command, cwd=Path.cwd(), env=environment, check=False)
+    with subprocess.Popen(command, cwd=Path.cwd(), env=environment) as process:
+        try:
+            returncode = process.wait(timeout=warn_after_seconds)
+        except subprocess.TimeoutExpired:
+            click.echo(
+                "::warning title=PostgreSQL shard time budget exceeded::"
+                f"Shard {shard_index} is still running after {warn_after_seconds:g}s. "
+                "Preserve headroom for cleanup before the job deadline. "
+                "Tests continue with their original result."
+            )
+            returncode = process.wait()
     click.echo(
         json.dumps(
             {
                 "shard_index": shard_index,
+                "discovery_seconds": round(discovery_seconds, 3),
                 "seconds": round(time.monotonic() - started_at, 3),
                 "test_count": len(targets),
-                "returncode": result.returncode,
+                "returncode": returncode,
             },
             sort_keys=True,
         )
     )
-    if result.returncode != 0:
+    if returncode != 0:
         raise click.ClickException("PostgreSQL integration tests failed")
 
 

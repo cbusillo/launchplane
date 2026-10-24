@@ -4,6 +4,7 @@ import unittest
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -22,11 +23,92 @@ from tests.test_http_app_product import (
     _product_health_monitoring_profile,
 )
 from tests.support.http import request
-from tests.support.auth import _StubVerifier
+from tests.support.auth import _StubVerifier, scoped_agent_test
 from tests.support.stores import _sqlite_database_url
 
 
 class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_agents_apply_monitoring_without_per_action_grants(self) -> None:
+        for transport in ("local_operator", "terminal_agent"):
+            for instance in ("testing", "prod"):
+                for kind in ("public_http", "private_http"):
+                    with (
+                        self.subTest(transport=transport, instance=instance, kind=kind),
+                        TemporaryDirectory() as directory,
+                    ):
+                        store = PostgresRecordStore(
+                            database_url=_sqlite_database_url(Path(directory) / "db")
+                        )
+                        self.addCleanup(store.close)
+                        store.ensure_schema()
+                        profile_data = _product_health_monitoring_profile().model_dump(mode="json")
+                        profile_data["production_use"] = "live"
+                        profile_data["lanes"][0]["instance"] = instance
+                        profile = LaunchplaneProductProfileRecord.model_validate(profile_data)
+                        store.write_product_profile_record(profile)
+                        endpoint = PrivateHealthEndpointRecord(
+                            endpoint_key="runtime-health",
+                            product=profile.product,
+                            context=profile.lanes[0].context,
+                            instance=instance,
+                            url="https://runtime.internal/health",
+                            updated_at=profile.updated_at,
+                        )
+                        store.write_private_health_endpoint_record(endpoint)
+                        app = create_launchplane_fastapi_app(
+                            verifier=_RejectingVerifier(),
+                            bearer_identity_config=BearerIdentityConfig.model_validate(
+                                {
+                                    f"{transport}_token": "fixture-token",
+                                    f"{transport}_subject": "fixture-agent",
+                                    f"{transport}_token_label": "fixture-label",
+                                }
+                            ),
+                            authz_policy=LaunchplaneAuthzPolicy(schema_version=3),
+                            record_store_factory=lambda: store,
+                        )
+                        payload = {
+                            **_product_health_monitoring_payload(),
+                            "instance": instance,
+                            "check_name": "runtime-health",
+                            "check_kind": kind,
+                            "monitoring_intent": "private" if kind == "private_http" else "public",
+                            "private_endpoint_key": endpoint.endpoint_key
+                            if kind == "private_http"
+                            else "",
+                        }
+                        headers = {"Authorization": "Bearer fixture-token"}
+                        route = "/v1/product-profiles/health-monitoring/apply"
+                        plan = await request(app, "POST", route, payload=payload, headers=headers)
+                        self.assertEqual(plan.status_code, 202, plan.text)
+                        applied = {**payload, "mode": "apply"}
+                        applied["reviewed_plan_sha256"] = plan.json()["result"]["plan_sha256"]
+                        headers["Idempotency-Key"] = "monitoring-change"
+                        response = await request(
+                            app, "POST", route, payload=applied, headers=headers
+                        )
+                        self.assertEqual(response.status_code, 202, response.text)
+                        self.assertTrue(response.json()["result"]["applied"])
+                        saved = store.read_product_profile_record(profile.product)
+                        check = next(
+                            check
+                            for check in saved.lanes[0].health_monitoring.checks
+                            if check.name == payload["check_name"]
+                        )
+                        self.assertTrue(check.enabled)
+                        self.assertTrue(check.require_runtime_identity)
+                        self.assertEqual(check.kind, kind)
+                        self.assertEqual(saved.production_use, profile.production_use)
+                        self.assertEqual(saved.lanes[0].base_url, profile.lanes[0].base_url)
+                        self.assertEqual(store.list_runtime_environment_records(), ())
+                        self.assertEqual(
+                            store.read_private_health_endpoint_record(endpoint.endpoint_key),
+                            endpoint,
+                        )
+                        replay = await request(app, "POST", route, payload=applied, headers=headers)
+                        self.assertEqual(replay.status_code, 202, replay.text)
+                        self.assertTrue(replay.json()["replayed"])
+
     async def test_workflow_plan_apply_and_replay_keep_browser_evidence_out_of_result(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
@@ -90,7 +172,8 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(response.json()["replayed"])
             store.close()
 
-    async def test_terminal_agent_cannot_use_monitoring_even_with_broad_policy(self) -> None:
+    @scoped_agent_test
+    async def test_scoped_terminal_agent_cannot_use_monitoring_even_with_broad_policy(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             bearer_identity_config=BearerIdentityConfig(

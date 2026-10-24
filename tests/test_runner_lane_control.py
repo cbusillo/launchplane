@@ -262,7 +262,6 @@ class RunnerLaneControlPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-control-plan",
                     "--action",
                     "restart",
@@ -307,7 +306,6 @@ class RunnerLaneControlPlanCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-control-plan",
                     "--action",
                     "restart",

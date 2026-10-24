@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
+    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -153,6 +154,98 @@ class _StoreFixture:
 
 
 class DurableProviderOperationRunnerTests(unittest.TestCase):
+    def test_atomic_admission_refusal_preserves_cause_and_releases_target_without_effects(
+        self,
+    ) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            cause = GenericWebPromotionSourceRefused("Testing lost qualification before dispatch.")
+            current_source = True
+            atomic_checkpoint_entered = False
+            dispatched: list[str] = []
+            refused: list[LaunchplaneIdempotencyRecord] = []
+            original_lock = fixture.store._lock_product_authority_bundle_write
+
+            def require_source() -> None:
+                if not current_source:
+                    raise cause
+
+            def revoke_source_in_atomic_checkpoint(session: object) -> None:
+                nonlocal current_source
+                original_lock(session)
+                if atomic_checkpoint_entered:
+                    current_source = False
+
+            class AdmissionAdapter(_FakeAdapter):
+                def apply(
+                    self, provider_operation_key: str, lease: ProviderOperationLease
+                ) -> ProviderMutationOutcome:
+                    nonlocal atomic_checkpoint_entered
+                    assert isinstance(lease, ProviderEvidenceLease)
+                    try:
+                        require_source()
+                        with fixture.store.provider_evidence_guard(
+                            lease.evidence_reservation,
+                            effect_admission_checkpoint=require_source,
+                        ):
+                            atomic_checkpoint_entered = True
+                            lease.checkpoint_effect("test_effect")
+                            dispatched.append(provider_operation_key)
+                    except GenericWebPromotionSourceRefused as error:
+                        refused.append(fixture.stored())
+                        raise ProviderMutationRejectedError(error) from error
+                    return ProviderMutationOutcome(202)
+
+            with patch.object(
+                fixture.store,
+                "_lock_product_authority_bundle_write",
+                side_effect=revoke_source_in_atomic_checkpoint,
+            ):
+                with self.assertRaises(GenericWebPromotionSourceRefused) as raised:
+                    fixture.run(AdmissionAdapter())
+
+            self.assertIs(raised.exception, cause)
+            self.assertFalse(current_source)
+            self.assertEqual(dispatched, [])
+            self.assertFalse(refused[0].provider_effect_started_at)
+            self.assertFalse(refused[0].provider_effect_phase)
+            self.assertIsNone(fixture.maybe_stored())
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="newer-decision").status, "completed"
+            )
+
+    def test_checkpoint_storage_failure_preserves_target_fence_before_dispatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            dispatched: list[str] = []
+
+            class CheckpointAdapter(_FakeAdapter):
+                def apply(
+                    self, provider_operation_key: str, lease: ProviderOperationLease
+                ) -> ProviderMutationOutcome:
+                    lease.checkpoint_effect("test_effect")
+                    dispatched.append(provider_operation_key)
+                    return ProviderMutationOutcome(202)
+
+            with patch.object(
+                fixture.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=OSError("Checkpoint storage is unavailable."),
+            ):
+                outcome = fixture.run(CheckpointAdapter())
+
+            self.assertEqual(outcome.status, "reconcile_required")
+            self.assertEqual(dispatched, [])
+            stored = fixture.stored()
+            self.assertEqual(stored.state, "reconcile_required")
+            self.assertFalse(stored.provider_effect_started_at)
+            self.assertFalse(stored.provider_effect_phase)
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="newer-decision").status, "target_busy"
+            )
+
     def test_fresh_acquire_applies_once_and_completes(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)
@@ -966,6 +1059,43 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(stored.state, "reconcile_required")
             self.assertEqual(stored.provider_effect_phase, "test_effect")
 
+    def test_qualified_continuation_preserves_original_effect_on_local_rejection(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            with self.assertRaises(RuntimeError):
+                fixture.run(_FakeAdapter(apply_error=RuntimeError("uncertain effect")))
+            original = fixture.stored()
+            recovery = _FakeAdapter(
+                observation=ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                ),
+                apply_error=ProviderMutationRejectedError(ValueError("local refusal")),
+            )
+            result = fixture.run(recovery)
+            self.assertEqual(result.status, "reconcile_required")
+            retained = fixture.stored()
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertGreater(retained.attempt, original.attempt)
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="replacement").status, "target_busy"
+            )
+
+    def test_default_absent_retry_releases_a_locally_rejected_new_attempt(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            with self.assertRaises(RuntimeError):
+                fixture.run(_FakeAdapter(apply_error=RuntimeError("uncertain effect")))
+            recovery = _FakeAdapter(
+                observation=ProviderObservation("absent", retry_safe=True),
+                apply_error=ProviderMutationRejectedError(ValueError("local refusal")),
+            )
+            with self.assertRaises(ValueError):
+                fixture.run(recovery)
+            self.assertIsNone(fixture.maybe_stored())
+
     def test_non_durable_outcome_after_checkpoint_requires_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)
@@ -1004,6 +1134,34 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
 
 
 class MutationReservationAdoptionStorageTests(unittest.TestCase):
+    def test_profile_evidence_adopts_stored_history_and_refuses_authority_drift(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import product_profile_payload
+        from tests.support.stored_profiles import persist_historical_preview_transport
+
+        for drift in (False, True):
+            with self.subTest(drift=drift), TemporaryDirectory() as directory:
+                store, reservation = self._reconcile_required_store(directory)
+                self.addCleanup(store.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+                store.write_product_profile_record(profile)
+                persist_historical_preview_transport(
+                    store, profile.product, data_transport_mode="bootstrap", seed_command="old-seed"
+                )
+                expected = store.read_product_profile_record(profile.product)
+                if drift:
+                    store.write_product_profile_record(
+                        expected.model_copy(update={"display_name": "Changed authority"})
+                    )
+                adoption = store.adopt_reconciled_mutation(
+                    reservation=reservation,
+                    response_status_code=202,
+                    response_trace_id="adopting-instance",
+                    response_payload={"status": "accepted"},
+                    expected_binding_evidence=(expected,),
+                )
+                self.assertEqual(adoption.status, "reservation_mismatch" if drift else "adopted")
+
     @staticmethod
     def _reconcile_required_store(
         directory: str,

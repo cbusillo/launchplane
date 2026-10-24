@@ -10,9 +10,11 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
@@ -23,8 +25,8 @@ from control_plane.lane_movement import (
     require_forward_build,
 )
 
-from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -51,7 +53,18 @@ from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
-from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.api import (
+    DokployRequestFailed,
+    DokployScheduleExecutionFailed,
+    is_transient_dokploy_error,
+)
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.memory_capacity import (
+    PreviewMemoryCapacityRefused,
+    preview_memory_failure_details,
+)
+from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE_MESSAGES
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -213,7 +226,11 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_slug,
     serialize_generic_web_preview_operation,
 )
-from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
+from control_plane.workflows.launchplane import (
+    PreviewMutationRecordStore,
+    find_preview_record,
+    launchplane_github_token,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewApplyInputsRequest,
@@ -385,6 +402,8 @@ def resolve_build_provenance_transport(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> BuildProvenanceTransport:
     """Mint the product's read-only build-provenance token from its merge-train App."""
+    if not profile.is_managed_runtime:
+        raise ProductReconcileError("Product has no managed runtime.")
     identity, repository_id = _merge_train_app_identity(
         record_store, profile, purpose="build-provenance"
     )
@@ -509,12 +528,121 @@ def reconcile_testing_target(
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
 ) -> ReconcileOutcome:
     """Deploy the testing lane's desired artifact when it runs anything else."""
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": "testing", "action": "none", "reason": "product_has_no_runtime"}
+        )
     plan, desired = _plan_testing_target(
         record_store=record_store,
         profile=profile,
         repository_id=repository_id,
         transport=transport,
     )
+    if isinstance(desired, VerifiedGenericWebBuild) and plan.get("reason") == "already_deployed":
+        from control_plane.generic_web_testing_inputs import (
+            DELIVERY_RECEIPT_KEY,
+            testing_input_authority,
+        )
+
+        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        delivery_digest = testing_input_authority(record_store, profile, lane)
+        try:
+            target = record_store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+        except FileNotFoundError:
+            target = None
+            try:
+                provider_target = cast(
+                    _TestingLaneAuthorityStore, record_store
+                ).read_provider_target_record(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+            except FileNotFoundError:
+                provider_target = None
+            if (
+                provider_target is not None
+                and provider_target.provider_id == "dokploy"
+                and provider_target.provider_target_type == "application"
+            ):
+                plan.update(action="wait", reason="testing_runtime_unverified")
+                return ReconcileOutcome(plan)
+        if target is not None and target.target_type == "application":
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                deployed = None
+            if (
+                deployed is None
+                or deployed.deploy.status != "pass"
+                or (
+                    delivery_digest
+                    and deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+                )
+            ):
+                plan.update(action="deploy", reason="testing_runtime_inputs_missing")
+            else:
+                from control_plane.dokploy.application_runtime import (
+                    application_runtime_drift_fingerprint,
+                    application_runtime_matches,
+                )
+                from control_plane.contracts.deploy_reference import provider_image_reference
+                from control_plane.workflows.generic_web_deploy_provider import (
+                    GenericWebTestingApplicationRuntimeProvider,
+                )
+
+                matches, drift = False, ""
+                if control_plane_root is not None:
+                    provider = (
+                        default_generic_web_deploy_provider(
+                            record_store=record_store, control_plane_root=control_plane_root
+                        )
+                        if testing_hooks.generic_web_deploy_provider is None
+                        else testing_hooks.generic_web_deploy_provider()
+                    )
+                    if isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+                        try:
+                            binding = cast(
+                                _TestingLaneAuthorityStore, record_store
+                            ).read_dokploy_target_id_record(
+                                context_name=lane.context, instance_name=lane.instance
+                            )
+                            runtime = provider.observe_testing_application_runtime(
+                                control_plane_root=control_plane_root,
+                                target_id=binding.target_id,
+                            )
+                            testing_envelope = _generic_web_testing_deploy_request(profile, desired)
+                            provider_reference = provider_image_reference(
+                                artifact_id=testing_envelope.deploy.artifact_id,
+                                deploy_reference=testing_envelope.deploy.deploy_reference,
+                            )
+                            if runtime.application_id != binding.target_id:
+                                raise ValueError("Runtime observation belongs to another target.")
+                            matches = application_runtime_matches(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                            drift = application_runtime_drift_fingerprint(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                        except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+                            matches, drift = False, ""
+                if not matches:
+                    if not drift:
+                        plan.update(action="wait", reason="testing_runtime_unverified")
+                        return ReconcileOutcome(plan)
+                    plan.update(
+                        action="deploy",
+                        reason="testing_runtime_drift",
+                        testing_runtime_drift_sha256=drift,
+                    )
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -577,7 +705,11 @@ def reconcile_testing_target(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
-    from control_plane.odoo_testing_restore import read_current_testing_generation
+    from control_plane.odoo_testing_restore import (
+        fresh_testing_mode_refusal,
+        generation_binding,
+        read_current_testing_generation,
+    )
 
     try:
         generation = read_current_testing_generation(
@@ -590,19 +722,29 @@ def reconcile_testing_target(
     except (ValueError, FileNotFoundError, click.ClickException):
         plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
         return ReconcileOutcome(plan)
-    if generation is not None and not generation.reconcile_requested_at:
-        plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
+    fresh_generation = generation is not None and not generation.completed_at
+    data_source_mode: Literal["existing", "upstream_restore"] = (
+        "upstream_restore" if fresh_generation else "existing"
+    )
+    if refusal := fresh_testing_mode_refusal(generation, data_source_mode):
+        plan.update(action="wait", held=True, reason=refusal[0])
         return ReconcileOutcome(plan)
+    generation_sha256 = generation_binding(generation) if fresh_generation and generation else ""
+    rearmed_after = testing_retry_after_operation(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        artifact_id=manifest.artifact_id,
+        generation_binding_sha256=generation_sha256,
+    )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
             product=profile.product,
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
-            allow_empty_data=True,
-            data_source_mode="upstream_restore"
-            if generation and not generation.completed_at
-            else "existing",
+            allow_empty_data=fresh_generation or not bool(rearmed_after),
+            data_source_mode=data_source_mode,
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
@@ -628,7 +770,18 @@ def reconcile_testing_target(
             f"{manifest.artifact_id}"
         ),
         idempotency_scope=idempotency_scope,
-        generation_prepared_at=generation.prepared_at if generation is not None else "",
+        generation_budget_started_at=(generation.completed_at or generation.prepared_at)
+        if generation is not None
+        else "",
+        rearmed_after_operation_id=rearmed_after,
+        history_after_operation_id=testing_retry_after_operation(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=manifest.artifact_id,
+            require_current_binding=False,
+            generation_binding_sha256=generation_sha256,
+        ),
     )
     if attempt.last_failed is not None:
         # The operation's own status read needs the grant that starts a deploy;
@@ -678,8 +831,8 @@ def reconcile_testing_target(
             plan,
             error=(
                 f"The testing deploy of {manifest.artifact_id} failed "
-                f"{attempt.failed_attempts} times; Launchplane stops retrying it until a "
-                f"newer build. Last attempt {attempt.last_failed_operation_id}: "
+                f"{attempt.failed_attempts} times; use the reviewed testing retry control "
+                f"or a newer build. Last attempt {attempt.last_failed_operation_id}: "
                 f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
@@ -716,6 +869,17 @@ def reconcile_testing_target(
         queued_operation_status=str(operation.get("status") or ""),
     )
     return ReconcileOutcome(plan)
+
+
+def _generic_web_testing_deploy_request(
+    profile: LaunchplaneProductProfileRecord, desired: VerifiedGenericWebBuild
+) -> GenericWebDeployEnvelope:
+    return event_testing_deploy_request(
+        product=profile.product,
+        image_reference=desired.image_reference,
+        source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
+    )
 
 
 def _deploy_generic_web_testing(
@@ -762,12 +926,7 @@ def _deploy_generic_web_testing(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
-    envelope = event_testing_deploy_request(
-        product=profile.product,
-        image_reference=desired.image_reference,
-        source_commit=desired.manifest.source_commit,
-        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
-    )
+    envelope = _generic_web_testing_deploy_request(profile, desired)
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.
@@ -776,18 +935,37 @@ def _deploy_generic_web_testing(
     plan["held"] = False
     try:
         authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        delivery_digest = testing_input_authority(record_store, profile, lane)
         idempotency_key = (
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
+            + (f":inputs-{delivery_digest}" if delivery_digest else "")
+            + (":runtime-repair" if plan.get("testing_runtime_drift_sha256") else "")
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
-        existing = record_store.read_idempotency_record(
-            scope=reconcile_reservation_scope(profile.product),
-            route_path=GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-        )
-        if existing is None and not _scan_deploy_artifact(profile, plan, desired):
+        from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
+
+        def current_attempt(base_key: str) -> tuple[str, LaunchplaneIdempotencyRecord | None]:
+            key = base_key
+            while True:
+                current = record_store.read_idempotency_record(
+                    scope=reconcile_reservation_scope(profile.product),
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                    idempotency_key=key,
+                )
+                if current is None or not testing_attempt_was_settled(current):
+                    return key, current
+                predecessor = hashlib.sha256(current.record_id.encode()).hexdigest()
+                key = f"{base_key}:after-{predecessor}"
+
+        base_idempotency_key = idempotency_key
+        idempotency_key, existing = current_attempt(base_idempotency_key)
+        plan["deploy_idempotency_key"] = idempotency_key
+        artifact_scanned = existing is None
+        if artifact_scanned and not _scan_deploy_artifact(profile, plan, desired):
             return ReconcileOutcome(plan)
         provider = (
             default_generic_web_deploy_provider(
@@ -806,6 +984,7 @@ def _deploy_generic_web_testing(
             deploy_provider=provider,
             retain_event_request=True,
             post_deploy_authority_digest=authority,
+            complete_inert_inventory_refusal=True,
         )
         execution_lock = (
             record_store.testing_replacement_execution_lock(
@@ -830,6 +1009,14 @@ def _deploy_generic_web_testing(
                     hold_recorded_at=hold.recorded_at,
                 )
                 return ReconcileOutcome(plan)
+            idempotency_key, existing = current_attempt(base_idempotency_key)
+            plan["deploy_idempotency_key"] = idempotency_key
+            if (
+                existing is None
+                and not artifact_scanned
+                and not _scan_deploy_artifact(profile, plan, desired)
+            ):
+                return ReconcileOutcome(plan)
             adapter.execution_check = check_execution_lock
             # The target execution lock excludes an old worker through provider effects. A new
             # authority key must not bypass an unresolved old attempt, even after a
@@ -853,6 +1040,32 @@ def _deploy_generic_web_testing(
                         # This exact old recipient remains fenced. The qualified
                         # new recipient has its own executor and reservation key.
                         continue
+                    from control_plane.testing_event_deploy_recovery import (
+                        settle_obsolete_testing_event_deploy,
+                    )
+
+                    settlement = settle_obsolete_testing_event_deploy(
+                        store=record_store,
+                        reservation=reservation,
+                        profile=profile,
+                        context=lane.context,
+                        current_target_key=adapter.target_key(),
+                        desired_fingerprint=request_fingerprint,
+                        provider=provider,
+                        root=control_plane_root,
+                        trace_id=trace_id,
+                        check_execution_lock=check_execution_lock,
+                    )
+                    if settlement is not None:
+                        if settlement.record is not None and testing_attempt_was_settled(
+                            settlement.record
+                        ):
+                            plan["testing_deploy_recovery"] = {
+                                "action": "settle_obsolete_testing_pre_image_attempt",
+                                "reservation_id": reservation.record_id,
+                            }
+                            continue
+                        return _generic_web_testing_outcome(plan=plan, result=settlement)
                     if (
                         reservation.provider_target_key == adapter.target_key()
                         and reservation.request_fingerprint == request_fingerprint
@@ -1078,6 +1291,20 @@ def _generic_web_testing_outcome(
         plan["deferred"] = "lane_busy"
         return ReconcileOutcome(plan, deferred=True)
     if result.status in {"target_busy", "reconcile_required"}:
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        if (
+            result.record is not None
+            and result.record.provider_effect_phase == TESTING_DISPATCH_REFUSED_PHASE
+        ):
+            return ReconcileOutcome(
+                plan,
+                error=(
+                    "Testing dispatch was refused after image save, before deployment. "
+                    "The original operation stays held until recovery proves current "
+                    "target authority and deployment absence."
+                ),
+            )
         return ReconcileOutcome(
             plan,
             error=(
@@ -1128,13 +1355,80 @@ class _TestingAttempt:
         return self.last_failed.operation_id if self.last_failed is not None else ""
 
 
+def testing_retry_after_operation(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    artifact_id: str,
+    require_current_binding: bool = True,
+    generation_binding_sha256: str = "",
+) -> str:
+    if not isinstance(record_store, PostgresRecordStore):
+        return ""
+    if not require_current_binding:
+        rearm = record_store.read_testing_retry_history(
+            profile.product,
+            artifact_id,
+            context=lane.context,
+            generation_binding_sha256=generation_binding_sha256,
+        )
+        return rearm.after_operation_id if rearm is not None else ""
+    rearm = record_store.read_testing_retry_rearm(
+        profile.product, generation_binding_sha256=generation_binding_sha256
+    )
+    if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
+        return ""
+    if (
+        record_store.read_testing_retry_binding(product=profile.product, context=lane.context)
+        != rearm.lane_binding_sha256
+    ):
+        return ""
+    return rearm.after_operation_id
+
+
+def testing_artifact_attempt(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    artifact_id: str,
+    generation_budget_started_at: str = "",
+    generation_binding_sha256: str = "",
+) -> _TestingAttempt:
+    return _next_testing_attempt(
+        record_store=record_store,
+        testing_runs_desired=lambda: False,
+        base_key=f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:testing:{artifact_id}",
+        idempotency_scope=reconcile_reservation_scope(profile.product),
+        generation_budget_started_at=generation_budget_started_at,
+        rearmed_after_operation_id=testing_retry_after_operation(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=artifact_id,
+            generation_binding_sha256=generation_binding_sha256,
+        ),
+        history_after_operation_id=testing_retry_after_operation(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=artifact_id,
+            require_current_binding=False,
+            generation_binding_sha256=generation_binding_sha256,
+        ),
+    )
+
+
 def _next_testing_attempt(
     *,
     record_store: object,
     testing_runs_desired: Callable[[], bool],
     base_key: str,
     idempotency_scope: str,
-    generation_prepared_at: str = "",
+    generation_budget_started_at: str = "",
+    rearmed_after_operation_id: str = "",
+    history_after_operation_id: str = "",
 ) -> _TestingAttempt:
     """Follow this artifact's earlier attempts to the active one or the next key.
 
@@ -1144,14 +1438,47 @@ def _next_testing_attempt(
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     generation_started = (
         parse_launchplane_mutation_timestamp(
-            generation_prepared_at, field_name="testing generation preparation"
+            generation_budget_started_at, field_name="testing generation phase"
         )
-        if generation_prepared_at
+        if generation_budget_started_at
         else None
     )
-    key = base_key
+    # The prefix was terminal and exhausted when re-arm committed under the lane
+    # lock. Start at its successor so repeated recoveries do not spend the chain
+    # traversal bound on immutable history. Enqueue still checks the entire lane
+    # for active/unknown operations, including any reopened historical attempt.
+    if rearmed_after_operation_id and generation_started is not None:
+        reviewed = operation_store.read_odoo_stable_target_replacement_operation_record(
+            rearmed_after_operation_id
+        )
+        if (
+            parse_launchplane_mutation_timestamp(
+                reviewed.created_at, field_name="testing operation creation"
+            )
+            < generation_started
+        ):
+            rearmed_after_operation_id = ""
+    # A current-phase reviewed reset wins even when an older API did not advance
+    # the independent traversal key. Older-phase receipts cannot move us back.
+    boundary = rearmed_after_operation_id or history_after_operation_id
+    key = f"{base_key}:after-{boundary}" if boundary else base_key
     failed_attempts = 0
     last_failed: OdooStableTargetReplacementOperationRecord | None = None
+    if boundary:
+        prior = operation_store.read_odoo_stable_target_replacement_operation_record(boundary)
+        if prior.status not in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
+            return _TestingAttempt(idempotency_key=key, active=prior)
+        if not rearmed_after_operation_id and (
+            generation_started is None
+            or parse_launchplane_mutation_timestamp(
+                prior.created_at, field_name="testing operation creation"
+            )
+            >= generation_started
+        ):
+            # A stale binding voids the budget reset, not the immutable traversal
+            # checkpoint. A fresh review must still be possible after long history.
+            failed_attempts = TESTING_DEPLOY_MAX_FAILED_ATTEMPTS
+            last_failed = prior
     for _ in range(TESTING_DEPLOY_MAX_ATTEMPT_CHAIN):
         existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
             operation_store=operation_store,
@@ -1178,8 +1505,8 @@ def _next_testing_attempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
         elif existing.status != "superseded" and not is_staff_testing_hold_cancellation(existing):
-            # A qualified independent generation preserves the retained target's
-            # failures, but they cannot spend this recipient's retry budget.
+            # Preparation and copy completion start independent phase budgets.
+            # Earlier terminal failures remain history, without spending it.
             # Follow the original chain, including every unresolved attempt.
             if generation_started is None or (
                 parse_launchplane_mutation_timestamp(
@@ -1452,6 +1779,16 @@ def _plan_testing_target(
     )
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
+        if isinstance(desired, VerifiedGenericWebBuild):
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if deployed.post_deploy_update.status == "pending":
+                    plan.update(action="deploy", reason="testing_qualification_pending")
     else:
         if current_artifact_id and not current_commit:
             plan.update(action="none", reason="current_source_unverified", held=True)
@@ -1515,6 +1852,10 @@ def reconcile_preview_target(
     lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": "preview", "action": "none", "reason": "product_has_no_runtime"}
+        )
     from control_plane.preview_reservation_recovery import (
         classify_preview_reservation,
         held_preview_reservations,
@@ -1710,6 +2051,11 @@ def reconcile_preview_target(
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )
         outcome = _preview_failure(plan, code)
+    if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
+        plan.pop("last_failed_error_code", None)
+        plan.pop("last_failed_error_summary", None)
+        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
+        return ReconcileOutcome(plan)
     if (
         plan["action"] == "destroy"
         and outcome.error
@@ -1726,38 +2072,39 @@ def reconcile_preview_target(
 
 
 def _preview_cleanup_guard(
-    store: ProductReconcileStore, profile: LaunchplaneProductProfileRecord, number: int
+    store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
 ) -> None:
     from control_plane.disposable_lanes import (
         DisposableLaneSafetyUnknown,
         DisposableLaneStore,
-        require_disposable_lane,
+        resolve_disposable_preview,
+        require_lane_target_ownership,
     )
+
+    from control_plane.workflows.preview_resource_destroy import PreviewTargetOwnershipStore
 
     if store.read_product_profile_record(profile.product) != profile:
         raise ProductReconcileError(
             "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
         )
     instance = profile.preview.slug_template.format(number=number)
-    evidence = cast(DisposableLaneStore, store).read_disposable_lane_safety(
-        profile.product, profile.preview.context, instance
-    )
-    for condition, value, required in (
-        ("usage", evidence.usage if evidence else "unknown", "unused"),
-        ("data", evidence.data if evidence else "unknown", "reproducible"),
-    ):
-        if value != required:
-            raise ProductReconcileError(
-                f"Preview cleanup held: {condition} is {value}.",
-                code=f"preview_cleanup_{condition}_{value}",
-            )
     try:
-        require_disposable_lane(
+        resolve_disposable_preview(
             cast(DisposableLaneStore, store),
-            product=profile.product,
+            profile,
+            profile.preview.context,
+            instance,
+        )
+        target_store = cast(PreviewTargetOwnershipStore, store)
+        require_lane_target_ownership(
+            (
+                *target_store.list_dokploy_target_id_records(),
+                *target_store.list_physical_provider_target_records(),
+            ),
             context=profile.preview.context,
             instance=instance,
-            preview_cleanup=True,
         )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
@@ -1995,7 +2342,13 @@ def _run_preview_operation(
                 }
             )
         except Exception as execution_error:
-            if isinstance(execution_error, DokployRequestFailed) and not execution_error.retryable:
+            if (
+                isinstance(execution_error, DokployRequestFailed)
+                or (
+                    isinstance(execution_error, DokployScheduleExecutionFailed)
+                    and execution_error.cause == "trigger_baseline_unavailable"
+                )
+            ) and not is_transient_dokploy_error(execution_error):
                 plan["preview_execution_refused"] = True
             raise
 
@@ -2053,6 +2406,10 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
+        if str(driver_result.get("error_message") or "").startswith(
+            f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
+        ):
+            plan["preview_result_error_code"] = PREVIEW_CLEANUP_SAFETY_UNKNOWN
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"
@@ -2169,6 +2526,11 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        return _preview_failure(plan, error.code)
+    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+        return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
@@ -2178,13 +2540,15 @@ def _run_preview_operation(
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
 
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
     summary = record_failure_summary(code)
+    if code in PREVIEW_MEMORY_FAILURE_MESSAGES:
+        summary += preview_memory_failure_details(plan)
     if code == "preview_config_refused":
         keys = env_key_names(cast(list[object], plan.get("missing_keys", [])))
         plan["missing_keys"] = list(keys)
@@ -2301,8 +2665,12 @@ def _run_generic_web_preview_operation(
                 profile=profile,
             )
             status = str(result.get("destroy_status") or "")
+    except PreviewMemoryCapacityRefused as error:
+        plan.update(error.plan_values())
+        plan["preview_result_status"] = "refused"
+        return _preview_failure(plan, error.code)
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         _LOGGER.warning(
             "Generic-web preview %s of %s refused: %s", operation, profile.product, error
@@ -2434,7 +2802,42 @@ def reconcile_product_request(
         return ReconcileOutcome(
             {"target": request.target_kind, "action": "none", "reason": "product_inactive"}
         )
+    if not profile.is_managed_runtime:
+        return ReconcileOutcome(
+            {"target": request.target_kind, "action": "none", "reason": "product_has_no_runtime"}
+        )
     identity = product_repository_identity(record_store, profile)
+    if request.target_kind == "preview" and (
+        not profile.preview.enabled or not profile.preview.context.strip()
+    ):
+        assert request.pull_request_number is not None
+        lifecycle_previews = record_store.list_preview_records(
+            anchor_repo=_preview_anchor_repo(profile),
+            anchor_pr_number=request.pull_request_number,
+        )
+        if not any(
+            preview.state not in _ENDED_PREVIEW_STATES for preview in lifecycle_previews
+        ) and not _has_preview_reservation(record_store, profile, request.pull_request_number):
+            with _repository_read_transport(profile, control_plane_root) as reader:
+                pull_request = _object(
+                    reader.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls/{request.pull_request_number}"
+                    ),
+                    "pull request",
+                )
+            state = pull_request.get("state")
+            if state not in {"open", "closed"}:
+                raise ProductReconcileError("Pull request state is unavailable.")
+            return ReconcileOutcome(
+                {
+                    "target": "preview",
+                    "action": "none",
+                    "pull_request_number": request.pull_request_number,
+                    "reason": "preview_not_configured"
+                    if state == "open"
+                    else "pull_request_not_open",
+                }
+            )
     transport = transport_factory(record_store, profile)
     if request.target_kind == "testing":
         return reconcile_testing_target(
@@ -2457,6 +2860,26 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+
+
+def _has_preview_reservation(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+) -> bool:
+    from control_plane.preview_reservation_recovery import (
+        held_preview_reservations,
+        original_preview_intent,
+    )
+
+    for reservation in held_preview_reservations(record_store, product=profile.product):
+        try:
+            original = original_preview_intent(reservation, profile=profile, store=record_store)
+        except ValueError:
+            return True
+        if original.issued_plan.plan_request.pr_number == pull_request_number:
+            return True
+    return False
 
 
 def run_product_reconcile_once(
@@ -2515,6 +2938,9 @@ def run_product_reconcile_once(
     if request.target_kind == "preview" and outcome.error:
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
+            *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            *PREVIEW_MEMORY_FAILURE_MESSAGES,
+            "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",
@@ -2691,7 +3117,9 @@ def reconcile_reservation_scope(product: str) -> str:
 def request_product_reconcile_sweep(
     record_store: ProductReconcileStore,
     now: str,
-    transport_factory: TransportFactory = resolve_build_provenance_transport,
+    transport_factory: TransportFactory | None = None,
+    *,
+    control_plane_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Request every mapped product's testing target, live preview and open PR.
 
@@ -2702,13 +3130,14 @@ def request_product_reconcile_sweep(
     inventory_records = record_store.list_repository_inventory_records()
     profiles = record_store.list_product_profile_records()
     for profile in profiles:
-        if not profile.is_active or not _has_repository_identity(
-            profile, inventory_records, profiles
+        if (
+            not profile.is_active
+            or not profile.is_managed_runtime
+            or not _has_repository_identity(profile, inventory_records, profiles)
         ):
             continue
-        if not any(lane.instance == "testing" for lane in profile.lanes):
-            continue
-        targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
+        if any(lane.instance == "testing" for lane in profile.lanes):
+            targets.append(ProductReconcileTarget(product=profile.product, target_kind="testing"))
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
@@ -2726,18 +3155,15 @@ def request_product_reconcile_sweep(
                     pull_request_number=original.issued_plan.plan_request.pr_number,
                 )
             )
-        preview_context = profile.preview.context.strip()
-        if not preview_context:
-            continue
-        for number in _open_pull_requests(record_store, profile, transport_factory):
+        for number in _open_pull_requests(
+            record_store, profile, transport_factory, control_plane_root
+        ):
             targets.append(
                 ProductReconcileTarget(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(
-            context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        )
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
@@ -2800,30 +3226,61 @@ def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
 def _open_pull_requests(
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
-    transport_factory: TransportFactory,
+    transport_factory: TransportFactory | None,
+    control_plane_root: Path | None,
 ) -> tuple[int, ...]:
     """The product's open PRs, drafts included; an unreadable list only skips this product."""
-    if not profile.preview.enabled:
-        return ()
     numbers: list[int] = []
     try:
-        transport = transport_factory(record_store, profile)
-        for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
-            pulls = _list(
-                transport.get_json(
-                    f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+        with (
+            nullcontext(transport_factory(record_store, profile))
+            if transport_factory is not None
+            else _repository_read_transport(profile, control_plane_root)
+        ) as transport:
+            for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
+                pulls = _list(
+                    transport.get_json(
+                        f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+                    )
                 )
-            )
-            numbers.extend(
-                pull["number"]
-                for pull in pulls
-                if isinstance(pull, dict) and isinstance(pull.get("number"), int)
-            )
-            if len(pulls) < 100:
-                break
-    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError) as error:
-        _LOGGER.warning("Sweep could not list %s's open pull requests: %s", profile.product, error)
+                numbers.extend(
+                    pull["number"]
+                    for pull in pulls
+                    if isinstance(pull, dict) and isinstance(pull.get("number"), int)
+                )
+                if len(pulls) < 100:
+                    break
+    except (
+        BuildProvenanceError,
+        ProductReconcileError,
+        click.ClickException,
+        OSError,
+        ValueError,
+    ) as error:
+        _LOGGER.warning(
+            "Sweep could not list %s's open pull requests (%s).",
+            profile.product,
+            type(error).__name__,
+        )
     return tuple(numbers)
+
+
+@contextmanager
+def _repository_read_transport(
+    profile: LaunchplaneProductProfileRecord, control_plane_root: Path | None
+) -> Iterator[BuildProvenanceTransport]:
+    if control_plane_root is None:
+        raise ProductReconcileError("Repository reads require the service control-plane root.")
+    with launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name="",
+        repository=profile.repository,
+        purpose="repository_read",
+        report_failure=True,
+    ) as token:
+        if not token:
+            raise ProductReconcileError("Delivery App repository-read credential is unavailable.")
+        yield GitHubBuildProvenanceTransport(token=token)
 
 
 def _has_repository_identity(

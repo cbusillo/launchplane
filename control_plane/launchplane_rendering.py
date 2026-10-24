@@ -1035,96 +1035,6 @@ def render_launchplane_preview_index_page_html(
         </section>
         """
 
-    def render_enablement_action(action_payload: dict[str, object]) -> str:
-        action_status = str(action_payload.get("status", "none")).strip()
-        action_tone = escape(str(action_payload.get("tone", "neutral")).strip() or "neutral")
-        headline = escape(str(action_payload.get("headline", "No preview action available.")))
-        summary = escape(str(action_payload.get("summary", "")))
-        if action_status == "actionable":
-            recipe = str(action_payload.get("recipe", "")).strip()
-            recipe_id = escape(
-                str(
-                    action_payload.get("recipe_id", "preview-enable-request")
-                    or "preview-enable-request"
-                )
-            )
-            return f"""
-            <div class=\"enablement-inline-action tone-{action_tone}\">
-              <div class=\"enablement-inline-action-head\">
-                <div>
-                  <div class=\"action-command\">request-generation</div>
-                  <h4>{headline}</h4>
-                  <p>{summary}</p>
-                </div>
-                <button class=\"copy-button\" type=\"button\" data-copy-target=\"{recipe_id}\">Copy recipe</button>
-              </div>
-              <details class=\"action-details\">
-                <summary>Show Launchplane request recipe</summary>
-                <pre id=\"{recipe_id}\" class=\"action-pre\">{escape(recipe)}</pre>
-              </details>
-            </div>
-            """
-        if action_status in {
-            "blocked",
-            "manual_review_required",
-            "missing_context",
-            "missing_evidence",
-        }:
-            return f"""
-            <div class=\"enablement-inline-note tone-{action_tone}\">
-              <h4>{headline}</h4>
-              <p>{summary}</p>
-            </div>
-            """
-        return ""
-
-    def render_enablement_row(item: dict[str, object]) -> str:
-        anchor_repo = str(item.get("anchor_repo", "")).strip()
-        anchor_pr_number = int_from_json_value(item.get("anchor_pr_number", 0))
-        anchor_pr_url = escape(str(item.get("anchor_pr_url", "")).strip())
-        state = escape(str(item.get("state", "candidate")).strip() or "candidate")
-        tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
-        request_source = str(item.get("request_source", "none")).strip()
-        source_label = {
-            "launchplane": "Launchplane request",
-            "history": "Earlier request",
-            "none": "Not requested",
-        }.get(request_source, "Launchplane")
-        request_summary = escape(str(item.get("request_summary", "")).strip())
-        status_summary = escape(str(item.get("status_summary", "")).strip())
-        canonical_url = escape(str(item.get("canonical_url", "")).strip())
-        preview_id = escape(str(item.get("preview_id", "")).strip())
-        action_payload = json_object(item.get("action"))
-        detail_href = ""
-        if detail_href_builder is not None and anchor_repo and anchor_pr_number > 0:
-            detail_href = detail_href_builder(context_name, anchor_repo, anchor_pr_number)
-        actions = [f'<a href="{anchor_pr_url}">PR</a>'] if anchor_pr_url else []
-        if detail_href:
-            actions.append(f'<a href="{escape(detail_href)}">Detail</a>')
-        if canonical_url:
-            actions.append(f'<a href="{canonical_url}">Preview</a>')
-        if preview_id:
-            actions.append(f'<span class="enablement-meta"><code>{preview_id}</code></span>')
-        actions_html = "".join(actions)
-        action_html = render_enablement_action(action_payload) if action_payload is not None else ""
-        return f"""
-        <article class=\"enablement-row\">
-          <div class=\"enablement-row-main\">
-            <div class=\"enablement-row-head\">
-              <h3>PR #{anchor_pr_number}</h3>
-              <div class=\"enablement-row-tones\">
-                <span class=\"tone-pill tone-{tone}\">{state}</span>
-                <span class=\"signal-chip\">{escape(source_label)}</span>
-              </div>
-            </div>
-            <p>{request_summary}</p>
-            <p class=\"enablement-status\">{status_summary}</p>
-          </div>
-          <div class=\"enablement-row-actions\">{actions_html}</div>
-          {action_html}
-        </article>
-        """
-
     def render_promotion_evidence_check(check: dict[str, object]) -> str:
         status = str(check.get("status", "pending")).strip().lower() or "pending"
         tone = "good" if status == "pass" else "bad" if status == "fail" else "warn"
@@ -1316,37 +1226,10 @@ def render_launchplane_preview_index_page_html(
             str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant"
         )
         preview_counts = json_object(tenant_payload.get("preview_counts")) or {}
-        preview_candidates = json_object_items(tenant_payload.get("preview_candidates"))
-        preview_enablement_rows = json_object_items(tenant_payload.get("preview_enablement"))
-        preview_enablement_counts = (
-            json_object(tenant_payload.get("preview_enablement_counts")) or {}
-        )
         environments = json_object(tenant_payload.get("environments")) or {}
         promotion_summary = json_object(tenant_payload.get("promotion_summary")) or {}
         promotion_action = json_object(tenant_payload.get("promotion_action")) or {}
         environment_actions = json_object(tenant_payload.get("environment_actions")) or {}
-        preview_enablement_html = ""
-        if preview_enablement_rows:
-            visible_enablement_rows = preview_enablement_rows[:4]
-            remaining_enablement_count = len(preview_enablement_rows) - len(visible_enablement_rows)
-            overflow_note = (
-                f'<p class="enablement-overflow">{remaining_enablement_count} more PRs stay visible in the queue below.</p>'
-                if remaining_enablement_count > 0
-                else ""
-            )
-            preview_enablement_html = f"""
-            <section class=\"tenant-enablement\">
-              <div class=\"tenant-enablement-head\">
-                <div>
-                  <div class=\"section-label\">Preview enablement</div>
-                  <h3>Why each PR does or does not have a preview</h3>
-                </div>
-                <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Launchplane-driven requests, and retained history now stay visible before the deeper queue.</p>
-              </div>
-              <div class=\"enablement-list\">{"".join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
-              {overflow_note}
-            </section>
-            """
         has_environment_evidence = any(
             isinstance(environments.get(instance_name), dict)
             for instance_name in ("testing", "prod")
@@ -1363,17 +1246,19 @@ def render_launchplane_preview_index_page_html(
         promotion_stage_html = render_promotion_action_panel(
             promotion_action, context_name=context_name
         )
+        preview_strip_html = f"""
+            <dl class=\"tenant-preview-strip\">
+              <div><dt>Previews</dt><dd>{preview_counts.get("all", 0)}</dd></div>
+              <div><dt>In flight</dt><dd>{preview_counts.get("in_flight", 0)}</dd></div>
+              <div><dt>Live</dt><dd>{preview_counts.get("live", 0)}</dd></div>
+              <div><dt>Attention</dt><dd>{preview_counts.get("attention", 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_counts.get("retained", 0)}</dd></div>
+            </dl>
+            """
         sparse_preview_html = ""
         if not has_environment_evidence:
             sparse_preview_html = f"""
-            {preview_enablement_html}
-            <dl class=\"tenant-preview-strip\">
-              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
-              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
-              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
-              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
-              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
-            </dl>
+            {preview_strip_html}
             """
         dense_environment_html = ""
         if has_environment_evidence:
@@ -1384,19 +1269,12 @@ def render_launchplane_preview_index_page_html(
             </div>
             {lane_actions_html}
             {promotion_stage_html if show_promotion_stage else ""}
-            <dl class=\"tenant-preview-strip\">
-              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
-              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
-              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
-              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
-              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
-            </dl>
-            {preview_enablement_html}
+            {preview_strip_html}
             """
         tenant_stage_copy = (
-            "Main feeds testing. Tested artifacts promote into prod. Pull requests become opt-in preview environments instead of shared dev branches."
+            "Main feeds testing. Tested artifacts promote into prod. Each open pull request gets its own preview environment instead of a shared dev branch."
             if has_environment_evidence
-            else "Launchplane has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
+            else "Launchplane has preview evidence for this tenant, but it has not recorded current testing or prod lane evidence yet."
         )
         tenant_brief_label = (
             "Promotion path" if has_environment_evidence else "Current Launchplane focus"
@@ -1404,7 +1282,7 @@ def render_launchplane_preview_index_page_html(
         tenant_brief_copy = (
             escape(str(promotion_summary.get("summary", "No promotion evidence recorded yet.")))
             if has_environment_evidence
-            else "Preview request state is available even before Launchplane has current long-lived lane evidence for this tenant."
+            else "Preview state is available even before Launchplane has current long-lived lane evidence for this tenant."
         )
         tenant_stage_html = f"""
         <section class=\"tenant-stage\">
@@ -1425,7 +1303,7 @@ def render_launchplane_preview_index_page_html(
         """
         roster_label = "Preview roster"
         roster_title = "Pull request previews"
-        roster_summary = "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
+        roster_summary = "This tenant page keeps testing, prod, preview, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
 
     body_html = f"""
     <div data-launchplane-overview>
@@ -1887,138 +1765,6 @@ def render_launchplane_preview_index_page_html(
       font-family: var(--serif);
       font-size: 22px;
     }
-    .tenant-enablement {
-      display: grid;
-      gap: 12px;
-      border-top: 1px solid var(--line);
-      padding-top: 16px;
-    }
-    .tenant-enablement-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: end;
-    }
-    .tenant-enablement h3,
-    .enablement-row h3 {
-      margin: 0;
-      font-family: var(--serif);
-      line-height: 1.02;
-    }
-    .tenant-enablement h3 {
-      font-size: 28px;
-    }
-    .tenant-enablement-copy,
-    .enablement-overflow,
-    .enablement-row p,
-    .enablement-meta {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }
-    .enablement-list {
-      display: grid;
-      gap: 12px;
-    }
-    .enablement-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 14px;
-      border: 1px solid var(--line);
-      background: var(--surface);
-      border-radius: 14px;
-      padding: 14px 16px;
-      align-items: center;
-    }
-    .enablement-inline-action,
-    .enablement-inline-note {
-      grid-column: 1 / -1;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px 14px 14px;
-      margin-top: 2px;
-    }
-    .enablement-inline-action {
-      display: grid;
-      gap: 10px;
-    }
-    .enablement-inline-action.tone-good,
-    .enablement-inline-action.tone-warn,
-    .enablement-inline-action.tone-bad,
-    .enablement-inline-action.tone-neutral,
-    .enablement-inline-note.tone-good,
-    .enablement-inline-note.tone-warn,
-    .enablement-inline-note.tone-bad,
-    .enablement-inline-note.tone-neutral {
-      background: var(--surface);
-      color: inherit;
-    }
-    .enablement-inline-action.tone-good,
-    .enablement-inline-note.tone-good { border-left: 3px solid var(--good); }
-    .enablement-inline-action.tone-warn,
-    .enablement-inline-note.tone-warn { border-left: 3px solid var(--warn); }
-    .enablement-inline-action.tone-bad,
-    .enablement-inline-note.tone-bad { border-left: 3px solid var(--bad); }
-    .enablement-inline-action.tone-neutral,
-    .enablement-inline-note.tone-neutral { border-left: 3px solid var(--neutral); }
-    .enablement-inline-action-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: start;
-    }
-    .enablement-inline-action h4,
-    .enablement-inline-note h4 {
-      margin: 0;
-      font-family: var(--serif);
-      font-size: 20px;
-      line-height: 1.08;
-    }
-    .enablement-inline-action p,
-    .enablement-inline-note p {
-      margin: 8px 0 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }
-    .enablement-inline-note.tone-bad h4 {
-      color: var(--bad);
-    }
-    .enablement-row-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: start;
-    }
-    .enablement-row-head h3 {
-      font-size: 24px;
-    }
-    .enablement-row-tones {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      justify-content: end;
-    }
-    .enablement-status {
-      margin-top: 6px;
-      color: var(--text);
-    }
-    .enablement-row-actions {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: end;
-      gap: 12px;
-      align-items: center;
-    }
-    .enablement-row-actions a,
-    .enablement-meta {
-      font-family: var(--mono);
-      font-size: 12px;
-      text-decoration: none;
-      text-underline-offset: 0.18em;
-    }
-    .enablement-row-actions a:hover {
-      text-decoration: underline;
-    }
     .environment-board {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2377,7 +2123,6 @@ def render_launchplane_preview_index_page_html(
       .lane-actions-grid,
       .promotion-stage-grid,
       .promotion-recipes,
-      .enablement-row,
       .environment-board,
       .summary-strip,
       .lane-grid,
@@ -2430,13 +2175,9 @@ def render_launchplane_preview_index_page_html(
       .promotion-check {
         padding: 12px 14px 14px;
       }
-      .tenant-enablement-head,
       .lane-actions-head,
       .promotion-stage-head,
-      .promotion-check-head,
-      .enablement-inline-action-head,
-      .enablement-row-head,
-      .enablement-row-actions {
+      .promotion-check-head {
         display: grid;
         gap: 10px;
       }

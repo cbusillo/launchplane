@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -14,6 +15,11 @@ from control_plane.github_app_webhook import (
     handle_github_app_webhook_request,
 )
 from control_plane.merge_train_events import MergeTrainEventListener, wake_merge_train_for_event
+from control_plane.merge_train_wake import (
+    MAX_MERGE_TRAIN_WAKE_RECEIPTS,
+    MergeTrainEventReceipt,
+    encode_merge_train_hint,
+)
 from tests.test_merge_train_scheduler import _policy_record
 
 
@@ -94,7 +100,7 @@ class MergeTrainEventTests(TestCase):
                         self.store, event, {"repository": {"id": 42}, **payload}
                     )
                 )
-                self.store.notify_merge_train.assert_called_once_with((alpha,))
+                self.store.notify_merge_train.assert_called_once_with((alpha,), receipt=None)
         self.connect.assert_not_called()
 
     def test_completions_no_train_waits_on_do_not_notify(self) -> None:
@@ -172,7 +178,7 @@ class MergeTrainEventTests(TestCase):
                         "check_run": {"pull_requests": [{"number": 8, "base": {"ref": base}}]},
                     },
                 )
-                self.store.notify_merge_train.assert_called_once_with(woken)
+                self.store.notify_merge_train.assert_called_once_with(woken, receipt=None)
 
     def test_unmapped_disabled_or_unrelated_events_do_not_notify(self) -> None:
         payload: dict[str, object] = {
@@ -288,7 +294,7 @@ class MergeTrainEventTests(TestCase):
         pending = self._notifications("alpha", "beta", "alpha")
         listener = MergeTrainEventListener("postgresql://test")
         # The first hint ends the wait; the two queued behind it join the same pass.
-        self.assertEqual(listener.wait(300, Event()), frozenset({"alpha", "beta"}))
+        self.assertEqual(listener.wait(300, Event()).target_keys, frozenset({"alpha", "beta"}))
         connection.execute.assert_called_once()
         self.assertEqual(pending, [])
         connection.notifies.assert_any_call(timeout=0)
@@ -298,10 +304,10 @@ class MergeTrainEventTests(TestCase):
     def test_a_hint_naming_no_train_or_a_due_sweep_wakes_every_train(self) -> None:
         listener = MergeTrainEventListener("postgresql://test")
         self._notifications("alpha", "")
-        self.assertIsNone(listener.wait(300, Event()))
+        self.assertIsNone(listener.wait(300, Event()).target_keys)
         # A due sweep drops waiting hints without blocking: it rereads every train.
         pending = self._notifications("alpha")
-        self.assertIsNone(listener.wait(0, Event()))
+        self.assertIsNone(listener.wait(0, Event()).target_keys)
         self.assertEqual(pending, [])
         self.connect.return_value.notifies.assert_called_with(timeout=0)
 
@@ -309,10 +315,105 @@ class MergeTrainEventTests(TestCase):
         self.connect.side_effect = RuntimeError("database unavailable")
         stop = MagicMock(spec=Event)
         listener = MergeTrainEventListener("postgresql://test")
-        self.assertIsNone(listener.wait(300, stop, monotonic=lambda: 0))
+        wake = listener.wait(300, stop, monotonic=lambda: 0)
+        self.assertIsNone(wake.target_keys)
+        self.assertEqual(wake.reason, "listener_fallback")
         stop.wait.assert_called_once_with(timeout=300)
         self.assertIsNone(listener.connection)
         self.connect.side_effect = None
         self._notifications("alpha")
-        self.assertEqual(listener.wait(300, Event()), frozenset({"alpha"}))
+        self.assertEqual(listener.wait(300, Event()).target_keys, frozenset({"alpha"}))
         self.assertEqual(self.connect.call_count, 2)
+
+    def _receipt(self, trace_id: str) -> MergeTrainEventReceipt:
+        return MergeTrainEventReceipt(
+            delivery_id="same-delivery-may-be-redelivered",
+            request_trace_id=trace_id,
+            received_at="2026-10-19T09:00:00Z",
+            event="check_run",
+            action="completed",
+        )
+
+    def _hint(self, key: str, receipt: MergeTrainEventReceipt) -> str:
+        encoded = encode_merge_train_hint(key, receipt)
+        assert encoded is not None
+        return encoded
+
+    def test_listener_keeps_correlated_redeliveries_and_discards_malformed_metadata(self) -> None:
+        first, second = self._receipt("first-request"), self._receipt("second-request")
+        companion = self._hint("alpha", first)
+        self._notifications(
+            "alpha",
+            companion,
+            companion,
+            companion[:-1],
+            self._hint("alpha", second),
+            "beta",
+        )
+        wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
+        self.assertEqual(wake.target_keys, frozenset({"alpha", "beta"}))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+            (first, second),
+        )
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "beta"), ()
+        )
+        self.assertFalse(wake.receipts_truncated)
+
+    def test_receipt_budget_never_stops_draining_or_erases_a_full_sweep(self) -> None:
+        payloads = ["alpha"]
+        for index in range(MAX_MERGE_TRAIN_WAKE_RECEIPTS + 1):
+            payloads.append(self._hint("alpha", self._receipt(str(index))))
+        payloads.extend(("beta", ""))
+        pending = self._notifications(*payloads)
+        wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
+        self.assertEqual(pending, [])
+        self.assertIsNone(wake.target_keys)
+        self.assertEqual(wake.reason, "empty_hint_sweep")
+        self.assertTrue(wake.receipts_truncated)
+        self.assertEqual(len(wake.receipts), MAX_MERGE_TRAIN_WAKE_RECEIPTS)
+        self.assertEqual(wake.receipts[-1].receipt.request_trace_id, str(index))
+        self.assertNotIn(
+            self._receipt("0"),
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+        )
+
+    def test_due_sweep_retains_observed_receipts_without_repeating_routing_hints(self) -> None:
+        receipt = self._receipt("queued-request")
+        pending = self._notifications("alpha", self._hint("alpha", receipt))
+        wake = MergeTrainEventListener("postgresql://test").wait(0, Event())
+        self.assertEqual(pending, [])
+        self.assertIsNone(wake.target_keys)
+        self.assertEqual(wake.reason, "timer_sweep")
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"), (receipt,)
+        )
+
+    def test_one_notification_binds_routing_and_receipt_without_a_second_read(self) -> None:
+        receipt = self._receipt("single-notification")
+        self._notifications(self._hint("alpha", receipt))
+        wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
+        self.assertEqual(wake.target_keys, frozenset({"alpha"}))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"), (receipt,)
+        )
+
+    def test_invalid_optional_receipt_in_an_envelope_keeps_its_routing_hint(self) -> None:
+        receipt = self._receipt("request")
+        hint = self._hint("alpha", receipt).replace(receipt.received_at, "invalid-time")
+        self._notifications(hint)
+        wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
+        self.assertEqual(wake.target_keys, frozenset({"alpha"}))
+        self.assertEqual(wake.receipts, ())
+
+    def test_unreadable_envelope_falls_back_to_a_sweep_without_a_receipt(self) -> None:
+        self._notifications(self._hint("alpha", self._receipt("request"))[:-1])
+        wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
+        self.assertIsNone(wake.target_keys)
+        self.assertEqual(wake.receipts, ())
+
+    def test_invalid_optional_receipt_has_no_hint(self) -> None:
+        receipt = self._receipt("request")
+        self.assertIsNone(encode_merge_train_hint("alpha", self._receipt("")))
+        self.assertIsNone(encode_merge_train_hint("alpha", replace(receipt, head_sha="\ud800")))

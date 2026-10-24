@@ -68,6 +68,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
 )
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.odoo_runtime_environment import (
     LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
     merge_required_odoo_addons_path,
@@ -111,8 +112,7 @@ from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
-    default_odoo_health_url,
-    is_legacy_derived_odoo_health_url,
+    resolve_odoo_health_url,
     verify_odoo_stable_readiness,
 )
 from control_plane.workflows.runtime_identity_health import (
@@ -891,14 +891,11 @@ def _target_health_url(
     public_hosts: tuple[str, ...] = (),
 ) -> str:
     base_url = _target_origin_base_url(lane=lane, domains=domains, public_hosts=public_hosts)
-    lane_health_url = lane.health_url.strip()
-    if lane_health_url and not is_legacy_derived_odoo_health_url(
-        health_url=lane_health_url,
+    return resolve_odoo_health_url(
         base_url=base_url,
+        lane_health_url=lane.health_url,
         profile_health_path=profile.health_path,
-    ):
-        return lane_health_url
-    return default_odoo_health_url(base_url=base_url)
+    )
 
 
 def _read_odoo_instance_override_record(
@@ -933,10 +930,6 @@ def _record_with_target_replacement_canonical(
             "source_label": "odoo-stable-target-replacement",
         }
     )
-
-
-def _merge_required_odoo_install_modules(raw_modules: str) -> str:
-    return merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1247,7 +1240,7 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
         )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
-    if isinstance(error, OdooFreshTestingIntentRefusedError):
+    if isinstance(error, (OdooFreshTestingIntentRefusedError, ScheduleMaterializationTooLarge)):
         code = error.code
     elif isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
@@ -1675,6 +1668,10 @@ def build_odoo_stable_target_replacement_plan(
             # integration setting kept off this lane); the retirement wins and the key
             # is not delivered. Declared and driver keys still cannot be retired.
             control_plane_live_target_runtime.validate_provider_key_retirement(
+                record_store=record_store,
+                product_name=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
@@ -2404,6 +2401,10 @@ def execute_odoo_stable_target_replacement_apply(
                     tuple(retired_provider_keys ^ set(plan.retired_provider_keys)),
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
+                record_store=record_store,
+                product_name=plan.product,
+                context_name=plan.context,
+                instance_name=plan.instance,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
@@ -2533,7 +2534,9 @@ def execute_odoo_stable_target_replacement_apply(
         if (
             plan.data_source_mode == "existing"
             and control_plane_live_target_runtime.retained_database_password_changed(
-                instance_name=plan.instance, desired_env=application_env, live_env=current_env_map
+                instance_name=plan.instance,
+                desired_env=application_env,
+                live_env=current_env_map,
             )
         ):
             code = deploy_blocked_code("retained_database_credential_changed")
@@ -2573,23 +2576,21 @@ def execute_odoo_stable_target_replacement_apply(
                 "replacement.",
                 tuple(provider_only_keys),
             )
-        # A value the provider env text cannot carry intact, such as a multiline
-        # key, would persist as fragments; refuse it by name before any write.
-        unportable_keys = sorted(
-            key
-            for key, value in runtime_environment_values.items()
-            if dokploy_api.parse_dokploy_env_text(
-                dokploy_api.serialize_dokploy_env_text({key: value})
-            )
-            != {key: value}
-        )
+        # Qualify both provider parsing and Compose's generated .env stage
+        # before allocation, schedule or provider effects.
+        unportable_keys: list[str] = []
+        for key, value in runtime_environment_values.items():
+            try:
+                dokploy_api.serialize_dokploy_env_text({key: value}, target_type="compose")
+            except dokploy_api.DokployEnvironmentEncodingError:
+                unportable_keys.append(key)
         if unportable_keys:
             raise OdooTargetReplacementStageError(
                 deploy_blocked_code("unportable_values"),
                 "Odoo target replacement cannot carry the value of env key(s) "
                 + ", ".join(unportable_keys)
-                + " in the provider env; store them as single-line values.",
-                tuple(unportable_keys),
+                + " in the provider env; use values supported by the provider format.",
+                tuple(sorted(unportable_keys)),
             )
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(
@@ -2726,6 +2727,11 @@ def execute_odoo_stable_target_replacement_apply(
                 compose_id=target_id_record.target_id,
                 domain_host=domain_host,
                 runtime_port=profile.runtime_port,
+                **(
+                    {"certificate_type": generation.certificate_type}
+                    if generation is not None
+                    else {}
+                ),
             )
         raw_domains = dokploy_request(
             host=host,
@@ -2808,13 +2814,19 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
         desired_env_map.update(runtime_identity_env(runtime_identity))
+        prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=prepared_env_text,
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -2849,6 +2861,15 @@ def execute_odoo_stable_target_replacement_apply(
             )
         missing_keys = sorted(
             key for key, value in desired_env_map.items() if refreshed_env_map.get(key, "") != value
+        )
+        missing_keys = sorted(
+            set(missing_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(refreshed_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
+                )
+            )
         )
         if missing_keys:
             raise click.ClickException(
@@ -3036,6 +3057,7 @@ def execute_odoo_stable_target_replacement_apply(
     except (
         OdooTargetReplacementStageError,
         OdooFreshTestingIntentRefusedError,
+        ScheduleMaterializationTooLarge,
         DurableOperationAuthorizationDeniedError,
     ) as error:
         _write_failed_deployment(

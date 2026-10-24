@@ -1,6 +1,5 @@
 """Configuration staging protects production without asserting disposable lane facts."""
 
-import unittest
 from httpx2 import Response
 from unittest.mock import patch
 
@@ -14,15 +13,11 @@ from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
 
 
-class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
+class TestingRuntimeSeparationTests(authority._DisposableRuntimeAuthorityFixture):
     database_url: str | None = None
 
     def setUp(self) -> None:
-        fixture = authority.DisposableRuntimeAuthorityTests()
-        fixture.database_url = self.database_url
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        self.store, self.context, self.app = fixture.store, fixture.context, fixture.app
+        super().setUp()
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 
         self.production_secret = SecretRecord(
@@ -109,6 +104,33 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             ):
                 response = await self.stage(key=f"separation-{index}")
                 self.assertEqual(response.status_code, 202, response.text)
+                from control_plane.http_routes.mutation_support import idempotency_scope
+
+                reservation = self.store.read_idempotency_record(
+                    scope=idempotency_scope(
+                        LocalOperatorIdentity(
+                            subject="local-owner-agent", token_label="local-owner-write"
+                        )
+                    ),
+                    route_path="/v1/live-target-runtime/apply",
+                    idempotency_key=f"separation-{index}",
+                )
+                assert reservation is not None
+                capsule = self.store.read_provider_target_origin(reservation)
+                assert capsule is not None
+                target = self.store.read_provider_target_record(
+                    context_name=self.context, instance_name="testing"
+                )
+                self.assertEqual(
+                    (
+                        capsule.origin.product,
+                        capsule.origin.context,
+                        capsule.origin.instance,
+                        capsule.origin.target_id,
+                    ),
+                    (self.payload["product"], self.context, "testing", target.target_id),
+                )
+                self.assertEqual(self.store.read_original_mutation_intent(reservation), {})
                 self.assertFalse(driver.call_args.kwargs["deploy"])
                 self.assertEqual(driver.call_args.kwargs["instance_name"], "testing")
 
@@ -149,7 +171,10 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             driver.assert_not_called()
 
     async def test_unknown_deploy_fence_is_preserved_and_no_write_runs(self) -> None:
-        reserved = self.store.reserve_mutation(
+        from tests.support.provider_target_history import reserve_historical_mutation
+
+        reserved = reserve_historical_mutation(
+            self.store,
             scope="earlier",
             route_path="/earlier-deploy",
             idempotency_key="old-deploy",

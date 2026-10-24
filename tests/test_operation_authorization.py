@@ -1,12 +1,10 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Any
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import PropertyMock, patch
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from pydantic import ValidationError
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.operation_descriptor import OperationDescriptor
@@ -15,15 +13,13 @@ from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.launchplane_github_delivery import DELIVERY_GITHUB_APP_ID_KEY
 from control_plane.operation_authorization import (
-    OBSERVATION_AUTHZ_ACTION,
     bind_operation_handler,
-    observation_authorization_allows,
+    operation_observation_is_declared,
     register_operation_route,
     validate_operation_routes,
 )
 from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
-    LocalOperatorIdentity,
     LocalOperatorPolicyRule,
 )
 from control_plane.service_github_delivery_controls import (
@@ -50,83 +46,13 @@ def standing_policy() -> LaunchplaneAuthzPolicy:
                 token_labels=("local-owner-read",),
                 products=("launchplane",),
                 contexts=("launchplane",),
-                actions=(OBSERVATION_AUTHZ_ACTION,),
+                actions=("launchplane_service.read",),
             ),
         ),
     )
 
 
 class OperationDeclarationTests(unittest.TestCase):
-    def test_new_observation_uses_standing_grant_without_its_own_action_grant(self) -> None:
-        def endpoint() -> None:
-            pass
-
-        descriptor = OperationDescriptor(
-            method="GET",
-            route_path="/v1/example",
-            scope="context",
-            authz_action="example.inspect",
-            mode_effects={"read": "observation", "apply": "operation"},
-        )
-        policy = standing_policy()
-        identity = LocalOperatorIdentity(
-            subject="local-owner-agent", token_label="local-owner-read"
-        )
-        request: dict[str, Any] = dict(
-            endpoint=endpoint,
-            authorization_allows=policy.allows,
-            identity=identity,
-            product="launchplane",
-            context="launchplane",
-        )
-        self.assertFalse(observation_authorization_allows(mode="read", **request))
-        bind_operation_handler(descriptor=descriptor, endpoint=endpoint, declared_methods=("GET",))
-        self.assertTrue(observation_authorization_allows(mode="read", **request))
-        for mode in ("apply", "dry-run", "unknown"):
-            self.assertFalse(observation_authorization_allows(mode=mode, **request))
-        for changes in (
-            {"context": "other"},
-            {"product": "other"},
-            {"identity": LocalOperatorIdentity(subject=identity.subject, token_label="other")},
-            {"authorization_allows": LaunchplaneAuthzPolicy().allows},
-        ):
-            self.assertFalse(
-                observation_authorization_allows(mode="read", **{**request, **changes})
-            )
-
-    def test_undeclared_or_invalid_modes_never_call_authorization(self) -> None:
-        def endpoint() -> None:
-            pass
-
-        allows = Mock(return_value=True)
-        request: dict[str, Any] = dict(
-            endpoint=endpoint,
-            mode="read",
-            authorization_allows=allows,
-            identity=LocalOperatorIdentity(subject="agent", token_label="label"),
-            product="launchplane",
-            context="launchplane",
-        )
-        self.assertFalse(observation_authorization_allows(**request))
-        bind_operation_handler(
-            descriptor=OperationDescriptor(
-                method="GET", route_path="/v1/example", authz_action="example.read", scope="context"
-            ),
-            endpoint=endpoint,
-            declared_methods=("GET",),
-        )
-        self.assertFalse(observation_authorization_allows(**request))
-        allows.assert_not_called()
-        with self.assertRaises(ValidationError):
-            OperationDescriptor.model_validate(
-                {
-                    "method": "GET",
-                    "route_path": "/v1/example",
-                    "scope": "context",
-                    "mode_effects": {"read": "unknown"},
-                }
-            )
-
     def test_route_registration_rejects_drift_and_missing_handler_declaration(self) -> None:
         def endpoint() -> None:
             pass
@@ -182,19 +108,7 @@ class OperationDeclarationTests(unittest.TestCase):
             bind_native_fastapi_driver_handler(
                 route_path=action.route_path, endpoint=endpoint, declared_methods=(action.method,)
             )
-        policy = standing_policy()
-        self.assertTrue(
-            observation_authorization_allows(
-                endpoint=endpoint,
-                mode="read",
-                authorization_allows=policy.allows,
-                identity=LocalOperatorIdentity(
-                    subject="local-owner-agent", token_label="local-owner-read"
-                ),
-                product="launchplane",
-                context="launchplane",
-            )
-        )
+        self.assertTrue(operation_observation_is_declared(endpoint=endpoint, mode="read"))
 
 
 class DeliveryObservationHttpTests(unittest.IsolatedAsyncioTestCase):

@@ -30,6 +30,13 @@ port or Docker router. Both web slots have cron threads disabled. A web guard
 waits for its exact slot/module-plan receipt marker before starting any registry.
 Existing serving Compose configuration and routes must remain unchanged.
 
+The installed candidate-preparation capability must preserve the serving slot's
+consumer meaning for shared settings, including legacy credential transport.
+Equal parsed values alone are insufficient when legacy and literal transports
+differ. Preparing a shared-database candidate is not a fresh-database
+initialization and must not re-encode its retained credentials. Installed-host
+qualification must demonstrate this before lane activation.
+
 Runtime identity omits unset slot, release, image-digest and database-UUID fields
 so legacy container identities keep their reviewed service-restart digests.
 Populated two-slot identity fields remain serialized and bound to verification.

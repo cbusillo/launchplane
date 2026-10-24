@@ -20,10 +20,11 @@ from control_plane.contracts.testing_publication import (
 )
 from control_plane.contracts.testing_rebuild import TestingRouteObservation
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.route_binding_reconcile import route_binding_authority_projection
 from control_plane.testing_candidate_runtime import (
     testing_profile_binding,
     testing_serving_target_authority,
@@ -43,14 +44,30 @@ def _same(left: object, right: object) -> bool:
     return canonical_json_sha256(left) == canonical_json_sha256(right)
 
 
+def testing_binding_authority(
+    binding: EnvironmentRouteBindingRecord | None,
+) -> tuple[object, ...] | None:
+    """Share route ownership and publication custody across serving-copy checks."""
+    if binding is None:
+        return None
+    return (
+        route_binding_authority_projection(binding),
+        binding.source.source_kind,
+        binding.source.source_label,
+        binding.source.source_versions.get("testing_publication"),
+        binding.source.source_versions.get("testing_route"),
+    )
+
+
 def serving_snapshot_matches(
     actual: TestingServingSnapshot, expected: TestingServingSnapshot
 ) -> bool:
-    """Current staff policy and its writer provenance do not identify a serving copy."""
+    """Serving authority and custody identify a copy; observation metadata does not."""
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
         payload["target"] = testing_serving_target_authority(snapshot.target)
+        payload["binding"] = testing_binding_authority(snapshot.binding)
         values.append(payload)
     return _same(*values)
 
@@ -172,7 +189,7 @@ def _sources(
 
     require_original_candidate_inputs(plan)
     profiles = tuple(
-        LaunchplaneProductProfileRecord.model_validate(row.payload)
+        store._read_product_profile_payload(row.payload)
         for row in session.scalars(select(db.LaunchplaneProductProfileRow))
     )
     require_bundle_context_owner(
@@ -414,6 +431,17 @@ def publish(
                 )
             }
         )
+        if replacement.binding is not None and current.binding is not None:
+            replacement = replacement.model_copy(
+                update={
+                    "binding": replacement.binding.model_copy(
+                        update={
+                            "ingress": current.binding.ingress,
+                            "tls": current.binding.tls,
+                        }
+                    )
+                }
+            )
         if (
             session.scalar(
                 select(db.LaunchplaneDokployTargetIdRow)
@@ -501,7 +529,7 @@ def _write_serving_snapshot(
     bundle = ProductAuthorityBundle(
         required_context_owner=(plan.candidate.product, plan.candidate.context),
         expected_product_profiles=(
-            LaunchplaneProductProfileRecord.model_validate(
+            store._read_product_profile_payload(
                 session.get(db.LaunchplaneProductProfileRow, plan.profile.product).payload
             ),
         ),

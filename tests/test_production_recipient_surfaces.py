@@ -380,9 +380,28 @@ class HttpBoundaryTests(unittest.TestCase):
             body.model_copy(update={"mode": "apply"}).model_dump(mode="json"), RECOVERY_ROUTE
         )
         self.assertEqual(response.status_code, 403)
+        response = self.post(
+            body.model_copy(
+                update={"mode": "apply", "purpose": "published", "generation": "post-window-1"}
+            ).model_dump(mode="json"),
+            RECOVERY_ROUTE,
+        )
+        self.assertEqual(response.status_code, 403)
         self.mutate.assert_not_awaited()
         injected = {**body.model_dump(mode="json"), "capture_sha256": "a" * 64, "recovered": True}
         self.assertEqual(self.post(injected, RECOVERY_ROUTE).status_code, 422)
+
+    def test_published_recovery_requires_a_generation_and_rejects_asserted_success(self) -> None:
+        body: dict[str, Any] = {
+            "context": self.fixture.context,
+            "preparation_plan_sha256": "a" * 64,
+            "purpose": "published",
+            "reason": "Review current recovery",
+        }
+        self.assertEqual(self.post(body, RECOVERY_ROUTE).status_code, 422)
+        body.update({"generation": "post-window-1", "recovered": True, "capture_sha256": "b" * 64})
+        self.assertEqual(self.post(body, RECOVERY_ROUTE).status_code, 422)
+        self.mutate.assert_not_awaited()
 
 
 class TerminalClientTests(unittest.TestCase):

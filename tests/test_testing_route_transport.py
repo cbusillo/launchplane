@@ -10,24 +10,31 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from traceback import walk_tb
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import yaml
 from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.dokploy import testing_route_transport as transport
+from control_plane import http_error_evidence
+from control_plane.dokploy import testing_route_transport as transport, compose
+from control_plane.dokploy import testing_route as routing
 from control_plane.dokploy import native_copy_stream
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
 )
 from control_plane.dokploy.testing_route import (
+    TestingLaneRoute,
     TestingRoutePending,
     route_document,
     observe_testing_route,
+    compile_unavailable_testing_route,
 )
+from control_plane.dokploy.testing_retained_copy import retained_inventory_sha256
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionCustody,
     TestingRouteInitializer,
@@ -39,6 +46,8 @@ from tests.test_odoo_testing_native_source import Connection
 
 
 class TestingRouteTransportTests(unittest.TestCase):
+    program_filename = "<testing-route-host>"
+
     def setUp(self, *, initialize_fence: bool = True) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -88,6 +97,7 @@ class TestingRouteTransportTests(unittest.TestCase):
                 "Id": "old",
                 "Name": "/testing-old-web-1",
                 "State": {"Status": "running"},
+                "Mounts": [],
                 "Config": {
                     "Labels": {
                         "com.docker.compose.project": "testing-old",
@@ -109,14 +119,17 @@ class TestingRouteTransportTests(unittest.TestCase):
             },
         }
         namespace = self.plan.new_backend.removeprefix("http://").split(":")[0]
+        self.candidate_project: str | None = namespace + "-abc123"
         self.containers["new"] = {
             "Id": "new",
             "Name": "/" + namespace + "-web-1",
             "State": {"Status": "running"},
+            "Mounts": [],
             "Config": {
                 "Labels": {
-                    "com.docker.compose.project": namespace,
+                    "com.docker.compose.project": self.candidate_project,
                     "com.docker.compose.service": "web",
+                    "traefik.enable": "false",
                 },
                 "Env": [
                     "PLATFORM_INSTANCE=testing",
@@ -205,6 +218,8 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.lose_writer_reply = False
         self.remote_modes: list[str] = []
         self.original_run = subprocess.run
+        self.original_popen = subprocess.Popen
+        self.docker_stdio: Any = None
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
             host="https://provider.invalid",
@@ -243,7 +258,10 @@ class TestingRouteTransportTests(unittest.TestCase):
         result = b""
         proxy_id = self.containers["proxy"]["Id"]
         if command[1:3] == ["ps", "-aq"]:
-            result = "\n".join(self.containers).encode()
+            result = "\n".join(
+                item["Id"] if "--no-trunc" in command else item["Id"][:12]
+                for item in self.containers.values()
+            ).encode()
         elif command[1] == "inspect":
             result = json.dumps(
                 [
@@ -305,8 +323,15 @@ class TestingRouteTransportTests(unittest.TestCase):
                 check=False,
                 env=environment,
             )
-            if completed.returncode == 0 and self.apply_immediately and self.route_file.exists():
-                self.apply_document()
+            if completed.returncode == 0 and self.apply_immediately:
+                for section in ("routers", "services", "middlewares"):
+                    self.raw[section] = {
+                        name: value
+                        for name, value in self.raw[section].items()
+                        if not name.startswith(self.plan.route_id)
+                    }
+                if self.route_file.exists():
+                    self.apply_document()
             if self.lose_writer_reply:
                 raise subprocess.TimeoutExpired(command, 1)
             return completed
@@ -319,6 +344,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         opener = Mock()
         opener.open.side_effect = URLError("Docker bridge is unreachable from the host")
 
+        def start(arguments: Any, **options: Any) -> Any:
+            if arguments == ["docker", "system", "dial-stdio"]:
+                if self.docker_stdio is None:
+                    raise AssertionError("The native service fixture is missing")
+                return self.docker_stdio()
+            return self.original_popen(arguments, **options)
+
         def dispatch() -> None:
             if (
                 kwargs["payload"]["mode"] in {"publish", "publish_v2"}
@@ -328,6 +360,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("subprocess.run", side_effect=self.command),
+                patch("subprocess.Popen", side_effect=start),
                 patch("urllib.request.build_opener", return_value=opener),
                 patch.object(
                     sys,
@@ -342,7 +375,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             ):
                 try:
                     exec(
-                        compile(kwargs["program"], "<testing-route-host>", "exec"),
+                        compile(kwargs["program"], self.program_filename, "exec"),
                         {"__name__": "__main__"},
                     )
                 except SystemExit:
@@ -354,7 +387,13 @@ class TestingRouteTransportTests(unittest.TestCase):
                 if frame["type"] == "denied":
                     raise NativeSourceAuthorizationDenied("fixture denied")
                 if frame["type"] == "failed":
-                    raise NativeSourceUnavailable("fixture unavailable")
+                    native_copy_stream._read_program(
+                        Connection(frame),
+                        program=kwargs["program"],
+                        payload=kwargs["payload"],
+                        timeout_seconds=5,
+                        receive=kwargs["receive"],
+                    )
                 kwargs["receive"](frame)
 
         guard = kwargs.get("dispatch_guard")
@@ -363,9 +402,47 @@ class TestingRouteTransportTests(unittest.TestCase):
         else:
             guard(dispatch)
 
-    def publish(self, backend: str, expected: str) -> None:
+    def test_failed_native_reads_preserve_actual_program_sites_without_private_values(self) -> None:
+        program = transport.testing_route_host_program()
+        original = self.command
+        observed: list[list[int]] = []
+        for failed_command in ("ps", "inspect"):
+            private = "private-native-error-sentinel-" + failed_command
+            failure = RuntimeError(private)
+
+            def command(arguments: list[str], **kwargs: Any) -> Any:
+                if arguments[1] == failed_command:
+                    raise failure
+                return original(arguments, **kwargs)
+
+            with patch.object(self, "command", side_effect=command):
+                with self.assertRaises(native_copy_stream.NativeProgramFailed) as raised:
+                    self.client.read()
+            try:
+                raise ValueError("private-wrapper-sentinel") from raised.exception
+            except ValueError as wrapped:
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(wrapped, "native-route-test")
+            text = logs.records[-1].getMessage()
+            native = json.loads(text)["native_programs"][0]
+            expected = [
+                line
+                for frame, line in walk_tb(failure.__traceback__)
+                if frame.f_code.co_filename == self.program_filename
+            ][-native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT :]
+            self.assertTrue(expected)
+            self.assertEqual(native["lines"], expected)
+            self.assertEqual(native["sha"], hashlib.sha256(program.encode()).hexdigest())
+            self.assertNotIn(private, text)
+            self.assertNotIn("private-wrapper-sentinel", text)
+            self.assertFalse(raised.exception.has_diagnostic)
+            self.assertEqual(self.effect_count, 0)
+            observed.append(native["lines"])
+        self.assertNotEqual(*observed)
+
+    def publish(self, backend: str | None, expected: str | None) -> None:
         execution = self.client.execution_intent(
-            self.plan, backend, operation_id="fixture:" + expected
+            self.plan, backend, operation_id="fixture:" + str(expected)
         )
         frame = self.client.read()
         writer = TestingRouteWriterAttempt(
@@ -380,12 +457,15 @@ class TestingRouteTransportTests(unittest.TestCase):
             backend,
             expected_backend=expected,
             dispatch_guard=self.guard,
-            desired_runtime_identity=self.identity
+            desired_runtime_identity=None
+            if backend is None
+            else self.identity
             if backend == self.plan.old_backend
             else self.new_identity,
             execution=execution,
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
+            desired_compose_project=self.candidate_project,
         )
         frame = self.client.read()
         observe_testing_route(
@@ -409,7 +489,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             lock_identity=lock_identity,
         )
 
-    def fenced_attempt(self, backend: str, *, name: str = "original") -> TestingRouteWriterAttempt:
+    def fenced_attempt(
+        self, backend: str | None, *, name: str = "original"
+    ) -> TestingRouteWriterAttempt:
         initializer = self.initializer(name)
         fence = self.client.initialize_execution(initializer, dispatch_guard=self.guard)
         execution = self.client.execution_intent(
@@ -423,18 +505,23 @@ class TestingRouteTransportTests(unittest.TestCase):
             key=hashlib.sha256(("fixture durable writer child:" + name).encode()).hexdigest(),
         )
 
-    def publish_attempt(self, attempt: TestingRouteWriterAttempt, expected: str) -> str | None:
+    def publish_attempt(
+        self, attempt: TestingRouteWriterAttempt, expected: str | None
+    ) -> str | None:
         return self.client.publish(
             self.plan,
             attempt.execution.backend,
             expected_backend=expected,
-            desired_runtime_identity=self.identity
+            desired_runtime_identity=None
+            if attempt.execution.backend is None
+            else self.identity
             if attempt.execution.backend == self.plan.old_backend
             else self.new_identity,
             dispatch_guard=self.guard,
             execution=attempt.execution,
             execution_key=attempt.key,
             writer_attempt=attempt,
+            desired_compose_project=self.candidate_project,
         )
 
     def test_a_lost_initializer_reply_is_observed_without_another_send(self) -> None:
@@ -677,7 +764,16 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_candidate_alias_must_be_unique_running_web_and_the_admitted_runtime(self) -> None:
         original = deepcopy(self.containers["new"])
-        for problem in ("missing", "shared", "stopped", "identity", "project"):
+        for problem in (
+            "missing",
+            "shared",
+            "stopped",
+            "identity",
+            "project",
+            "suffix",
+            "unsuffixed",
+            "service",
+        ):
             with self.subTest(problem=problem):
                 self.containers["new"] = deepcopy(original)
                 self.containers.pop("foreign", None)
@@ -693,14 +789,41 @@ class TestingRouteTransportTests(unittest.TestCase):
                         "PLATFORM_INSTANCE=testing",
                         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.identity.model_dump_json(),
                     ]
-                else:
+                elif problem in {"project", "suffix", "unsuffixed"}:
                     self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
                         "foreign"
+                        if problem == "project"
+                        else self.plan.new_backend.removeprefix("http://").split(":")[0]
+                        + ("-def456" if problem == "suffix" else "")
                     )
+                else:
+                    self.containers["new"]["Config"]["Labels"]["com.docker.compose.service"] = "db"
                 with self.assertRaises(NativeSourceUnavailable):
                     self.publish(self.plan.new_backend, self.plan.old_backend)
                 self.assertEqual(self.effect_count, 0)
                 self.assertFalse(self.route_file.exists())
+
+    def test_recorded_project_cannot_cross_the_candidate_namespace(self) -> None:
+        self.candidate_project = "foreign-project"
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.candidate_project
+        )
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
+    def test_legacy_project_requires_exact_unsuffixed_custody(self) -> None:
+        self.candidate_project = None
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.plan.new_backend.removeprefix("http://").split(":")[0]
+        )
+        self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertTrue(self.route_file.exists())
 
     def test_alias_ownership_covers_every_proxy_network_and_dns_spelling(self) -> None:
         original = deepcopy(self.containers)
@@ -834,6 +957,39 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.assertFalse(self.route_file.exists())
         self.containers["old"]["Config"]["Env"] = environment
 
+    def test_identity_and_watched_provider_fences_keep_distinct_read_checkpoints(self) -> None:
+        original = self.client.read()
+        for change, expected in (
+            (
+                {
+                    "old_identity": self.identity.model_copy(
+                        update={"artifact_id": "different-build"}
+                    ).model_dump(mode="json")
+                },
+                "testing_route_identity_changed",
+            ),
+            (
+                {"static_configuration": "providers: {file: {watch: false}}"},
+                "testing_route_provider_unverified",
+            ),
+            ({"static_configuration": "[invalid-yaml"}, "testing_route_provider_unverified"),
+            ({"static_configuration": "providers: null"}, "testing_route_provider_unverified"),
+            ({"static_configuration": "providers: []"}, "testing_route_provider_unverified"),
+            (
+                {"static_configuration": "providers: {file: []}"},
+                "testing_route_provider_unverified",
+            ),
+        ):
+            with (
+                self.subTest(expected=expected),
+                patch.object(self.client, "_run", return_value={**original, **change}),
+            ):
+                with self.assertRaises(transport.TestingRouteObservationRefused) as refused:
+                    self.client.read()
+                self.assertEqual(refused.exception.code, expected)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
     def test_cross_lane_plan_refuses_before_provider_reads(self) -> None:
         different = self.plan.model_copy(update={"host": "other.invalid"})
         execution = self.client.execution_intent(
@@ -864,9 +1020,431 @@ class TestingRouteTransportTests(unittest.TestCase):
         document = route_document(self.plan, self.plan.old_backend)
         next(iter(document["http"]["routers"].values()))["rule"] = "Host(`production.invalid`)"
         with (
-            patch.object(transport, "route_document", return_value=document),
+            patch.object(routing, "route_document", return_value=document),
             self.assertRaises(NativeSourceUnavailable),
         ):
             self.publish(self.plan.old_backend, self.plan.old_backend)
         self.assertEqual(self.effect_count, 0)
         self.assertFalse(self.route_file.exists())
+
+    def unavailable_route(self, *, preserve_file: bool = False) -> str | None:
+        recorded = self.plan
+        content = None
+        if preserve_file:
+            content = json.dumps(route_document(recorded, recorded.old_backend), indent=2) + "\n"
+            self.route_file.write_text(content)
+            self.apply_document()
+            self.containers["old"]["State"]["Status"] = "exited"
+        else:
+            self.containers.pop("old")
+        for section in ("routers", "services", "middlewares"):
+            self.raw[section] = {
+                name: value
+                for name, value in self.raw[section].items()
+                if not name.endswith("@docker")
+            }
+        route_tests.add_proxy_internal_routes(self.raw)
+        self.static += (
+            "entryPoints:\n  web:\n    address: ':80'\n  websecure:\n    address: ':443'\n"
+        )
+        frame = self.client.read()
+        configured = yaml.safe_dump(
+            {
+                "services": {
+                    "web": {
+                        "labels": {
+                            "traefik.enable": "true",
+                            "traefik.docker.network": "dokploy-network",
+                            "traefik.http.routers.testing.rule": f"Host(`{recorded.host}`)",
+                            "traefik.http.routers.testing.entrypoints": "websecure",
+                            "traefik.http.routers.testing.tls": "true",
+                        }
+                    }
+                }
+            }
+        )
+        self.plan = compile_unavailable_testing_route(
+            product=recorded.product,
+            context=recorded.context,
+            host=recorded.host,
+            new_backend=recorded.new_backend,
+            raw=frame["raw"],
+            file_content=frame["owned_file"],
+            observation_sha256="c" * 64,
+            static_configuration=self.static,
+            configured_compose=configured,
+            recorded_template=recorded.template if preserve_file else None,
+            recorded_backend=recorded.old_backend if preserve_file else None,
+        )
+        self.client.old_runtime_identity = None
+        self.client.payload["entrypoints"] = self.plan.public_entrypoints
+        self.client.payload["unavailable_predecessor"] = {
+            "project": "testing-old",
+            "availability": "stopped" if preserve_file else "absent",
+            "inventory_sha256": retained_inventory_sha256(
+                list(self.containers.values()), {"project": "testing-old"}
+            ),
+        }
+        return content
+
+    def test_unavailable_inverse_restores_exact_file_bytes_or_absence_with_the_same_writer(
+        self,
+    ) -> None:
+        for present in (False, True):
+            with self.subTest(present=present):
+                fixture = TestingRouteTransportTests()
+                fixture.setUp()
+                try:
+                    before = fixture.unavailable_route(preserve_file=present)
+                    fixture.publish(fixture.plan.new_backend, None)
+                    self.assertTrue(fixture.route_file.exists())
+                    fixture.static += "# unrelated proxy management edit\n"
+                    fixture.raw["middlewares"]["unrelated-redirect@file"] = {
+                        "status": "enabled",
+                        "redirectScheme": {"scheme": "https"},
+                    }
+                    fixture.raw["routers"].pop("acme-http@internal", None)
+                    fixture.raw["services"].pop("acme-http@internal", None)
+                    fixture.publish(None, fixture.plan.new_backend)
+                    self.assertEqual(
+                        fixture.route_file.read_text() if fixture.route_file.exists() else None,
+                        before,
+                    )
+                    frame = fixture.client.read()
+                    self.assertIsNone(
+                        observe_testing_route(
+                            fixture.plan,
+                            frame["raw"],
+                            json.loads(frame["owned_file"])
+                            if frame["owned_file"] is not None
+                            else None,
+                        )
+                    )
+                finally:
+                    fixture.doCleanups()
+
+    def test_unavailable_forward_ignores_unrelated_static_configuration(self) -> None:
+        self.unavailable_route()
+        self.static += "\nlog:\n  level: INFO\n"
+        self.publish(self.plan.new_backend, None)
+        self.assertTrue(self.route_file.exists())
+
+    def test_present_nonserving_lifecycle_is_not_reported_as_a_running_predecessor(self) -> None:
+        self.unavailable_route(preserve_file=True)
+        for state in ("removing", "dead"):
+            with self.subTest(state=state):
+                self.containers["old"]["State"]["Status"] = state
+                frame = self.client.read()
+                self.assertEqual(frame["old_availability"], "unknown")
+                self.assertFalse(self.client.unavailable_predecessor_matches(frame))
+
+    def test_route_observation_binds_the_unhealthy_running_original_process(self) -> None:
+        self.unavailable_route(preserve_file=True)
+        self.containers["old"]["State"].update(
+            Status="running", StartedAt="fixture-old-start", Health={"Status": "unhealthy"}
+        )
+        frame = self.client.read()
+        self.assertEqual(frame["old_availability"], "stopped")
+        self.assertEqual(
+            frame["old_web_process"],
+            {
+                "id": self.containers["old"]["Id"],
+                "status": "running",
+                "started_at": self.containers["old"]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
+
+    def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
+        self.unavailable_route()
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        self.static = self.static.replace(":443", ":444")
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish_attempt(attempt, None)
+        self.assertFalse(self.route_file.exists())
+
+    def test_unavailable_redirect_drift_remains_visible_in_scoped_host_reads(self) -> None:
+        self.declared_two_listener_route()
+        reference = "redirect-to-https@file"
+        original = deepcopy(self.raw["middlewares"][reference])
+        for published in (False, True):
+            with self.subTest(published=published):
+                if published:
+                    self.publish(self.plan.new_backend, None)
+                self.raw["middlewares"][reference]["redirectScheme"]["scheme"] = "http"
+                frame = self.client.read()
+                document = json.loads(frame["owned_file"]) if frame["owned_file"] else None
+                self.assertEqual(
+                    frame["raw"]["middlewares"][reference]["redirectScheme"]["scheme"], "http"
+                )
+                with self.assertRaises(routing.TestingRouteAuthorityChanged):
+                    observe_testing_route(self.plan, frame["raw"], document)
+                self.raw["middlewares"].pop(reference)
+                with self.assertRaises(routing.TestingRouteAuthorityChanged):
+                    observe_testing_route(self.plan, self.client.read()["raw"], document)
+                self.raw["middlewares"][reference] = {
+                    "status": "disabled",
+                    "redirectScheme": {"scheme": "https"},
+                }
+                with self.assertRaises(TestingRoutePending):
+                    observe_testing_route(self.plan, self.client.read()["raw"], document)
+                self.raw["middlewares"][reference] = {"status": "enabled", "redirectScheme": []}
+                with self.assertRaises(NativeSourceUnavailable):
+                    self.client.read()
+                self.raw["middlewares"][reference] = deepcopy(original)
+
+    def test_lost_absence_inverse_reply_is_settled_without_recreating_the_file(self) -> None:
+        self.unavailable_route()
+        self.publish(self.plan.new_backend, None)
+        attempt = self.fenced_attempt(None)
+        self.lose_writer_reply = True
+        with self.assertRaises(NativeSourceUnavailable):
+            self.publish_attempt(attempt, self.plan.new_backend)
+        self.assertFalse(self.route_file.exists())
+        writes = self.remote_modes.count("publish_v2")
+        self.lose_writer_reply = False
+        self.assertEqual(self.client.settle_attempt(attempt, dispatch_guard=self.guard), "applied")
+        self.assertFalse(self.route_file.exists())
+        self.assertEqual(self.remote_modes.count("publish_v2"), writes)
+
+    def test_unavailable_inverse_survives_a_reappeared_old_process_and_docker_routes(self) -> None:
+        for present in (False, True):
+            with self.subTest(present=present):
+                fixture = TestingRouteTransportTests()
+                fixture.setUp()
+                try:
+                    old = deepcopy(fixture.containers["old"])
+                    before = fixture.unavailable_route(preserve_file=present)
+                    fixture.publish(fixture.plan.new_backend, None)
+                    old["State"]["Status"] = "running"
+                    old["Id"] = "redeployed-old"
+                    fixture.containers["old"] = old
+                    for section in ("routers", "services", "middlewares"):
+                        fixture.raw[section].update(deepcopy(fixture.fixture.raw[section]))
+                    frame = fixture.client.read()
+                    self.assertEqual(frame["old_availability"], "available")
+                    with self.assertRaises(transport.TestingRouteWriteNotStarted):
+                        fixture.publish(fixture.plan.new_backend, None)
+                    self.assertEqual(
+                        fixture.publish_attempt(
+                            fixture.fenced_attempt(None), fixture.plan.new_backend
+                        ),
+                        "applied",
+                    )
+                    self.assertEqual(
+                        fixture.route_file.read_text() if fixture.route_file.exists() else None,
+                        before,
+                    )
+                    frame = fixture.client.read()
+                    self.assertEqual(frame["old_availability"], "available")
+                    self.assertEqual(frame["owned_file"], before)
+                finally:
+                    fixture.doCleanups()
+
+    def test_unavailable_inverse_preserves_a_foreign_owned_file(self) -> None:
+        self.unavailable_route()
+        self.publish(self.plan.new_backend, None)
+        foreign = json.dumps({"http": {"routers": {}, "services": {}}})
+        self.route_file.write_text(foreign)
+        writes = self.remote_modes.count("publish_v2")
+        with self.assertRaises(ValueError):
+            self.publish(None, self.plan.new_backend)
+        self.assertEqual(self.route_file.read_text(), foreign)
+        self.assertEqual(self.remote_modes.count("publish_v2"), writes)
+
+    def test_declared_nonredirecting_http_and_https_routes_reach_the_actual_writer(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        points = tuple(yaml.safe_load(self.static)["entryPoints"])
+        for tls in (False, True):
+            with self.subTest(tls=tls):
+                labels = {
+                    "traefik.enable": "true",
+                    "traefik.docker.network": "dokploy-network",
+                    "traefik.http.routers.testing.rule": f"Host(`{self.plan.host}`)",
+                    "traefik.http.routers.testing.entrypoints": points[-1] if tls else points[0],
+                    "traefik.http.routers.testing.tls": str(tls).lower(),
+                }
+                self.plan = compile_unavailable_testing_route(
+                    product=self.plan.product,
+                    context=self.plan.context,
+                    host=self.plan.host,
+                    new_backend=self.plan.new_backend,
+                    raw=frame["raw"],
+                    file_content=None,
+                    observation_sha256="c" * 64,
+                    static_configuration=self.static,
+                    configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+                )
+                self.client.payload["entrypoints"] = self.plan.public_entrypoints
+                self.publish(self.plan.new_backend, None)
+                self.assertTrue(self.route_file.exists())
+                self.publish(None, self.plan.new_backend)
+                self.assertFalse(self.route_file.exists())
+
+    def test_incomplete_host_inventory_never_proves_absence(self) -> None:
+        command = self.command
+
+        def incomplete(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1] == "inspect" and len(arguments) > 3:
+                return subprocess.CompletedProcess(arguments, 0, stdout=b"[]", stderr=b"")
+            return command(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=incomplete),
+            self.assertRaises(NativeSourceUnavailable),
+        ):
+            self.client.read()
+        self.assertEqual(self.effect_count, 0)
+
+    def declared_two_listener_route(self, *, repeat_labels: bool = False) -> None:
+        self.unavailable_route()
+        self.raw["middlewares"]["redirect-to-https@file"] = {
+            "status": "enabled",
+            "redirectScheme": {"scheme": "https", "permanent": True},
+        }
+        configured = "services:\n  web:\n" + compose._render_odoo_web_traefik_labels(
+            domain_hosts=(self.plan.host,),
+            runtime_port=8069,
+            domain_certificate_type="none",
+            isolated_testing=True,
+        )
+        if repeat_labels:
+            declaration = yaml.safe_load(configured)
+            declaration["services"]["web"]["labels"] *= 2
+            configured = yaml.safe_dump(declaration)
+        frame = self.client.read()
+        self.plan = compile_unavailable_testing_route(
+            product=self.plan.product,
+            context=self.plan.context,
+            host=self.plan.host,
+            new_backend=self.plan.new_backend,
+            raw=frame["raw"],
+            file_content=None,
+            observation_sha256="c" * 64,
+            static_configuration=self.static,
+            configured_compose=configured,
+        )
+        self.client.payload["entrypoints"] = self.plan.public_entrypoints
+        self.client.payload["external_middlewares"] = routing.testing_route_external_middlewares(
+            self.plan.template
+        )
+
+    def test_real_declared_two_listener_routes_use_actual_redirect_without_a_running_predecessor(
+        self,
+    ) -> None:
+        self.declared_two_listener_route()
+        self.assertEqual(
+            set(self.plan.public_entrypoints), set(yaml.safe_load(self.static)["entryPoints"])
+        )
+        self.publish(self.plan.new_backend, None)
+        self.publish(None, self.plan.new_backend)
+        self.assertFalse(self.route_file.exists())
+
+    def test_identical_repeated_labels_preserve_unavailable_route_and_its_inverse(self) -> None:
+        self.declared_two_listener_route(repeat_labels=True)
+        self.publish(self.plan.new_backend, None)
+        self.publish(None, self.plan.new_backend)
+        self.assertFalse(self.route_file.exists())
+
+    def test_contradictory_repeated_label_refuses_unavailable_route(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        labels = [
+            "traefik.enable=true",
+            "traefik.docker.network=dokploy-network",
+            f"traefik.http.routers.testing.rule=Host(`{self.plan.host}`)",
+            "traefik.http.routers.testing.entrypoints=websecure",
+            "traefik.http.routers.testing.tls=true",
+            "traefik.http.routers.testing.tls=false",
+        ]
+        with self.assertRaises(ValueError):
+            compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+            )
+        self.assertEqual(self.effect_count, 0)
+
+    def test_recorded_unavailable_template_needs_its_current_tls_resolver(self) -> None:
+        for router in self.plan.template["http"]["routers"].values():
+            if "tls" in router:
+                router["tls"] = {"certResolver": "missing-resolver"}
+        with self.assertRaises(ValueError):
+            self.unavailable_route(preserve_file=True)
+        self.assertEqual(self.effect_count, 0)
+
+    def test_declared_unavailable_router_cannot_borrow_a_foreign_service(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        configured = yaml.safe_dump(
+            {
+                "services": {
+                    "web": {
+                        "labels": {
+                            "traefik.enable": "true",
+                            "traefik.docker.network": "dokploy-network",
+                            "traefik.http.routers.testing.rule": f"Host(`{self.plan.host}`)",
+                            "traefik.http.routers.testing.entrypoints": "websecure",
+                            "traefik.http.routers.testing.tls": "true",
+                            "traefik.http.routers.testing.service": "api@internal",
+                        }
+                    }
+                }
+            }
+        )
+        with self.assertRaises(ValueError):
+            compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=configured,
+            )
+        self.assertEqual(self.effect_count, 0)
+
+    def test_declared_unavailable_aliases_require_equivalent_listener_behavior(self) -> None:
+        self.unavailable_route()
+        self.static += "certificatesResolvers: {one: {}, two: {}}\n"
+        frame = self.client.read()
+        labels = {"traefik.enable": "true", "traefik.docker.network": "dokploy-network"}
+        for name, resolver in (("first", "one"), ("alias", "two")):
+            prefix = "traefik.http.routers." + name + "."
+            labels.update(
+                {
+                    prefix + "rule": f"Host(`{self.plan.host}`)",
+                    prefix + "entrypoints": "websecure",
+                    prefix + "tls": "true",
+                    prefix + "tls.certresolver": resolver,
+                }
+            )
+
+        def compile_aliases() -> TestingLaneRoute:
+            return compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+            )
+
+        with self.assertRaises(ValueError):
+            compile_aliases()
+        labels["traefik.http.routers.alias.tls.certresolver"] = "one"
+        self.plan = compile_aliases()
+        self.publish(self.plan.new_backend, None)
+        self.assertTrue(self.route_file.exists())

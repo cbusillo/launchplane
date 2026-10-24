@@ -25,7 +25,9 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_inventory,
     preview_slug_from_application_name,
 )
-from control_plane.workflows.odoo_preview_runtime import _complete_preview_compose_inventory
+from control_plane.dokploy.preview_inventory import (
+    complete_preview_compose_inventory as _complete_preview_compose_inventory,
+)
 
 
 class PreviewInventoryCollectionStore(Protocol):

@@ -2,15 +2,51 @@
 title: Client release review
 ---
 
+An Odoo testing copy published by a native rebuild must match its ordinary
+testing release tuple before candidate review, website-settings preparation or
+promotion source selection. A different served artifact or unavailable native
+publication/custody refuses that selection. The supported next ordinary ship
+retains the copy's data, applies its normal overrides and records the matching
+tuple. This check neither mints a tuple nor changes acceptance. Legacy lanes
+retain their existing qualification path.
+
 ## Odoo business hours
 
-An admin selects `odoo_business_hours.company_id` in a product profile through
-the existing product-profile API. This selects that company's
-`resource_calendar_id` in Odoo; Launchplane stores no copy of the hours.
+An authorized caller selects the company through the standalone
+`odoo_business_hours` section of `POST /v1/product-config/apply`. First use
+`operation: inspect` in dry-run mode to read the verified prod runtime's permitted
+company IDs, private labels and calendar references. That visibility scope is
+not proof of every company in the database or of which company serves the
+intended business. Select that company deliberately; ambiguous business identity
+needs clarification before configuration. The same read works before live
+activation and does not change production classification.
+
+Then dry-run `operation: set` with explicit `company_id` and
+`expected_calendar_id`, plus an existing `private_endpoint_key` when needed.
+The current company-to-calendar relation must match that assertion. Apply carries
+the returned `plan_digest` as `reviewed_plan_sha256`, the same reviewed request
+and a stable Idempotency-Key. It needs the same caller's stored dry-run and
+unchanged profile/runtime/transport authority. Read the stored policy through
+`GET /v1/product-profiles/{product}`. Installed caller delivery is tracked in
+[codex-skills#2538](https://github.com/cbusillo/codex-skills/issues/2538);
+source capability alone does not prove that caller or deployment is available.
+
+Only `company_id` and the optional endpoint key are stored in the profile.
+`expected_calendar_id` is a configuration assertion, not calendar authority:
+release reads follow that company's current `resource_calendar_id` in Odoo.
+Launchplane stores no copy of the hours.
 The policy applies only when that product's `production_use` is `live`.
 Configure it for staff-facing Odoo products before live activation; website
-products remain unselected. Removing the policy disables scheduling for that
-product. Existing release holds and exact-candidate acceptance still apply.
+products remain unselected. A reviewed `operation: clear` disables scheduling for that
+product without requiring a healthy calendar read. Whole-profile POST cannot
+set, change or clear the policy; an omitted field preserves the stored selection.
+An explicit null is still a policy change and requires the reviewed clear operation.
+Re-onboarding and explicitly acknowledged
+bootstrap/recovery profile CLI upserts preserve the existing policy and refuse
+concurrent profile changes. The CLI preserves profile fields outside its supported
+flags, including nested image and preview settings. Its direct-DB acknowledgement
+does not authorize routine shared or production mutations. Existing release holds
+and exact-candidate acceptance still apply.
 
 For a private Odoo site, `odoo_business_hours.private_endpoint_key` references
 an existing active private health endpoint for the same product's prod lane.
@@ -63,6 +99,46 @@ the current production and testing revisions. The product's Client reviews the
 testing site and the **`Client test notes`** from every merged pull request in that
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
+
+For generic-web testing lanes, candidate construction reads the inventory's
+referenced deployment record as well as the inventory. That record must pass
+deployment, post-deploy and destination-health qualification and match the
+lane, artifact, source revision, runtime identity and provider target evidence.
+A copied passing inventory cannot qualify a missing, mismatched or failed
+deployment. The physical recipient must also match the current provider-target
+binding. A running or reconciliation-required operation on that testing recipient
+refuses fresh admission, including an expired or receiptless original whose effects
+remain uncertain. A hold on a different retired recipient does not disqualify a
+qualified replacement. These facts are read together under the existing authority
+fence; supported original observation, terminal continuation and retesting remain
+available.
+
+The accepted-release worker and direct promotion path recheck this
+source evidence after backup waits and before admitting the first forward
+production effect, including a recipient cutover resumed before dispatch. The final source check runs
+inside the native first-effect checkpoint, serialized with testing reservation
+insertion, reacquisition and current authority publication. No provider I/O runs
+under that short read/checkpoint boundary.
+Once that accepted production attempt starts, testing may advance to a newer
+qualified build without aborting it. Acceptance and backup checks continue;
+an already started gated rollback keeps its existing recovery authority.
+Recipient resumption uses that original attempt's dispatch evidence. A new
+repromotion must qualify its source again, regardless of older dispatch facts.
+The testing lane must still name the current stored context and instance under
+an applicable generic-web driver; a removed or rebound source cannot keep
+using a cached inventory from its former lane.
+
+Losing qualification before a fresh promotion's first provider effect holds
+that step without changing the saved Client or Director acceptance, including
+`director_standing`. Run the normal supported testing deployment and
+qualification again. A qualified retest of the same accepted artifact and
+revision can retry that unstarted promotion while its verified backup remains
+current, unconsumed and bound to unchanged production authority. A different
+release needs its own acceptance. This does not restart a failed backup or
+replace expired backup evidence; the separate continuation capability is
+tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
+The source check does not impose testing qualification on production baselines
+or replace Odoo's release-tuple contract.
 
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
@@ -226,6 +302,17 @@ one new invitation mentioning the Client and naming only the additions. A batch
 of changes gets one invitation. Client-facing evidence is an existing product
 preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
+Valid engineering release-test notes under the
+[shared notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
+also appear in an existing mixed request or a deliberately opened urgent request.
+The Client sees the real test steps and the source change, without the engineering
+directive. Those steps alone never open an automatic request or send a new ping;
+only the preview-review evidence above supplies that notification trigger.
+An addition note still names only the Client-facing additions; the next silent
+update restores the full testing list, including the release-test steps.
+Existing requests refresh missing or corrected release-test steps silently before
+their receipt is reused or a reminder is sent. Adoption receipts record only the
+changes with preview-review evidence, so a later material addition can still notify.
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
@@ -367,9 +454,8 @@ fail closed. Every successful production promotion writes production's
 environment record from the deployment it made, so the next review starts from
 the version actually running. When the checklist cannot be compiled, the
 response carries one fixed `unavailable_reason` code, shown on the review page
-with the trace ID and logged with it: `testing_lane_missing`,
-`source_control_access_unavailable`, `production_identity_missing`,
-`candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
+with the trace ID and logged with it. The `ReleaseEvidenceReason` contract in
+[release_review.py](../control_plane/contracts/release_review.py) defines those codes.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
@@ -687,20 +773,14 @@ or caching that poll as a completed idempotent response. Repeat the same payload
 and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
-The drain also has an absolute ten-minute pre-effect budget. Its persisted
-`drain_started_at` and `drain_deadline_at` survive polling and process restart;
-legacy drains anchor those fields to their last stored observation on first
-updated poll. At the deadline the route returns `409/self_deploy_drain_timeout`
-with remaining blocker IDs, expires its admission pause and admits no provider
-write. That request cannot later dispatch; retry after diagnosis with a new
-intent and fresh marker. Product recovery fences are retained. This budget is
-independent of the longer worker stop/provider/health budget after dispatch.
+The bounded deadline, timeout alert and supported fresh-request continuation are
+documented in [operations](operations.md#self-deploy-drain-timeout-and-continuation).
 Final admission rechecks the fence and running operations under the same lock.
 The typed Odoo and shared backup queues also contain workflow-started operations;
 their claims pause at this worker boundary and resume after replacement. Worker
-debug logs report that pause, and the runtime read exposes its cause. Generic-web
-workflow requests outside Client releases retain their existing reservations;
-this boundary covers Client-started generic-web releases and product-event effects.
+debug logs report that pause, and the runtime read exposes its cause. Agent-started
+rehearsals also participate through their route, independently of caller scope.
+Other families keep their existing request and worker-claim boundaries.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. Running reservations remain blockers even
 after lease expiry: losing a heartbeat does not prove a provider call ended.
@@ -863,8 +943,16 @@ failed health checks are retained as failures. Older interrupted rollback record
 without the saved target evidence remain held. Successful recovery settles the
 existing accepted release step; the release worker can continue any remaining
 steps under that decision's normal acceptance and hold checks.
-The current Dokploy runtime observer proves compose targets only; application
-targets remain held until their provider supports the same exact runtime proof.
+The Dokploy observer supports Compose and Docker-backed application targets.
+Application recovery requires the original saved provider reference, actual
+service image, independently inspected immutable running images and this
+operation's deployment identity, with converged processes and a settled rollout.
+Missing, ambiguous or changed evidence stays fenced; apply observes again and
+requires the reviewed proof to remain current. Automatic rollback uses the
+effective durable deployment's provider reference, while a drill uses its
+captured plan. Compose behavior remains unchanged. Runtime identity proof
+supplies neither volume recovery nor permission to retry an uncertain deployment
+or perform a live recovery operation.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 
@@ -877,11 +965,16 @@ With `promote_with_rollback_drill` it then runs the rollback drill:
 
 The rollback restores the checklist's production version, so the checklist
 recompiles to the digest the Client accepted, and that acceptance covers the
-second promotion and nothing else. A product drills once. After a release's
-drill passes, both `promote_with_rollback_drill` and `director_standing` behave as
-`promote`. Standing acceptance records the same drill sequence until a drill has
-passed for that product; the first promotion alone or a failed drill does not
-qualify it. Each decision retains the release sequence stamped when it was accepted.
+second promotion and nothing else. A product drills once per version of the
+rollback code. After a release's drill passes, both `promote_with_rollback_drill`
+and `director_standing` behave as `promote`. A drill counts only when its
+acceptance was recorded at or after `ROLLBACK_DRILL_CODE_CHANGED_AT` in
+`control_plane/client_release.py`; a change to the rollback or promotion path
+moves that marker forward in the same pull request, so each product's next
+accepted release drills again on the new code. Standing acceptance records the
+same drill sequence until a drill has passed for that product; the first
+promotion alone or a failed drill does not qualify it. Each decision retains the
+release sequence stamped when it was accepted.
 
 Odoo and generic-web products use this same sequence and acceptance checks.
 Generic web redeploys the explicitly selected passing production deployment's
@@ -891,6 +984,29 @@ same provider fence and durable step reservation as promotion; an unknown
 rollback outcome stops the run for reconciliation. A failed drill or second
 backup never starts re-promotion. Automatic rollback after a failed promotion
 remains permitted even when the Client's forward release authority is revoked.
+
+Generic-web testing qualification admits each fresh forward production attempt.
+After that attempt starts, a newer or failed testing deployment does not interrupt
+its accepted production work. The generic drill's rollback checks Client release
+authority until its own first marked effect. The recipient inverse checks until
+its own replacement-writer pause dispatch; earlier peer parking still requires
+authority. After the relevant boundary, they finish the bound restore or protective
+cleanup under the original lease and target/publication fences, even if a newer
+decision or hold stops fresh work.
+They do not depend on testing. Separate recovery Apply still requires the current
+accepted release and the original operation key. The second backup and promotion
+still require the accepted artifact and source to qualify in testing again. A
+same-artifact qualified retest uses the existing acceptance and checklist digest
+for an unstarted source-held promotion with still-current backup evidence.
+Failed backup operations and expired or consumed captures retain their existing
+fail-closed outcomes; a retest does not recapture or restart them.
+
+A typed source refusal before any promotion provider effect leaves that accepted
+promotion step unstarted.
+The service can retry it after testing qualifies, including after repeated
+refusals. Repeated refusals do not turn an unstarted step into an interrupted
+deployment. An existing or dispatched attempt keeps its original recovery fence;
+a qualified retest cannot stand in for proof that its uncertain effects ended.
 
 Before the first backup, a generic-web drill requires a deployable passing
 production record for the checklist's exact artifact and source commit. A
@@ -905,8 +1021,20 @@ reservations, missing or changed records, failed health and unproven runtime
 stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
 
+A queued generic-web backup keeps its existing saved-pair authority. A new testing
+operation or current-recipient rebind alone does not terminally fail that admitted
+capture. Its worker still rechecks the current decision, Client, release hold,
+production boundary and complete saved testing pair at every stage; failed or
+changed saved qualification still refuses. Fresh backup queueing and promotion
+admission use the stronger current-recipient and unresolved-operation checks.
+An unresolved testing operation reports `candidate_operation_unresolved`, while
+fresh release work waits for it to finish. A waiting accepted release retains its
+merge-train hold while its saved pair and continuation checks still qualify.
+Permanent decision, lane, inverse and drill blockers retain their previous effects
+on that hold; the public release view still explains fresh admission waits.
+
 Each step runs under a `client_release_acceptance` grant that names the
-decision. Before a step is queued, the worker checks all of the following:
+decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
 
 - the decision is still the product's newest one, `accepted`, published, and by
   the product's recorded Client;
@@ -922,8 +1050,11 @@ remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
 fenced for reconciliation rather than repeating the release.
 
-A changed candidate, a newer decision, or a hold therefore stops the release
-before its next step and never falls back to a newer testing build. A failed or
+A changed testing candidate stops the next fresh backup or promotion, and never
+falls back to a newer testing build. A newer decision or a hold stops fresh planned
+release work. Once a generic rollback starts, or a recipient inverse dispatches its
+own replacement-writer pause, its protective restore finishes under its original
+fences. A failed or
 cancelled step stops forward progress; the successful rollback drill never runs
 for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,

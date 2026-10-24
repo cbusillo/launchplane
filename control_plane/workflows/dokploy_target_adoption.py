@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 import re
 from typing import Protocol
 
@@ -28,6 +29,7 @@ from control_plane.workflows.provider_target_dual_write import (
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy.api import JsonObject
+from control_plane.dokploy.network_capacity import require_bridge_network_capacity
 
 
 PROJECT_CREATE_PATH = "/api/project.create"
@@ -132,7 +134,15 @@ def normalize_dokploy_domain_hosts(raw_hosts: tuple[str, ...]) -> tuple[str, ...
     return tuple(normalized)
 
 
-def repair_dokploy_target_domain_authority(
+@dataclass(frozen=True)
+class DokployTargetDomainRepairPlan:
+    current_target: DokployTargetRecord
+    target_id: DokployTargetIdRecord
+    current_provider_target: ProviderTargetRecord
+    result: DokployTargetDomainRepairResult
+
+
+def plan_dokploy_target_domain_authority(
     *,
     record_store: DokployTargetAdoptionRecordStore,
     host: str,
@@ -146,10 +156,9 @@ def repair_dokploy_target_domain_authority(
     expected_current_provider_target_fingerprint: str = "",
     source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
     updated_at: str = "",
-    apply: bool = False,
     fetch_target_payload: FetchDokployTargetPayload,
     fetch_target_domains: FetchDokployTargetDomains,
-) -> DokployTargetDomainRepairResult:
+) -> DokployTargetDomainRepairPlan:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_id = _require_non_empty(target_id, "target_id")
@@ -184,8 +193,6 @@ def repair_dokploy_target_domain_authority(
         raise ValueError(
             "Dokploy domain authority repair target id does not match the tracked target."
         )
-    if apply and expected_current_provider_target_fingerprint:
-        raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
     require_provider_target_expectation(
         current=provider_target_record,
         expected=expected_current_provider_target,
@@ -241,31 +248,75 @@ def repair_dokploy_target_domain_authority(
             "source_label": normalized_source_label,
         }
     )
-    if apply:
-        target_record, provider_target_record = (
-            record_store.compare_and_write_dokploy_target_domains(
-                expected_record=target_record,
-                expected_target_id_record=target_id_record,
-                expected_provider_target_record=provider_target_record,
-                domains=requested_domains,
-                updated_at=recorded_at,
-                source_label=normalized_source_label,
-            )
-        )
-    else:
-        target_record = projected_target_record
-        provider_target_record = projected_provider_target_record
+    return DokployTargetDomainRepairPlan(
+        current_target=target_record,
+        target_id=target_id_record,
+        current_provider_target=provider_target_record,
+        result=DokployTargetDomainRepairResult(
+            applied=False,
+            target_record=projected_target_record,
+            target_id_record=target_id_record,
+            provider_target_record=projected_provider_target_record,
+            requested_domains=requested_domains,
+            live_provider_domains=live_provider_domains,
+            warnings=("dry run only; records were not written and provider remained read-only",),
+        ),
+    )
 
-    return DokployTargetDomainRepairResult(
-        applied=apply,
-        target_record=target_record,
-        target_id_record=target_id_record,
-        provider_target_record=provider_target_record,
-        requested_domains=requested_domains,
-        live_provider_domains=live_provider_domains,
-        warnings=()
-        if apply
-        else ("dry run only; records were not written and provider remained read-only",),
+
+def repair_dokploy_target_domain_authority(
+    *,
+    record_store: DokployTargetAdoptionRecordStore,
+    host: str,
+    token: str,
+    context: str,
+    instance: str,
+    target_type: DokployTargetType,
+    target_id: str,
+    domains: tuple[str, ...],
+    expected_current_provider_target: DeployedTargetReference,
+    expected_current_provider_target_fingerprint: str = "",
+    source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
+    updated_at: str = "",
+    apply: bool = False,
+    fetch_target_payload: FetchDokployTargetPayload,
+    fetch_target_domains: FetchDokployTargetDomains,
+) -> DokployTargetDomainRepairResult:
+    if apply and expected_current_provider_target_fingerprint:
+        raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
+    plan = plan_dokploy_target_domain_authority(
+        record_store=record_store,
+        host=host,
+        token=token,
+        context=context,
+        instance=instance,
+        target_type=target_type,
+        target_id=target_id,
+        domains=domains,
+        expected_current_provider_target=expected_current_provider_target,
+        expected_current_provider_target_fingerprint=expected_current_provider_target_fingerprint,
+        source_label=source_label,
+        updated_at=updated_at,
+        fetch_target_payload=fetch_target_payload,
+        fetch_target_domains=fetch_target_domains,
+    )
+    if not apply:
+        return plan.result
+    target_record, provider_target_record = record_store.compare_and_write_dokploy_target_domains(
+        expected_record=plan.current_target,
+        expected_target_id_record=plan.target_id,
+        expected_provider_target_record=plan.current_provider_target,
+        domains=plan.result.requested_domains,
+        updated_at=plan.result.target_record.updated_at,
+        source_label=plan.result.target_record.source_label,
+    )
+    return plan.result.model_copy(
+        update={
+            "applied": True,
+            "target_record": target_record,
+            "provider_target_record": provider_target_record,
+            "warnings": (),
+        }
     )
 
 
@@ -450,6 +501,39 @@ def adopt_dokploy_target(
     )
 
 
+def plan_dokploy_application_target(
+    *,
+    project_id: str,
+    project_name: str,
+    environment_id: str,
+    environment_name: str,
+    target_name: str,
+    app_name: str,
+    server_id: str,
+) -> DokployTargetCreatePlan:
+    return DokployTargetCreatePlan(
+        project={
+            "action": _project_plan_action(
+                project_id=project_id,
+                environment_id=environment_id,
+            ),
+            "project_id": project_id,
+            "project_name": project_name,
+        },
+        environment={
+            "action": "use_existing" if environment_id else "create",
+            "environment_id": environment_id,
+            "environment_name": environment_name,
+        },
+        application={
+            "action": "create",
+            "target_name": target_name,
+            "app_name": app_name.strip(),
+            "server_id": server_id.strip(),
+        },
+    )
+
+
 def create_dokploy_application_target(
     *,
     record_store: DokployTargetAdoptionRecordStore,
@@ -495,7 +579,7 @@ def create_dokploy_application_target(
             "Dokploy target creation requires --project-id or --project-name when --environment-id is not supplied"
         )
 
-    provider_requests = _planned_provider_requests(
+    provider_requests = planned_application_provider_requests(
         project_id=normalized_project_id,
         project_name=normalized_project_name,
         project_description=project_description,
@@ -507,26 +591,14 @@ def create_dokploy_application_target(
         application_description=application_description,
         server_id=server_id,
     )
-    plan = DokployTargetCreatePlan(
-        project={
-            "action": _project_plan_action(
-                project_id=normalized_project_id,
-                environment_id=normalized_environment_id,
-            ),
-            "project_id": normalized_project_id,
-            "project_name": normalized_project_name,
-        },
-        environment={
-            "action": "use_existing" if normalized_environment_id else "create",
-            "environment_id": normalized_environment_id,
-            "environment_name": normalized_environment_name,
-        },
-        application={
-            "action": "create",
-            "target_name": normalized_target_name,
-            "app_name": app_name.strip(),
-            "server_id": server_id.strip(),
-        },
+    plan = plan_dokploy_application_target(
+        project_id=normalized_project_id,
+        project_name=normalized_project_name,
+        environment_id=normalized_environment_id,
+        environment_name=normalized_environment_name,
+        target_name=normalized_target_name,
+        app_name=app_name,
+        server_id=server_id,
     )
 
     _ensure_create_route_has_no_provider_target(
@@ -676,6 +748,7 @@ def create_dokploy_compose_target(
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
+    resuming_create: bool = False,
 ) -> DokployComposeTargetCreateResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -804,6 +877,14 @@ def create_dokploy_compose_target(
             warnings=("dry run only; provider was not mutated and records were not written",),
         )
 
+    # A Compose lane needs its private default bridge. Check the selected host
+    # before even creating its parent placement; a refusal leaves no partial lane.
+    if resuming_create and not (normalized_project_id or normalized_environment_id):
+        raise ValueError("Resuming creation requires recorded original placement.")
+    if not resuming_create:
+        require_bridge_network_capacity(
+            host=host, token=token, server_id=normalized_server_id, required_networks=1
+        )
     created_project_id = normalized_project_id
     if not created_project_id and not normalized_environment_id:
         project_payload: JsonObject = {"name": normalized_project_name}
@@ -1015,7 +1096,7 @@ def _provider_string_field(
     return ""
 
 
-def _planned_provider_requests(
+def planned_application_provider_requests(
     *,
     project_id: str,
     project_name: str,

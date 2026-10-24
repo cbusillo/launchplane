@@ -1,6 +1,6 @@
 """Drop consumer-free delegated-delivery and older unmodeled history tables.
 
-Prepared contract migration for #2437. Hosted startup stays on down_revision
+Prepared contract migration for #2437. Hosted startup excludes this branch
 until shared-data/release approval. Take and rehearse a full database backup
 before applying: downgrade cannot recover these historical rows.
 """

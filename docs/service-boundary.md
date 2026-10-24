@@ -549,16 +549,12 @@ confirmation phrase, a non-empty reason and related issue, and an unchanged
 managed-comment observation. If the managed comment is already absent, apply
 records `already_absent` without claiming a GitHub mutation.
 
-- work graph chooser route:
+- repository context and merge-delivery routes:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
-  - `GET /v1/work-graph/snapshot` (native FastAPI)
-  - `GET /v1/work-graph/github/issues` (native FastAPI)
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
-  - `POST /v1/work-graph/rank` (native FastAPI)
-  - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
@@ -625,7 +621,7 @@ typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
-driver, preview, work-graph, merge-train, and Every Code route families, plus
+driver, preview, merge-train, and Every Code route families, plus
 the seven evidence-ingress writes and twelve Generic Web provider writes, are
 registered from dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
@@ -650,11 +646,22 @@ Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
-The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-and checked `frontend/src/generated/openapi.ts` types from that canonical
-export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
-temporary paths and fails when the checked schema or generated types drift from
-the backend contract. The canonical `x-launchplane-ui-read-operations` and
+The frontend derives `frontend/generated/openapi-ui.json` from that export.
+Both JSON files and the TypeScript client at `frontend/src/generated/openapi.ts`
+are ignored build artifacts. Each schema replaces its prior file atomically so
+concurrent readers receive a complete document. Frontend tests, development, type checks and builds
+export schemas before consuming them. Docker provides Python and uv in its
+frontend build stage. The browser-container wrapper exports on the host before
+running the Node-only `test:browser:prepared` consumer inside its private namespace.
+That prepared command requires the wrapper's generated schemas.
+Python tests generate their UI fixtures in temporary paths; inventory reads derive
+the canonical document directly from the Python exporter.
+`(cd frontend && pnpm check:openapi-drift)` still compares the committed runtime
+agent contract with a temporary Python export. Use
+`(cd frontend && pnpm generate:openapi)` after a backend contract change and commit
+only the agent contract. No custom merge driver or train candidate regeneration
+is required. The canonical
+`x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
 browser-safe POST path and stable operation id; slicing fails closed when a
 route, method, operation id, success response, or referenced schema drifts. A
@@ -664,13 +671,10 @@ after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
 write route also goes in `BROWSER_WRITE_ROUTES` in
 `frontend/src/browser-write-contract.ts`;
 `frontend/tests/action-model.test.mjs` checks that those routes match the write
-manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
-generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
-It also covers browser-human privileged-operation approval and revocation; the
-service-internal execution path is intentionally absent.
-Issue reconciliation remains a bearer-only service operation rather than a
-browser client binding. Generated request, success, validation, and error
-bindings are the API boundary consumed by the UI. Handwritten frontend types
+manifest. Use those manifests for the current selection rather than maintaining
+a second operation list here.
+Generated request, success, validation, and error bindings are the API boundary
+consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
 The same canonical export also feeds the narrower checked
@@ -679,7 +683,7 @@ The same canonical export also feeds the narrower checked
 to project only the explicit agent/admin allow-list plus the semantic
 lifecycle, deploy, reconciliation, workflow, and governance overlay. The
 artifact carries a semantic digest and non-gating source revision. The existing
-`pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
+`(cd frontend && pnpm check:openapi-drift)` gate regenerates it in a temporary
 path and compares only its normalization version and semantic digest, so
 unrelated OpenAPI or provenance-only changes do not create consumer drift.
 
@@ -695,14 +699,9 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated work-graph snapshot,
-issue-inbox, Every Code summary, merge-train policy-target, and merge-train
-controller-status read models directly. Work-graph ranking is the only
-Engineering Ops POST in the generated browser write contract; it is stateless
-and accepts the current generated snapshot. Issue reconciliation remains
-read-only in the browser: the UI explains the native GitHub Actions OIDC or
-trusted Director-agent write identity boundary and renders no Dry Run or Apply
-button. Merge-train UI is also status-only: target selection comes exclusively
+The Engineering Ops browser routes consume the generated Every Code summary,
+merge-train policy-target, and controller-status read models directly.
+Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
 Each route aborts superseded reads, distinguishes denied and empty responses,
@@ -776,6 +775,34 @@ never retries a dispatched mutation. An already-ended session counts as a
 successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
+### Human OAuth credential retirement
+
+A valid logout removes its current database session and encrypted credential.
+Failed identity verification also removes local custody. Neither path makes a
+GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+update guards prevent renewal from recreating a deleted session; they do not
+prevent restoration from an older database backup.
+
+Expired rows are deleted by normal session reads and by opportunistic sign-in
+or provider-refresh sweeps, which skip locked rows. An inactive service performs
+no sweep. Reaching the claims ceiling alone does not collect an inactive
+browser's credential, and ciphertext can remain beyond stored session expiry
+until a later read or sweep.
+
+Database backups may retain earlier encrypted credentials and the identifiers
+needed to decrypt them. Someone holding that backup and its original session
+root can recover the historical credential; local deletion does not erase the
+backup or establish that the credential has expired at GitHub. Rotating the
+current root invalidates current service cookies and custody, but does not
+invalidate GitHub credentials or prevent decryption with the old root. Restoring
+an older database with the same root can also restore unexpired session rows.
+Keep the root separate from database exports and preserve existing backup access
+and retention controls.
+
+Provider revocation is not implemented. Neither per-browser credential isolation
+nor complete refresh-pair retirement has been established. Supported provider
+expiry and rotation do not establish immediate retirement on logout.
+
 ### Browser Mutation Boundary
 
 `SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF
@@ -806,32 +833,20 @@ idempotency key so the service can replay or reconcile the original operation.
 It must not generate a replacement key merely because the browser stopped
 waiting.
 
-The cookie-capable mutation inventory is intentionally limited to:
-
-- `POST /auth/logout`
-- `POST /v1/work-graph/rank`
-- `POST /v1/agent/write-intents/evaluate`
-- `POST /v1/drivers/generic-web/prod-promotion`
-- `POST /v1/drivers/generic-web/prod-promotion-workflow`
-- `POST /v1/product-config/apply`
-- `POST /v1/merge-train/policies/import`
-- `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
-- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
-
-Every other authenticated mutation route intentionally rejects session-cookie
-authentication and continues to require its existing GitHub Actions OIDC,
-`local_operator`/`local_admin` bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the existing mixed-identity routes above
-also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The Launchplane UI exposes only the separately
-generated UI write slice; this inventory is a server-side cookie-capable surface
-list, not a promise of UI controls for every route. In particular, GitHub issue
-inbox reconciliation is displayed as unavailable because it remains a GitHub
-Actions OIDC service operation. Managed-secret root re-encryption is explicitly
-bearer-only even when a valid human session cookie is present; rotating the
-service root is not a browser mutation surface.
+Each route's authentication dependency selects its accepted identities;
+see the dependency definitions and route wiring in
+[`http_app.py`](../control_plane/http_app.py) and
+[`http_routes/`](../control_plane/http_routes/), with wiring and CSRF coverage in
+the [browser mutation tests](../tests/test_http_app_browser_mutation.py).
+Browser-capable mutations use
+the CSRF boundary above and still enforce their route-specific authorization.
+On routes that also accept bearer identities, bearer requests retain their
+existing verification rather than using browser origin, fetch-metadata, or CSRF
+proof. A cookie does not weaken or replace bearer verification. The Launchplane
+UI's selected write surface is defined by the OpenAPI manifests described above.
+Managed-secret root re-encryption remains bearer-only even when a valid human
+session cookie is present; rotating the service root is not a browser mutation
+surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -1014,12 +1029,11 @@ mutable reusable ref may appear only in a reviewed overlap plan when the active
 policy already authorizes that exact ref; narrowing removes it from the same
 stable managed rule after canary evidence.
 
-The standalone policy-admin worker owns its exact immutable grants in the
-separate `operator.authz-policy-reconcile` managed set. Rotate that authority by
-expanding through the currently authorized worker, advancing the wrapper pin,
-verifying the new identity, and then contracting the old rule. The deploy
-workflow no longer carries any authorization inputs, secret, or reconciliation
-job. Do not reintroduce a deploy-time policy bridge; missing policy-admin
+The standalone policy-admin wrapper and reusable worker are deleted. Stored
+rules in `operator.authz-policy-reconcile` require separate Director-approved
+removal through the DB-native Access policy proposal path. The deploy workflow
+carries no authorization inputs, secret, or reconciliation job. Do not
+reintroduce a workflow or deploy-time policy bridge; missing policy-admin
 authority is a DB-native recovery design blocker.
 
 Production diagnostic and repair workers do not accept a service URL or OIDC
@@ -1204,21 +1218,6 @@ capabilities, preserve the direct worker signal payloads, and do not create
 idempotency records. PR-feedback status preserves
 the worker transition semantics: missing feedback returns `404 not_found`, and
 already applied or ignored feedback returns `409 feedback_already_final`.
-
-`POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
-returns the queue payload under `result.queue`. The route requires the
-`work_graph.rank` action for product/context `launchplane`, accepts GitHub
-Actions OIDC and GitHub human-session callers, rejects Director-agent bearer tokens
-at the identity boundary even if a policy grant is too broad, performs no
-storage writes, and does not make Launchplane authoritative for copied GitHub or
-Code Plans state.
-
-`POST /v1/work-graph/github/issues/reconcile` reconciles the configured GitHub
-issue inbox into Code Plans Project state. `dry_run` mode requires
-`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. The
-route uses the native FastAPI write identity boundary for GitHub Actions OIDC
-and trusted Director-agent write credentials, then returns reconcile evidence under
-`result.reconcile`.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
@@ -1424,7 +1423,7 @@ batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
-repository ownership/awareness read model used by work graph and agent context.
+repository ownership/awareness read model used by agent context.
 The route requires
 `product_environment.read` for product/context `launchplane`, performs no
 writes, and distinguishes Launchplane-managed runtime repos from awareness-only
@@ -1432,39 +1431,13 @@ Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 
-`GET /v1/work-graph/snapshot` is a native FastAPI route that returns the
-current Launchplane-assembled work graph snapshot for the same authorization
-boundary. It composes product overviews and Every Code work-request records into
-the typed snapshot contract.
-General planning and work graphs inside Launchplane are retired (see
-`DIRECTION.md`); the planning provider, ranking, and issue-inbox reconcile
-described here remain only until their code is deleted.
-When a caller-owned planning ingestion provider is configured, the route can
-overlay compact GitHub/Code Plans facts. The first provider is opt-in via
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, reads `gh project item-list --format
-json`, and supplies Project Focus, Manager, Finish Line, labels, status, updated
-time, PR-vs-issue type, dependency counts, subissue counts, and PR check state.
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT` bounds the per-snapshot fan-out for
-dependency, subissue, and check reads after Project items are loaded. The route
-reports product, work-request, and planning-fact source counts, does not fetch or
-store GitHub issue bodies, and writes no state. A configured Project or signal
-read failure returns an error instead of a silently incomplete snapshot.
-The production image includes `gh` for this provider, and deploy automation maps
-the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` repository secret into service `GH_TOKEN`
-when present. Deploy automation also withholds the Project provider env bundle
-until that secret exists, so prepared repo variables do not enable
-unauthenticated runtime reads. That token is not a Launchplane record and must
-remain outside the repo.
-
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, work graph snapshot, Every Code
-summary, and preview readiness projections under named sections. Each section
-reports `available`, `unauthorized`, or `unavailable`; optional work-graph
-planning provider failures mark only that section unavailable instead of dropping
-the whole context or silently omitting the failure. The endpoint writes no
+composes the existing repo-product mapping, Every Code summary, preview
+readiness, and optional exact tenant-admission projections under named sections.
+Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
+writes no
 records, fetches no issue bodies, and must preserve the lower-level
 redaction/provenance rules.
 
@@ -1531,22 +1504,11 @@ session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React Launchplane UI.
 Hosted requests reload the current DB policy before authorization and re-evaluate
-the session role. OAuth organization/team claims expire for authorization after
-24 hours; the session is revoked and the user must sign in again to refresh
-those mutable GitHub claims.
-
-The cookie's `Max-Age` and stored session expiry are 14 days (1,209,600 seconds),
-with renewal eligible after 24 hours (86,400 seconds) since issue or last renewal.
-This is separate from the production admin/read-only authorization-claims
-limit: those claims expire absolutely 24 hours after sign-in, and the service
-revokes the session before attempting cookie renewal. Background reads enter
-the same check but do not refresh GitHub claims or the sign-in time; there is no
-separate short idle timeout. Confined Client sessions follow their current
-product-ownership checks instead of this admin/read-only claims branch.
-The OAuth callback uses the GitHub token to read identity and membership, then
-retains only the Launchplane identity/session; it does not store the token or
-its expiry/refresh metadata. Later Launchplane session reads do not use that
-token. OAuth login state lasts 10 minutes (600 seconds).
+the session role. The [human auth/session contract](#service-route-checklist)
+above owns renewal, provider verification, credential custody, Client
+confinement, concurrency and logout. See
+[credential retirement](#human-oauth-credential-retirement) for the local/provider
+and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an
@@ -2035,6 +1997,11 @@ transport or its managed authority.
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
 records; product repos do not carry repo-local Launchplane lifecycle manifests.
+Profile GET responses include a strong `ETag`. A full-profile POST may supply
+that exact revision as `If-Match`; stale revisions return HTTP 412 before any
+save. Existing idempotent replay precedes this check. The reviewed
+[preview override helper](preview-settings.md) uses this condition to preserve
+unrelated profile updates while changing one preview setting.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
@@ -2272,6 +2239,34 @@ confirmation, and source label. This permits a different apply reason without
 changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
+
+### Odoo business-hours policy
+
+A standalone `odoo_business_hours` section selects an Odoo prod company's
+calendar, with `inspect` (dry-run only), `set` or explicit `clear`. It cannot
+combine runtime settings, secrets or public hosts. It retains normal
+`product_config.plan` / `product_config.apply` lane authority and requires
+`product_profile.read` plus existing instance-scoped `operations.read` runtime
+permission. Applying additionally requires `product_profile.write` in the service
+context. Config-only authority does not acquire release-policy write authority.
+Signed-in mutations retain CSRF checks; terminal-agent exclusion is unchanged.
+
+Set requires positive `company_id` and `expected_calendar_id`, and optionally an
+existing owned prod private endpoint key. Inspection reports bounded permitted
+company scope rather than database-wide completeness. Authentication membership
+is bounded to 128 companies; a larger or incomplete membership response refuses
+qualification, including when a company filter is supplied. The reviewed plan binds
+scope, full starting profile, requested references, endpoint/runtime authority,
+reason and source label; clock progress and forecasts do not change its digest.
+Apply requires `reviewed_plan_sha256` and the same caller's saved dry-run marker.
+The profile write, expected existing profile or verified absence, and successful
+idempotency receipt commit in one authority bundle. Completed original-key replay
+precedes remote qualification; concurrent profile edits refuse without overwriting
+them. Runtime/Odoo observations remain point-in-time; the transaction does not
+freeze external systems. Clear needs no Odoo read. The result's optional
+`odoo_business_hours` contains bounded evidence; other runtime/secret results are
+skipped/empty and no live-sync action is requested. See
+[business-hours configuration](release-review.md#odoo-business-hours).
 
 ### Public hostnames on the prod compose target
 
@@ -2532,8 +2527,6 @@ The conventional generic-web contract requires an admin-supplied root
 preview base URL and writes it as the context-scoped
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
 binds that mutable runtime value; no real domain becomes checked-in authority.
-Repeated onboarding merges that owned key into the existing preview-context
-record instead of replacing unrelated runtime values.
 Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
 manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized
@@ -2722,6 +2715,50 @@ for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
 remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
+The setup repair operation and `POST /v1/route-bindings/reconcile` also support
+the explicit CSRF-checked strict-administrator browser decision. Their optional
+`browser_review` names the actual lane product and, on apply, the reviewed
+semantic plan digest. Setup retains its service namespace `product=launchplane`;
+the browser supplies no provider identity, placement, target or domain payload.
+The service resolves fresh lane records and read-only provider evidence. Binding
+browser dry-run uses the absent expectation as a discovery sentinel and returns
+the actual current expectation for apply. The typed top-level `review` exposes
+current/proposed records and findings, without arbitrary provider evidence.
+It is omitted for existing machine requests, whose result shape and authority
+remain unchanged.
+
+Browser apply rechecks the semantic review and current source rows through the
+existing atomic CAS/receipt boundary. A deterministic prewrite `stale` result
+is returned only after its completed 409 refusal wins the same unique caller,
+route and idempotency-key row as a successful atomic write. A concurrent 202
+winner is recovered instead of a false refusal; a 409 winner prevents later
+same-key route-record writes, even after evidence becomes eligible again.
+Existing immutable once-only idempotency insertion decides this result without
+a second request-lock or lease lifecycle. Changed payloads conflict, while
+in-progress, infrastructure, storage and commit uncertainty retain the original
+request/key. Browser replay preserves the exact stored 409 error and trace before
+any Accepted response conversion. Machine replay behavior remains unchanged.
+
+A historical same-key replay is recovered before fresh-plan drift checks. A
+verified accepted or replayed receipt completes that apply independently of
+current-record readback. The browser then performs a separate inert dry-run,
+using a distinct request identity. Failure, denial or later drift of readback is
+shown as current evidence only and does not retain the completed operation in
+recovery or block either decision. Resuming an unproved apply requires the exact
+original payload/key. The administrator may instead explicitly start a separate
+review, releasing only browser tracking without canceling or settling the old
+request. A new inert review and decision precede a fresh-key apply, protected
+by the existing record CAS boundary. The earlier identity/failure stays labeled
+unknown in this view; it is not a durable browser history, and a new receipt
+does not establish the earlier outcome. Unknown operations do not lock the
+independent card, although current network work still serializes both cards.
+Administrator, session and CSRF checks remain required. Neither a later record nor readback
+proves current site health. Browser receipts retain the administrator's reason;
+the typed review's required `expected_confirmation` comes from the same
+server-side envelope property that validates apply. Existing machine response
+shapes and confirmations remain unchanged. No other setup operation is admitted
+by this browser path.
+
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped
 `dokploy_target.lane_setup` action for `create-compose` and the narrow
@@ -2876,7 +2913,13 @@ metadata.
 Live target runtime sync uses the native FastAPI
 `POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
 or `mode: "apply"`, product/context/instance, and optional apply-only deploy
-controls. Dry-run requires `live_target_runtime.plan`; apply requires
+controls. Optional `selected_keys` is a nonempty list of unique existing managed
+key names. It restricts the plan, delivery and persistence readback to those
+keys, preserves every unselected provider value, and applies no retirements.
+Unknown, missing or retired selected keys fail before provider mutation.
+Selection cannot deploy or stage testing separation; any literal qualification
+must also be selected. Omitting the field retains full-lane sync behavior.
+Dry-run requires `live_target_runtime.plan`; apply requires
 `live_target_runtime.apply`. The route resolves DB-backed runtime environment
 records, managed runtime secrets, and the tracked Dokploy target in the deployed
 Launchplane service, evaluates runtime key-safety policy, compares desired and
@@ -3779,10 +3822,11 @@ with the exact base branch and optional merge method. It requires
 controller's `mutate=false` path, so it verifies current numeric repository and
 repository owner identity, head, base, open/merged state, draft/mergeability, admission,
 and live required-check policy without acquiring a controller lease or writing
-GitHub/provider state. Mergeable tenant UI PRs report required technical-check
-readiness. Engineering returns `not_applicable`; current results for both kinds
-have no human actions. Client decisions use product review and the release
-checklist, separately from these machine checks.
+GitHub/provider state. Mergeable tenant UI PRs report readiness only when both
+required technical checks and the existing current-head Client gate pass.
+Engineering returns `not_applicable`; current results for both kinds have no
+human actions. Client decisions are recorded through product review; this
+evaluation reads them and grants no acceptance or release authority.
 
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
 tenant-admission read model. The query supplies the complete candidate binding:
@@ -3827,7 +3871,7 @@ It is bearer-only, requires `tenant_admission.controller.run_once` authorization
 for the candidate product/context, and is covered by the exact-length JSON body
 guard at 64 KiB. An explicitly authorized terminal agent may invoke this route.
 The controller independently rechecks classification, exact source-control facts,
-and technical evidence before every merge effect. This is a dedicated privileged
+technical evidence, and the existing Client gate before every merge effect. This is a dedicated privileged
 controller action: its context-scoped
 grant intentionally authorizes a central controller or admin whose source
 repository need not equal the target tenant repository. The submitted target
@@ -3851,12 +3895,22 @@ non-draft and currently mergeable. When the live required-check policy is
 strict, the exact PR head must also contain the current base SHA; missing or
 malformed strict-policy and draft evidence fails closed.
 
+Readiness uses the merge train's [Client-review contract](owner-acceptance.md#current-client-review),
+including its notes, current-head acceptance projection and saved veto rules.
+Missing profile or saved-decision storage cannot establish readiness.
+
 For `mutate=true`, Launchplane uses the existing repository/base controller
 lease only as a shared mutation and crash-reconciliation fence; it does not
 enqueue the PR or borrow merge-train scheduler, label, batch, or stack policy.
 After the first evaluation it re-fetches PR/base facts, recomputes admission,
-and re-reads technical checks immediately before checkpointing and issuing the
-GitHub merge request with the exact expected head SHA. Provider uncertainty
+and re-reads technical checks and Client review before checkpointing and issuing
+the GitHub merge request with the exact expected head SHA. A newly saved veto or
+a failed pre-merge read releases the lease without a provider mutation. GitHub's
+[documented synchronous merge refusals](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
+(403, 404, 405, 409 and 422) also release
+the fence; other statuses and uncertain merge outcomes retain it. An abrupt
+process death in any active phase requires the same tenant request to resume;
+another controller action cannot adopt that state. Provider uncertainty
 leaves the exact request, admission decision, technical-check digest, and merge
 phase in durable controller state. A retry adopts success only when GitHub shows
 that exact head merged into the requested base and the target branch contains
@@ -4190,6 +4244,17 @@ context. A scoped admin or agent can inspect the preview and latest decision;
 it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
 the ability to record a Client decision.
 
+`POST /v1/product-review/withdrawal` supports `dry-run`, `apply` and `readback`
+for the Director's recorded decision to withdraw a pending labeled request.
+The request names `{product, repository, pull_request, expected_head_sha,
+reason, director_decision_url, mode, reviewed_plan_sha256}`. Apply and readback
+require the same original `Idempotency-Key`; apply binds the reviewed dry-run
+plan. Only an authenticated Director agent or admin may apply it; dry-run and readback use product read authority. The service
+refuses any current-head Client decision before removing the configured label,
+records withdrawal history, and never supplies acceptance or changes release
+acceptance. See [pending request withdrawal](owner-acceptance.md#withdrawing-a-pending-request)
+for replay, readback and later-request behavior.
+
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
 reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
 `decision` of `accepted` or `changes_requested` (reason required). The three
@@ -4497,7 +4562,7 @@ The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
 `mode` (`100644` or `100755`). An omitted mode preserves an existing regular
 file's mode and defaults to `100644` for a new file; symlinks are refused.
-It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
+It accepts at most 32 files, 2 MiB of old-plus-new changed content (including
 deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
 or merge settings. The base must match the verified OIDC `sha`. A new branch
@@ -4506,6 +4571,17 @@ current default-branch head; a stale new proposal receives 409
 `updater_proposal_conflict` and reruns against the new base. An exact existing
 branch can resume its original bounded proposal after verifying its tree and
 single parent; it never updates that branch.
+
+The whole-file budget includes unchanged bytes within every submitted file. It
+is deliberately larger than the 1 MiB JSON ingress limit so small changes to
+large source files or lockfiles can fit without a second edit representation.
+The body limit still bounds all submitted content, JSON escaping and metadata;
+raising the old-plus-new budget does not raise that limit or file count. Callers
+omit genuinely unchanged files and measure the complete serialized request and
+old-plus-new changed-file bytes. An oversized coherent candidate is explicitly
+refused; do not skip necessary changes, truncate files or split it into competing
+pending proposals. The service still consumes whole UTF-8 file contents as data
+and performs no caller-supplied patch execution.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set
@@ -4555,6 +4631,23 @@ and real-run qualification follow this route's landing and deployment; they
 are not activated by adding the route.
 
 ## Reviewed stored-setting and workflow-rule retirement
+
+An exact testing lane can disable an existing runtime-secret binding through
+`POST /v1/product-config/apply` with `disable_secret_bindings`, a list of
+`binding_key` and current `version_id` pairs. Read version IDs through the
+names-only product secret-binding surface. Use the existing product-config
+dry-run/apply helpers, with a matching reviewed request and stable idempotency
+key. This metadata-only operation cannot be combined with other config writes.
+
+Retire the keys through product config and sync them out of provider configuration
+first. The service independently checks existing retirement intent, fresh provider
+key absence, unique lane bindings and current versions. Commit-time read sets
+protect retirement intent and secret metadata. The shared delivery selector must
+also find no inherited supplier after removal. Only the selected testing bindings
+become disabled; encrypted versions, secret records and other lanes stay intact.
+The response contains actions and names only. Provider persistence does not prove
+running-container adoption: complete the normal testing deployment and verify
+its runtime behavior before claiming isolation or a green lane.
 
 See [reviewed retirement](reviewed-retirement.md) for the exact request, saved
 review, administrator apply, private rollback custody and readback contracts of

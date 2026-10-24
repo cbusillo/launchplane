@@ -21,12 +21,20 @@ From the repository root:
 uv sync --extra dev
 uv run launchplane --help
 uv run launchplane service serve --help
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend validate
+(cd frontend && pnpm install --frozen-lockfile)
+(cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the OpenAPI drift check, TypeScript, and the
-production Vite build. `pnpm --dir frontend test:browser` runs the Playwright
+Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
+and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
+client are ignored build artifacts generated from Python source before frontend
+tests, development, type checks and production builds, including Docker and CI.
+Python contract tests and inventory scripts also derive schemas from source.
+After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
+and commit only the agent contract. CI still rejects drift in that runtime contract.
+For IDE type resolution before the first build, run
+`(cd frontend && pnpm generate:openapi-types)` once.
+`(cd frontend && pnpm test:browser)` runs the Playwright
 browser smoke. Use [`.github/github.json`](.github/github.json) for current gates
 and [testing style](docs/style/testing.md) for choosing proportionate tests:
 
