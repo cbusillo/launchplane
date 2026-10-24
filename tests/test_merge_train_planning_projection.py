@@ -263,6 +263,137 @@ class NativePlanningProjectionTests(TestCase):
         self.assertTrue(_receipt(record)["review_required"])
         self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
 
+    def test_terminal_reference_errors_publish_a_failed_partial_receipt(self) -> None:
+        for status in (404, 410):
+            with self.subTest(status=status):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.pull_body = "Refs #8"
+                self.graph.add(_REPO, 8, state="closed")
+                error = HTTPError(
+                    "https://example.test/issues/8", status, "Unavailable", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+
+                def fail(call: dict[str, Any]) -> None:
+                    if call["path"] == f"/repos/{_REPO}/issues/8":
+                        raise click.ClickException("reference unavailable") from error
+
+                self.graph.fail = fail
+                self.comment_mock.reset_mock()
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.comment_mock.assert_called_once()
+                self.assertEqual(
+                    self.comment_mock.call_args.kwargs["body"], record.comment_markdown
+                )
+                receipt = _receipt(record)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["coverage"], "partial")
+                rows = self.rows(record)
+                self.assertTrue(rows[_REPO, 7]["verified"])
+                self.assertEqual(rows[_REPO, 8]["failure"]["status_code"], status)
+
+    def test_incomplete_discovery_publishes_known_targets_without_metadata_writes(self) -> None:
+        for failure in ("malformed_timeline", "comment_bound", "target_bound"):
+            with self.subTest(failure=failure):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.pull_body = "Refs #8"
+                if failure == "malformed_timeline":
+                    source.timeline = [{"event": "cross-referenced", "source": None}]
+                elif failure == "comment_bound":
+                    source.pull_comments = [{"body": "Prior progress", "user": {"id": _BOT}}] * (
+                        completion.MAX_PROVIDER_PAGES * completion.PROVIDER_PAGE_SIZE
+                    )
+                else:
+                    source.pull_body = "Refs " + ", ".join(
+                        f"#{number}" for number in range(10, 10 + completion.MAX_PLANNING_TARGETS)
+                    )
+                self.comment_mock.reset_mock()
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.comment_mock.assert_called_once()
+                receipt = _receipt(record)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["coverage"], "partial")
+                self.assertIn("discovery_failure", receipt)
+                self.assertIn((_REPO, 7), self.rows(record))
+                self.assertTrue(all(not row["verified"] for row in receipt["issues"]))
+                self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
+
+    def test_transient_reference_failure_takes_retry_priority_over_terminal_failure(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.pull_body = "Refs #8 and #10"
+        self.graph.add(_REPO, 8, state="closed")
+        self.graph.add(_REPO, 10, state="closed")
+        transient = True
+
+        def fail(call: dict[str, Any]) -> None:
+            status = (
+                404
+                if call["path"] == f"/repos/{_REPO}/issues/8"
+                else 503
+                if transient and call["path"] == f"/repos/{_REPO}/issues/10"
+                else None
+            )
+            if status:
+                error = HTTPError(
+                    "https://example.test/reference", status, "Unavailable", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+                raise click.ClickException("reference unavailable") from error
+
+        self.graph.fail = fail
+        record = self.record()
+        self.assertTrue(record.retryable)
+        self.comment_mock.assert_not_called()
+        transient = False
+
+        retried = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
+            planning_scope_resolver=self.graph.scope,
+        )
+
+        self.assertEqual(retried.delivery_status, "failed")
+        self.assertFalse(retried.retryable)
+        self.comment_mock.assert_called_once()
+        self.assertTrue(self.rows(retried)[_REPO, 10]["verified"])
+
+    def test_discovery_denial_and_identity_failure_never_publish(self) -> None:
+        for status in (403, 401):
+            with self.subTest(status=status):
+                self.graph = NativeGraphProvider()
+                self.comment_mock.reset_mock()
+                error = HTTPError(
+                    "https://example.test/comments", status, "Refused", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+
+                def refuse(call: dict[str, Any]) -> None:
+                    if call["path"].startswith(
+                        f"/repos/{_REPO}/issues/{self.graph.pull_number}/comments?"
+                    ):
+                        raise click.ClickException("PR comments refused") from error
+
+                self.graph.fail = refuse
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.assertFalse(self.graph.nodes[_REPO, 7].writes)
+                self.comment_mock.assert_not_called()
+
     def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
         source = self.graph.nodes[_REPO, 7]
         source.references = []

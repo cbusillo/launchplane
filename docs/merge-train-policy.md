@@ -2442,8 +2442,8 @@ fresh creation order. A completed record with a saved planning receipt is not
 queued again; legacy completion without that receipt can recover. Newer feedback
 from a different controller attempt remains protected. Queueing performs no
 provider calls under the controller lease. Completion is queued and reconciled
-even when the current policy has no trusted automation authors. Missing author
-trust remains a source-review hold in the receipt; it never silently skips
+even when the landing repository's policy has no trusted automation authors.
+Missing author trust remains a source-review hold in the receipt; it never silently skips
 reconciliation or grants metadata authority.
 
 For a merged PR on the default branch, completed feedback discovers its native
@@ -2506,9 +2506,15 @@ completion are distinct. A known repository denial prevents that repository's
 writes while independent authorized repositories can continue. A global identity
 failure or unknown write outcome stops later writes. Discovery-time failures
 apply before any metadata write and retain already discovered neighbors. Failed
-source provider evidence withholds comment delivery; terminal source holds can
-publish the existing incomplete-planning note. These outcomes do not undo the
-landing or grant access.
+source evidence remains failed, with every verified prior result retained.
+A verified landing can publish terminal partial receipts through the existing
+incomplete-planning note while reconciliation remains failed. Incomplete source
+reference discovery or a neighborhood coverage overflow retains known targets
+and explicitly partial coverage without metadata writes.
+Unknown writes, global identity failures, denial in the source repository and
+transient/quota failures still suppress publication and retain existing backoff.
+Terminal planning failures remain failed in the existing feedback protocol even
+when their note was delivered. These outcomes do not undo the landing or grant access.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
 Completion and retry share a sanitized classification cached on the original

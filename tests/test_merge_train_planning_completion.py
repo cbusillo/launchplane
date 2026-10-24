@@ -822,13 +822,18 @@ class PlanningCompletionTests(TestCase):
                         },
                     )
 
-    def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
+    def test_failed_readback_never_certifies_completion_or_publishes_an_unknown_write(self) -> None:
         self.provider.drop_label_write = True
-        self.assertEqual(self.record().delivery_status, "failed")
+        partial = self.record()
+        self.assertEqual(partial.delivery_status, "failed")
+        self.assertFalse(_receipt(partial)["ok"])
+        self.comment_mock.assert_called_once()
+        self.comment_mock.reset_mock()
         self.provider.drop_label_write = False
         self.provider.config = {"planning": {"projects": {"default_project": 2}}}
         self.provider.drop_project_write = True
         self.assertEqual(self.record().delivery_status, "failed")
+        self.comment_mock.assert_not_called()
         self.assertEqual(self.provider.project_status, "active")
         self.provider.drop_project_write = False
         record = self.record()

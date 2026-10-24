@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import quote
 
 import click
@@ -34,6 +35,9 @@ from control_plane.merge_train_planning_scope import (
 from control_plane.merge_train_provider_failure import provider_failure
 
 PROJECTION_GRACE = timedelta(minutes=15)
+MAX_PLANNING_TARGETS = 100
+PROVIDER_PAGE_SIZE = 100
+MAX_PROVIDER_PAGES = 10
 _QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String, $config: String!) {
   repository(owner: $owner, name: $name) {
@@ -69,7 +73,7 @@ class PlanningCompletionPending(PlanningCompletionFailure):
 
 
 class PlanningCompletionSourceReview(PlanningCompletionReview):
-    """All sources were visited; landed feedback may report their terminal holds."""
+    pass
 
 
 class PlanningCompletionProviderFailure(PlanningCompletionFailure):
@@ -163,12 +167,14 @@ def _graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any
 
 def _pages(token: str, path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for page in range(1, 11):
-        response = github_api_request(path=f"{path}?per_page=100&page={page}", token=token)
+    for page in range(1, MAX_PROVIDER_PAGES + 1):
+        response = github_api_request(
+            path=f"{path}?per_page={PROVIDER_PAGE_SIZE}&page={page}", token=token
+        )
         if not isinstance(response, list):
             raise PlanningCompletionReview("Planning completion list read was incomplete.")
         rows.extend(_object(item) for item in response)
-        if len(response) < 100:
+        if len(response) < PROVIDER_PAGE_SIZE:
             return rows
     raise PlanningCompletionReview("Planning completion list exceeded its coverage bound.")
 
@@ -179,14 +185,17 @@ def _source_references(
     number: int,
     pull: dict[str, Any],
     trusted_author_ids: tuple[int, ...],
-) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    add_source: Callable[[str, int], object],
+    add_mention: Callable[[str, int], object],
+) -> None:
     if (
         not isinstance(pull.get("title"), str)
         or "body" not in pull
         or not isinstance(pull["body"], (str, type(None)))
     ):
         raise PlanningCompletionReview("Planning completion source text was unavailable.")
-    references = linked_issues(repository, pull)
+    for target_repository, target_number in linked_issues(repository, pull):
+        add_source(target_repository, target_number)
     pull_author_id = normalize_author(pull).get("id")
     path = f"/repos/{repository}/issues/{number}"
     for comment in _pages(token, path + "/comments"):
@@ -203,15 +212,14 @@ def _source_references(
         body = comment.get("body")
         if not isinstance(body, str):
             raise PlanningCompletionReview("Planning completion source comment was unavailable.")
-        references.extend(linked_issues(repository, {"body": body}))
-    timeline = []
+        for target_repository, target_number in linked_issues(repository, {"body": body}):
+            add_source(target_repository, target_number)
     for event in _pages(token, path + "/timeline"):
         if event.get("event") != "cross-referenced":
             continue
         issue = _object(_object(event.get("source")).get("issue"))
         if "pull_request" not in issue:
-            timeline.append(_reference(issue, repository))
-    return list(dict.fromkeys(references)), list(dict.fromkeys(timeline))
+            add_mention(*_reference(issue, repository))
 
 
 def _labels(issue: dict[str, Any]) -> set[str]:
@@ -367,6 +375,73 @@ class _Target:
     reference_only: bool = False
     scope: PlanningRepositoryScope | None = field(default=None, repr=False)
     discovery_error: Exception | None = field(default=None, repr=False)
+
+
+def _retryable_failure(error: Exception) -> bool:
+    if isinstance(error, PlanningCompletionProviderFailure):
+        return error.retryable
+    return isinstance(error, PlanningCompletionPending) or provider_failure(error).retryable
+
+
+def _failure_evidence(error: Exception) -> dict[str, Any]:
+    evidence = provider_failure(error)
+    return {
+        "reason": str(error),
+        "cause": error.cause
+        if isinstance(error, PlanningCompletionProviderFailure)
+        else evidence.cause,
+        "status_code": evidence.status_code,
+        "request_id": evidence.request_id,
+        "retryable": _retryable_failure(error),
+    }
+
+
+def _fail_completion(
+    error: Exception, receipt: dict[str, Any], *, publication_blocked: bool
+) -> NoReturn:
+    if not publication_blocked and not _retryable_failure(error):
+        raise PlanningCompletionSourceReview(
+            f"Planning reconciliation is incomplete: {error}", receipt=receipt
+        ) from error
+    if isinstance(error, PlanningCompletionFailure):
+        error.receipt = receipt
+        raise error
+    raise PlanningCompletionFailure(
+        "Planning reconciliation has incomplete provider evidence.", receipt=receipt
+    ) from error
+
+
+def _discovery_receipt(
+    targets: Iterable[_Target], *, landing_sha: str, error: Exception
+) -> dict[str, Any]:
+    outcomes = [
+        {
+            "repo": target.repository,
+            "number": target.number,
+            "role": "source" if target.source or target.reference_only else "related",
+            "closing_reference": target.closing_reference,
+            "phase": "discovery",
+            "review_required": True,
+            **classify_outcome(
+                "not_attempted_discovery_incomplete", required=target.closing_reference
+            ),
+            **(
+                {"discovery_failure": _failure_evidence(target.discovery_error)}
+                if target.discovery_error
+                else {}
+            ),
+        }
+        for target in targets
+    ]
+    return {
+        **receipt_summary(outcomes),
+        "ok": False,
+        "coverage": "partial",
+        "review_required": True,
+        "landing_sha": landing_sha,
+        "issues": outcomes,
+        "discovery_failure": _failure_evidence(error),
+    }
 
 
 @dataclass
@@ -674,7 +749,7 @@ def reconcile_completed_change(
     merged_at = None
     source_text = None
     attempted = _timestamp(attempted_at)
-    for _ in range(10):
+    for _ in range(MAX_PROVIDER_PAGES):
         data = _graphql(
             token,
             _QUERY,
@@ -716,7 +791,11 @@ def reconcile_completed_change(
             }
         sha = _object(pull.get("mergeCommit") or {}).get("oid")
         observed_merge_time = _timestamp(pull["mergedAt"])
-        if not sha or observed_merge_time > attempted + PROJECTION_GRACE:
+        if (
+            not isinstance(sha, str)
+            or not sha
+            or observed_merge_time > attempted + PROJECTION_GRACE
+        ):
             raise PlanningCompletionReview(
                 "Planning completion requires a confirmed default-branch landing and merge time."
             )
@@ -740,7 +819,7 @@ def reconcile_completed_change(
         connection = _object(pull.get("closingIssuesReferences"))
         for issue in connection["nodes"]:
             references.append(_reference(_object(issue), repository))
-        if len(set(references)) > 100:
+        if len(set(references)) > MAX_PLANNING_TARGETS:
             raise PlanningCompletionReview(
                 "Planning completion references exceeded their coverage bound."
             )
@@ -758,7 +837,6 @@ def reconcile_completed_change(
             "Planning completion references exceeded their coverage bound."
         )
     assert merged_at is not None
-    explicit, timeline = _source_references(token, repository, number, pull, trusted_author_ids)
     source_scope = PlanningRepositoryScope(repository, base_branch, token, trusted_author_ids)
     scopes: dict[str, PlanningRepositoryScope] = {repository.casefold(): source_scope}
     targets: dict[tuple[str, int], _Target] = {}
@@ -767,6 +845,7 @@ def reconcile_completed_change(
     pending_reasons: list[str] = []
     denied_repositories: set[str] = set()
     stopped = False
+    overflow_target = None
 
     def resolve(target_repository: str) -> PlanningRepositoryScope:
         key = target_repository.casefold()
@@ -795,21 +874,27 @@ def reconcile_completed_change(
         closing_reference: bool = False,
         reference_only: bool = False,
     ) -> _Target:
+        nonlocal overflow_target
         key = (target_repository.casefold(), target_number)
         if key not in targets:
-            if len(targets) >= 100:
-                raise PlanningCompletionReview(
-                    "Planning direct neighborhood exceeded its coverage bound."
-                )
-            targets[key] = _Target(
+            target = _Target(
                 target_repository,
                 target_number,
                 source=source,
                 closing_reference=closing_reference,
                 reference_only=reference_only,
             )
+            if len(targets) >= MAX_PLANNING_TARGETS:
+                error = PlanningCompletionReview(
+                    "Planning direct neighborhood exceeded its coverage bound."
+                )
+                target.discovery_error = error
+                overflow_target = target
+                raise error
+            targets[key] = target
         if source:
             targets[key].source = True
+        if not reference_only:
             targets[key].reference_only = False
         if closing_reference:
             targets[key].closing_reference = True
@@ -817,10 +902,34 @@ def reconcile_completed_change(
 
     for target_repository, target_number in references:
         add(target_repository, target_number, source=True, closing_reference=True)
-    for target_repository, target_number in explicit:
-        add(target_repository, target_number, source=True)
+    try:
+        _source_references(
+            token,
+            repository,
+            number,
+            pull,
+            trusted_author_ids,
+            add_source=lambda target_repository, target_number: add(
+                target_repository, target_number, source=True
+            ),
+            add_mention=lambda target_repository, target_number: add(
+                target_repository, target_number, reference_only=True
+            ),
+        )
+    except (click.ClickException, KeyError, TypeError, ValueError) as error:
+        known_targets = [*targets.values(), *([overflow_target] if overflow_target else [])]
+        disposition = failure_disposition(
+            _failure_evidence(error)["cause"], None, writes_started=False
+        )
+        _fail_completion(
+            error,
+            _discovery_receipt(known_targets, landing_sha=landing, error=error),
+            publication_blocked=bool(
+                disposition["stop_writes"] or disposition["repository_denied"]
+            ),
+        )
     for target in list(targets.values()):
-        if stopped or target.repository.casefold() in denied_repositories:
+        if not target.source or stopped or target.repository.casefold() in denied_repositories:
             continue
         try:
             target.scope = resolve(target.repository)
@@ -839,6 +948,8 @@ def reconcile_completed_change(
                 add(parent_repository, parent_number)
         except (click.ClickException, KeyError, TypeError, ValueError) as error:
             target.discovery_error = error
+            if overflow_target is not None:
+                break
             if isinstance(error, PlanningScopeReview):
                 denied_repositories.add(target.repository.casefold())
                 continue
@@ -853,9 +964,20 @@ def reconcile_completed_change(
                 denied_repositories.add(target.repository.casefold())
             stopped = stopped or bool(disposition["stop_writes"])
 
-    for target_repository, target_number in timeline:
-        if (target_repository.casefold(), target_number) not in targets:
-            add(target_repository, target_number, reference_only=True)
+    if overflow_target is not None:
+        errors = [target.discovery_error for target in targets.values() if target.discovery_error]
+        assert overflow_target.discovery_error is not None
+        errors.append(overflow_target.discovery_error)
+        selected_error = next(
+            (failure for failure in errors if _retryable_failure(failure)), errors[-1]
+        )
+        _fail_completion(
+            selected_error,
+            _discovery_receipt(
+                [*targets.values(), overflow_target], landing_sha=landing, error=selected_error
+            ),
+            publication_blocked=stopped or repository.casefold() in denied_repositories,
+        )
 
     for target in targets.values():
         row: dict[str, Any] = {
@@ -972,14 +1094,19 @@ def reconcile_completed_change(
         outcomes.append(row)
     receipt = {**receipt_summary(outcomes), "landing_sha": landing, "issues": outcomes}
     if provider_errors:
-        first_error = provider_errors[0]
-        if isinstance(first_error, PlanningCompletionFailure):
-            first_error.receipt = receipt
-            raise first_error
-        failure = PlanningCompletionFailure(
-            "Planning reconciliation has incomplete provider evidence.", receipt=receipt
+        selected_error = (
+            provider_errors[0]
+            if stopped
+            else next(
+                (failure for failure in provider_errors if _retryable_failure(failure)),
+                provider_errors[0],
+            )
         )
-        raise failure from first_error
+        _fail_completion(
+            selected_error,
+            receipt,
+            publication_blocked=stopped or repository.casefold() in denied_repositories,
+        )
     if pending_reasons:
         raise PlanningCompletionPending("; ".join(pending_reasons), receipt=receipt)
     if not receipt["ok"]:
