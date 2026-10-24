@@ -155,6 +155,20 @@ class _PassingTechnicalCheckClient(TenantAdmissionControllerGitHubClient):
         )
 
 
+class _CandidateProofClient(_PassingTechnicalCheckClient):
+    def __init__(self, full_candidate_passed: bool) -> None:
+        super().__init__()
+        self.full_candidate_passed = full_candidate_passed
+        self.observed_heads: list[str] = []
+
+    def read_technical_checks(self, **arguments: str) -> TenantAdmissionTechnicalChecks:
+        self.observed_heads.append(arguments["head_sha"])
+        result = super().read_technical_checks(**arguments)
+        if self.full_candidate_passed:
+            return result
+        return result.model_copy(update={"status": "pending", "signals": ()})
+
+
 class _EmptyEngineeringReviewStore:
     @staticmethod
     def list_engineering_review_run_records(**_filters: object) -> tuple[()]:
@@ -385,10 +399,14 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
             head_sha=evidence.target.head_sha,
             tree_sha=evidence.target.tree_sha,
         )
-        for mergeable, state, accepted in (
-            (True, "success", True),
-            (None, "success", True),
-            (None, "failure", False),
+        for mergeable, state, accepted, focused, full_candidate_passed in (
+            (True, "success", True, False, True),
+            (None, "success", True, False, True),
+            (None, "failure", False, False, True),
+            (True, "success", True, True, True),
+            (None, "success", True, True, True),
+            (True, "success", True, True, False),
+            (True, "failure", False, True, True),
         ):
             with self.subTest(mergeable=mergeable, checks=state), TemporaryDirectory() as directory:
                 pull = _github_pull_request(
@@ -413,10 +431,19 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     [pull],
                     [handoff],
                     pull,
-                    _protected_branch_with_checks("ci-status", app_id=None),
+                    _protected_branch_with_checks(
+                        "ci-gate" if focused else "ci-status", app_id=None
+                    ),
                     [],
                     _combined_status(state=state),
-                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                    {
+                        "check_runs": [
+                            _required_check_run(
+                                "pr-ci-gate" if focused else "ci-status", "completed", state
+                            )
+                            | {"app": {"id": 15368, "slug": "github-actions"}}
+                        ]
+                    },
                     _conversation_rule(),
                     [],
                     *(
@@ -427,7 +454,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     [{"filename": "application.py"}],
                     pull,
                 )
-                client = _PassingTechnicalCheckClient()
+                client = _CandidateProofClient(full_candidate_passed)
                 transport = RecordingMergeTrainGitHubTransport(responses=responses)
                 client.transport = transport
                 evaluator = LiveMergeAdmissionEvaluator(
@@ -463,7 +490,13 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                         )
 
                     if accepted:
-                        self.assertEqual(evaluate().readiness.state, "ready")
+                        evaluation = evaluate()
+                        self.assertEqual(
+                            evaluation.readiness.state == "ready", full_candidate_passed
+                        )
+                        self.assertEqual(
+                            client.observed_heads, [landing.landing_plan.candidate_sha]
+                        )
                     else:
                         with self.assertRaises(MergeAdmissionDeniedError):
                             evaluate()

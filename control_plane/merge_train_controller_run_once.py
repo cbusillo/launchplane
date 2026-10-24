@@ -450,6 +450,7 @@ def execute_merge_train_controller_run_once(
     github_client = GitHubMergeTrainClient(
         transport=transport,
         effect_executor=effect_executor,
+        source_screening=True,
         branch_refresh_store=review_store,
         branch_refresh_recorder=(
             merge_train_branch_refresh_recorder(

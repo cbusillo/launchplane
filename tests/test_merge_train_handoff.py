@@ -827,7 +827,7 @@ class GitHubHandoffTests(unittest.TestCase):
             completed = cast(dict[str, object], result.accepted_result["stack_collapse_plan"])
             self.assertEqual(completed["status"], "waiting_for_root_checks")
 
-    def test_standalone_admit_uses_live_reader_and_stored_collapse_proof(self) -> None:
+    def test_standalone_admit_uses_focused_root_and_stored_collapse_proof(self) -> None:
         policy, plan, members = _stack_fixture()
         collapsed = execute_merge_train_stack_collapse_plan(
             plan=plan,
@@ -853,10 +853,15 @@ class GitHubHandoffTests(unittest.TestCase):
                     "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}],
                 },
                 pull,
-                _protected_branch_with_checks("ci-status", app_id=None),
+                _protected_branch_with_checks("ci-gate", app_id=None),
                 [],
                 _combined_status(),
-                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                {
+                    "check_runs": [
+                        _required_check_run("pr-ci-gate", "completed", "success")
+                        | {"app": {"id": 15368, "slug": "github-actions"}}
+                    ]
+                },
                 _conversation_rule(),
                 [],
                 [{"filename": "api/a.py"}],

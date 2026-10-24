@@ -105,10 +105,12 @@ class _FakeMergeTrainGitHubClient:
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         branch_refresh_recorder: object | None = None,
         branch_refresh_store: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport: MergeTrainGitHubTransport = _LegacyCandidateTransport(transport)
         self.branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
+        self._source_screening = source_screening
         self._snapshot_policy = None
         self._reuse_snapshots = False
         self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
@@ -654,8 +656,10 @@ class _FakeMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
+        self.source_screening = source_screening
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -726,6 +730,7 @@ class _FakeEmptyMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 
@@ -747,6 +752,7 @@ class _FakeStackedMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 

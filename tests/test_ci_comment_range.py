@@ -153,6 +153,17 @@ class CiCommentRangeTests(unittest.TestCase):
         self.assertEqual(selected_base, base)
         return set(_git(history.root, "diff", "--name-only", base, history.head).splitlines())
 
+    def test_manual_source_full_run_checks_its_contribution(self) -> None:
+        with TemporaryDirectory() as directory:
+            history = self._history(Path(directory), batch=False)
+            result = self._exercise(
+                history, EVENT_NAME="workflow_dispatch", EVENT_REF="refs/heads/work/source"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._assert_range(history, history.base), {"first.py"})
+            internal = self._exercise(history, EVENT_NAME="workflow_dispatch")
+            self.assertNotEqual(internal.returncode, 0)
+
     def test_first_member_remains_in_range_before_and_after_landing(self) -> None:
         for movement in ("", "advanced", "landed", "landed_then_advanced"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:

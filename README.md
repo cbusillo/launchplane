@@ -43,12 +43,8 @@ uv run --extra dev python -m unittest tests.test_module_name
 ```
 
 Replace `tests.test_module_name` with the module for the changed behavior.
-During the [Q326 trial](docs/style/testing.md#local-test-loop), routine changes
-use focused local tests plus lint, type checks, and IDE inspection; the full
-sharded suite runs only in CI and must pass before `gh-pr.py ready` and merge.
-The approved Q375 refinement keeps safety classifications and adds whole
-modules for touched safety areas to local focused tests; testing style owns
-the selection rules.
+Follow [testing style](docs/style/testing.md#local-test-loop) for local safety
+module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
 Implementation goes through a task branch and PR. Once required checks pass and
 review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR
