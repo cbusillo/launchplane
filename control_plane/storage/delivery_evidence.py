@@ -128,6 +128,13 @@ class DeliveryEvidenceWork:
     processed: dict[str, str]
 
 
+@dataclass(frozen=True)
+class DeliveryFailureObservation:
+    summary: str
+    observed_at: str
+    target_url: str
+
+
 class DeliveryEvidenceIndex:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
@@ -435,24 +442,50 @@ class DeliveryEvidenceIndex:
             )
 
     def matching_success(
-        self, context: str, key: str, opened_at: str, verify: Callable[[str], bool] | None = None
+        self,
+        context: str,
+        key: str,
+        opened_at: str,
+        verify: Callable[[str], bool] | None = None,
+        *,
+        finished_before: str = "",
     ) -> bool:
-        with self.engine.connect() as connection:
-            for column in (sources.c.artifact_key, sources.c.source_key):
-                source_id = connection.scalar(
-                    select(sources.c.source_id)
-                    .where(
-                        sources.c.context == context,
-                        sources.c.instance == "prod",
-                        sources.c.passed.is_(True),
-                        column == key,
-                        sources.c.finished_at > normalized_time(opened_at),
-                    )
-                    .limit(1)
-                )
-                if source_id and (verify is None or verify(source_id)):
-                    return True
+        for source_id in self.deployment_candidates(
+            context, passed=True, key=key, finished_after=opened_at, finished_before=finished_before
+        ):
+            if verify is None or verify(source_id):
+                return True
         return False
+
+    def deployment_candidates(
+        self,
+        context: str,
+        *,
+        passed: bool | None = None,
+        key: str = "",
+        finished_before: str = "",
+        finished_after: str = "",
+        finished_since: str = "",
+    ) -> Iterator[str]:
+        query = select(sources.c.source_id).where(
+            sources.c.kind == "deployment",
+            sources.c.context == context,
+            sources.c.instance == "prod",
+        )
+        if passed is not None:
+            query = query.where(sources.c.passed.is_(passed))
+        if key:
+            query = query.where(or_(sources.c.artifact_key == key, sources.c.source_key == key))
+        if finished_before:
+            query = query.where(sources.c.finished_at <= normalized_time(finished_before))
+        if finished_after:
+            query = query.where(sources.c.finished_at > normalized_time(finished_after))
+        if finished_since:
+            query = query.where(sources.c.finished_at >= normalized_time(finished_since))
+        with self.engine.connect() as connection:
+            yield from connection.execute(
+                query.order_by(sources.c.finished_at.desc()).execution_options(yield_per=100)
+            ).scalars()
 
     def finish_bootstrap(self, context: str, product: str) -> None:
         with self.engine.begin() as connection:

@@ -29,7 +29,10 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source
-from control_plane.dokploy.fresh_application import require_fresh_application_runtime
+from control_plane.dokploy.fresh_application import (
+    match_application_volume_mount,
+    require_fresh_application_runtime,
+)
 from control_plane.dokploy_inventory import MAX_PROJECTS, read_dokploy_inventory
 from control_plane.generic_web_testing_exclusion import (
     bind_testing_recipient,
@@ -1008,18 +1011,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
     ) -> bool:
         specification = record.request.application
         assert specification is not None
-        rows = live.get("mounts")
-        mount = api.as_json_object(rows[0]) if isinstance(rows, list) and len(rows) == 1 else None
-        return mount is not None and all(
-            mount.get(key) == value
-            for key, value in {
-                "type": "volume",
-                "volumeName": resources.volumes["state"],
-                "mountPath": specification.state.container_path,
-                "serviceType": "application",
-                "serviceId": record.target_id,
-            }.items()
+        mount = match_application_volume_mount(
+            live,
+            application_id=record.target_id,
+            volume_name=resources.volumes["state"],
+            mount_path=specification.state.container_path,
         )
+        return mount is not None and mount.get("serviceType") == "application"
 
     def configure_application(
         self,

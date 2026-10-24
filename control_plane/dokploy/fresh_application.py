@@ -4,6 +4,39 @@ from control_plane.dokploy.api import JsonObject
 from control_plane.dokploy.target_source_setup import require_empty_target_source
 
 
+def match_application_volume_mount(
+    payload: JsonObject, *, application_id: str, volume_name: str, mount_path: str
+) -> JsonObject | None:
+    mounts = payload.get("mounts")
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        return None
+    mount = mounts[0]
+    if (
+        mount.get("type") != "volume"
+        or mount.get("volumeName") != volume_name
+        or mount.get("mountPath") != mount_path
+        or mount.get("applicationId") != application_id
+        or any(
+            mount.get(key)
+            for key in (
+                "hostPath",
+                "filePath",
+                "content",
+                "composeId",
+                "postgresId",
+                "mysqlId",
+                "mariadbId",
+                "mongoId",
+                "redisId",
+                "libsqlId",
+            )
+        )
+        or not mount.get("mountId")
+    ):
+        return None
+    return mount
+
+
 def _require_empty_environment(payload: JsonObject) -> None:
     value = payload.get("env")
     if "env" not in payload or (

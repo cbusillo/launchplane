@@ -85,6 +85,19 @@ function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView;
   </section>;
 }
 
+export function ClientTestNotes({ notes }: { notes: string }) {
+  return <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
+    h1: ({ children }) => <h5>{children}</h5>,
+    h2: ({ children }) => <h5>{children}</h5>,
+    h3: ({ children }) => <h5>{children}</h5>,
+    h4: ({ children }) => <h5>{children}</h5>,
+    h5: ({ children }) => <h5>{children}</h5>,
+    h6: ({ children }) => <h5>{children}</h5>,
+    a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
+    img: ({ alt }) => <>{alt}</>,
+  }}>{notes.trim() || "Test notes are missing for this change."}</Markdown></div>;
+}
+
 function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull request changes between these versions." }: { items: readonly ReleaseReviewItem[]; viewerIsOwner: boolean; emptyMessage?: string }) {
   const grouped = groupReleaseItems(items);
   function changeTitle(item: ReleaseReviewItem) {
@@ -94,16 +107,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
   return <>
         {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(item => <li key={item.url}>
           <h4>{changeTitle(item)}</h4>
-          <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
-            h1: ({ children }) => <h5>{children}</h5>,
-            h2: ({ children }) => <h5>{children}</h5>,
-            h3: ({ children }) => <h5>{children}</h5>,
-            h4: ({ children }) => <h5>{children}</h5>,
-            h5: ({ children }) => <h5>{children}</h5>,
-            h6: ({ children }) => <h5>{children}</h5>,
-            a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
-            img: ({ alt }) => <>{alt}</>,
-          }}>{item.owner_test_notes.trim() || "Test notes are missing for this change."}</Markdown></div>
+          <ClientTestNotes notes={item.owner_test_notes} />
             {!viewerIsOwner && item.preview_era_notes ? <span data-testid={`release-notes-adjustment-${item.pull_request_number}`}>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}

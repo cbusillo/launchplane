@@ -151,7 +151,7 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
   return [...reasons];
 }
 
-const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
+export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
   isolation_staging: "Deploys held until testing is proven separate from production",
   staff_testing: "Deploys held while staff test",
 };

@@ -142,6 +142,7 @@ def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
 
 
 _UPSTREAM_RESTORE_ENV = {
+    "DATA_WORKFLOW_SSH_DIR": "/fixture/restore-ssh",
     "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
     "ODOO_UPSTREAM_HOST": "source.example.test",
     "ODOO_UPSTREAM_USER": "restore",
@@ -3284,6 +3285,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         route_writes: list[dict[str, object]] | None = None,
         revoke_on_pending: bool = False,
         provider_extra_env: tuple[str, ...] = (),
+        ordinary_deploy: bool = False,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3373,6 +3375,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         persisted_env = ""
         resolved_env = dict(_UPSTREAM_RESTORE_ENV)
+        volume_prefix = f"opw_{test_instance}" if ordinary_deploy else "opw_prod"
+        volumes = {
+            "ODOO_DATA_VOLUME": f"{volume_prefix}_odoo_data",
+            "ODOO_LOG_VOLUME": f"{volume_prefix}_odoo_logs",
+            "ODOO_DB_VOLUME": f"{volume_prefix}_odoo_db",
+        }
+        if ordinary_deploy:
+            resolved_env.update(volumes)
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
@@ -3387,9 +3397,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     (
                         *_DATABASE_ENV_LINES,
                         *provider_extra_env,
-                        "ODOO_DATA_VOLUME=opw_prod_odoo_data",
-                        "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
-                        "ODOO_DB_VOLUME=opw_prod_odoo_db",
+                        *(f"{key}={value}" for key, value in volumes.items()),
                     )
                 ),
             }
@@ -3515,8 +3523,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 request=OdooStableTargetReplacementApplyRequest(
                     product="odoo-tenant-opw",
                     instance=test_instance,
-                    allow_empty_data=True,
-                    data_source_mode="upstream_restore",
+                    allow_empty_data=not ordinary_deploy,
+                    data_source_mode="existing" if ordinary_deploy else "upstream_restore",
                     confirmation="restore opw upstream",
                 ),
                 dokploy_request=cast(DokployRequest, _request),
@@ -3743,6 +3751,41 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     self.assertEqual(store.odoo_instance_override_record, override)
                     post_deploy.assert_called_once()
 
+    def test_completed_testing_generation_deploy_omits_recorded_restore_inputs(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "completed_at": generation().prepared_at,
+            }
+        )
+        source = {
+            key: value
+            for key, value in _UPSTREAM_RESTORE_ENV.items()
+            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+        }
+        result, post_deploy, _, store = self._apply_upstream_restore(
+            override_record=None,
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context=fresh.context,
+                    instance=fresh.instance,
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            test_instance="testing",
+            fresh_generation=fresh,
+            provider_extra_env=tuple(f"{key}={value}" for key, value in source.items()),
+            ordinary_deploy=True,
+        )
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
+        self.assertFalse(source.keys() & store.last_provider_env.keys())
+
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation
 
@@ -3802,6 +3845,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         test_instance="testing",
                         fresh_generation=fresh,
                         route_writes=route_writes,
+                        provider_extra_env=tuple(
+                            f"{key}={value}"
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        ),
                     )
                     self.assertEqual(result.deploy_status, "pass")
                     self.assertEqual(store.odoo_instance_override_record, override)
@@ -3823,8 +3871,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         post_deploy.call_args.kwargs["fresh_testing_generation"], fresh
                     )
                     post_deploy.assert_called_once()
-                    self.assertTrue(
-                        post_deploy.call_args.kwargs["fresh_restore_source_environment"]
+                    self.assertEqual(
+                        post_deploy.call_args.kwargs["fresh_restore_source_environment"],
+                        {
+                            key: value
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        },
                     )
                     self.assertFalse(
                         any(

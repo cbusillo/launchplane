@@ -37,7 +37,8 @@ from tests.test_merge_train_scheduler import _policy_record
 class NativeGraphProvider:
     """Repository-specific state; a source token cannot pass as target authority."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, pull_number: int = 9001) -> None:
+        self.pull_number = pull_number
         self.nodes: dict[tuple[str, int], PlanningProvider] = {}
         self.blocking: list[dict[str, Any]] = []
         self.parent: dict[str, Any] | None = None
@@ -56,6 +57,7 @@ class NativeGraphProvider:
         labels: tuple[str, ...] = ("plan", "blocked"),
     ) -> PlanningProvider:
         node = PlanningProvider()
+        node.pull_number = self.pull_number
         node.issue.update(
             number=number,
             node_id=f"{repo}#{number}",
@@ -96,7 +98,7 @@ class NativeGraphProvider:
             number = int(parts[5]) if len(parts) > 5 and parts[4] == "issues" else None
             node = (
                 self.nodes[repo, number]
-                if number
+                if number and number != self.pull_number
                 else next(node for (target, _), node in self.nodes.items() if target == repo)
             )
         if token != self.token(repo):
@@ -131,11 +133,11 @@ class NativePlanningProjectionTests(TestCase):
         self.comment_mock = self.comment.start()
         self.addCleanup(self.comment.stop)
 
-    def record(self) -> Any:
+    def record(self, *, planning_author_ids: tuple[int, ...] = (_BOT,)) -> Any:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
                 repository=_REPO,
-                pull_request_number=9,
+                pull_request_number=self.graph.pull_number,
                 event="completed",
                 controller_action="land_batch",
             ),
@@ -144,12 +146,358 @@ class NativePlanningProjectionTests(TestCase):
             token="fixture",
             recorded_at="2026-10-01T00:00:00Z",
             response_trace_id="projection",
-            planning_author_ids=(_BOT,),
+            planning_author_ids=planning_author_ids,
             planning_scope_resolver=self.graph.scope,
         )
 
     def rows(self, record: Any) -> dict[tuple[str, int], dict[str, Any]]:
         return {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
+
+    def test_nonclosing_source_refreshes_neighborhood_and_records_remaining_judgment(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", state_reason=None)
+        parent = self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+        dependent = self.graph.add(_REPO, 10)
+        dependent.blockers = [{"number": 7, "state": "open"}]
+        self.graph.blocking = [self.graph.ref(_REPO, 10)]
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        receipt = _receipt(record)
+        self.assertTrue(receipt["ok"])
+        self.assertTrue(receipt["review_required"])
+        rows = self.rows(record)
+        self.assertEqual(rows[_REPO, 7]["status"], "review_open_finish_line")
+        self.assertFalse(rows[_REPO, 7]["closing_reference"])
+        self.assertTrue(rows[_REPO, 7]["informational"])
+        self.assertEqual(rows[_REPO, 8]["derived_status"], "active")
+        self.assertEqual(rows[_REPO, 10]["derived_status"], "blocked")
+        self.assertEqual(source.issue["body"], before["body"])
+        self.assertEqual(source.issue["state"], before["state"])
+        self.assertEqual(
+            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
+        )
+
+    def test_completed_reference_in_pr_comment_reconciles_without_closing_keyword(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_comments = [{"body": "Prior progress"}] * completion.PROVIDER_PAGE_SIZE + [
+            {"body": "Refs #7", "user": {"id": _BOT}}
+        ]
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        row = self.rows(record)[_REPO, 7]
+        self.assertFalse(row["closing_reference"])
+        self.assertTrue(row["verified"])
+        self.assertEqual(
+            {x["name"] for x in source.issue["labels"]}, {_LABELS["plan"], _LABELS["done"]}
+        )
+        self.assertEqual(source.issue["body"], before["body"])
+
+    def test_closing_reference_keeps_required_completion_when_also_explicit(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", state_reason=None)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(record.retryable)
+        row = self.rows(record)[_REPO, 7]
+        self.assertTrue(row["closing_reference"])
+        self.assertFalse(row["ok"])
+
+    def test_superseded_reference_preserves_closure_and_other_source_repairs(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = [8]
+        source.pull_body = "Refs #7 (superseded)"
+        source.issue["state_reason"] = "not_planned"
+        completing = self.graph.add(_REPO, 8, state="closed")
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertTrue(_receipt(record)["ok"])
+        self.assertTrue(self.rows(record)[_REPO, 7]["review_required"])
+        self.assertEqual(source.issue, before)
+        self.assertTrue(completing.writes)
+
+    def test_pr_comment_discovery_requires_author_trust(self) -> None:
+        for identity, login, accepted in (
+            (999, "outsider", False),
+            (99, "author", True),
+            (77, "example", True),
+        ):
+            with self.subTest(login=login):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.references = []
+                source.pull_comments = [
+                    {"body": "Refs #7", "user": {"id": identity, "login": login}}
+                ]
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "delivered")
+                self.assertEqual(bool(source.writes), accepted)
+                self.assertEqual(bool(_receipt(record)["issues"]), accepted)
+
+    def test_missing_current_author_trust_keeps_the_neighborhood_read_only(self) -> None:
+        parent = self.graph.add(_REPO, 8)
+        parent.issue["user"] = {"id": 77, "login": "example"}
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record(planning_author_ids=())
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertFalse(record.retryable)
+        self.assertTrue(_receipt(record)["review_required"])
+        self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
+
+    def test_terminal_reference_errors_publish_a_failed_partial_receipt(self) -> None:
+        for status in (404, 410):
+            with self.subTest(status=status):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.pull_body = "Refs #8"
+                self.graph.add(_REPO, 8, state="closed")
+                error = HTTPError(
+                    "https://example.test/issues/8", status, "Unavailable", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+
+                def fail(call: dict[str, Any]) -> None:
+                    if call["path"] == f"/repos/{_REPO}/issues/8":
+                        raise click.ClickException("reference unavailable") from error
+
+                self.graph.fail = fail
+                self.comment_mock.reset_mock()
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.comment_mock.assert_called_once()
+                self.assertEqual(
+                    self.comment_mock.call_args.kwargs["body"], record.comment_markdown
+                )
+                receipt = _receipt(record)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["coverage"], "partial")
+                rows = self.rows(record)
+                self.assertTrue(rows[_REPO, 7]["verified"])
+                self.assertEqual(rows[_REPO, 8]["failure"]["status_code"], status)
+
+    def test_incomplete_discovery_publishes_known_targets_without_metadata_writes(self) -> None:
+        for failure in ("malformed_timeline", "comment_bound", "target_bound"):
+            with self.subTest(failure=failure):
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.pull_body = "Refs #8"
+                if failure == "malformed_timeline":
+                    source.timeline = [{"event": "cross-referenced", "source": None}]
+                elif failure == "comment_bound":
+                    source.pull_comments = [{"body": "Prior progress", "user": {"id": _BOT}}] * (
+                        completion.MAX_PROVIDER_PAGES * completion.PROVIDER_PAGE_SIZE
+                    )
+                else:
+                    source.pull_body = "Refs " + ", ".join(
+                        f"#{number}" for number in range(10, 10 + completion.MAX_PLANNING_TARGETS)
+                    )
+                self.comment_mock.reset_mock()
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.comment_mock.assert_called_once()
+                receipt = _receipt(record)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["coverage"], "partial")
+                self.assertIn("discovery_failure", receipt)
+                self.assertIn((_REPO, 7), self.rows(record))
+                self.assertTrue(all(not row["verified"] for row in receipt["issues"]))
+                self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
+
+    def test_neighborhood_overflow_retains_targets_and_prevents_metadata_writes(self) -> None:
+        numbers = range(10, 10 + completion.MAX_PLANNING_TARGETS - 1)
+        for number in numbers:
+            self.graph.add(_REPO, number)
+        self.graph.blocking = [self.graph.ref(_REPO, number) for number in numbers]
+        parent_number = numbers.stop + 1
+        self.graph.add(_REPO, parent_number)
+        self.graph.parent = self.graph.ref(_REPO, parent_number)
+
+        record = self.record()
+
+        receipt = _receipt(record)
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertFalse(record.retryable)
+        self.assertEqual(receipt["coverage"], "partial")
+        self.assertIn((_REPO, parent_number), self.rows(record))
+        self.assertIn("discovery_failure", self.rows(record)[_REPO, parent_number])
+        self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
+        self.comment_mock.assert_called_once()
+
+    def test_transient_reference_failure_takes_retry_priority_over_terminal_failure(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.pull_body = "Refs #8 and #10"
+        self.graph.add(_REPO, 8, state="closed")
+        self.graph.add(_REPO, 10, state="closed")
+        transient = True
+
+        def fail(call: dict[str, Any]) -> None:
+            status = (
+                404
+                if call["path"] == f"/repos/{_REPO}/issues/8"
+                else 503
+                if transient and call["path"] == f"/repos/{_REPO}/issues/10"
+                else None
+            )
+            if status:
+                error = HTTPError(
+                    "https://example.test/reference", status, "Unavailable", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+                raise click.ClickException("reference unavailable") from error
+
+        self.graph.fail = fail
+        record = self.record()
+        self.assertTrue(record.retryable)
+        self.comment_mock.assert_not_called()
+        transient = False
+
+        retried = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
+            planning_scope_resolver=self.graph.scope,
+        )
+
+        self.assertEqual(retried.delivery_status, "failed")
+        self.assertFalse(retried.retryable)
+        self.comment_mock.assert_called_once()
+        self.assertTrue(self.rows(retried)[_REPO, 10]["verified"])
+
+    def test_discovery_denial_and_identity_failure_never_publish(self) -> None:
+        for status in (403, 401):
+            with self.subTest(status=status):
+                self.graph = NativeGraphProvider()
+                self.comment_mock.reset_mock()
+                error = HTTPError(
+                    "https://example.test/comments", status, "Refused", Message(), BytesIO()
+                )
+                self.addCleanup(error.close)
+
+                def refuse(call: dict[str, Any]) -> None:
+                    if call["path"].startswith(
+                        f"/repos/{_REPO}/issues/{self.graph.pull_number}/comments?"
+                    ):
+                        raise click.ClickException("PR comments refused") from error
+
+                self.graph.fail = refuse
+
+                record = self.record()
+
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertFalse(record.retryable)
+                self.assertFalse(self.graph.nodes[_REPO, 7].writes)
+                self.comment_mock.assert_not_called()
+
+    def test_pending_closure_keeps_retry_when_an_explicit_reference_fails_terminally(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.issue.update(state="open", state_reason=None)
+        source.pull_body = "Refs #8"
+        self.graph.add(_REPO, 8)
+        neighbor = self.graph.add(_REPO, 10)
+        neighbor.blockers = [{"number": 7, "state": "open"}]
+        self.graph.blocking = [self.graph.ref(_REPO, 10)]
+        error = HTTPError("https://example.test/reference", 404, "Missing", Message(), BytesIO())
+        self.addCleanup(error.close)
+
+        def fail(call: dict[str, Any]) -> None:
+            if call["path"] == f"/repos/{_REPO}/issues/8":
+                raise click.ClickException("reference unavailable") from error
+
+        self.graph.fail = fail
+        record = self.record()
+        self.assertTrue(record.retryable)
+        self.comment_mock.assert_not_called()
+        self.assertEqual(self.rows(record)[_REPO, 7]["status"], "review_projection_pending")
+        source.issue.update(state="closed", state_reason="completed")
+        neighbor.blockers[0]["state"] = "closed"
+
+        retried = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
+            planning_scope_resolver=self.graph.scope,
+        )
+
+        self.assertFalse(retried.retryable)
+        self.assertEqual(retried.delivery_status, "failed")
+        self.comment_mock.assert_called_once()
+        self.assertTrue(self.rows(retried)[_REPO, 7]["verified"])
+        self.assertEqual(self.rows(retried)[_REPO, 10]["blocked_by"], [])
+
+    def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.timeline = [
+            {"event": "cross-referenced", "source": {"issue": self.graph.ref(_REPO, 7)}}
+        ]
+        source.issue.update(state="open", state_reason=None)
+        self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        rows = self.rows(record)
+        self.assertIn((_REPO, 7), rows)
+        self.assertNotIn((_REPO, 8), rows)
+        self.assertTrue(rows[_REPO, 7]["review_required"])
+        self.assertFalse(source.writes)
+
+    def test_unread_pr_links_fail_before_any_metadata_write(self) -> None:
+        def refuse(call: dict[str, Any]) -> None:
+            if call["path"].startswith(f"/repos/{_REPO}/issues/{self.graph.pull_number}/comments?"):
+                raise click.ClickException("PR comments unavailable") from URLError("offline")
+
+        self.graph.fail = refuse
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(record.retryable)
+        self.assertFalse(self.graph.nodes[_REPO, 7].writes)
+        self.comment_mock.assert_not_called()
+
+    def test_short_reference_to_a_pr_does_not_create_finish_line_review(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", pull_request={"url": "https://example.test/pull/7"})
+        self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertFalse(_receipt(record)["review_required"])
+        self.assertNotIn((_REPO, 8), self.rows(record))
+        self.assertFalse(source.writes)
 
     def test_parent_and_dependents_keep_only_current_blockers_and_person_waits(self) -> None:
         parent = self.graph.add(_REPO, 8)
@@ -391,7 +739,7 @@ class NativePlanningProjectionTests(TestCase):
         self.addCleanup(error.close)
 
         def fail(call: dict[str, Any]) -> None:
-            if "/comments?" in call["path"]:
+            if "/issues/7/comments?" in call["path"]:
                 raise click.ClickException("provider refused") from error
 
         self.graph.fail = fail

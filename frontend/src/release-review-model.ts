@@ -9,6 +9,10 @@ function nothingToTestMarker(notes: string): string | undefined {
   return [NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST].find(marker => lowered.startsWith(marker.toLowerCase()));
 }
 
+export function needsNothingFromClient(notes: string): boolean {
+  return Boolean(nothingToTestMarker(notes));
+}
+
 export type GroupedReleaseItems = {
   checks: ReleaseReviewItem[];
   nothingToTest: ReleaseReviewItem[];
@@ -20,7 +24,7 @@ export function groupReleaseItems(items: readonly ReleaseReviewItem[]): GroupedR
   const nothingToTest: ReleaseReviewItem[] = [];
   for (const item of items) {
     const notes = item.owner_test_notes.trim();
-    if (!item.client_test_notes_error && nothingToTestMarker(notes)) {
+    if (!item.client_test_notes_error && needsNothingFromClient(notes)) {
       nothingToTest.push(item);
       continue;
     }

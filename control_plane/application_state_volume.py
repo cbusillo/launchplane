@@ -5,7 +5,7 @@ from pathlib import Path
 from http.client import HTTPException
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 from uuid import uuid4
@@ -13,6 +13,7 @@ from uuid import uuid4
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.application_state_volume_errors import StateVolumeRefusal
 from control_plane.dokploy import api, source
+from control_plane.dokploy.fresh_application import match_application_volume_mount
 from control_plane.dokploy_inventory import InventoryUnavailable
 from control_plane.http_routes.mutation_support import request_fingerprint
 from control_plane.provider_operations import (
@@ -640,31 +641,14 @@ class ApplicationStateVolumeAdapter:
                 and not live.get("domains")
                 and live.get("applicationStatus") in {None, "idle"}
             )
-        mounts = live.get("mounts")
-        if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
-            return False
-        mount = mounts[0]
         return (
-            mount.get("type") == "volume"
-            and mount.get("volumeName") == self.intent["volume_name"]
-            and mount.get("mountPath") == self.request.state_volume_path
-            and mount.get("applicationId") == live["applicationId"]
-            and not any(
-                mount.get(key)
-                for key in (
-                    "hostPath",
-                    "filePath",
-                    "content",
-                    "composeId",
-                    "postgresId",
-                    "mysqlId",
-                    "mariadbId",
-                    "mongoId",
-                    "redisId",
-                    "libsqlId",
-                )
+            match_application_volume_mount(
+                live,
+                application_id=cast(str, live["applicationId"]),
+                volume_name=cast(str, self.intent["volume_name"]),
+                mount_path=self.request.state_volume_path,
             )
-            and bool(mount.get("mountId"))
+            is not None
         )
 
     def _verify_adopted(
