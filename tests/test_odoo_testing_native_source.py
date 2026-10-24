@@ -91,6 +91,45 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_native_program_sites_are_bounded_and_cannot_carry_provider_prose(self) -> None:
+        program = "first fixture line\nsecond fixture line"
+        baseline = transport.NativeProgramFailed("baseline")
+        private = "private-program-site-sentinel"
+        for sites, expected in (
+            ([1], (1,)),
+            ([True], ()),
+            ([-1], ()),
+            ([0], ()),
+            ([len(program.splitlines()) + 1], ()),
+            ([[]], ()),
+            ([private], ()),
+            (private, ()),
+            ([1] * (transport.NATIVE_PROGRAM_SOURCE_SITE_LIMIT + 1), ()),
+        ):
+            with self.subTest(sites=sites):
+                connection = Connection(
+                    {"type": "failed", "sites": sites, "sha": private, "message": private}
+                )
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        connection,
+                        program=program,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(error.program_sites, expected)
+                if expected:
+                    self.assertEqual(
+                        error.program_sha256, hashlib.sha256(program.encode()).hexdigest()
+                    )
+                self.assertEqual(error.evidence, baseline.evidence)
+                self.assertEqual(error.code, baseline.code)
+                self.assertEqual(error.has_diagnostic, baseline.has_diagnostic)
+                self.assertEqual(error.unavailable, baseline.unavailable)
+                self.assertNotIn(private, str(error) + json.dumps(error.evidence))
+
     def test_failed_frame_keeps_only_registered_predicates_and_closed_observations(self) -> None:
         for predicate, kind in (
             (ReadbackPredicate.RUNNER_RUNNING, "refused"),
