@@ -205,7 +205,7 @@ def main(argv):
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         if program[2] == "-c":
             return subprocess.run([sys.executable, *program[1:]], env={
-                **os.environ, **exec_environment,
+                **os.environ, "PLATFORM_INSTANCE": "preview", **exec_environment,
                 "PYTHONPATH": str(state_dir / "modules"),
             }).returncode
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
@@ -842,6 +842,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
+        self._write_preview_workflow()
         (modules / "run_odoo_startup.py").write_text(
             "import os\n"
             "def _load_settings(arguments): return arguments\n"
@@ -1207,7 +1208,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("workflow arguments --post-deploy-maintenance", run.docker_log)
 
-    def test_upstream_preview_restores_even_when_a_partial_database_exists(self) -> None:
+    def _write_preview_workflow(self) -> None:
         (self.root / "modules" / "run_odoo_data_workflows.py").write_text("""
 import os
 from pathlib import Path
@@ -1222,7 +1223,8 @@ class OdooDataWorkflowRunner:
     def __init__(self, local: SimpleNamespace, upstream: object, environment: object) -> None:
         self.local = local
     def prepare_credentials_before_registry(self, **arguments: bool) -> None:
-        pass
+        if os.environ.get("FAKE_PREVIEW_SANITIZER_FAILURE") == "1":
+            raise RuntimeError("synthetic credential refusal")
     def connect_to_db(self) -> object:
         return psycopg2.connect()
     def _connect_with_retry(self, database: str) -> object:
@@ -1232,8 +1234,11 @@ def main(arguments: list[str]) -> int:
     runner = OdooDataWorkflowRunner(LocalServerSettings(), None, None)
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     print("fixture_addon_after_boundary=true")
-    return 0
+    print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
+    return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
 """)
+
+    def test_upstream_preview_restores_even_when_a_partial_database_exists(self) -> None:
         script = _render_post_deploy_script(
             None,
             instance="pr-45",
@@ -1258,6 +1263,11 @@ def main(arguments: list[str]) -> int:
                 self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
                 self.assertTrue(run.readback_ran, run.docker_log)
                 self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
+
+        refused = self._run(script, FAKE_PREVIEW_SANITIZER_FAILURE="1")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(refused.web_restarted)
+        self.assertNotIn("fixture_addon_after_boundary=true", refused.stdout.splitlines())
 
     def test_unanswered_database_probe_stops_before_touching_web(self) -> None:
         run = self._run(_render_preview_script(), FAKE_DATABASE_PRESENT="error")

@@ -2924,6 +2924,9 @@ exit_trap() {{
     trap - EXIT
     if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
         echo "odoo_restore_completed=false"
+        if [ "{int(preview_restore)}" = "1" ]; then
+            web_restart_blocked=1
+        fi
     fi
     if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
         if ! enforce_website_settings; then

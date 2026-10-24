@@ -26,6 +26,7 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
     _odoo_preview_service_environment,
     issue_odoo_preview_apply_plan,
+    preview_uses_upstream_restore,
     validate_odoo_preview_issued_plan,
 )
 from control_plane.provider_operations import DurableProviderOperationResult
@@ -122,6 +123,25 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_driver_selects_upstream_restore_only_when_it_has_an_upstream_source(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        for mode in ("none", "driver"):
+            selected = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"data_transport_mode": mode})}
+            )
+            self.assertFalse(preview_uses_upstream_restore(selected, {}))
+            self.assertFalse(preview_uses_upstream_restore(selected, {"ODOO_UPSTREAM_HOST": ""}))
+            self.assertEqual(
+                preview_uses_upstream_restore(
+                    selected, {"ODOO_UPSTREAM_HOST": "source.example.test"}
+                ),
+                mode == "driver",
+            )
+            self.assertEqual(
+                preview_uses_upstream_restore(selected, {"ODOO_UPSTREAM_USER": "reader"}),
+                mode == "driver",
+            )
+
     def test_capacity_or_provider_denial_releases_unused_preview_key(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied

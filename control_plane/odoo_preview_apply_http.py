@@ -514,10 +514,18 @@ def execute_odoo_preview_apply_result(
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
-        restore_upstream=profile.preview.data_transport_mode == "driver",
+        restore_upstream=preview_uses_upstream_restore(profile, resolved_environment_values),
         provider_mutation_guard=provider_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
+
+
+def preview_uses_upstream_restore(
+    profile: LaunchplaneProductProfileRecord, environment: dict[str, str]
+) -> bool:
+    return profile.preview.data_transport_mode == "driver" and any(
+        key.startswith("ODOO_UPSTREAM_") and value.strip() for key, value in environment.items()
+    )
 
 
 def observe_odoo_preview_apply_result(

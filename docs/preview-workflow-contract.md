@@ -404,7 +404,8 @@ managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
 stale explicit runtime-environment value cannot override the compose default
 and make required module dependencies unavailable. Refresh then deploys the
 compose and runs the managed Odoo data-workflow schedule before any
-smoke check can pass. An Odoo preview with `data_transport_mode="driver"` runs the
+smoke check can pass. An Odoo preview with `data_transport_mode="driver"` and
+an upstream source runs the
 existing devkit upstream restore on every refresh, replacing even a partially initialized database before
 OpenUpgrade. That path requires complete upstream settings, a non-root reader
 and an explicit dedicated SSH directory. It forces bootstrap off and sanitization
