@@ -865,7 +865,7 @@ class ApplicationFlowTests(unittest.TestCase):
             patch("sys.stdout", output),
         ):
             try:
-                exec(header, {})
+                exec(compile(header, "<stdin>", "exec"), {})
             except SystemExit as error:
                 if error.code != 1:
                     raise

@@ -105,10 +105,13 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             PREPARED_CONTAINER_CAPABILITY_PROGRAM,
             PREPARED_CONTAINER_LOOKUP,
             PREPARED_CONTAINER_READBACK,
+            CAPABILITY_FAILURE_REPORT,
+            LEGACY_CAPABILITY_FAILURE_REPORT,
         )
 
         current = retained_application_capability_program(self.spec)
-        historical = current
+        historical = current.replace(CAPABILITY_FAILURE_REPORT, LEGACY_CAPABILITY_FAILURE_REPORT, 1)
+        self.assertTrue(capability_program_matches(historical, current))
         for fragment in (
             PREPARED_CONTAINER_CAPABILITY_PROGRAM,
             PREPARED_CONTAINER_LOOKUP,
@@ -362,8 +365,65 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             patch.object(subprocess, "run", side_effect=self.docker),
             patch("sys.stdout", output),
         ):
-            exec(header, {})
+            try:
+                exec(compile(header, "<stdin>", "exec"), {})
+            finally:
+                self.last_program_output = output.getvalue()
+                self.last_program_body = header
         return output.getvalue()
+
+    def test_native_refusals_preserve_distinct_bounded_locations_without_values(self) -> None:
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+        from control_plane.dokploy.post_deploy import _safe_odoo_post_deploy_marker
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+        original = deepcopy(self.task)
+        locations = []
+        private = "private-retained-capability-value"
+        for kind in ("mount", "credential"):
+            self.task = deepcopy(original)
+            self.tasks = {self.task["ID"]: self.task}
+            configuration = self.task["Spec"]["ContainerSpec"]
+            if kind == "mount":
+                configuration["Mounts"] = [
+                    {
+                        "Type": "bind",
+                        "Source": "/var/run/docker.sock",
+                        "Target": "/var/run/docker.sock",
+                    }
+                ]
+            else:
+                configuration["Env"].append("DOKPLOY_TOKEN=" + private)
+            with self.subTest(kind=kind), self.assertRaises(SystemExit):
+                self.observe()
+            markers = extract_odoo_post_deploy_readback_markers({"logs": self.last_program_output})
+            from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
+
+            failure = NativeProgramFailed(
+                "Retained capability refused.",
+                program=self.last_program_body,
+                program_sites=[
+                    int(value) for value in markers[CAPABILITY_FAILURE_SITES_MARKER].split(",")
+                ],
+            )
+            self.assertTrue(failure.program_sites)
+            import ast
+            from control_plane.testing_application_capabilities import (
+                capability_program_body,
+                retained_application_capability_program,
+            )
+
+            body = capability_program_body(retained_application_capability_program(self.spec))
+            self.assertIn(
+                failure.program_sites[-1],
+                {node.lineno for node in ast.walk(ast.parse(body)) if isinstance(node, ast.Raise)},
+            )
+            self.assertNotIn(private, self.last_program_output)
+            for line in self.last_program_output.splitlines():
+                key, separator, value = line.partition("=")
+                self.assertTrue(separator and _safe_odoo_post_deploy_marker(key, value))
+            locations.append(failure.program_sites)
+        self.assertNotEqual(*locations)
 
     def test_attributable_named_volume_original_ignores_provider_manager_authority(self) -> None:
         self.assertIn("testing_resources_ok=true", self.observe())

@@ -1133,6 +1133,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
 _PREVIOUS_ARTIFACT = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'f' * 64}"
 _PREVIOUS_DEPLOYMENT = "deployment-syo-prod-previous"
+_FORMER_REPOSITORY_ARTIFACT = f"ghcr.io/cbusillo/sellyouroutboard-app@sha256:{'f' * 64}"
 
 
 class _ProductionProvider:
@@ -1141,8 +1142,11 @@ class _ProductionProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
 
-    def __init__(self, *, fail_artifact: str = "") -> None:
+    def __init__(
+        self, *, fail_artifact: str = "", healthy_artifact: str = _PREVIOUS_ARTIFACT
+    ) -> None:
         self.fail_artifact = fail_artifact
+        self.healthy_artifact = healthy_artifact
         self.running: RuntimeIdentity | None = None
         self.deployed_artifacts: list[str] = []
 
@@ -1205,18 +1209,20 @@ class _ProductionProvider:
 
     def healthcheck(self, **_kwargs: object) -> HealthcheckPass:
         running = self.running
-        if running is None or running.artifact_id != _PREVIOUS_ARTIFACT:
+        if running is None or running.artifact_id != self.healthy_artifact:
             raise click.ClickException("https://www.sellyouroutboard.com/api/health returned 503")
         return HealthcheckPass(payload={"runtime_identity": running.model_dump(mode="json")})
 
 
 def _store_with_production(
-    *, previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}"
+    *,
+    previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}",
+    previous_artifact: str = _PREVIOUS_ARTIFACT,
 ) -> _GenericWebPromotionStore:
     store = _GenericWebPromotionStore(_profile())
     store.write_qualified_testing_inventory(_testing_inventory())
     previous = _deployment_record(
-        artifact_id=_PREVIOUS_ARTIFACT, deploy_reference=previous_deploy_reference
+        artifact_id=previous_artifact, deploy_reference=previous_deploy_reference
     ).model_copy(update={"record_id": _PREVIOUS_DEPLOYMENT, "source_git_ref": "previous"})
     store.write_deployment_record(previous)
     store.write_environment_inventory(
@@ -1238,7 +1244,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         from tests.support.lane_builds import LaneBuildGitHub
 
         profile = _profile()
-        transport = LaneBuildGitHub(
+        self.build_history = LaneBuildGitHub(
             profile.repository,
             profile.image.repository,
             {"1" * 40: "sha256:" + "f" * 64, "2" * 40: "sha256:" + "b" * 64},
@@ -1246,7 +1252,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.enterContext(
             patch(
                 "control_plane.product_reconcile.resolve_build_provenance_transport",
-                return_value=transport,
+                return_value=self.build_history,
             )
         )
         self.enterContext(
@@ -1613,6 +1619,26 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         promotion = store.promotions[result.promotion_record_id]
         self.assertEqual(promotion.rollback.detail, record_failure_summary("rollback_passed"))
         self.assertEqual(promotion.rollback.target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+
+    def test_failed_promotion_returns_to_a_deployment_from_the_former_image_repository(
+        self,
+    ) -> None:
+        store = _store_with_production(
+            previous_artifact=_FORMER_REPOSITORY_ARTIFACT,
+            previous_deploy_reference=f"ghcr.io/cbusillo/sellyouroutboard-app:sha-{'e' * 40}",
+        )
+        provider = _ProductionProvider(
+            fail_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
+            healthy_artifact=_FORMER_REPOSITORY_ARTIFACT,
+        )
+        self.build_history.run_started_at[2] = "2030-01-01T00:00:00Z"
+
+        result = self._promote(store, provider)
+
+        assert provider.running is not None
+        self.assertEqual(provider.running.artifact_id, _FORMER_REPOSITORY_ARTIFACT)
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(result.rollback_target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
 
     def test_rollback_health_error_is_not_kept_on_the_promotion(self) -> None:
         store = _store_with_production()

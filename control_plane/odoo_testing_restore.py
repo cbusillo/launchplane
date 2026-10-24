@@ -1082,7 +1082,7 @@ def restore_main():
                 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
                     raise RuntimeError("Unsupported restore source coordinate")
             path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
-            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
+            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path) or (source["ODOO_UPSTREAM_USER"] == "root" and len(Path(path).parts) == 1):
                 raise RuntimeError("Unsupported restore source filestore")
             destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
             ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
@@ -1102,14 +1102,23 @@ def restore_main():
             ssh.extend(["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "UserKnownHostsFile=" + str(ssh_directory / "known_hosts")])
             # The host's existing identity is used only by these two fixed source reads.
             # No key, agent socket or SSH directory enters an application container.
-            remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
+            remote = shlex.join(
+                ["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
+            )
             staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
             filestore = staging / "filestore"
             filestore.mkdir()
-            command(["rsync", "-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args",
+            rsync_options = (
+                ["-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args"]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["-a", "--no-links", "--no-devices", "--no-specials"]
+            )
+            command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
             docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
             docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)

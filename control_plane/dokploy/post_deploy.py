@@ -69,6 +69,11 @@ from control_plane.odoo_testing_restore import (
     preflight_fresh_testing_intent,
 )
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS,
+)
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -396,6 +401,15 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == CAPABILITY_FAILURE_SITES_MARKER:
+        sites = value.split(",")
+        return 0 < len(sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT and all(
+            site.isascii()
+            and site.isdigit()
+            and len(site) <= NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS
+            and int(site) > 0
+            for site in sites
+        )
     if readback_marker_is_safe(key, value):
         return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
