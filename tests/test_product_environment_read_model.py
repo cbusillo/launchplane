@@ -71,6 +71,8 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+from control_plane.product_review import ProductReviewPreview
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -959,6 +961,128 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertEqual(allowed.preview.records[0].recorded_state, "active")
         self.assertEqual(allowed.preview.trust_state, overview.preview.trust_state)
+
+    def test_product_ops_keeps_preview_failure_attention_through_retry(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        store = _PreviewRecordStore(profile, ())
+        baseline = build_product_site_overview(
+            record_store=store, product=profile.product, action_allowed=lambda *_: True
+        )
+        request = ProductReconcileRequestRecord(
+            target_key="example-site:preview:42",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=42,
+            state="failed",
+            requested_at="2026-10-24T15:00:00Z",
+            updated_at="2026-10-24T15:00:00Z",
+            request_count=1,
+            last_error="Provider unavailable password=hunter2",
+            last_plan={"action": "apply", "head_sha": "new-head"},
+        )
+        for state in ("failed", "pending", "running"):
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    store,
+                    "list_product_reconcile_requests",
+                    create=True,
+                    return_value=(request.model_copy(update={"state": state}),),
+                ),
+            ):
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                warning = " ".join(overview.warnings)
+                self.assertIn("Provider unavailable", warning)
+                self.assertNotIn("hunter2", warning)
+        replacement = request.model_copy(
+            update={
+                "state": "done",
+                "last_error": "",
+                "last_plan": {
+                    "head_sha": "new-head",
+                    "last_failed_error_summary": "Provider unavailable",
+                },
+            }
+        )
+        with patch.object(
+            store, "list_product_reconcile_requests", create=True, return_value=(replacement,)
+        ):
+            for serving_head in ("old-head", "new-head"):
+                with (
+                    self.subTest(serving_head=serving_head),
+                    patch(
+                        "control_plane.product_review.resolve_serving_preview",
+                        return_value=ProductReviewPreview(
+                            preview_url="https://pr-42.example.invalid", head_sha=serving_head
+                        ),
+                    ),
+                ):
+                    overview = build_product_site_overview(
+                        record_store=store,
+                        product=profile.product,
+                        action_allowed=lambda *_: True,
+                    )
+                    self.assertEqual(
+                        overview.warnings != baseline.warnings, serving_head != "new-head"
+                    )
+        with (
+            patch.object(
+                store,
+                "list_product_reconcile_requests",
+                create=True,
+                return_value=(request.model_copy(update={"last_plan": {}}),),
+            ),
+            patch(
+                "control_plane.product_review.resolve_serving_preview",
+                return_value=ProductReviewPreview(
+                    preview_url="https://pr-42.example.invalid", head_sha="new-head"
+                ),
+            ),
+        ):
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+            self.assertNotEqual(overview.warnings, baseline.warnings)
+            self.assertIn("Provider unavailable", " ".join(overview.warnings))
+        for plan in (
+            {"action": "wait", "reason": "no_verified_build"},
+            {"action": "destroy", "last_failed_error_summary": "Cleanup refused"},
+            {"destroy_retry_key": "closed-cleanup", "last_failed_error_summary": "Read failed"},
+            {"feedback_recovery_closed_observed": True, "last_failed_error_summary": "Read failed"},
+        ):
+            with (
+                self.subTest(plan=plan),
+                patch.object(
+                    store,
+                    "list_product_reconcile_requests",
+                    create=True,
+                    return_value=(
+                        request.model_copy(update={"last_error": "", "last_plan": plan}),
+                    ),
+                ),
+            ):
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                self.assertEqual(overview.warnings, baseline.warnings)
+        with patch.object(
+            store,
+            "list_product_reconcile_requests",
+            create=True,
+            side_effect=ValueError("invalid saved record"),
+        ):
+            overview = build_product_site_overview(
+                record_store=store,
+                product=profile.product,
+                action_allowed=lambda *_: True,
+            )
+            self.assertNotEqual(overview.warnings, baseline.warnings)
 
     def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
