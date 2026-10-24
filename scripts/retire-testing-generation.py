@@ -93,6 +93,8 @@ def main() -> int:
                 inspection.plan.applied,
             ) != (args.product, draft.context, draft.operation_id, True):
                 raise ValueError("Custody inspection belongs to another retained generation.")
+            if any(item.context != draft.context for item in inspection.reservations):
+                raise ValueError("Custody reservations belong to another context.")
             print(
                 json.dumps(
                     {

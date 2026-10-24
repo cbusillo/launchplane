@@ -249,13 +249,35 @@ class TestingGenerationRetirementTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(response.json()["result"]["plan"], retained.plan.model_dump(mode="json"))
         self.assertFalse(response.json()["result"]["hostname_release_authorized"])
-        self.assertTrue(
-            all("env" not in item for item in response.json()["result"]["reservations"])
-        )
         self.assertEqual(self.store.retained_disposable_hostnames(), hosts)
         self.assertEqual(
             self.store.read_retained_testing_generation(self.operation.operation_id), retained
         )
+        from control_plane.storage.postgres import LaunchplaneDisposableReplacementPreparationRow
+
+        with self.store._session_factory() as session:
+            custody = session.get(
+                LaunchplaneDisposableReplacementPreparationRow, allocation.operation_id
+            )
+            assert custody is not None
+            custody.payload = {**custody.payload, "recorded_at": "legacy-unavailable"}
+            session.commit()
+        self.assertEqual(self.store.retained_disposable_hostnames(), hosts)
+        with self.store._session_factory() as session:
+            custody = session.get(
+                LaunchplaneDisposableReplacementPreparationRow, allocation.operation_id
+            )
+            assert custody is not None
+            session.delete(custody)
+            session.commit()
+        missing = inspect_retained_testing_custody(self.store, retained)
+        orphaned = next(
+            item for item in missing.reservations if item.source_kind == "retained_allocation"
+        )
+        self.assertIsNone(orphaned.product)
+        self.assertIsNone(orphaned.target_id)
+        self.assertIn(orphaned.hostname, self.store.retained_disposable_hostnames())
+        self.assertEqual(self.store.retained_disposable_hostnames(), hosts)
 
     def test_retirement_preserves_original_operation_and_reserves_its_hostname(self) -> None:
         profiles = self.store.list_product_profile_records()

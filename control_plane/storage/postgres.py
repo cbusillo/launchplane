@@ -15237,10 +15237,9 @@ class PostgresRecordStore(HumanSessionStore):
                         # Writing a hold or metadata on the unchanged original
                         # recipient cannot transfer its hostname to a fresh target.
                         continue
-                preparation = (
-                    DisposableTestingReplacementPreparation.model_validate(custody.payload)
-                    if custody is not None
-                    else None
+                product = custody.payload.get("product") if custody is not None else None
+                retained_target_id = (
+                    custody.payload.get("retained_target_id") if custody is not None else None
                 )
                 for hostname in sorted(
                     set(
@@ -15254,10 +15253,12 @@ class PostgresRecordStore(HumanSessionStore):
                     reservations.append(
                         RetainedTestingHostnameReservation(
                             source_kind="retained_allocation",
-                            product=preparation.product if preparation else None,
+                            product=product if isinstance(product, str) else None,
                             context=retained.context,
                             operation_id=allocation.operation_id,
-                            target_id=preparation.retained_target_id if preparation else None,
+                            target_id=retained_target_id
+                            if isinstance(retained_target_id, str)
+                            else None,
                             hostname=hostname,
                             custody_sha256=canonical_json_sha256(
                                 {

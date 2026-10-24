@@ -124,6 +124,18 @@ class TestingGenerationRetirementClientTests(unittest.TestCase):
             self.assertEqual(request.call_count, 1)
             self.assertNotIn("idempotency_key", request.call_args.kwargs)
             self.assertEqual(evidence.read_bytes(), saved)
+            request.return_value = {
+                **receipt(True),
+                "result": inspection.model_copy(
+                    update={
+                        "reservations": (
+                            inspection.reservations[0].model_copy(update={"context": "another"}),
+                        )
+                    }
+                ).model_dump(mode="json"),
+            }
+            self.assertEqual(call("inspect")[0], 1)
+            self.assertEqual(evidence.read_bytes(), saved)
             request.reset_mock()
             request.side_effect = http.client.IncompleteRead(b"", 1)
             status, outcome = call(
