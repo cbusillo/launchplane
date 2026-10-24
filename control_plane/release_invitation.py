@@ -360,6 +360,8 @@ def _accepted_release_in_progress(
     store: ReleaseReviewStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord | None,
+    production: ReleaseVersion,
+    candidate: ReleaseVersion,
 ) -> bool:
     if decision is None or decision.decision != "accepted" or not decision.release_start:
         return False
@@ -373,7 +375,13 @@ def _accepted_release_in_progress(
         )
         or (
             run.state == "waiting"
-            and (not run.blocked_reason or any(step.status == "pass" for step in run.steps))
+            and (
+                any(step.status == "pass" for step in run.steps)
+                or (
+                    production == decision.checklist.production
+                    and candidate == decision.checklist.candidate
+                )
+            )
         )
     )
 
@@ -886,7 +894,7 @@ def publish_release_invitation(
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
             return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
-    if _accepted_release_in_progress(store, profile, last_decision):
+    if _accepted_release_in_progress(store, profile, last_decision, production, candidate):
         return False
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
@@ -1007,7 +1015,13 @@ def publish_release_invitation(
                 not _ready(latest, profile)
                 or latest.checklist_digest != review.checklist_digest
                 or _last_client_decision(store, profile) != last_decision
-                or _accepted_release_in_progress(store, profile, last_decision)
+                or _accepted_release_in_progress(
+                    store,
+                    profile,
+                    last_decision,
+                    review.checklist.production,
+                    review.checklist.candidate,
+                )
             ):
                 return False
             if issues[0].get("state") == "closed":

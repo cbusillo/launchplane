@@ -1185,10 +1185,78 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertFalse(any(step.status == "pass" for step in run.steps))
         self.assertTrue(self.publish())
         self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.change_candidate(source_commit=accepted.checklist.candidate.source_commit)
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        artifact = self.store.read_artifact_manifest(production.artifact_id).model_copy(
+            update={"artifact_id": "new-production", "source_commit": "d" * 40}
+        )
+        self.store.write_artifact_manifest(artifact)
+        self.store.write_release_tuple_record(
+            production.model_copy(update={"artifact_id": artifact.artifact_id})
+        )
+        self.refresh_settings_review()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "waiting")
+        self.assertTrue(run.blocked_reason)
+        self.assertTrue(self.publish())
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product),
             (accepted,),
         )
+
+    def test_temporary_unstarted_release_waits_do_not_ask_again_after_notes_change(self) -> None:
+        from control_plane.client_release import read_client_release_run
+        from control_plane.contracts.odoo_business_hours import (
+            BusinessHoursWindow,
+            OdooBusinessHoursPolicy,
+        )
+
+        self.make_engineering_only()
+        self.profile = self.profile.model_copy(
+            update={"odoo_business_hours": OdooBusinessHoursPolicy(company_id=7)}
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.assertTrue(self.publish())
+        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+            update={"release_start": "promote"}
+        )
+        self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
+        original = self.comments[0].copy()
+        for window, draining, release_url in (
+            (
+                BusinessHoursWindow(applies=True, blocked_reason="business open"),
+                False,
+                accepted.release_issue_url,
+            ),
+            (BusinessHoursWindow(), True, accepted.release_issue_url),
+            (BusinessHoursWindow(), False, ""),
+        ):
+            saved = accepted.model_copy(update={"release_issue_url": release_url})
+            self.store.write_release_review_decision_record(saved)
+            with (
+                self.subTest(window=window, draining=draining, published=bool(release_url)),
+                patch(
+                    "control_plane.odoo_business_hours.read_business_hours_window",
+                    return_value=window,
+                ),
+                patch(
+                    "control_plane.service_deploy_drain.read_status",
+                    return_value={"admission_paused": draining},
+                ),
+            ):
+                run = read_client_release_run(
+                    store=self.store, profile=self.profile, decision=saved
+                )
+                assert run is not None
+                self.assertEqual(run.state, "waiting")
+                self.assertTrue(run.blocked_reason)
+                self.assertFalse(self.publish(ReleaseInvitationBackoff()))
+                self.assertFalse(self.publish(urgent_reason="Send the release request."))
+        self.assertEqual(self.comments, [original])
+        self.assertEqual(self.edits, [])
 
     def add_release_test_change(self) -> ReleaseReviewItem:
         assert self.review.checklist is not None

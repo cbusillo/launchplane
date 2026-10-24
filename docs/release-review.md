@@ -222,11 +222,15 @@ supplies acceptance or bypasses release checks.
 
 While the current Client's accepted release can proceed or has started and is
 waiting, running, or awaiting reconciliation, the publisher sends no new
-request or reminder. An accepted release that is blocked before any step starts
-does not prevent requesting acceptance for a newer qualified candidate.
+request or reminder. Before any step starts, a change to the accepted production
+or testing version permits a request for the newer qualified release snapshot.
+Temporary calendar, deploy-drain or acceptance-publication waits with unchanged
+versions keep the original acceptance and produce no new request.
 The acceptance covers the entire started run, including its rollback
 drill and re-promotion, even when production temporarily differs from testing or
-testing advances. Publication rechecks the run after looking up its destination.
+testing advances. A started run whose continuation needs its accepted testing
+version waits for that version to be re-qualified instead of asking again.
+Publication rechecks the run after looking up its destination.
 Once the run finishes, the existing settle path reconciles all invitations for
 that released version, including a stray request posted after acceptance.
 An automatic engineering why-now line is refreshed as the release contents change;
