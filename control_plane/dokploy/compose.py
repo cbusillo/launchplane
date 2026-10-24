@@ -138,10 +138,13 @@ def render_odoo_raw_compose_file(
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
     mount_workflow_ssh: bool = True,
+    protect_workflow_ssh: bool = False,
     isolated_testing: bool = False,
     private_backend_alias: str = "",
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
 ) -> str:
+    if protect_workflow_ssh and not mount_workflow_ssh:
+        raise ValueError("Protected workflow SSH requires its source mount.")
     if private_backend_alias and (
         not isolated_testing
         or domain_hosts
@@ -175,11 +178,15 @@ def render_odoo_raw_compose_file(
       - "${ODOO_WEB_HOST_PORT:-8069}:8069"
       - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
 """
-    workflow_ssh_mounts = (
-        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
-        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
-        if mount_workflow_ssh
-        else ""
+    workflow_ssh_mounts = ""
+    if mount_workflow_ssh:
+        if not protect_workflow_ssh:
+            workflow_ssh_mounts += (
+                "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
+            )
+        workflow_ssh_mounts += "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
+    workflow_security = (
+        '    security_opt: ["no-new-privileges:true"]' if protect_workflow_ssh else ""
     )
     # Dokploy adds `default` to domain-enabled services. Make that very network
     # private for testing, so provider conversion cannot add an outbound bridge.
@@ -323,6 +330,7 @@ services:
 
   script-runner:
     <<: *odoo-base
+{workflow_security}
 {private_network}
     volumes:
       - odoo_data:/volumes/data
