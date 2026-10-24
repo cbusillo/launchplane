@@ -480,7 +480,7 @@ class NpmplusClientTests(unittest.TestCase):
                 opener = _Opener()
                 opener.proxy_hosts_payload = [valid, malformed]
                 client = NpmplusClient(credentials=_credentials(), opener=opener)
-                with self.assertRaises((click.ClickException, ValidationError)):
+                with self.assertRaises((click.ClickException, ValueError)):
                     client.list_proxy_hosts()
 
     def test_selected_host_read_normalizes_null_locations(self) -> None:
