@@ -15,11 +15,8 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
-    administrator_product_evidence_read_state,
     agent_product_setup_grants_match_records,
-    agent_product_setup_products,
     agent_product_setup_request_grants,
-    agent_product_setup_state,
     authorization_candidate_request_matches,
     compile_agent_product_setup_candidate,
     compile_administrator_product_evidence_read_candidate,
@@ -636,10 +633,6 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
 
     def test_exact_set_add_remove_and_noops_are_isolated(self) -> None:
         active = _policy_with_product_evidence()
-        self.assertEqual(
-            administrator_product_evidence_read_state(active, github_id=123),
-            "active",
-        )
         add_state, add_request = compile_administrator_product_evidence_read_candidate(
             current_policy=active,
             github_id=123,
@@ -668,7 +661,6 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
 
     def test_legacy_set_is_corrected_or_removed_without_changing_public_state(self) -> None:
         legacy = _legacy_policy_with_product_evidence()
-        self.assertEqual(administrator_product_evidence_read_state(legacy, github_id=123), "active")
 
         add_state, add_request = compile_administrator_product_evidence_read_candidate(
             current_policy=legacy,
@@ -1022,8 +1014,6 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
     def test_matching_set_is_noop_and_new_selection_replaces_it(self) -> None:
         policy = _setup_policy(*_setup_rules())
         self.assertEqual(self._compile(policy), ("already_satisfied", None))
-        self.assertEqual(agent_product_setup_state(policy, identity=_OPERATOR), "active")
-        self.assertEqual(agent_product_setup_products(policy), ("example-shop",))
         state, candidate = self._compile(policy, products=("example-shop", "example-docs"))
         self.assertEqual(state, "planned")
         assert candidate is not None
@@ -1083,9 +1073,6 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
         )
         for policy in cases:
             with self.subTest(policy=policy.local_operators[1:]):
-                self.assertEqual(agent_product_setup_state(policy, identity=_OPERATOR), "conflict")
-                if policy is not cases[0]:
-                    self.assertEqual(agent_product_setup_products(policy), ())
                 with self.assertRaises(AuthorizationCandidatePreparationError) as raised:
                     self._compile(policy)
                 self.assertEqual(raised.exception.reason_code, "candidate_set_conflict")

@@ -1,3 +1,5 @@
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
+from tests.support.secret_relabel import relabel_secret_binding
 import os
 import unittest
 from pathlib import Path
@@ -43,7 +45,7 @@ class WorkerSecretMigrationTests(unittest.TestCase):
         self.store = PostgresRecordStore(database_url=self.database_url)
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
-        for record in runtime_environments.build_runtime_environment_records_from_definition(
+        for record in build_runtime_environment_records_from_definition(
             runtime_environments.RuntimeEnvironmentDefinition(
                 schema_version=1,
                 shared_env={},
@@ -277,7 +279,7 @@ class WorkerSecretMigrationTests(unittest.TestCase):
             for binding in self.store.list_secret_bindings(integration=RUNTIME, limit=None)
             if binding.binding_key == "GITHUB_TOKEN"
         )
-        control_plane_secrets.relabel_secret_binding(
+        relabel_secret_binding(
             record_store=self.store, binding_id=binding.binding_id, binding_key="APP_GITHUB_TOKEN"
         )
 

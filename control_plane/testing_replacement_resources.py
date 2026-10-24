@@ -107,12 +107,6 @@ class TestingReplacementResourcesPlan(BaseModel):
     applied: bool
 
 
-class TestingReplacementResourcesResult(TestingReplacementResourcesPlan):
-    resources_verified: Literal[True]
-    resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    schedule_id: str = Field(min_length=1)
-
-
 class TestingReplacementResourcesReadback(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

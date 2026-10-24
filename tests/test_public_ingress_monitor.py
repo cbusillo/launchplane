@@ -52,7 +52,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
-from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
+from tests.support.ingress_incidents import build_public_ingress_lane_incident_id
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_observation_id
 from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
@@ -77,13 +77,12 @@ from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorResult,
     _deliver_github_issue_notification,
     _gh_issue_client,
-    _incident_event,
     check_public_ingress_target,
     deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
-    reconcile_public_ingress_incident,
     run_public_ingress_monitor_once,
 )
+from tests.support.ingress_incidents import reconcile_public_ingress_incident
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -1524,7 +1523,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         tls_incident = next(
             incident for incident in store.incidents if incident.check_kind == "tls"
         )
-        self.assertEqual(_incident_event(incident=tls_incident), "opened")
         self.assertEqual(
             [
                 event.event

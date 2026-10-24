@@ -83,13 +83,12 @@ from control_plane.privileged_operation_registry import (
 from control_plane.privileged_operation_service import (
     PrivilegedOperationSemanticReviewError,
     cancel_privileged_operation,
-    create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
     read_privileged_operation,
-    list_privileged_operations,
     privileged_operation_semantic_review,
     validate_privileged_operation_semantic_review_coverage,
 )
+from tests.support.privileged_operations import create_privileged_operation_plan
 from control_plane.service_auth import LaunchplaneAuthzPolicy, action_safety
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import (
@@ -1262,7 +1261,7 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
                     )
                     self.assertEqual(still_planned, expiring)
                     self.assertEqual(
-                        list_privileged_operations(record_store=store, status="planned"),
+                        store.list_privileged_operation_records(status="planned"),
                         (expiring,),
                     )
                     self.assertEqual(
@@ -1482,8 +1481,7 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
             )
             store.write_privileged_operation_plan(newer_record, _planned_event(newer_record))
 
-            records = list_privileged_operations(
-                record_store=store,
+            records = store.list_privileged_operation_records(
                 status="cancelled",
                 limit=1,
             )

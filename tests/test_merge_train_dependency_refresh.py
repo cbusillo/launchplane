@@ -8,11 +8,8 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
     build_merge_train_branch_refresh_record,
 )
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, MAJOR
 from tests.test_merge_train_github import (

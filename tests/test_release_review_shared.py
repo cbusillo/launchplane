@@ -171,7 +171,7 @@ class SharedReleaseReviewTests(unittest.TestCase):
     def test_shared_release_membership_comes_from_recorded_artifact_sources(self) -> None:
         from control_plane.client_release_repositories import client_release_profiles
         from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
-        from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+        from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
         from typing import Any, cast
 
         self.assertEqual(

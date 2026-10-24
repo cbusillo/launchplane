@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 
 import base64
 import json
@@ -41,7 +42,7 @@ def _seed_runtime_environment_records(
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        records = runtime_environments.build_runtime_environment_records_from_definition(
+        records = build_runtime_environment_records_from_definition(
             definition,
             updated_at="2026-04-22T00:00:00Z",
             source_label="test",

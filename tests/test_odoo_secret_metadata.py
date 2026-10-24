@@ -20,7 +20,8 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
 from control_plane.odoo_secret_transport import OdooSecretTransportPlan, plan_odoo_secret_transport
-from control_plane.secrets import SecretWriteStore, relabel_secret_binding
+from control_plane.secrets import SecretWriteStore
+from tests.support.secret_relabel import relabel_secret_binding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import SecretRecordConflictError

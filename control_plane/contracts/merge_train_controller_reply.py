@@ -153,12 +153,6 @@ class MergeTrainControllerReply(TypedDict):
 _REPLY_ADAPTER = TypeAdapter(MergeTrainControllerReply)
 
 
-def validate_merge_train_controller_reply(reply: object) -> None:
-    """Raise `pydantic.ValidationError` unless the reply matches the published contract."""
-
-    _REPLY_ADAPTER.validate_json(json.dumps(reply), strict=True)
-
-
 def build_merge_train_controller_reply_schema() -> dict[str, Any]:
     return {
         "$schema": JSON_SCHEMA_DIALECT,

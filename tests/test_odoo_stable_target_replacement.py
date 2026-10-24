@@ -100,7 +100,6 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooTargetReplacementStageError,
     _deploy_step_failure,
     _failure_stage,
-    _merge_required_odoo_install_modules,
     _read_lane,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
@@ -688,12 +687,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "uncertain" if hold_uncertain_effects else None,
                 )
                 self.assertEqual(store.environment_inventories, [])
-
-    def test_merge_required_odoo_install_modules_prepends_and_dedupes(self) -> None:
-        self.assertEqual(
-            _merge_required_odoo_install_modules("cm_website, disable_odoo_online, website"),
-            "launchplane_settings,disable_odoo_online,cm_website,website",
-        )
 
     def test_required_runtime_identity_evidence_records_exact_match(self) -> None:
         expected_runtime_identity = RuntimeIdentity(

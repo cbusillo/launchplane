@@ -10,13 +10,11 @@ from urllib.parse import quote, urlencode
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_profile_record import BumpLevel as BumpLevel
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     retry_outbox_delivery,
 )
-from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -68,101 +66,6 @@ class GenericWebPromotionWorkflowResult(BaseModel):
     run_url: str = ""
     run_status: str = "pending"
     run_conclusion: str = ""
-
-
-def dispatch_generic_web_promotion_workflow(
-    *,
-    control_plane_root: Path,
-    profile: LaunchplaneProductProfileRecord,
-    request: GenericWebPromotionWorkflowRequest,
-) -> GenericWebPromotionWorkflowResult:
-    if profile.product.strip() != request.product:
-        raise click.ClickException("Generic-web promotion workflow product does not match profile.")
-    if not product_profile_uses_generic_web_base(profile):
-        raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
-            "not generic-web or a generic-web based driver."
-        )
-    contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
-    if request.context not in contexts:
-        raise click.ClickException(
-            "Generic-web promotion workflow context is not in the product profile."
-        )
-    owner, repo = _repository_parts(profile.repository)
-    with launchplane_github_token(
-        token_resolver=resolve_launchplane_github_token,
-        api_request=github_api_request,
-        control_plane_root=control_plane_root,
-        context_name=request.context,
-        repository=profile.repository,
-        purpose="workflow_dispatch",
-    ) as token:
-        if not token:
-            raise click.ClickException(
-                "Launchplane Delivery App credentials are unavailable for this repository"
-            )
-        workflow = profile.promotion_workflow
-        workflow_id = workflow.workflow_id.strip()
-        ref = workflow.ref.strip()
-        bump = _normalize_bump(request.bump if request.bump is not None else workflow.default_bump)
-        previous_run_ids = _workflow_dispatch_run_ids(
-            owner=owner,
-            repo=repo,
-            workflow_id=workflow_id,
-            ref=ref,
-            token=token,
-        )
-        dispatch_started_at = _github_timestamp_precision(datetime.now(UTC))
-        github_api_request(
-            path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
-            token=token,
-            method="POST",
-            body={
-                "ref": ref,
-                "inputs": {
-                    workflow.dry_run_input.strip(): str(request.dry_run).lower(),
-                    workflow.bump_input.strip(): bump,
-                    **(
-                        {workflow.artifact_id_input.strip(): request.artifact_id}
-                        if request.artifact_id
-                        else {}
-                    ),
-                    **(
-                        {workflow.deploy_reference_input.strip(): request.deploy_reference}
-                        if request.deploy_reference
-                        else {}
-                    ),
-                    **(
-                        {workflow.source_git_ref_input.strip(): request.source_git_ref}
-                        if request.source_git_ref
-                        else {}
-                    ),
-                },
-            },
-        )
-        run = _wait_for_workflow_run(
-            owner=owner,
-            repo=repo,
-            workflow_id=workflow_id,
-            ref=ref,
-            token=token,
-            previous_run_ids=previous_run_ids,
-            min_created_at=dispatch_started_at,
-            timeout_seconds=request.observe_timeout_seconds,
-        )
-        return GenericWebPromotionWorkflowResult(
-            product=profile.product,
-            context=request.context,
-            repository=profile.repository,
-            workflow_id=workflow_id,
-            ref=ref,
-            dry_run=request.dry_run,
-            bump=bump,
-            run_id=_int_value(run.get("id")) if run else 0,
-            run_url=_string_value(run.get("html_url")) if run else "",
-            run_status=_string_value(run.get("status")) if run else "pending",
-            run_conclusion=_string_value(run.get("conclusion")) if run else "",
-        )
 
 
 def dispatch_generic_web_promotion_workflow_delivery(

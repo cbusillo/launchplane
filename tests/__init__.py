@@ -33,9 +33,7 @@ def _check_controller_replies() -> None:
     """
 
     from control_plane import merge_train_controller_run_once as controller
-    from control_plane.contracts.merge_train_controller_reply import (
-        validate_merge_train_controller_reply,
-    )
+    from tests.support.merge_train_controller_reply import validate_merge_train_controller_reply
     from control_plane.http_routes.mutation_support import accepted_evidence_response
 
     result_type = controller.MergeTrainControllerRunOnceResult

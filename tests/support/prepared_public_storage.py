@@ -1,5 +1,3 @@
-"""File-backed isolation/rehearsal storage, never shared production authority."""
-
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile

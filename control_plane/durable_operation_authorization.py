@@ -245,62 +245,6 @@ def capture_durable_operation_authorization(
     )
 
 
-def capture_explicit_action_durable_operation_authorization(
-    *,
-    identity: LaunchplaneIdentity,
-    action: str,
-    product: str,
-    context: str,
-    instances: tuple[str, ...],
-    policy_record: LaunchplaneAuthzPolicyRecord,
-    authorized_at: str,
-) -> DurableOperationAuthorization:
-    """Capture authority only from a rule that names the requested action."""
-
-    policy_schema_version = _durable_policy_schema_version(policy_record)
-    administrator_authorization = _admin_authorization(
-        identity=identity,
-        action=action,
-        product=product,
-        context=context,
-        instances=instances,
-        policy_record=policy_record,
-        policy_schema_version=policy_schema_version,
-        authorized_at=authorized_at,
-    )
-    if administrator_authorization is not None:
-        return administrator_authorization
-    target = AuthorizationTarget(scope="instance", instances=instances)
-    try:
-        managed_rule = require_single_explicit_action_managed_rule_identity(
-            policy=policy_record.policy,
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=target,
-        )
-    except ManagedRuleAuthorizationError as error:
-        raise DurableOperationAuthorizationCaptureError(
-            "Durable operations require exactly one explicit-action managed authz rule match."
-        ) from error
-    return DurableOperationAuthorization(
-        action=action,
-        product=product,
-        context=context,
-        instances=instances,
-        managed_set_id=managed_rule.managed_set_id,
-        managed_rule_id=managed_rule.managed_rule_id,
-        policy_record_id=policy_record.record_id,
-        policy_revision=policy_record.revision,
-        policy_schema_version=policy_schema_version,
-        policy_sha256=policy_record.policy_sha256,
-        policy_source=policy_record.source,
-        authorized_at=authorized_at,
-        caller=durable_operation_caller_identity(identity),
-    )
-
-
 def _durable_policy_schema_version(
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> Literal[2, 3]:
@@ -627,34 +571,6 @@ def durable_operation_authorization_allows(
         product=authorization.product,
         context=authorization.context,
         target=target,
-    )
-
-
-def explicit_action_durable_operation_authorization_allows(
-    *,
-    authorization: DurableOperationAuthorization,
-    policy_record: LaunchplaneAuthzPolicyRecord,
-) -> bool:
-    if authorization.grant != "policy_rule" or policy_record.status != "active":
-        return False
-    schema_transition = (
-        authorization.policy_schema_version,
-        policy_record.policy.schema_version,
-    )
-    if schema_transition not in _DURABLE_OPERATION_POLICY_SCHEMA_TRANSITIONS:
-        return False
-    identity = launchplane_identity_from_durable_caller(authorization.caller)
-    target = AuthorizationTarget(scope="instance", instances=authorization.instances)
-    return _managed_rule_allows(
-        policy=policy_record.policy,
-        identity=identity,
-        managed_set_id=authorization.managed_set_id,
-        managed_rule_id=authorization.managed_rule_id,
-        action=authorization.action,
-        product=authorization.product,
-        context=authorization.context,
-        target=target,
-        require_explicit_action=True,
     )
 
 

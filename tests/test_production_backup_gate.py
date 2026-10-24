@@ -14,7 +14,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
-from control_plane.contracts.production_backup_failures import known_backup_failure_code
 from control_plane.http_routes.production_backup_gate import _response
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import (
@@ -192,7 +191,6 @@ class ProductionBackupGateTests(unittest.TestCase):
         self.assertEqual(recovered.status, "fail")
         self.assertEqual(recovered.error_code, "backup_effect_outcome_unknown")
         response = _response(recovered, "expired-capture-read")
-        self.assertEqual(known_backup_failure_code(response.error_code), recovered.error_code)
         self.assertTrue(response.error_description)
         evidence = self.store.read_backup_gate_record(operation.backup_record_id)
         self.assertEqual(evidence.source, "launchplane-production-backup-gate")

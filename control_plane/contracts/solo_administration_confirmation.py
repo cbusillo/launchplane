@@ -89,10 +89,6 @@ def verify_solo_administration_acknowledgement(
     return hmac.compare_digest(expected_digest, supplied_digest)
 
 
-def solo_administration_acknowledgement_sha256(acknowledgement: str) -> str:
-    return solo_administration_confirmation_acknowledgement_sha256(acknowledgement)
-
-
 def build_solo_administration_confirmation_id(
     *,
     reviewed_plan_sha256: str,

@@ -717,33 +717,6 @@ def apply_merge_train_branch_update_intent(
     )
 
 
-def reread_merge_train_after_branch_update(
-    *,
-    branch_update_result: MergeTrainBranchUpdateResult,
-    policy: MergeTrainPolicy,
-    snapshot_reader: MergeTrainSnapshotReader,
-) -> MergeTrainRereadResult:
-    if not branch_update_result.reread_required:
-        return MergeTrainRereadResult(
-            status="skipped",
-            repository=branch_update_result.repository,
-            base_branch=branch_update_result.base_branch,
-            detail="Branch update result does not require a reread.",
-        )
-    snapshot = snapshot_reader.read_merge_train_snapshot(
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-    )
-    refreshed_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
-    return MergeTrainRereadResult(
-        status="reread",
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-        refreshed_result=refreshed_result,
-        detail="Re-read mergeability and required checks after branch update.",
-    )
-
-
 def build_merge_train_wait_result(
     *, dry_run_result: MergeTrainDryRunResult
 ) -> MergeTrainWaitResult:

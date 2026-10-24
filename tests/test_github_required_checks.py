@@ -4,7 +4,6 @@ from control_plane.github_required_checks import CheckRequirement
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
-    RecordingMergeTrainGitHubTransport,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     _list_check_runs,
@@ -12,6 +11,7 @@ from control_plane.merge_train_github import (
     _required_checks_status,
     _required_checks_observation,
 )
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
     TenantAdmissionControllerError,

@@ -160,8 +160,8 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         from control_plane.workflows.public_ingress_monitor import (
             check_public_ingress_target,
             discover_public_ingress_monitor_targets,
-            reconcile_public_ingress_incident,
         )
+        from tests.support.ingress_incidents import reconcile_public_ingress_incident
 
         checked_at = format_launchplane_mutation_timestamp(
             parse_launchplane_mutation_timestamp(self.original.updated_at, field_name="updated_at")
@@ -270,7 +270,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         from control_plane.contracts.public_ingress_monitoring import (
             public_ingress_material_fingerprint_sha256,
         )
-        from control_plane.workflows.public_ingress_monitor import reconcile_public_ingress_incident
+        from tests.support.ingress_incidents import reconcile_public_ingress_incident
         from control_plane.provider_target_holds import (
             ProviderOperationAttentionReference,
             ProviderOperationReference,
@@ -398,8 +398,8 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         from control_plane.workflows.public_ingress_monitor import (
             discover_public_ingress_monitor_targets,
             check_public_ingress_target,
-            reconcile_public_ingress_incident,
         )
+        from tests.support.ingress_incidents import reconcile_public_ingress_incident
 
         opening = self.record_legacy_fence()
         plan = self.inspect()
