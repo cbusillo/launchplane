@@ -54,7 +54,10 @@ from control_plane.storage.delivery_evidence import (
     DeliveryFailureObservation,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
+from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressIncidentChanged,
+    _store_monitor_observation,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 Store = PostgresRecordStore | FilesystemRecordStore
@@ -486,7 +489,6 @@ def record_production_delivery_failure(
         check_name=check_name,
         status="open",
     )
-    # New stages update the same incident; exact retries retain their original trace.
     if (
         existing
         and existing[0].material_fingerprint is not None
@@ -1034,16 +1036,19 @@ def _recover_delivery_failures(
         ):
             recovery_summary = f"The failed production rollback recovered through {recovery}."
         if recovery_summary:
-            _observe(
-                store,
-                profile,
-                lane,
-                check_name=incident.check_name,
-                failed=False,
-                summary=recovery_summary,
-                observed_at=now,
-                expected_incident_sha256=public_ingress_incident_record_sha256(incident),
-            )
+            try:
+                _observe(
+                    store,
+                    profile,
+                    lane,
+                    check_name=incident.check_name,
+                    failed=False,
+                    summary=recovery_summary,
+                    observed_at=now,
+                    expected_incident_sha256=public_ingress_incident_record_sha256(incident),
+                )
+            except PublicIngressIncidentChanged:
+                continue
         elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
@@ -1191,7 +1196,14 @@ def _monitor_availability(
     available: bool,
 ) -> None:
     candidate = "monitor:" + component
-    if not available:
+    incidents = store.list_public_ingress_incident_records(
+        product=profile.product,
+        context_name=lane.context,
+        instance_name="prod",
+        check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
+        status="open",
+    )
+    if not available and not incidents:
         record_production_delivery_failure(
             store,
             profile,
@@ -1201,13 +1213,7 @@ def _monitor_availability(
             trace_id="production-delivery-monitor:" + _candidate_key(profile.product),
             observed_at=now,
         )
-    elif store.list_public_ingress_incident_records(
-        product=profile.product,
-        context_name=lane.context,
-        instance_name="prod",
-        check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
-        status="open",
-    ):
+    elif available and incidents:
         _observe(
             store,
             profile,

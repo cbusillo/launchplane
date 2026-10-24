@@ -852,8 +852,35 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             self.monitor()
         self.assertTrue(raced)
         self.assertEqual(
+            {
+                item.incident_id
+                for item in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {incident.incident_id},
+        )
+        self.assertEqual(
             self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
         )
+
+    def test_monitor_read_outage_keeps_one_failure_until_the_read_recovers(self) -> None:
+        self.transport.get_json.side_effect = RuntimeError("source unavailable")
+        with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+            self.monitor()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        original = self.store.list_public_ingress_observation_records(
+            incident_id=incident.incident_id
+        )
+        self.now += timedelta(hours=1)
+        with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+            self.monitor()
+        self.assertEqual(
+            self.store.list_public_ingress_observation_records(incident_id=incident.incident_id),
+            original,
+        )
+        self.transport.get_json.side_effect = self.read_source
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
 
     def test_only_a_later_matching_release_clears_failure(self) -> None:
         self.reject()

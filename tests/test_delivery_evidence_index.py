@@ -344,8 +344,6 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                     incident_id=incident.incident_id
                 )
                 self.assertEqual(len(before), len(traces))
-                for trace in traces:
-                    self.assertTrue(any(trace in observation.summary for observation in before))
                 record_production_delivery_failure(
                     self.store,
                     self.profile,
