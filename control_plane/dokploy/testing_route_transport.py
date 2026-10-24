@@ -149,6 +149,20 @@ def docker(*arguments, stdin=None):
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
 
+def read_service_ids() -> list[str]:
+    prefixes=docker('service','ls','-q').decode().splitlines()
+    if (len(prefixes)>10000 or len(prefixes)!=len(set(prefixes))
+        or any(not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}',value) for value in prefixes)):
+        raise RuntimeError('Service inventory prefixes are incomplete')
+    if not prefixes:
+        return []
+    resolved=[json.loads(line) for line in docker('service','inspect','--format','{{json .ID}}',*prefixes).splitlines()]
+    if (len(resolved)!=len(prefixes)
+        or any(not isinstance(value,str) or not value.startswith(prefix) for prefix,value in zip(prefixes,resolved))
+        or len(resolved)!=len(set(resolved))):
+        raise RuntimeError('Complete service identities are unavailable')
+    return resolved
+
 WRITE_STARTED=False
 
 def proxy_dns_names(container, proxy_networks):
@@ -206,8 +220,8 @@ def application_container(containers, binding, proxy_networks):
     attachments=service.get('Spec',{}).get('TaskTemplate',{}).get('Networks')
     if not network_ids or not isinstance(attachments,list) or not any(item.get('Target') in network_ids for item in attachments):
         raise RuntimeError('Application service network ownership is unavailable')
-    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
-    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+    service_ids=read_service_ids()
+    if service['ID'] not in service_ids:
         raise RuntimeError('Application service inventory is incomplete')
     for identifier in service_ids:
         if identifier==service['ID']: continue
@@ -222,7 +236,7 @@ def application_container(containers, binding, proxy_networks):
         if item['Id']!=container['Id'] and binding['name'].casefold() in proxy_dns_names(item,proxy_networks):
             raise RuntimeError('Application private name is shared')
     if (json.loads(docker('service','inspect',binding['name']))[0]!=service or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids):
+        or read_service_ids()!=service_ids):
         raise RuntimeError('Application service changed during route observation')
     return container,identity,shared
 
@@ -349,8 +363,8 @@ def retained_application_backend(containers, binding, proxy_networks):
             exact_endpoints.extend('http://'+alias+':'+str(binding['port']) for alias in proxy_dns_names(container,proxy_networks))
     if not pinned and not actual_image:
         raise RuntimeError('A tag-only retained template has no actual immutable image proof')
-    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
-    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+    service_ids=read_service_ids()
+    if service['ID'] not in service_ids:
         raise RuntimeError('Application service inventory is incomplete')
     for identifier in service_ids:
         if identifier==service['ID']: continue
@@ -366,7 +380,7 @@ def retained_application_backend(containers, binding, proxy_networks):
             raise RuntimeError('Application private name is shared')
     if (json.loads(docker('service','inspect',binding['name']))[0]!=service
         or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids
+        or read_service_ids()!=service_ids
         or sorted(docker('ps','-aq').decode().splitlines())!=sorted(item['Id'] for item in containers)
         or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
         or single_local_swarm_node(docker)!=local_nodes):
