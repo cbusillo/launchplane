@@ -1102,10 +1102,13 @@ def reconcile_completed_change(
                 provider_errors[0],
             )
         )
+        publication_blocked = stopped or repository.casefold() in denied_repositories
+        if pending_reasons and not publication_blocked and not _retryable_failure(selected_error):
+            raise PlanningCompletionPending("; ".join(pending_reasons), receipt=receipt)
         _fail_completion(
             selected_error,
             receipt,
-            publication_blocked=stopped or repository.casefold() in denied_repositories,
+            publication_blocked=publication_blocked,
         )
     if pending_reasons:
         raise PlanningCompletionPending("; ".join(pending_reasons), receipt=receipt)

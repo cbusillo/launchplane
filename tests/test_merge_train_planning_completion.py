@@ -189,7 +189,9 @@ class PlanningProvider:
             page, per_page = int(query["page"][0]), int(query["per_page"][0])
             return copy.deepcopy(self.pull_comments[(page - 1) * per_page : page * per_page])
         if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/timeline?"):
-            return copy.deepcopy(self.timeline)
+            query = parse_qs(urlsplit(path).query)
+            page, per_page = int(query["page"][0]), int(query["per_page"][0])
+            return copy.deepcopy(self.timeline[(page - 1) * per_page : page * per_page])
         if "/comments?" in path:
             return copy.deepcopy(self.comments)
         if "/dependencies/blocked_by?" in path:

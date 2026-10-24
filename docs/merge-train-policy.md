@@ -2512,7 +2512,9 @@ incomplete-planning note while reconciliation remains failed. Incomplete source
 reference discovery or a neighborhood coverage overflow retains known targets
 and explicitly partial coverage without metadata writes.
 Unknown writes, global identity failures, denial in the source repository and
-transient/quota failures still suppress publication and retain existing backoff.
+transient/quota failures still suppress publication. Existing retry classification
+and quota backoff remain; pending keyword projection also retains its retry when
+another source has a terminal error.
 Terminal planning failures remain failed in the existing feedback protocol even
 when their note was delivered. These outcomes do not undo the landing or grant access.
 
