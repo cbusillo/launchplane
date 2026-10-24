@@ -27,31 +27,44 @@ class ClientTestNotesTests(unittest.TestCase):
                 )
         self.assertTrue(client_test_notes(ENGINEERING_RELEASE_TESTS).error)
 
-    def test_director_standing_preserves_note_validation_and_dependency_exemption(self) -> None:
+    def test_director_standing_holds_only_for_the_review_label(self) -> None:
         for notes in (
             "",
             "Nothing for the Client to test",
             "Nothing for the Client to test: CI only.",
             "Try the new buttons.",
         ):
-            with self.subTest(notes=notes):
+            for labels in ((), ("owner-review",)):
+                with self.subTest(notes=notes, labels=labels):
+                    body = "## Client test notes\n" + notes
+                    standing = change_client_review(
+                        body=body,
+                        labels=labels,
+                        review_label="owner-review",
+                        director_standing=True,
+                    )
+                    if labels:
+                        self.assertEqual(
+                            standing,
+                            change_client_review(
+                                body=body, labels=labels, review_label="owner-review"
+                            ),
+                        )
+                        self.assertTrue(standing.review_required)
+                    else:
+                        self.assertFalse(standing.review_required)
+                        self.assertEqual(standing.error, client_test_notes(notes).error)
+        for labels, review_required in (((), False), (("owner-review",), True)):
+            with self.subTest(dependency_update=True, labels=labels):
                 intent = change_client_review(
-                    body="## Client test notes\n" + notes,
-                    labels=("owner-review",),
+                    body="## Client test notes\nTry the new buttons.",
+                    labels=labels,
                     review_label="owner-review",
                     director_standing=True,
+                    pure_dependency_update=True,
                 )
-                self.assertFalse(intent.review_required)
-                self.assertEqual(intent.error, client_test_notes(notes, review_override=True).error)
-        intent = change_client_review(
-            body="Bumps a dependency.",
-            labels=(),
-            review_label="owner-review",
-            director_standing=True,
-            pure_dependency_update=True,
-        )
-        self.assertFalse(intent.review_required)
-        self.assertFalse(intent.error)
+                self.assertIs(intent.review_required, review_required)
+                self.assertFalse(intent.error)
 
     def test_real_notes_request_review_without_a_label(self) -> None:
         intent = change_client_review(
@@ -198,6 +211,9 @@ class ClientTestNotesTests(unittest.TestCase):
 
             self.assertTrue(read())
             self.assertFalse(read(director_standing=True))
+            payload["labels"] = [{"name": "owner-review"}]
+            self.assertTrue(read(director_standing=True))
+            payload["labels"] = []
             self.assertFalse(read(store))
             payload["body"] = "Synthetic train candidate."
             self.assertFalse(read(store))
