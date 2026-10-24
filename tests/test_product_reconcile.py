@@ -1409,6 +1409,46 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 operation,
             )
 
+    def test_completed_native_generation_queues_existing_data_without_bootstrap_queue_receipt(
+        self,
+    ) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        generation = FreshOdooTestingGeneration(
+            product="site",
+            context="cm",
+            operation_id="native-testing-fixture",
+            target_id="independent-testing-target",
+            namespace="lp-testing-" + "a" * 32,
+            domain_host="fresh.example.invalid",
+            resources_binding_sha256="b" * 64,
+            bootstrap_plan_sha256="c" * 64,
+            request_sha256="d" * 64,
+            prepared_at="2026-09-30T12:00:00Z",
+        )
+        for completed in (False, True):
+            current = generation.model_copy(
+                update={"completed_at": "2026-09-30T12:01:00Z" if completed else ""}
+            )
+            with (
+                self.subTest(completed=completed),
+                patch(
+                    "control_plane.odoo_testing_restore.read_current_testing_generation",
+                    return_value=current,
+                ),
+            ):
+                self.request()
+                plan = self.reconcile()
+                if not completed:
+                    self.assertTrue(plan["held"])
+                    self.assertEqual(plan["reason"], "fresh_testing_bootstrap_incomplete")
+                    self.assertNotIn("queued_operation_id", plan)
+                    continue
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                    cast(str, plan["queued_operation_id"])
+                )
+                self.assertEqual(operation.request.data_source_mode, "existing")
+                self.assertFalse(plan["held"])
+
     def fail_with_provider_text(self, operation_id: str) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
         self.store.write_odoo_stable_target_replacement_operation_record(

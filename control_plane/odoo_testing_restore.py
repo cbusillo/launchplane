@@ -122,7 +122,7 @@ def fresh_testing_mode_refusal(
 ) -> tuple[OdooTargetReplacementPlanBlockerCode, str] | None:
     if generation is None:
         return None
-    if not generation.reconcile_requested_at:
+    if not (generation.completed_at or generation.reconcile_requested_at):
         return (
             "fresh_testing_bootstrap_incomplete",
             "Finish the original bootstrap route and queue preparation before executing this generation.",

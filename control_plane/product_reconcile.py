@@ -706,6 +706,7 @@ def reconcile_testing_target(
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
     from control_plane.odoo_testing_restore import (
+        fresh_testing_mode_refusal,
         generation_binding,
         read_current_testing_generation,
     )
@@ -721,10 +722,13 @@ def reconcile_testing_target(
     except (ValueError, FileNotFoundError, click.ClickException):
         plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
         return ReconcileOutcome(plan)
-    if generation is not None and not generation.reconcile_requested_at:
-        plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
-        return ReconcileOutcome(plan)
     fresh_generation = generation is not None and not generation.completed_at
+    data_source_mode: Literal["existing", "upstream_restore"] = (
+        "upstream_restore" if fresh_generation else "existing"
+    )
+    if refusal := fresh_testing_mode_refusal(generation, data_source_mode):
+        plan.update(action="wait", held=True, reason=refusal[0])
+        return ReconcileOutcome(plan)
     generation_sha256 = generation_binding(generation) if fresh_generation and generation else ""
     rearmed_after = testing_retry_after_operation(
         record_store=record_store,
@@ -740,7 +744,7 @@ def reconcile_testing_target(
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
             allow_empty_data=fresh_generation or not bool(rearmed_after),
-            data_source_mode="upstream_restore" if fresh_generation else "existing",
+            data_source_mode=data_source_mode,
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
