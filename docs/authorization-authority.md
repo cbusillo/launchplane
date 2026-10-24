@@ -1204,8 +1204,8 @@ which can deploy. The product's testing overview exposes **Review lift** and
 **Lift testing hold** only to the service-verified signed-in administrator.
 The existing testing-hold endpoints accept that browser session, with origin,
 fetch-metadata and single-use CSRF protection on the review and apply requests.
-The card displays the stored reason, recorder, time and an HTTPS issue link
-recorded in the reason. Missing historical metadata is shown as not recorded.
+The card displays the stored purpose, reason, recorder, time and an HTTPS issue
+link recorded in the reason. Missing historical metadata is shown as not recorded.
 The administrator
 reviews the current hold, supplies an audit reason and confirms that testing
 can deploy before submitting its digest-bound lift. The existing authenticated
@@ -1216,8 +1216,9 @@ administrator can explicitly start a separate review of the current hold;
 the earlier key is shown as unverified in this tab across reloads. Closing the
 tab or clearing its storage discards this local history, not the service's audit
 receipt. This does not claim the earlier request failed or succeeded.
-Isolation staging interlocks retain
-their separate activation flow.
+The same card lifts an isolation staging interlock: the review and apply
+name its purpose, and the lift requests no testing reconcile. The Director's
+agent keeps its separate activation flow.
 The Director's agent can set a testing hold but not lift one.
 The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
