@@ -1202,6 +1202,30 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("workflow arguments --post-deploy-maintenance", run.docker_log)
 
+    def test_upstream_preview_restores_even_when_a_partial_database_exists(self) -> None:
+        script = _render_post_deploy_script(
+            None,
+            instance="pr-45",
+            run_destructive_restore=True,
+            bootstrap_missing_database=True,
+            workflow_environment_overrides={"BOOTSTRAP": "false", "NO_SANITIZE": "false"},
+        )
+        for database_present in ("0", "1"):
+            with self.subTest(database_present=database_present):
+                run = self._run(
+                    script,
+                    FAKE_DATABASE_PRESENT=database_present,
+                    FAKE_CONTAINER_PAYLOAD="payload-a",
+                    FAKE_ODOO_DB=_fake_database(),
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertNotIn("probe database", run.docker_log)
+                self.assertNotIn("workflow arguments --bootstrap", run.docker_log)
+                self.assertNotIn("workflow arguments --post-deploy-maintenance", run.docker_log)
+                self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+                self.assertTrue(run.readback_ran, run.docker_log)
+                self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
+
     def test_unanswered_database_probe_stops_before_touching_web(self) -> None:
         run = self._run(_render_preview_script(), FAKE_DATABASE_PRESENT="error")
 

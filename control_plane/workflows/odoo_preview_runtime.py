@@ -1551,6 +1551,22 @@ def _preview_refresh_environment_values(
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
     environment_values["PLATFORM_INSTANCE"] = "preview"
+    if any(
+        environment_values.get(key, "").strip()
+        for key in dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS
+    ):
+        environment_values.update(
+            dokploy_post_deploy.resolve_upstream_restore_workflow_environment(
+                desired_env_map=environment_values
+            )
+        )
+        if environment_values["ODOO_UPSTREAM_USER"] == "root" or environment_values.get(
+            "DATA_WORKFLOW_SSH_DIR", ""
+        ).strip().rstrip("/") in {"", "/root/.ssh"}:
+            raise click.ClickException(
+                "Preview upstream restore requires a non-root reader and a dedicated SSH directory."
+            )
+        environment_values.update({"BOOTSTRAP": "false", "NO_SANITIZE": "false"})
     addons_path = merge_required_odoo_addons_path(environment_values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         environment_values["ODOO_ADDONS_PATH"] = addons_path
@@ -1600,6 +1616,8 @@ def _execute_refresh(
         provider_effect_attempted = True
 
     try:
+        environment_values = _preview_refresh_environment_values(request=request)
+        restore_upstream = bool(environment_values.get("ODOO_UPSTREAM_HOST", ""))
         if qualify_existing_refresh and creating_compose:
             raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
@@ -1637,7 +1655,7 @@ def _execute_refresh(
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
-            mount_workflow_ssh=not qualify_existing_refresh,
+            mount_workflow_ssh=not qualify_existing_refresh or restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
         )
 
@@ -1669,7 +1687,6 @@ def _execute_refresh(
             )
         steps.append(_step("compose_update_raw_source", compose_id))
 
-        environment_values = _preview_refresh_environment_values(request=request)
         previous_source = dokploy_api.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         ).get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")
@@ -1765,6 +1782,10 @@ def _execute_refresh(
             for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS
             if request.environment_values.get(key, "").strip()
         }
+        if restore_upstream:
+            runtime_override_environment.update(
+                {key: environment_values[key] for key in ("BOOTSTRAP", "NO_SANITIZE")}
+            )
         module_install_update_evidence = dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
             token=token,
@@ -1778,6 +1799,7 @@ def _execute_refresh(
             ),
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
+            run_destructive_restore=restore_upstream,
             bootstrap_missing_database=True,
             clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,
