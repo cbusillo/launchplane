@@ -1561,10 +1561,8 @@ def _preview_refresh_environment_values(
                 desired_env_map=environment_values
             )
         )
-        ssh_directory = PurePosixPath(
-            "/" + environment_values.get("DATA_WORKFLOW_SSH_DIR", "").lstrip("/")
-        )
-        source_directory = environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
+        source_directory = environment_values.get("DATA_WORKFLOW_SSH_DIR", "").strip()
+        ssh_directory = PurePosixPath("/" + source_directory.lstrip("/"))
         if (
             environment_values["ODOO_UPSTREAM_USER"] == "root"
             or not source_directory.startswith("/")
@@ -1580,6 +1578,7 @@ def _preview_refresh_environment_values(
         environment_values.update(
             {"BOOTSTRAP": "false", "NO_SANITIZE": "false", "ENV_OVERRIDE_DISABLE_CRON": "true"}
         )
+        environment_values["DATA_WORKFLOW_SSH_DIR"] = str(ssh_directory)
     addons_path = merge_required_odoo_addons_path(environment_values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         environment_values["ODOO_ADDONS_PATH"] = addons_path
@@ -1827,6 +1826,9 @@ def _execute_refresh(
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
             run_destructive_restore=restore_upstream,
+            preview_ssh_source_directory=environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
+            if restore_upstream
+            else "",
             bootstrap_missing_database=not preserve_existing_data,
             clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,

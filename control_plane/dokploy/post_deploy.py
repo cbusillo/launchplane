@@ -638,6 +638,7 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     bootstrap_missing_database: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
@@ -866,7 +867,7 @@ def run_compose_post_deploy_update(
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
         preview_restore=run_destructive_restore
         and runtime_key_safety_environment_class(target_definition.instance) == "preview",
-        preview_ssh_source_directory=desired_env_map.get("DATA_WORKFLOW_SSH_DIR", ""),
+        preview_ssh_source_directory=preview_ssh_source_directory,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         website_settings_instance=target_definition.instance.strip().lower()

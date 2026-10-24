@@ -416,7 +416,7 @@ bootstrap a missing database. No new database marker is needed.
 The restore requires complete upstream settings, a non-root reader and an explicit
 dedicated SSH directory. Its source mount is root-only and read-only. The workflow
 checks actual runner/web bind mounts before staging an identity: the runner must
-have only the expected source bound read-only at `/root/.ssh`, and web has no
+have only the canonical source from Launchplane's resolved settings bound read-only at `/root/.ssh`, and web has no
 host bind. Missing, changed or unreadable mounts stop before credential access.
 The workflow must run without root, effective/permitted/ambient capabilities, root-directory
 access or privilege escalation. The existing root broker stages the temporary
@@ -425,6 +425,8 @@ transfer, before addon code. The restricted source remains behind that root
 boundary until a later maintenance refresh omits the mount. Qualification, cleanup
 and restore programs run in isolated Python mode so PR files in the working
 directory cannot execute through standard-library imports before that boundary.
+These checks do not establish trust in an image's interpreter or installed
+packages; [artifact provenance](artifact-provenance.md) remains a separate prerequisite.
 
 The path forces bootstrap off and sanitization on, disables copied crons and
 serves without cron threads. The existing SQL connection-isolation library runs

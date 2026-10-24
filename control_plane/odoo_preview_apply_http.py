@@ -565,7 +565,7 @@ def preview_has_completed_restore(
                 or identity.preview_id != preview.preview_id
                 or identity.preview_generation_id != generation.generation_id
                 or identity.context != profile.preview.context
-                or identity.instance != plan.preview_slug
+                or identity.instance != plan.compose_name
             ):
                 continue
             operation = read_operation(identity.deployment_record_id)

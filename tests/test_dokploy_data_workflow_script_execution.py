@@ -501,6 +501,7 @@ def _render_post_deploy_script(
     instance: str = "testing",
     workflow_environment_overrides: dict[str, str] | None = None,
     clear_preview_fishbowl_source: bool = False,
+    target_ssh_directory: str = "/srv/preview-source-ssh",
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
@@ -525,7 +526,6 @@ def _render_post_deploy_script(
                     """\
                     ODOO_DB_NAME=example_testing
                     ODOO_INSTALL_MODULES=base
-                    DATA_WORKFLOW_SSH_DIR=/srv/preview-source-ssh
                     ODOO_UPSTREAM_HOST=source.example.com
                     ODOO_UPSTREAM_USER=backup
                     ODOO_UPSTREAM_DB_NAME=source
@@ -533,6 +533,7 @@ def _render_post_deploy_script(
                     ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
                     """
                 )
+                + f"\nDATA_WORKFLOW_SSH_DIR={target_ssh_directory}\n"
                 + "".join(
                     f"\n{key}={value}"
                     for key, value in (workflow_environment_overrides or {}).items()
@@ -581,6 +582,7 @@ def _render_post_deploy_script(
             target_definition=target_definition,
             env_file=None,
             run_destructive_restore=run_destructive_restore,
+            preview_ssh_source_directory="/srv/preview-source-ssh",
             bootstrap_missing_database=bootstrap_missing_database,
             workflow_environment_overrides=workflow_environment_overrides,
             clear_preview_fishbowl_source=clear_preview_fishbowl_source,
@@ -1336,6 +1338,20 @@ def main(arguments: list[str]) -> int:
                 self.assertNotIn("Normalizing filestore ownership", run.stdout)
                 self.assertNotIn("exec workflow", run.docker_log)
                 self.assertFalse(run.web_restarted)
+
+    def test_stale_provider_env_and_mount_cannot_replace_authoritative_source(self) -> None:
+        run = self._run(
+            _render_post_deploy_script(
+                None,
+                instance="pr-45",
+                run_destructive_restore=True,
+                target_ssh_directory="/root/.ssh",
+            ),
+            FAKE_READER_BINDS="/root/.ssh|/root/.ssh|false",
+        )
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("Normalizing filestore ownership", run.stdout)
+        self.assertNotIn("exec workflow", run.docker_log)
 
     def test_preview_capture_cleanup_failure_keeps_web_stopped(self) -> None:
         run = self._run(

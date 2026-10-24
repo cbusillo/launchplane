@@ -1696,6 +1696,23 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 self.assertFalse(result.provider_effect_attempted)
                 fetch.assert_not_called()
 
+        for directory in (
+            "/var/lib/source-reader/",
+            "//var/lib/source-reader",
+            "/var/lib/./source-reader",
+            "/var/lib/source-reader ",
+        ):
+            with self.subTest(directory=directory):
+                request = OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    manifest=artifact_manifest_v2(),
+                    environment_values={**source, "DATA_WORKFLOW_SSH_DIR": directory},
+                )
+                rendered = _preview_refresh_environment_values(
+                    request=request, restore_upstream=True
+                )
+                self.assertEqual(rendered["DATA_WORKFLOW_SSH_DIR"], source["DATA_WORKFLOW_SSH_DIR"])
+
     def test_explicit_read_only_source_allowance_reaches_post_deploy_readback(self) -> None:
         self._assert_refresh_readback_allowances(
             (
@@ -1893,6 +1910,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(
             module_update.call_args.kwargs.get("run_destructive_restore", False),
             restore_upstream,
+        )
+        self.assertEqual(
+            module_update.call_args.kwargs["preview_ssh_source_directory"],
+            env_map.get("DATA_WORKFLOW_SSH_DIR", "") if restore_upstream else "",
         )
         # Only an explicitly selected read-only source can reach this readback.
         preview_target = module_update.call_args.kwargs["target_definition"]

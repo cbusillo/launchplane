@@ -27,6 +27,7 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyConfigError,
     OdooPreviewApplyEnvelope,
     _odoo_preview_service_environment,
+    build_odoo_preview_runtime_identity,
     issue_odoo_preview_apply_plan,
     preview_uses_upstream_restore,
     preview_has_completed_restore,
@@ -129,24 +130,16 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
     def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
         self,
     ) -> None:
-        from control_plane.contracts.runtime_identity import RuntimeIdentity
-
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-        plan = OdooPreviewApplyEnvelope.model_validate(
-            _refresh_payload()
-        ).apply.dry_run_plan.model_copy(update={"compose_ref": "compose-fixture"})
-        preview = SimpleNamespace(preview_id="preview-fixture", state="active")
-        identity = RuntimeIdentity(
-            product=profile.product,
-            context=profile.preview.context,
-            instance=plan.preview_slug,
-            environment_kind="preview",
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        plan = envelope.apply.dry_run_plan.model_copy(update={"compose_ref": "compose-fixture"})
+        envelope.apply.dry_run_plan = plan
+        identity = build_odoo_preview_runtime_identity(
+            profile=profile,
+            issued_plan=_issued_plan(envelope),
             deployment_record_id="original-operation",
-            artifact_id="original-artifact",
-            source_git_ref=_HEAD_SHA,
-            preview_id=preview.preview_id,
-            preview_generation_id="original-generation",
         )
+        preview = SimpleNamespace(preview_id=identity.preview_id, state="active")
         generation = SimpleNamespace(
             preview_id=preview.preview_id,
             generation_id=identity.preview_generation_id,
