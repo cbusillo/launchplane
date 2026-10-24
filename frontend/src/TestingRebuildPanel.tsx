@@ -29,7 +29,9 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     setRecovery({ attempt: value, error: "" });
     if (!value) { setPreflight(null); setRefresh(value => value + 1); }
     const saved = saveTestingRebuildAttempt(detail.product, value);
-    setStorageError(saved ? "" : "Browser storage could not be updated. Keep this page open to recover the original request.");
+    setStorageError(saved ? "" : value
+      ? "Browser storage could not be updated. Keep this page open to recover the original request."
+      : "Saved recovery could not be cleared. It may reappear after reload; recover that original again before rebuilding.");
     return saved;
   }
 

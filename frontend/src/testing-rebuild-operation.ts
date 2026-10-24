@@ -27,7 +27,7 @@ export function saveTestingRebuildAttempt(product: string, attempt: TestingRebui
 }
 
 export function readTestingRebuildAttempt(product: string, storage: BrowserOperationStorage | null = browserOperationSessionStorage()): TestingRebuildAttempt | null {
-  const unavailable = "This browser's saved rebuild request could not be read. Allow storage and retry recovery before rebuilding.";
+  const unavailable = "Saved rebuild recovery is unavailable. Retry recovery. If it still fails, keep this page open while the original request is investigated.";
   try {
     if (!storage) throw new Error(unavailable);
     const encoded = storage.getItem(`launchplane:testing-rebuild:${product}`);

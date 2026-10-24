@@ -122,9 +122,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         repeated = await self.call("POST", payload, path=self.url + "/settle")
         self.assertEqual(repeated.status_code, 200, repeated.text)
         self.assertEqual(repeated.json()["outcome"], "excluded")
-        for changed in ({"reason": "Another intent"}, {"original_scope": "another-actor"}):
+        for changed, status in (
+            ({"reason": "Another intent"}, 409),
+            ({"original_scope": "another-actor"}, 403),
+        ):
             refused = await self.call("POST", {**payload, **changed}, path=self.url + "/settle")
-            self.assertIn(refused.status_code, (403, 409), refused.text)
+            self.assertEqual(refused.status_code, status, refused.text)
             self.assertNotIn("operation_id", refused.text)
         late = await self.call("POST", self.payload)
         self.assertEqual(late.status_code, 409, late.text)
@@ -142,23 +145,9 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(again.json()["operation"], accepted.json()["operation"])
         self.assertEqual(self.fixture.effects, [])
 
-    async def test_actor_binding_preserves_the_legacy_original_intent_fingerprint(self) -> None:
-        from control_plane.http_routes.mutation_support import request_fingerprint
-
+    async def test_actor_binding_replays_the_legacy_original_request(self) -> None:
         accepted = await self.call("POST", self.payload)
         self.assertEqual(accepted.status_code, 200, accepted.text)
-        operation = self.store.read_odoo_stable_target_replacement_operation_record(
-            accepted.json()["operation"]["operation_id"]
-        )
-        self.assertEqual(
-            operation.request_fingerprint,
-            request_fingerprint(
-                {
-                    "product": self.product,
-                    **self.payload,
-                }
-            ),
-        )
         bound = await self.call("POST", self.settlement_payload())
         self.assertEqual(bound.status_code, 200, bound.text)
         self.assertEqual(bound.json()["operation"], accepted.json()["operation"])

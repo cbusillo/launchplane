@@ -1564,6 +1564,12 @@ latest original request and observed operation in memory even when later storage
 writes fail. Watching, resuming and settlement use that retained identity. A
 failed storage removal after proved completion may leave an older recovery record
 on reload; it must be observed or settled again before another rebuild.
+The sending tab alone holds this browser recovery handle. A new tab, another
+browser or closing the tab does not settle an uncertain original. Preserve that
+tab until the original is observed or explicitly settled. If saved evidence is
+malformed, unreadable or refers to a missing operation, retain it for service
+investigation; absent evidence does not authorize another rebuild. This flow
+does not provide recovery across browsers after the original handle is lost.
 
 **Settle this request** explicitly calls
 `POST /v1/products/{product}/testing-rebuild/settle` with the same key, inspected
