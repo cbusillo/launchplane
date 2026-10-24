@@ -214,7 +214,13 @@ def release_website_settings(
         settings = record.last_apply.website_settings.model_copy(
             update={"artifact_id": artifact_id}
         )
-    return settings if settings is not None and settings.artifact_id == artifact_id else None
+    return (
+        settings
+        if settings is not None
+        and settings.artifact_id == artifact_id
+        and settings.settings.operation == "apply"
+        else None
+    )
 
 
 def release_version(
