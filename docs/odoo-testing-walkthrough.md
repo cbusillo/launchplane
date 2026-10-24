@@ -91,12 +91,13 @@ the predicate; path-check carries that distinction in its `blocked` or `unknown`
 state. A predicate names the observation, never permission to repair or repeat an effect.
 
 The read-only provision path check inspects generation completion and physical-copy
-predicates under an unchanged `isolation_staging` hold; staff holds and all action
-hold checks remain protective. Both native-published and legacy generations require
-managed password separation for reads and actions. This does not qualify inherited
-credentials, upstream-source capability or a hold lift. Generation-preparation
-checks that require an unheld lane report that hold without claiming a resource or
-usage defect; use the provision read for current-copy evidence.
+predicates under an unchanged `isolation_staging` hold; staff holds and action hold
+checks remain protective. Managed-password comparison remains required by resource
+safety collection, without adding a production-source requirement to ordinary
+native-published copy reads or cleanup. Generation-preparation checks identify the
+protective hold without claiming a resource or usage defect; use the provision read
+for current-copy evidence. None of these observations qualifies a hold lift,
+inherited credentials or upstream-source capability.
 
 Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It

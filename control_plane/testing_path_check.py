@@ -12,7 +12,7 @@ from control_plane.odoo_testing_restore import (
 )
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite, read_walkthrough_prerequisites
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
-from control_plane.product_path_check import ActionAllowed, PathCheckStep
+from control_plane.product_path_check import ActionAllowed, PathCheckStep, TESTING_HOLD_ACTIVE
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     WALKTHROUGH_ACTION,
@@ -84,7 +84,7 @@ def read_testing_prerequisites(
         try:
             read()
         except TestingPathHoldActive:
-            state, code = "blocked", "testing_hold_active"
+            state, code = "blocked", TESTING_HOLD_ACTIVE
             description = "The testing hold prevents this action-admission check; use the provision prerequisite read for current-copy evidence."
         except TestingCredentialsOverlap:
             state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
@@ -105,11 +105,7 @@ def read_testing_prerequisites(
                 state=state,
                 code=code if state != "clear" else step_id + "_clear",
                 description=description if state != "clear" else "This prerequisite passed.",
-                fix="none"
-                if state == "clear"
-                else "wait"
-                if state == "unknown" or code == "testing_hold_active"
-                else "by_hand",
+                fix="none" if state == "clear" else "wait" if state == "unknown" else "by_hand",
             )
         )
 
@@ -301,14 +297,14 @@ def read_testing_prerequisites(
 
     def allocation() -> None:
         assert operation_id is not None
-        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-        if target.policies.staff_testing_hold is not None:
-            raise TestingPathHoldActive
         preparation = store.read_disposable_resource_preparation(operation_id)
         if preparation is None:
             raise ValueError("Retained resource preparation is missing.")
         if (preparation.product, preparation.context) != (profile.product, context):
             raise ValueError("Retained resource preparation belongs to another lane.")
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         request = TestingReplacementResourcesRequest(
             context=context,
             operation_id=operation_id,
@@ -354,17 +350,20 @@ def read_testing_prerequisites(
         if root is None:
             raise RuntimeError("Testing usage needs the service runtime.")
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-        if target.policies.staff_testing_hold is not None:
-            raise TestingPathHoldActive
         target_id = store.read_dokploy_target_id_record(
             context_name=context, instance_name="testing"
         )
         preparation = (
             store.read_disposable_resource_preparation(operation_id) if operation_id else None
         )
+        if preparation is not None and (preparation.product, preparation.context) != (
+            profile.product,
+            context,
+        ):
+            raise ValueError("Preparation belongs to another lane.")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         if preparation is not None:
-            if (preparation.product, preparation.context) != (profile.product, context):
-                raise ValueError("Preparation belongs to another lane.")
             require_initial_usage(
                 root,
                 store,

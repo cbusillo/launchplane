@@ -386,7 +386,7 @@ class ProductPathCheckTests(unittest.TestCase):
             _steps(check),
             {
                 "profile_lane": ("clear", "lane_recorded", "none"),
-                "testing_hold": ("blocked", "testing_hold_active", "wait"),
+                "testing_hold": ("blocked", "testing_hold_active", "by_hand"),
                 "testing_deploy": ("clear", "already_deployed", "none"),
             },
         )

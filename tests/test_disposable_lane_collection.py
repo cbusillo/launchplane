@@ -123,6 +123,15 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
             )
 
     def test_read_only_prerequisites_expose_copy_blocker_under_isolation_hold(self) -> None:
+        self._assert_held_prerequisite_read()
+
+    def test_published_prerequisites_keep_diagnostic_and_action_hold_boundaries(self) -> None:
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            self._assert_held_prerequisite_read()
+
+    def _assert_held_prerequisite_read(self) -> None:
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
         from control_plane.odoo_walkthrough import (
@@ -226,26 +235,55 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 resource_qualification=True,
             )
 
-    def test_published_copy_enforces_credential_separation_for_read_and_action(self) -> None:
-        from control_plane.odoo_testing_restore import TestingCredentialsOverlap
+    def test_published_reads_and_cleanup_do_not_require_managed_production_credentials(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_restore import TestingCredentialVersionsMissing
 
+        self.store.read_product_profile_record.return_value = self.profile.model_copy(
+            update={
+                "lanes": tuple(lane for lane in self.profile.lanes if lane.instance == "testing")
+            }
+        )
         self.target.policies.staff_testing_hold = None
-        self.credentials.side_effect = TestingCredentialsOverlap("fixture overlap")
+        self.credentials.side_effect = TestingCredentialVersionsMissing(
+            "fixture has no managed production"
+        )
         with patch(
             "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
         ):
-            for qualification in (False, True):
-                with (
-                    self.subTest(qualification=qualification),
-                    self.assertRaises(TestingCredentialsOverlap),
-                ):
-                    read_current_testing_generation(
-                        self.store,
-                        product=self.generation.product,
-                        context=self.generation.context,
-                        instance="testing",
-                        resource_qualification=qualification,
-                    )
+            for generation in (None, self.generation):
+                self.store.read_fresh_odoo_testing_generation.return_value = generation
+                for qualification in (False, True):
+                    with self.subTest(generation=generation, qualification=qualification):
+                        self.assertEqual(
+                            read_current_testing_generation(
+                                self.store,
+                                product=self.generation.product,
+                                context=self.generation.context,
+                                instance="testing",
+                                resource_qualification=qualification,
+                            ),
+                            generation,
+                        )
+            self.target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Staff using the copy", purpose="staff_testing"
+            )
+            self.assertEqual(
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    task_account_cleanup=True,
+                ),
+                self.generation,
+            )
+            self.credentials.assert_not_called()
+            self.target.policies.staff_testing_hold.purpose = "isolation_staging"
+            self.assertEqual(self.collect(), {})
+            self.credentials.assert_called_once()
+            self.inspection.assert_not_called()
 
     def test_published_copy_keeps_read_only_isolation_hold_and_staff_protection(self) -> None:
         with patch(
@@ -261,7 +299,7 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 ),
                 self.generation,
             )
-            self.credentials.assert_called_once()
+            self.credentials.assert_not_called()
             with self.assertRaises(ValueError):
                 read_current_testing_generation(
                     self.store,
