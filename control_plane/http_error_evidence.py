@@ -52,6 +52,7 @@ def _validation_entry(item: ErrorDetails, model: type[BaseModel]) -> dict[str, o
     root = item.get("ctx", {}).get("error")
     site = _source_site(root) if isinstance(root, BaseException) else None
     return {
+        "model": model.__name__,
         "type": item["type"] if item["type"] in _VALIDATION_ERROR_TYPES else "custom_error",
         "loc": _field_location(model, item["loc"]),
         "sites": [site] if site is not None else [],

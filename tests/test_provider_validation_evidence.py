@@ -2,11 +2,11 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from traceback import walk_tb
-from typing import Any, Self
+from typing import Any
 import unittest
 from unittest.mock import patch
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from control_plane import http_error_evidence, npmplus
@@ -18,10 +18,6 @@ class Failure:
     evidence: dict[str, Any]
     text: str
     error: ValueError
-
-
-class NestedProviderData(BaseModel):
-    children: tuple[Self, ...]
 
 
 class ProviderValidationEvidenceTests(unittest.TestCase):
@@ -84,18 +80,25 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
         self.assertTrue(all(row["loc"] == list(location) for row in failure.evidence["validation"]))
         self.assertNotIn(private, failure.text)
 
-    def test_recursive_schema_locations_are_bounded(self) -> None:
-        location = ("children", 0) * 100
-        error = ValidationError.from_exception_data(
-            "private-title-sentinel", [{"type": "int_type", "loc": location, "input": "private"}]
-        )
-        safe = http_error_evidence.ProviderResponseValidationError(error, NestedProviderData)
+    def test_distinct_response_models_remain_identifiable_for_the_same_field(self) -> None:
+        private = "private-id-value-sentinel"
+        host_failure = self.capture_failure({"id": private})
+        opener = _Opener()
+        opener.certificate_payload["id"] = private
+        client = npmplus.NpmplusClient(credentials=_credentials(), opener=opener)
+        with (
+            patch.object(client, "_request", return_value=opener.certificate_payload),
+            self.assertRaises(ValueError) as caught,
+        ):
+            client.get_certificate(47)
         with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
-            http_error_evidence.log_handled_error_cause(safe, "bounded-validation-test")
-        validation = json.loads(logs.records[-1].getMessage())["validation"]
-        self.assertEqual(validation[0]["loc"][:2], list(location[:2]))
-        self.assertLess(len(validation[0]["loc"]), len(location))
-        self.assertNotIn("private", logs.records[-1].getMessage())
+            http_error_evidence.log_handled_error_cause(caught.exception, "certificate-test")
+        certificate = json.loads(logs.records[-1].getMessage())["validation"]
+        host = host_failure.evidence["validation"]
+        self.assertEqual(host[0]["loc"], certificate[0]["loc"])
+        self.assertEqual(host[0]["model"], npmplus.NpmplusProxyHost.__name__)
+        self.assertEqual(certificate[0]["model"], npmplus.NpmplusCertificate.__name__)
+        self.assertNotIn(private, host_failure.text + logs.records[-1].getMessage())
 
     def test_dynamic_locations_titles_inputs_and_large_error_sets_stay_private_and_bounded(
         self,
