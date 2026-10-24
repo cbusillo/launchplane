@@ -1,4 +1,5 @@
 import argparse
+from functools import cache
 import http.client
 import json
 from pathlib import Path
@@ -18,11 +19,16 @@ from control_plane.http_routes.operational_records import RuntimeSettingsRespons
 from control_plane.openapi_export import canonical_openapi_document
 
 
+@cache
+def _canonical_paths() -> dict[str, Any]:
+    paths: dict[str, Any] = canonical_openapi_document()["paths"]
+    return paths
+
+
 def operation_route(operation: str, method: str) -> str:
-    document = canonical_openapi_document()
     matches = [
         path
-        for path, methods in document["paths"].items()
+        for path, methods in _canonical_paths().items()
         if methods.get(method, {}).get("operationId") == operation
     ]
     if len(matches) != 1:
