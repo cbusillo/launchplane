@@ -30,6 +30,8 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import connect
 
 NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+CAPABILITY_FAILURE_SITES_MARKER = "testing_resources_failure_sites"
+NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS = 20
 NATIVE_CONTAINER_SPEC_FIELDS = (
     "Image",
     "Labels",
