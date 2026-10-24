@@ -386,10 +386,9 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 {
                     "psycopg2": self.driver,
                     "odoo_admin_password": self.password_helper,
-                    "passlib": SimpleNamespace(),
-                    "passlib.context": SimpleNamespace(CryptContext=self.context_factory),
                 },
             ),
+            patch("passlib.context.CryptContext", self.context_factory),
             patch("sys.stdin", io.StringIO(json.dumps(self.spec))),
             patch("sys.path", list(sys.path)),
             patch.dict(
