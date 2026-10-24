@@ -812,6 +812,7 @@ def _roll_back_production(
                 f"{provider_operation_title} rollback" if provider_operation_title else ""
             ),
             deployment_record_id=f"{deployment_record_id}-rollback",
+            recorded_artifact=True,
             rollback=True,
             rollback_source_deployment_record_id=deployment_record_id,
             rollback_target_deployment_record_id=target_id,
