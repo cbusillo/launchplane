@@ -142,6 +142,113 @@ class TestingPublicationTests(unittest.TestCase):
             observation=self.observation if observation is None else observation,
         )
 
+    def test_native_copy_release_consumers_refuse_a_stale_tuple_until_ordinary_ship(self) -> None:
+        import click
+
+        from control_plane.contracts.generic_promotion_inputs import (
+            GenericPromotionInputsRequest,
+            resolve_generic_promotion_inputs,
+        )
+        from control_plane.contracts.odoo_website_settings import (
+            OdooWebsiteSettings,
+            OdooWebsiteSettingsIntent,
+        )
+        from control_plane.odoo_website_settings import (
+            OdooWebsiteSettingsRequest,
+            _validate_candidate,
+        )
+        from control_plane.release_review import release_version
+        from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
+        from control_plane.workflows.odoo_prod_promotion import (
+            OdooProdPromotionRequest,
+            _read_source_tuple,
+        )
+
+        self.prepare()
+        self.publish()
+        app = self.candidate.application
+        assert app is not None
+        current = app.plan.artifact
+        stale = current.model_copy(
+            update={"artifact_id": "pre-rebuild-artifact", "source_commit": "f" * 40}
+        )
+        self.store.write_artifact_manifest(stale)
+        profile = self.store.read_product_profile_record(self.candidate.product)
+        production = next(lane for lane in profile.lanes if lane.instance == "prod")
+        for artifact in (stale, current):
+            self.store.write_release_tuple_record(
+                build_release_tuple_record_from_artifact_manifest(
+                    context_name=self.candidate.context,
+                    channel_name="testing",
+                    artifact_manifest=artifact,
+                    deployment_record_id="ordinary-ship",
+                    minted_at=self.now.isoformat(),
+                )
+            )
+            settings = OdooWebsiteSettingsRequest(
+                product=profile.product,
+                context=self.candidate.context,
+                website_settings=OdooWebsiteSettingsIntent(
+                    artifact_id=artifact.artifact_id,
+                    settings=OdooWebsiteSettings(
+                        website_id=1, public_origin="https://prod.example.invalid"
+                    ),
+                ),
+                reason="Synthetic source qualification",
+            )
+            promotion = OdooProdPromotionRequest(
+                product=profile.product,
+                context=self.candidate.context,
+                artifact_id=artifact.artifact_id,
+                backup_record_id="synthetic-backup",
+            )
+            readers = (
+                (
+                    "review",
+                    lambda: release_version(store=self.store, profile=profile, instance="testing"),
+                ),
+                (
+                    "settings",
+                    lambda: _validate_candidate(self.store, settings, profile, production),
+                ),
+                (
+                    "promotion",
+                    lambda: _read_source_tuple(record_store=self.store, request=promotion),
+                ),
+            )
+            with patch(
+                "control_plane.odoo_website_settings.matches_production_origin", return_value=True
+            ):
+                for name, read in readers:
+                    with self.subTest(reader=name, current=artifact == current):
+                        if artifact == current:
+                            read()
+                        else:
+                            with self.assertRaises((ValueError, click.ClickException)):
+                                read()
+            inputs = resolve_generic_promotion_inputs(
+                record_store=self.store,
+                request=GenericPromotionInputsRequest(context=self.candidate.context),
+            )
+            with self.subTest(reader="inputs", current=artifact == current):
+                self.assertEqual(inputs.input_status, "ready" if artifact == current else "blocked")
+
+        for missing in (
+            "read_dokploy_target_record",
+            "read_dokploy_target_id_record",
+            "read_route_binding_record",
+        ):
+            with patch.object(self.store, missing, side_effect=FileNotFoundError("fixture")):
+                for name, read in readers:
+                    with self.subTest(reader=name, missing=missing):
+                        with self.assertRaises((ValueError, click.ClickException)):
+                            read()
+                inputs = resolve_generic_promotion_inputs(
+                    record_store=self.store,
+                    request=GenericPromotionInputsRequest(context=self.candidate.context),
+                )
+                self.assertEqual(inputs.input_status, "blocked")
+
     def test_real_legacy_refresh_preserves_serving_authority_before_first_rebuild(self) -> None:
         from tests.test_route_binding_refresh_controller import _service_binding, _Store, _profile
         from control_plane.route_binding_refresh_controller import (

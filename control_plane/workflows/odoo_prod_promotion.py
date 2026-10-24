@@ -429,6 +429,14 @@ def _read_source_tuple(
         context_name=request.context,
         channel_name=request.from_instance,
     )
+    from control_plane.testing_serving_copy import require_published_testing_release
+
+    try:
+        require_published_testing_release(record_store, source_tuple)
+    except (FileNotFoundError, ValueError) as error:
+        raise click.ClickException(
+            "The testing release no longer matches its published copy."
+        ) from error
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,

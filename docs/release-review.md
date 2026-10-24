@@ -2,6 +2,14 @@
 title: Client release review
 ---
 
+An Odoo testing copy published by a native rebuild must match its ordinary
+testing release tuple before candidate review, website-settings preparation or
+promotion source selection. A different served artifact or unavailable native
+publication/custody refuses that selection. The supported next ordinary ship
+retains the copy's data, applies its normal overrides and records the matching
+tuple. This check neither mints a tuple nor changes acceptance. Legacy lanes
+retain their existing qualification path.
+
 ## Odoo business hours
 
 An authorized caller selects the company through the standalone

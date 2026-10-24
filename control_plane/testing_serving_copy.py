@@ -3,6 +3,7 @@
 from pathlib import Path
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.contracts.testing_publication import TestingPublicationRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -119,6 +120,49 @@ def published_testing_copy(
     ):
         raise ValueError("Serving testing copy acquired another lane's alias.")
     return record
+
+
+def require_published_testing_release(store: object, release: ReleaseTupleRecord) -> None:
+    if release.channel != "testing" or not isinstance(store, PostgresRecordStore):
+        return
+    bindings = tuple(
+        binding
+        for binding in store.list_route_binding_records(
+            context_name=release.context, instance_name="testing"
+        )
+        if binding.source.source_versions.get("testing_publication")
+    )
+    if not bindings:
+        try:
+            identity = store.read_dokploy_target_id_record(
+                context_name=release.context, instance_name="testing"
+            )
+        except FileNotFoundError:
+            identity = None
+        if identity is not None and store.find_testing_candidate_by_target(identity.target_id):
+            raise ValueError("The published testing release has no route provenance.")
+        try:
+            target = store.read_dokploy_target_record(
+                context_name=release.context, instance_name="testing"
+            )
+        except FileNotFoundError:
+            return
+        if target.source_label == "service:testing-rebuild":
+            raise ValueError("The published testing release has no copy custody.")
+        return
+    if len(bindings) != 1:
+        raise ValueError("The published testing release has ambiguous ownership.")
+    publication = published_testing_copy(
+        store, product=bindings[0].product, context=release.context
+    )
+    if publication is None:
+        raise ValueError("The published testing release has no publication receipt.")
+    inventory = store.read_environment_inventory(
+        context_name=release.context, instance_name="testing"
+    )
+    runtime = inventory.runtime_identity
+    if runtime is None or runtime.artifact_id != release.artifact_id:
+        raise ValueError("The testing release does not match its current published copy.")
 
 
 def testing_maintenance_secret_keys(store: PostgresRecordStore, context: str) -> frozenset[str]:
