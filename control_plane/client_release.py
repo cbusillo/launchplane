@@ -317,9 +317,13 @@ def _product_drill_passed(store: object, profile: LaunchplaneProductProfileRecor
 
 
 def _drill_predates_rollback_code(decision: ReleaseReviewDecisionRecord) -> bool:
-    return parse_launchplane_mutation_timestamp(
-        decision.decided_at, field_name="decided_at"
-    ) < parse_launchplane_mutation_timestamp(
+    try:
+        decided_at = parse_launchplane_mutation_timestamp(
+            decision.decided_at, field_name="decided_at"
+        )
+    except ValueError:
+        return True
+    return decided_at < parse_launchplane_mutation_timestamp(
         ROLLBACK_DRILL_CODE_CHANGED_AT, field_name="rollback_drill_code_changed_at"
     )
 

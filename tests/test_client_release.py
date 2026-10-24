@@ -439,6 +439,14 @@ class ClientReleaseTests(unittest.TestCase):
                 release_start_for_acceptance(store=self.store, profile=profile_record),
                 "promote_with_rollback_drill",
             )
+        self.store.write_release_review_decision_record(
+            accepted.model_copy(update={"decided_at": "2026-09-23T01:00:00"})
+        )
+        with patch(DRILL_CODE_CHANGED_AT, "2026-09-23T00:59:59Z"):
+            self.assertEqual(
+                release_start_for_acceptance(store=self.store, profile=profile_record),
+                "promote_with_rollback_drill",
+            )
 
         # Odoo's generic promotion has no deploy timestamps, and the drill
         # updates its rollback evidence. Each durable promotion still belongs
