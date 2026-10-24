@@ -96,10 +96,12 @@ reservation. The webhook request never waits on a deploy.
     or prepare an isolated fresh testing generation through the supported bootstrap
     path. These remain separate operations with their normal safety checks; the
     automatic deploy does not create an empty database or replay the failed restore.
-    A healthy published native testing copy uses its verified publication and
-    completed generation instead of a legacy bootstrap queue receipt. Its next
-    ordinary deploy retains existing data. An unfinished generation still needs
-    its original queue preparation and sanitized restore before maintenance.
+    A completed generation needs no legacy bootstrap queue receipt for an
+    existing-data deploy. The generation reader still checks native publication
+    custody or legacy adoption. An unfinished generation needs its original queue
+    preparation and sanitized restore before maintenance. Native publication does
+    not mint the ordinary testing release tuple; the outstanding verified build
+    can still need its first ordinary ship before release review or promotion.
     Drill records name their selected database. When a no-effect drill restores
     the prior completed generation on the same target, its unused candidate
     database does not hold maintenance of the restored selection. Untagged

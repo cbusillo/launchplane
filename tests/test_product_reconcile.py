@@ -1440,6 +1440,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 plan = self.reconcile()
                 if not completed:
                     self.assertTrue(plan["held"])
+                    self.assertEqual(plan["reason"], "fresh_testing_bootstrap_incomplete")
                     self.assertNotIn("queued_operation_id", plan)
                     continue
                 operation = self.store.read_odoo_stable_target_replacement_operation_record(
