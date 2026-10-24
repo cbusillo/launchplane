@@ -730,6 +730,7 @@ class _FakeEmptyMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 
@@ -751,6 +752,7 @@ class _FakeStackedMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 
