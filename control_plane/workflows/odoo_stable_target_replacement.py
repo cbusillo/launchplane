@@ -2564,7 +2564,7 @@ def execute_odoo_stable_target_replacement_apply(
                 application_runtime_keys.discard(key)
         provider_only_keys = _provider_only_keys(
             current_env=current_env_map,
-            application_keys=application_runtime_keys,
+            application_keys=application_runtime_keys | fresh_restore_source_environment.keys(),
             retired_keys=retired_provider_keys,
         )
         if provider_only_keys:

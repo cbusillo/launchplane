@@ -3134,6 +3134,10 @@ Conventional onboarding creates new products only.
   refuse every unreviewed provider-only key. Both consumers recheck retirement
   intent and application declarations before writing. Execution uses the current
   approved configuration; an earlier replacement plan does not freeze it.
+  For a sanitized testing generation, recorded upstream and workflow SSH source
+  settings remain restore inputs rather than application settings. Existing
+  provider entries for those recorded inputs are omitted on replacement without
+  being misclassified as unrecorded drift; unknown provider keys still refuse.
   Clearing intent does not
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
