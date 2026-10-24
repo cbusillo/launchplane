@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -121,6 +122,104 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 instance="testing",
             )
 
+    def test_read_only_prerequisites_expose_copy_blocker_under_isolation_hold(self) -> None:
+        self._assert_held_prerequisite_read()
+
+    def test_published_prerequisites_keep_diagnostic_and_action_hold_boundaries(self) -> None:
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            self._assert_held_prerequisite_read()
+
+    def _assert_held_prerequisite_read(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.odoo_walkthrough import (
+            WalkthroughPrerequisite,
+            WalkthroughPrerequisiteError,
+            plan_walkthrough,
+            read_walkthrough_prerequisites,
+        )
+        from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.odoo_runtime_reads import OdooRuntimeSelection
+
+        before = self.target.model_dump(mode="json")
+        with patch(
+            "control_plane.odoo_walkthrough.read_drill_recent_signins",
+            side_effect=NativeProgramFailed(
+                "private receiver detail",
+                predicate=ReadbackPredicate.RUNNER_RUNNING,
+                kind="refused",
+            ),
+        ) as inspection:
+            checks = {
+                checkpoint: (code, state)
+                for checkpoint, code, state in read_walkthrough_prerequisites(
+                    self.store,
+                    Path("/fixture"),
+                    self.generation.product,
+                    self.generation.context,
+                )
+            }
+        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION][1], "clear")
+        self.assertEqual(
+            checks[WalkthroughPrerequisite.PHYSICAL_COPY],
+            (ReadbackPredicate.RUNNER_RUNNING, "blocked"),
+        )
+        self.assertEqual(checks[WalkthroughPrerequisite.USE][1], "blocked")
+        inspection.assert_called_once()
+        self.assertEqual(self.target.model_dump(mode="json"), before)
+        with self.assertRaises(ValueError):
+            read_current_testing_generation(
+                self.store,
+                product=self.generation.product,
+                context=self.generation.context,
+                instance="testing",
+            )
+        selection = OdooRuntimeSelection(
+            RuntimeIdentity(
+                product=self.generation.product,
+                context=self.generation.context,
+                instance="testing",
+                deployment_record_id="fixture-deployment",
+                artifact_id="fixture-artifact",
+                source_git_ref="a" * 40,
+            ),
+            "https://" + self.generation.domain_host,
+        )
+        with (
+            patch("control_plane.odoo_walkthrough.select_stable_runtime", return_value=selection),
+            self.assertRaises(WalkthroughPrerequisiteError) as refused,
+        ):
+            plan_walkthrough(
+                self.store,
+                Path("/fixture"),
+                OdooWalkthroughRequest(
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    task_id="a" * 32,
+                    operation="provision",
+                ),
+                "fixture-actor",
+            )
+        self.assertEqual(refused.exception.code, WalkthroughPrerequisite.GENERATION)
+        hold = self.target.policies.staff_testing_hold
+        assert hold is not None
+        hold.purpose = "staff_testing"
+        with patch("control_plane.odoo_walkthrough.read_drill_recent_signins") as inspection:
+            staff_checks = {
+                checkpoint: state
+                for checkpoint, code, state in read_walkthrough_prerequisites(
+                    self.store,
+                    Path("/fixture"),
+                    self.generation.product,
+                    self.generation.context,
+                )
+            }
+        self.assertEqual(staff_checks[WalkthroughPrerequisite.GENERATION], "blocked")
+        inspection.assert_not_called()
+
     def test_staff_hold_blocks_collection_and_qualification_reader(self) -> None:
         hold = self.target.policies.staff_testing_hold
         assert hold is not None
@@ -135,6 +234,90 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 instance="testing",
                 resource_qualification=True,
             )
+
+    def test_published_reads_and_cleanup_do_not_require_managed_production_credentials(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_restore import TestingCredentialVersionsMissing
+
+        self.store.read_product_profile_record.return_value = self.profile.model_copy(
+            update={
+                "lanes": tuple(lane for lane in self.profile.lanes if lane.instance == "testing")
+            }
+        )
+        self.target.policies.staff_testing_hold = None
+        self.credentials.side_effect = TestingCredentialVersionsMissing(
+            "fixture has no managed production"
+        )
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            for generation in (None, self.generation):
+                self.store.read_fresh_odoo_testing_generation.return_value = generation
+                for qualification in (False, True):
+                    with self.subTest(generation=generation, qualification=qualification):
+                        self.assertEqual(
+                            read_current_testing_generation(
+                                self.store,
+                                product=self.generation.product,
+                                context=self.generation.context,
+                                instance="testing",
+                                resource_qualification=qualification,
+                            ),
+                            generation,
+                        )
+            self.target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Staff using the copy", purpose="staff_testing"
+            )
+            self.assertEqual(
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    task_account_cleanup=True,
+                ),
+                self.generation,
+            )
+            self.credentials.assert_not_called()
+            self.target.policies.staff_testing_hold.purpose = "isolation_staging"
+            self.assertEqual(self.collect(), {})
+            self.credentials.assert_called_once()
+            self.inspection.assert_not_called()
+
+    def test_published_copy_keeps_read_only_isolation_hold_and_staff_protection(self) -> None:
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy", return_value=Mock()
+        ):
+            self.assertEqual(
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    resource_qualification=True,
+                ),
+                self.generation,
+            )
+            self.credentials.assert_not_called()
+            with self.assertRaises(ValueError):
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                )
+            hold = self.target.policies.staff_testing_hold
+            assert hold is not None
+            hold.purpose = "staff_testing"
+            with self.assertRaises(ValueError):
+                read_current_testing_generation(
+                    self.store,
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    instance="testing",
+                    resource_qualification=True,
+                )
 
     def test_qualification_keeps_credentials_allocation_and_queue_guards(self) -> None:
         faults: tuple[tuple[Mock, str, object], ...] = (
@@ -156,7 +339,15 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 previous = getattr(dependency, field)
                 setattr(dependency, field, failure)
                 try:
-                    self.assertFalse(self.collect())
+                    facts = self.collect()
+                    if dependency is self.credentials:
+                        self.assertEqual(facts, {})
+                        with patch.object(
+                            self.store, "read_fresh_odoo_testing_generation", return_value=None
+                        ):
+                            self.assertEqual(self.collect(), {})
+                    else:
+                        self.assertFalse(facts)
                     self.inspection.assert_not_called()
                 finally:
                     setattr(dependency, field, previous)

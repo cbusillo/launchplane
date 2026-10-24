@@ -64,6 +64,7 @@ new record, account, policy change or alternate identity:
 
 | Code | Refused prerequisite and next read |
 | --- | --- |
+| `testing_task_prerequisite_not_reached` | A read-only checkpoint was skipped because an earlier prerequisite did not pass. No observation of this checkpoint was attempted; inspect the earlier failure. |
 | `testing_task_identity_unavailable` | Active product, exact testing context, runtime selection or exclusive HTTPS origin. Read the product profile and testing environment identity. |
 | `testing_task_generation_missing` | No current fresh testing generation was returned. A healthy deployment or connection-isolation pass cannot supply this copy witness. |
 | `testing_task_generation_incomplete` | The current qualified generation has no completion record. Follow its original supported operation and retain any unknown outcome. |
@@ -88,6 +89,17 @@ new record, account, policy change or alternate identity:
 Native predicate errors from execution append `_refused` or `_unavailable` to
 the predicate; path-check carries that distinction in its `blocked` or `unknown`
 state. A predicate names the observation, never permission to repair or repeat an effect.
+
+The read-only provision path check inspects generation completion and physical-copy
+predicates under an unchanged `isolation_staging` hold; staff holds and action hold
+checks remain protective. Managed-password comparison remains required by resource
+safety collection, without adding a production-source requirement to ordinary
+native-published copy reads or cleanup. Generation-preparation checks identify the
+protective hold without claiming a resource or usage defect; use the provision read
+for current-copy evidence. None of these observations qualifies a hold lift,
+inherited credentials or upstream-source capability.
+An unavailable credential comparison during collection discards inherited resource
+positives even when the legacy generation row is missing.
 
 Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It

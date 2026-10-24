@@ -186,15 +186,21 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.generation_read.return_value = None
         self.hold.side_effect = ValueError("staff protection")
         checks = {
-            checkpoint: state
+            checkpoint: (code, state)
             for checkpoint, code, state in read_walkthrough_prerequisites(
                 self.store, Path("/fixture"), "example-odoo", "example"
             )
         }
-        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION], "blocked")
-        self.assertEqual(checks[WalkthroughPrerequisite.USE], "blocked")
-        self.assertEqual(checks[WalkthroughPrerequisite.RUNTIME], "unknown")
-        self.assertEqual(checks[WalkthroughPrerequisite.CREDENTIAL], "unknown")
+        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION][1], "blocked")
+        self.assertEqual(checks[WalkthroughPrerequisite.USE][1], "blocked")
+        self.assertEqual(
+            checks[WalkthroughPrerequisite.RUNTIME],
+            (WalkthroughPrerequisite.NOT_REACHED, "unknown"),
+        )
+        self.assertEqual(
+            checks[WalkthroughPrerequisite.CREDENTIAL],
+            (WalkthroughPrerequisite.NOT_REACHED, "unknown"),
+        )
         self.connect.assert_not_called()
         self.usage.assert_not_called()
         self.store.find_secret_record.assert_not_called()
