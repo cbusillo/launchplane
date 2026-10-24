@@ -360,6 +360,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
             patch(
                 "control_plane.product_reconcile.reconcile_product_request", side_effect=outcomes
             ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
         ):
             for _ in outcomes:
                 store.request_product_reconcile(target, "2026-10-24T15:00:00Z")
