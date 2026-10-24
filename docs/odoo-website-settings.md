@@ -83,7 +83,15 @@ manual recovery reuses its verified snapshot. Rollback selects the production sn
 artifacts without a website snapshot disable CM indexing and native analytics
 across the database, without depending on the unverified new selector; they do
 not retain forward-release settings. Collection-only historical rollback preserves existing cookie and third-party controls. Successful readback retains the actually
-applied snapshot separately from pending intent, so subsequent review compares
+applied snapshot separately from pending intent. A verified collection-only
+rollback receipt remains recovery evidence, rather than a configured website
+snapshot in release review. The historical baseline therefore retains its
+accepted identity through the drill, allowing the second backup and re-promotion
+under the same acceptance. Re-promotion applies the accepted candidate settings.
+An accepted rollback restores that baseline even when it had no configured
+settings and the artifact is unchanged. Manual same-artifact recovery continues
+to reuse its verified applied snapshot.
+For configured website snapshots, subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
 
 The stopped-web stable-target replacement driver supports native application.
