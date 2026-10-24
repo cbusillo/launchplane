@@ -1,6 +1,7 @@
 """Run the fixed host/container programs with simulated provider boundaries."""
 
 import base64
+from collections.abc import Sequence
 from contextlib import nullcontext, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -8,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from threading import Thread
@@ -225,6 +227,14 @@ class CandidateHostProbeTests(unittest.TestCase):
     def test_provider_permission_refusal_remains_a_denial_on_the_wire(self) -> None:
         self.assertEqual(self.failure_frame(PermissionError("fixture denied")), {"type": "denied"})
 
+    def test_changed_copy_witness_refuses_before_the_credential_program(self) -> None:
+        self.witness = "other-copy"
+        with self.assertRaises(RuntimeError):
+            self.run_probe()
+        self.assertFalse(
+            any(probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls)
+        )
+
     def test_bad_database_password_is_a_failed_probe_not_a_provider_denial(self) -> None:
         container_probe = CandidateContainerProbeTests()
         container_probe.setUp()
@@ -320,9 +330,10 @@ class CandidateContainerProbeTests(unittest.TestCase):
             "http_port": 8072,
             "runtime_identity": self.identity,
             "web_config": str(self.config),
+            "copy_binding_sha256": "",
         }
         self.health_identity = dict(self.identity)
-        self.rows = [("encoded-local-admin",)]
+        self.rows: Sequence[tuple[str | None]] = [("encoded-local-admin",)]
         self.connection = MagicMock()
         self.cursor = self.connection.cursor.return_value.__enter__.return_value
         self.cursor.fetchall.side_effect = lambda: self.rows
@@ -335,9 +346,15 @@ class CandidateContainerProbeTests(unittest.TestCase):
             (password, stored)
             in {
                 ("local-login-fixture", "encoded-local-admin"),
+                ("admin", "encoded-default-admin"),
+                ("admin", "admin"),
             }
         )
         self.requests: list[Request] = []
+        self.preserved = False
+        self.password_helper: Any = SimpleNamespace(
+            restored_logins_preserved=Mock(side_effect=lambda cursor: self.preserved)
+        )
         self.last_output = ""
 
     def response(self, request: Any, **kwargs: Any) -> Any:
@@ -365,6 +382,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 "sys.modules",
                 {
                     "psycopg2": self.driver,
+                    "odoo_admin_password": self.password_helper,
                     "passlib": SimpleNamespace(),
                     "passlib.context": SimpleNamespace(
                         CryptContext=Mock(return_value=self.context)
@@ -372,6 +390,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
                 },
             ),
             patch("sys.stdin", io.StringIO(json.dumps(self.spec))),
+            patch("sys.path", list(sys.path)),
             patch.dict(
                 os.environ,
                 {
@@ -422,6 +441,79 @@ class CandidateContainerProbeTests(unittest.TestCase):
         self.assertEqual(self.connection.rollback.call_count, 2)
         self.assertEqual(self.connection.close.call_count, 2)
 
+    def test_restored_copy_preserves_login_without_authenticated_use(self) -> None:
+        self.spec["copy_binding_sha256"] = "verified-copy-binding"
+        self.preserved = True
+        for rows in ([("encoded-restored-password",)], [], [(None,)], [("",)]):
+            with self.subTest(rows=rows):
+                self.rows = rows
+                self.assertEqual(self.run_probe().strip(), "candidate_credentials_verified=true")
+        self.assertTrue(all(request.get_method() == "GET" for request in self.requests))
+        self.connection.commit.assert_not_called()
+        self.assertEqual(self.connection.rollback.call_count, 4)
+        self.assertEqual(self.connection.close.call_count, 4)
+        self.assertNotIn("encoded-restored-password", self.last_output)
+        self.assertNotIn("tester", self.last_output)
+
+    def test_restored_copy_refuses_default_password(self) -> None:
+        self.spec["copy_binding_sha256"] = "verified-copy-binding"
+        self.preserved = True
+        for stored in ("encoded-default-admin", "admin"):
+            with self.subTest(stored=stored):
+                self.rows = [(stored,)]
+                with self.assertRaises(RuntimeError):
+                    self.run_probe()
+                self.assertEqual(self.cursor.execute.call_args.args[1], (["admin", "tester"],))
+
+    def test_unmarked_or_older_copy_and_empty_bootstrap_keep_strict_login_check(self) -> None:
+        for binding, preserved, helper in (
+            ("", True, self.password_helper),
+            ("verified-copy-binding", False, self.password_helper),
+            ("verified-copy-binding", True, None),
+            ("verified-copy-binding", True, SimpleNamespace()),
+        ):
+            with self.subTest(binding=binding, preserved=preserved, helper=bool(helper)):
+                self.spec["copy_binding_sha256"] = binding
+                self.preserved = preserved
+                self.password_helper = helper
+                self.rows = [("encoded-local-admin",)]
+                self.run_probe()
+                for rows in ([], [("encoded-restored-password",)]):
+                    self.rows = rows
+                    with self.assertRaises(RuntimeError):
+                        self.run_probe()
+
+    def test_preserved_copy_still_requires_identity_database_and_master_credentials(self) -> None:
+        self.spec["copy_binding_sha256"] = "verified-copy-binding"
+        self.preserved = True
+        self.rows = [("encoded-restored-password",)]
+        self.run_probe()
+        self.health_identity = {"deployment_record_id": "other"}
+        with self.assertRaises(RuntimeError):
+            self.run_probe()
+        self.health_identity = dict(self.identity)
+        for before, after in (
+            ("database", "outside-db"),
+            ("candidate", "other-database"),
+            ("local-user", "other-user"),
+            ("local-database-fixture", "other-password"),
+            ("local-master-fixture", "other-master"),
+        ):
+            with self.subTest(field=before):
+                self.config.write_text(self.config_text.replace(before, after))
+                with self.assertRaises(RuntimeError):
+                    self.run_probe()
+        self.connection.commit.assert_not_called()
+
+    def test_preserved_marker_read_failure_refuses_and_closes_read_only_connection(self) -> None:
+        self.spec["copy_binding_sha256"] = "verified-copy-binding"
+        self.password_helper.restored_logins_preserved.side_effect = RuntimeError("unavailable")
+        with self.assertRaises(RuntimeError):
+            self.run_probe()
+        self.connection.commit.assert_not_called()
+        self.connection.rollback.assert_called_once()
+        self.connection.close.assert_called_once()
+
     def test_unset_empty_and_whitespace_login_use_startup_default(self) -> None:
         for login in (None, "", "  "):
             with self.subTest(login=login):
@@ -444,7 +536,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
             self.run_probe()
 
     def test_missing_or_ambiguous_admin_refuses_and_closes_read_only_connection(self) -> None:
-        for rows in ([], [("",)], self.rows * 2):
+        for rows in ([], [("",)], list(self.rows) * 2):
             with self.subTest(rows=len(rows)):
                 self.rows = rows
                 with self.assertRaises(RuntimeError):
