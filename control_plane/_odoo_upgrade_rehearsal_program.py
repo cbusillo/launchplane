@@ -267,12 +267,17 @@ def restore_preserved_snapshot(spec,root,containers,source_database,destination)
                 archive.extract(member,path=temporary,filter='data')
         docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+destination)
         docker('cp',str(Path(temporary)/source_database)+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+destination)
+    prepare_runner_storage(containers)
+    stamp(spec,containers,destination)
+
+
+def prepare_runner_storage(containers,*additional):
     uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
     gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
     if not uid.isdigit() or not gid.isdigit():
         raise RuntimeError('Unknown copy runner user')
-    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data/filestore/'+destination)
-    stamp(spec,containers,destination)
+    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,
+        '/volumes/data','/volumes/logs',*additional)
 
 
 def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=False):
@@ -434,11 +439,7 @@ def sanitize_capture(spec,containers,database,raw):
     try:
         docker('cp',str(raw/'database.dump'),containers['script-runner'][0]+':/tmp/rehearsal.dump')
         docker('exec','-u','root',containers['script-runner'][0],'chmod','644','/tmp/rehearsal.dump')
-        uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
-        gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
-        if not uid.isdigit() or not gid.isdigit():
-            raise RuntimeError('Unknown copy runner user')
-        docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data','/volumes/logs','/tmp/rehearsal.dump')
+        prepare_runner_storage(containers,'/tmp/rehearsal.dump')
         copy_runner(spec,containers,database,fresh=True,dump_path='/tmp/rehearsal.dump',sanitize_only=True)
     finally:
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
@@ -792,11 +793,12 @@ def prepared_rebuild_runtime(spec,root,database):
     pending=receipt.with_suffix('.pending')
     expected={key:spec[key] for key in ('record_binding_sha256','resources_binding_sha256')}
     expected.update(intent_sha256=spec['record']['intent_sha256'],generation=generation)
+    archived=archived_rehearsal_markers(spec['record'])
     for path in root.glob('rebuild-final-*.started'):
-        if path.is_symlink() or not path.with_suffix('.json').is_file():
-            raise RuntimeError('Uncertain FINAL restoration retains its custody')
+        if path.is_symlink() or (path.name not in archived and not path.with_suffix('.json').is_file()):
+            raise RebuildPrecheckRefused('Uncertain FINAL restoration retains its custody')
     if receipt.is_symlink() or marker.is_symlink() or pending.exists() or pending.is_symlink():
-        raise RuntimeError('Rebuild preparation custody is unverified')
+        raise RebuildPrecheckRefused('Rebuild preparation custody is unverified')
     if receipt.exists():
         try:
             metadata=receipt.stat()
@@ -812,7 +814,7 @@ def prepared_rebuild_runtime(spec,root,database):
             raise RebuildPrecheckRefused('Rebuild reuse precheck refused') from error
         return containers
     if marker.exists():
-        raise RuntimeError('Uncertain rebuild preparation retains its custody')
+        raise RebuildPrecheckRefused('Uncertain rebuild preparation retains its custody')
     marker.touch(mode=0o600)
     containers=prepare_runtime(spec,root,database)
     save(receipt,expected)

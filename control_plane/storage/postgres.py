@@ -12694,10 +12694,11 @@ class PostgresRecordStore(HumanSessionStore):
             )
         elif abandoning:
             admitted = (
-                expected.state == "switched"
+                expected.state in {"switched", "rebuilding"}
                 and later_phase_copies(expected, "switched")
                 and original.state in {"running", "reconcile_required"}
-                and original.provider_effect_phase == "validate-business"
+                and original.provider_effect_phase
+                == {"switched": "validate-business", "rebuilding": "rebuild-final"}[expected.state]
             )
         else:
             admitted = (

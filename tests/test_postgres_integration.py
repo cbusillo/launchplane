@@ -15464,6 +15464,15 @@ class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTranspor
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
+    def test_failed_rebuild_abandonment_resumes_on_postgres(self) -> None:
+        from tests.test_odoo_incomplete_rehearsal_retirement import LaterPhaseRetirementTests
+
+        fixture = LaterPhaseRetirementTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_failed_rebuild_abandonment_replaces_history_checkpoint_and_resumes()
+
     def test_checkpointed_rehearsal_resumes_original_job_on_postgres(self) -> None:
         from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
 

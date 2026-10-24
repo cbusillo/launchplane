@@ -20,9 +20,21 @@ def preserved_rehearsal_abandonment(record: dict[str, Any]) -> bool:
     )
 
 
+def archived_rehearsal_markers(record: dict[str, Any]) -> set[str]:
+    return {
+        item.get("original", {}).get("provider_effect_phase", "validate-business")
+        + "-"
+        + item["attempt_sha256"]
+        + ".started"
+        for item in record.get("abandoned_validations", [])
+    }
+
+
 INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = (
     "from typing import Any\n"
     + inspect.getsource(preserved_rehearsal_abandonment)
+    + "\n"
+    + inspect.getsource(archived_rehearsal_markers)
     + r"""
 def incomplete_initial_snapshot(spec,root,*,allow_partial):
     names=database_names(spec)
@@ -76,7 +88,9 @@ def later_phase_snapshots(spec,root):
     record=spec['record']
     names=database_names(spec)
     copies=record['copies']
-    roles=LATER_PHASE_ROLES[record['state']]
+    rebuilding=record['state']=='rebuilding' and spec['action']=='abandon-validation'
+    state='switched' if rebuilding else record['state']
+    roles=LATER_PHASE_ROLES[state]
     if [copy['database'] for copy in copies]!=[names[role] for role in roles]:
         raise RuntimeError('Recorded recovery copies do not match the rehearsal phase')
     for role,database in names.items():
@@ -92,11 +106,14 @@ def later_phase_snapshots(spec,root):
     # Witness, lineage and bytes must still be exactly the recorded tuples.
     validate_snapshots(spec,root,{},copies,retired=True)
     receipts=[]
-    abandoned=('validate-business-'+spec['abandoned_attempt_sha256']+'.started'
+    abandoned_action=spec.get('abandoned_action','validate-business')
+    if (spec['action']=='abandon-validation' and abandoned_action!=
+            {'switched':'validate-business','rebuilding':'rebuild-final'}.get(record['state'])):
+        raise RuntimeError('Abandoned effect does not match its rehearsal phase')
+    abandoned=(abandoned_action+'-'+spec['abandoned_attempt_sha256']+'.started'
         if spec['action']=='abandon-validation' else '')
-    archived={('validate-business-'+item['attempt_sha256']+'.started')
-        for item in record.get('abandoned_validations',[])}
-    if abandoned and (record['state']!='switched' or not (root/abandoned).is_file()
+    archived=archived_rehearsal_markers(record)
+    if abandoned and (record['state'] not in {'switched','rebuilding'} or not (root/abandoned).is_file()
             or (root/abandoned).is_symlink()):
         raise RuntimeError('Missing original validation marker')
     for marker in root.iterdir():
@@ -113,7 +130,7 @@ def later_phase_snapshots(spec,root):
                 raise RuntimeError('Uncertain original effect retains its custody')
             receipts.append(json.loads(receipt.read_text()))
     if not any(isinstance(saved,dict) and saved.get('intent_sha256')==record['intent_sha256']
-            and saved.get('state')==record['state'] and isinstance(saved.get('copies'),list)
+            and saved.get('state')==state and isinstance(saved.get('copies'),list)
             and len(saved['copies'])==len(copies)
             and all(same_receipt(left,right) for left,right in zip(saved['copies'],copies))
             for saved in receipts):
@@ -126,7 +143,8 @@ def incomplete_retirement(spec, root):
     namespace=record['rehearsal_id']
     if spec['mode'] not in {'dry-run','apply'} or not (
             (record['state']=='prepared' and not record['copies'])
-            or (record['state'] in LATER_PHASE_ROLES and record['copies'])):
+            or (record['state'] in LATER_PHASE_ROLES and record['copies'])
+            or (spec['action']=='abandon-validation' and record['state']=='rebuilding' and record['copies'])):
         raise RuntimeError('Only an incomplete prepared or settled later-phase rehearsal can be disposed')
     if not root.is_dir() or root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Missing private rehearsal custody')
