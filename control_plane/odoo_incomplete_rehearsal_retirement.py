@@ -43,6 +43,7 @@ PUBLISHED_FIELDS = (
     "state",
     "copies",
     "elapsed_seconds",
+    "phase_timings",
     "source_binding_sha256",
     "shape_sha256",
     "target_artifact_id",

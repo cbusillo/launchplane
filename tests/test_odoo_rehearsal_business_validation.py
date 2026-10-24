@@ -1,6 +1,7 @@
 """Fixed product invocation preserves isolation, original custody and value-free evidence."""
 
 import json
+from datetime import datetime
 import unittest
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -386,6 +387,35 @@ class BusinessValidationAdapterTests(unittest.TestCase):
                 {**self.request.model_dump(mode="json"), "business_validation": {"steps": []}}
             )
 
+    def test_original_attempt_publishes_timing_once_and_refuses_changed_times(self) -> None:
+        from datetime import timezone
+
+        stamp = datetime.now(timezone.utc).isoformat()
+        result: dict[str, Any] = {
+            "state": "switched",
+            "copies": [item.model_dump(mode="json") for item in self.record.copies],
+            "elapsed_seconds": {},
+            "business_validation": receipt(self.plan),
+            "phase_timing": {
+                "action": "validate-business",
+                "attempt_sha256": self.plan["attempt_sha256"],
+                "observed": {"product_started": stamp, "receipt_observed": stamp},
+            },
+        }
+        self.adapter.publish(self.record, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        self.adapter.publish(current, result)
+        repeated = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert repeated is not None
+        self.assertEqual(repeated.phase_timings, current.phase_timings)
+        changed = {
+            **result,
+            "phase_timing": {**result["phase_timing"], "observed": {"product_started": stamp}},
+        }
+        with self.assertRaises(RehearsalRefused):
+            self.adapter.publish(repeated, changed)
+
     def test_apply_and_original_key_observation_retain_sanitized_evidence_and_snapshot_lineage(
         self,
     ) -> None:
@@ -586,15 +616,44 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.assertTrue(result["business_validation"]["passed"])
         self.assertEqual(result["business_validation"]["database"], self.plan["database"])
         self.assertEqual(self.executions, 1)
+        timing = result["phase_timing"]["observed"]
+        self.assertLessEqual(
+            datetime.fromisoformat(timing["product_started"]),
+            datetime.fromisoformat(timing["receipt_observed"]),
+        )
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
         self.spec["mode"] = "observe"
         observed = self.fixture.run_host(self.spec)
         self.assertEqual(observed, result)
+        self.assertEqual(observed["phase_timing"], result["phase_timing"])
         self.assertEqual(self.executions, 1)
         self.spec["attempt_sha256"] = canonical_json_sha256({"operation_key": "different"})
         missing = self.fixture.run_host(self.spec)
         self.assertFalse(missing["completed"])
+        self.assertEqual(self.executions, 1)
+
+    def test_legacy_pending_outcome_is_recovered_without_backfilling_observation_time(self) -> None:
+        precheck = self.host["business_validation_precheck"]
+        calls = 0
+
+        def fail_after_write(*args: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise RuntimeError("postcheck interrupted")
+            precheck(*args)
+
+        with patch.dict(self.host, {"business_validation_precheck": fail_after_write}):
+            with self.assertRaises(RuntimeError):
+                self.fixture.run_host(self.spec)
+        outcome = next(self.root.glob("*.outcome.json"))
+        saved = json.loads(outcome.read_text())
+        saved["result"].pop("phase_timing")
+        outcome.write_text(json.dumps(saved))
+        observed = self.fixture.run_host({**self.spec, "mode": "observe"})
+        self.assertTrue(observed["business_validation"]["committed"])
+        self.assertNotIn("phase_timing", observed)
         self.assertEqual(self.executions, 1)
 
     def test_committed_pending_outcome_survives_failed_postcheck_and_recovers_without_replay(

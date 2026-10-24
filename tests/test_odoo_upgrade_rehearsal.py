@@ -118,6 +118,25 @@ class RehearsalScenario(unittest.TestCase):
             "copies": [],
             "elapsed_seconds": {"execute": 1.0},
         }
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        reservation = paused.record
+        completed["phase_timing"] = {
+            "action": "execute",
+            "attempt_sha256": canonical_json_sha256(
+                {
+                    "operation_key": build_provider_operation_key(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        request_fingerprint=reservation.request_fingerprint,
+                        reconciliation_key=reservation.reconciliation_key,
+                    )
+                }
+            ),
+            "observed": {"source_captured": prepared.updated_at.isoformat()},
+        }
         with (
             patch.dict(os.environ, _replacement_env()),
             patch(

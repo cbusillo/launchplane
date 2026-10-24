@@ -223,6 +223,8 @@ class CopyRunner(OdooDataWorkflowRunner):
         if checked.returncode or b"integration_readback_ok=true" not in checked.stdout.splitlines():
             raise RuntimeError("Testing copy pre-registry integration readback failed")
         print("testing_copy_pre_registry_sanitized=true", flush=True)
+        if globals().get("rehearsal_timing_marker"):
+            print(rehearsal_timing_marker+"sql_sanitized="+datetime.now(timezone.utc).isoformat(), flush=True)
 
 
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
@@ -284,8 +286,11 @@ finally:
 
 
 def rehearsal_copy_runner(*, sanitize_source_only: bool) -> str:
+    from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
+
     return (
-        "expected_copy_instance = 'rehearsal'\n"
+        "from datetime import datetime, timezone\nexpected_copy_instance = 'rehearsal'\n"
+        + f"rehearsal_timing_marker = {REHEARSAL_TIMING_MARKER!r}\n"
         + f"sanitize_source_only = {sanitize_source_only!r}\n"
         + TESTING_COPY_RUNNER
     )
@@ -304,6 +309,8 @@ def finish_copy_upgrade(runner):
         raise RuntimeError("Fresh copy lacks completed module update witnesses")
     print("odoo_module_update_completed=true", flush=True)
     print("odoo_module_update_modules_configured=true", flush=True)
+    if globals().get("rehearsal_timing_marker"):
+        print(rehearsal_timing_marker+"module_update_completed="+datetime.now(timezone.utc).isoformat(), flush=True)
     runner.assert_core_schema_healthy()
     runner.ensure_gpt_users()
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)

@@ -3446,6 +3446,49 @@ readback cannot inspect a removed placement; use confirmed-retire readback.
 Replaying the old preserving apply still returns its historical preserving
 result, which is not a current byte inventory.
 
+#### UTC rehearsal timing
+
+New `execute`, `simulate-final`, `rebuild-final` and `validate-business` receipts
+carry `phase_timing`: the action, original operation's `attempt_sha256`, and
+actual UTC `observed` boundaries. Publication appends these to `phase_timings`
+once per attempt. Conflicting evidence for the same attempt refuses publication.
+The saved host receipt and pending business outcome retain the original times;
+readback neither stamps the observation again nor repeats the effect. An
+interruption before the receipt is saved leaves its missing boundaries unknown.
+
+The timing field is excluded from the record's reviewed binding and omitted
+when empty. Existing recovery receipts and record hashes remain compatible.
+Ordinary retirement, incomplete retirement and preserving abandonment retain
+published timing history with the existing recovery metadata.
+
+| Boundary | Actual evidence |
+| --- | --- |
+| `T0` | `simulated_quiescent`, after the disposable upgraded web stops. The source is a non-running sanitized snapshot; live Odoo 18 writer drain is unexecuted. |
+| `T1` | The bound `final_source` receipt's existing `captured_at`; `final_source_witness_sha256` identifies that receipt. |
+| `T2` | The first `sql_sanitized` stamp emitted by the rehearsal copy runner, after committed SQL-only sanitization and independent integration readback, before registry startup. Later post-hook sanitization stamps do not replace it. |
+| Upgrade | `module_update_completed`, after exact declared module witnesses and installed/pending-state checks. |
+| `T3` | `before_web`, after the final connection readback and before opening the web gate. `web_started` records the subsequent private web start. |
+| `T4` | Unavailable: the current lifecycle has no distinct pre-switch HTTP verification step. Before-web isolation and post-start health do not supply that missing boundary. |
+| `T5` | `private_switch_verified`, after the private health/identity and login checks pass. |
+| `T6` | Bounded by `product_started` and `receipt_observed` for the first committed product validation, which must have passed. The product verifies its writes through a fresh cursor before returning the receipt. These bounds do not claim the exact commit instant. |
+
+For timed records, `measured_window` returns lower and upper bounds for the
+simulated pause and separately itemizes the private-switch-to-product-dispatch
+gap. The bounds require one simulation tied to the final source receipt and
+the first committed validation's own timing. A rebuild starts from preserved
+`T1` and therefore has no measured `T0`; abandonment, untimed first commits,
+unaccepted commits, missing boundaries and non-monotonic clocks keep the bounds
+null with a reason. Backward clock steps remain observable instead of stranding
+a completed operation; forward clock jumps cannot be detected from UTC stamps
+alone. Production capture and source sanitization remain separate
+`execute` terms and are never added to the simulated pause.
+
+`measured_window.complete` remains false because `T4` is unavailable. Bounded
+pause evidence does not complete a runbook criterion requiring all `T0`–`T6`
+boundaries. Legacy records have no timing field and remain unmeasured; neither
+elapsed durations nor later observations backfill their missing times. Product
+commit uncertainty, including an unverified pending postcheck, stays unknown.
+
 #### Private product business validation
 
 After `simulate-final` and before `verify`, use the supported client with

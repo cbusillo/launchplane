@@ -19,6 +19,7 @@ from control_plane._odoo_rehearsal_attachment_validation import (
 )
 from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
 from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
+from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     FILESTORE_TAR_WARNING_LIBRARY
@@ -26,6 +27,8 @@ ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
+    + "\nREHEARSAL_TIMING_MARKER = "
+    + repr(REHEARSAL_TIMING_MARKER)
     + "\nBUSINESS_VALIDATION_ENTRYPOINT = "
     + repr(BUSINESS_VALIDATION_ENTRYPOINT)
     + "\nBUSINESS_VALIDATION_RECEIPT_MAX_BYTES = "
@@ -140,6 +143,14 @@ def save(path,payload):
         output.flush()
         os.fsync(output.fileno())
     os.replace(temporary,path)
+
+
+def phase_stamp(spec,boundary,*,at=None):
+    if spec.get('action') not in {'execute','simulate-final','rebuild-final','validate-business'}:
+        return
+    timing=spec.setdefault('phase_timing',{'action':spec['action'],
+        'attempt_sha256':spec['attempt_sha256'],'observed':{}})
+    timing['observed'].setdefault(boundary,at or datetime.now(timezone.utc).isoformat())
 
 
 def compose(spec,root,*,image,database):
@@ -296,6 +307,11 @@ def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=Fa
         required+=['odoo_module_update_completed','odoo_module_update_modules_configured']
     if any(markers.get(key)!='true' for key in required):
         raise RuntimeError('Copy lacks its sanitization or upgrade proof')
+    for line in result.splitlines():
+        if line.startswith(REHEARSAL_TIMING_MARKER):
+            boundary,at=line.removeprefix(REHEARSAL_TIMING_MARKER).split('=',1)
+            if boundary in {'sql_sanitized','module_update_completed'}:
+                phase_stamp(spec,boundary,at=at)
 
 
 def before_web(spec,containers,database):
@@ -303,9 +319,11 @@ def before_web(spec,containers,database):
         spec['readback_spec'],stdin=spec['readback_program'].encode()).decode()
     if 'integration_readback_ok=true' not in result.splitlines():
         raise RuntimeError('Before-web connection readback failed')
+    phase_stamp(spec,'before_web')
     docker('exec',containers['script-runner'][0],'python3','-c',
         "import hashlib,os;from pathlib import Path;Path("+repr(spec['web_gate_path'])+").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
     docker('start',containers['web'][0])
+    phase_stamp(spec,'web_started')
 
 
 def private_health(spec,containers):
@@ -373,6 +391,7 @@ def product_command(arguments, *, stdin=None):
 
 def business_validation(spec,containers):
     expected=spec['business_validation_identity']
+    phase_stamp(spec,'product_started')
     output=product_command(['docker','exec','-i','-e','ODOO_DB_NAME='+expected['database'],
         containers['script-runner'][0],'python3',BUSINESS_VALIDATION_ENTRYPOINT],
         stdin=json.dumps(expected,separators=(',',':')).encode())
@@ -382,7 +401,9 @@ def business_validation(spec,containers):
         raise RuntimeError('Validation evidence is unavailable')
     try:
         result=json.loads(bytes.fromhex(markers[0].decode()))
-        return checked_business_receipt(result,expected)
+        checked=checked_business_receipt(result,expected)
+        phase_stamp(spec,'receipt_observed')
+        return checked
     except (ValueError,TypeError,KeyError):
         # Do not attach a parser exception or its input to provider logs.
         raise RuntimeError('Invalid product validation receipt') from None
@@ -402,7 +423,7 @@ def pending_business_outcome(spec,root,receipt,lock_held):
             or saved['intent_sha256']!=spec['record']['intent_sha256']):
         raise RuntimeError('Validation outcome binding changed')
     result=saved['result']
-    if (set(result)!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
+    if (set(result)-{'phase_timing'}!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
             'public_route','business_host_frozen','business_validation'}
             or result['intent_sha256']!=saved['intent_sha256'] or result['state']!='switched'
             or result['copies']!=spec['record']['copies'] or result['resources_preserved'] is not True
@@ -424,6 +445,7 @@ def pending_business_outcome(spec,root,receipt,lock_held):
         return result
     return {'intent_sha256':saved['intent_sha256'],'state':'switched',
         'copies':result['copies'],'elapsed_seconds':result['elapsed_seconds'],
+        **({'phase_timing':result['phase_timing']} if result.get('phase_timing') else {}),
         'resources_preserved':True,'public_route':False,'business_host_frozen':False,
         'completed':False,'business_validation_postcheck_verified':False,'diagnostics_private':True,
         'pending_business_validation':{key:saved[key] for key in
@@ -466,11 +488,13 @@ def capture(spec,root,containers,database):
     save(root/'capture.json',{'source_binding_sha256':spec['record']['source_binding_sha256'],
         'database_sha256':digest(raw/'database.dump'),'filestore_sha256':digest(raw/'filestore.tar')})
     spec.setdefault('phase_elapsed',{})['source-capture']=time.monotonic()-started
+    phase_stamp(spec,'source_captured')
     docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+database)
     docker('cp',str(raw/'filestore')+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+database)
     started=time.monotonic()
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
+    phase_stamp(spec,'source_sanitized')
     validations=spec['record'].get('business_validations',[])
     if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
         raise RuntimeError('Product validation has not passed')
@@ -820,6 +844,7 @@ def upgrade_final(spec,root,containers):
     switch_started=time.monotonic()
     before_web(spec,containers,names['final_upgrade'])
     private_health(spec,containers)
+    phase_stamp(spec,'private_switch_verified')
     spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
 
 
@@ -950,9 +975,11 @@ def main():
                 # Freeze/capture/switch affects the already sanitized source
                 # copy only. No second read or fence touches the business host.
                 docker('stop',containers['web'][0])
+                phase_stamp(spec,'simulated_quiescent')
                 restore_preserved_snapshot(spec,root,containers,names['source'],names['final_source'])
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=off')
                 copies.append(snapshot(spec,root,containers,names['final_source']))
+                spec['phase_timing']['final_source_witness_sha256']=copies[-1]['witness_sha256']
                 spec['phase_elapsed']['final-capture-simulation']=time.monotonic()-started
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=on')
                 upgrade_final(spec,root,containers)
@@ -975,6 +1002,8 @@ def main():
         elapsed={**record['elapsed_seconds'],**spec.get('phase_elapsed',{}),action:time.monotonic()-started}
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
+        if spec.get('phase_timing'):
+            result['phase_timing']=spec['phase_timing']
         if action=='validate-business':
             result['business_validation']=validation
             save(root/(spec['receipt_action']+'.outcome.json'),{
