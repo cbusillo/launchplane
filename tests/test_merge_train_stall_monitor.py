@@ -128,6 +128,7 @@ class StallMonitorTests(TestCase):
             }
         )
         client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter.publish.return_value = 91
         with (
@@ -186,6 +187,55 @@ class StallMonitorTests(TestCase):
             )
             self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
 
+    def test_missing_target_setting_alerts_at_once_and_resolves_when_added(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="example/repo", base_branch="main")
+        policy = _policy_record(
+            (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ("Require status checks on main.",)
+        client.read_merge_train_snapshot.return_value = snapshot.model_copy(
+            update={"pull_requests": ()}
+        )
+        reporter.publish.return_value = 91
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                return_value=policy,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
+                return_value=client,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
+            ),
+        ):
+            root = Path(directory)
+            store = FilesystemRecordStore(root)
+            run_stall_monitor_pass(
+                store=store, root=root, now=lambda: _time(0), reporter_factory=lambda **_: reporter
+            )
+            self.assertTrue(reporter.publish.call_args.kwargs["stalled"])
+            self.assertIn("Require status checks on main.", reporter.publish.call_args.args[1])
+            reporter.notify.assert_called_once()
+            client.target_setting_gaps.return_value = ()
+            run_stall_monitor_pass(
+                store=store,
+                root=root,
+                now=lambda: _time(300),
+                reporter_factory=lambda **_: reporter,
+            )
+            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
+
     def test_release_holds_pause_clocks_and_midpass_activity_does_not_reset_them(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
@@ -197,6 +247,7 @@ class StallMonitorTests(TestCase):
             )
         )
         client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter.publish.return_value = 91
         hold_reader = Mock(return_value=object())
@@ -273,6 +324,7 @@ class StallMonitorTests(TestCase):
             )
         )
         client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter.publish.return_value = 91
         with (
@@ -337,6 +389,7 @@ class StallMonitorTests(TestCase):
             )
         )
         client = Mock()
+        client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter = Mock()
         reporter.publish.return_value = 91
@@ -419,6 +472,7 @@ class StallMonitorTests(TestCase):
             )
         )
         client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
         reporter.publish.return_value = 91
         with (
             TemporaryDirectory() as directory,
@@ -558,6 +612,7 @@ class StallMonitorTests(TestCase):
             (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )
         client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter.publish.return_value = 91
         with (

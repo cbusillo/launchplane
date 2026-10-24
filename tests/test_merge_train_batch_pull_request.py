@@ -40,6 +40,9 @@ from tests.test_merge_train_github import (
 from tests.test_merge_train_structural_provenance import _entry, _records
 
 
+_CLOSE_REASON = "the queue changed."
+
+
 class _BatchProvider:
     def __init__(self, candidate: Any) -> None:
         self.candidate = candidate
@@ -119,6 +122,9 @@ class _BatchProvider:
             return self.pull_request(self.number)
         if method == "GET" and "/pulls/" in path:
             return self.pull_request(int(path.rsplit("/", maxsplit=1)[1]))
+        if method == "POST" and path.endswith(f"/issues/{self.number}/comments"):
+            assert body is not None
+            return {"html_url": f"https://github.com/{self.repository_name}/pull/{self.number}"}
         if method == "PATCH" and path.endswith(f"/pulls/{self.number}"):
             assert body == {"state": "closed"}
             self.closed = True
@@ -362,7 +368,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
     def test_single_candidate_retirement_closes_its_generated_pr(self) -> None:
         self._prepare((_entry(1, 1),))
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
         self.assertTrue(self.provider.closed)
         self.assertFalse(self.provider.merged)
         self.assertFalse(self.provider.merge_calls)
@@ -585,16 +593,28 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertEqual(self.provider.merge_calls, [])
 
     def test_retirement_closes_only_the_bound_batch_pr_and_is_idempotent(self) -> None:
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
         self.assertTrue(self.provider.closed)
         self.assertEqual(len([r for r in self.provider.requests if r[0] == "PATCH"]), 1)
+        comments = [
+            body for method, path, body in self.provider.requests if path.endswith("/comments")
+        ]
+        self.assertEqual(len(comments), 1)
+        assert comments[0] is not None
+        self.assertIn(_CLOSE_REASON, str(comments[0]["body"]))
         self.assertTrue(all(self.provider.pull_request(n)["state"] == "open" for n in (1, 2)))
 
     def test_retirement_does_not_dispose_of_an_unrecorded_merge(self) -> None:
         self.provider.merged = True
         with self.assertRaises(MergeAdmissionReconciliationRequiredError):
-            self.client.close_batch_pull_request(candidate=self.provider.candidate)
+            self.client.close_batch_pull_request(
+                candidate=self.provider.candidate, reason=_CLOSE_REASON
+            )
         self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
 
     def test_retirement_handles_mutable_batch_pr_drift(self) -> None:
@@ -617,7 +637,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
                 with patch.object(self.provider, "pull_request", side_effect=altered):
                     with self.assertRaises(MergeTrainGitHubStaleHeadError):
                         self.client.ensure_batch_pull_request(candidate=self.provider.candidate)
-                    self.client.close_batch_pull_request(candidate=self.provider.candidate)
+                    self.client.close_batch_pull_request(
+                        candidate=self.provider.candidate, reason=_CLOSE_REASON
+                    )
                 self.assertTrue(self.provider.closed)
         self.assertEqual(self.provider.merge_calls, [])
 

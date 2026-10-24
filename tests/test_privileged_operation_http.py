@@ -392,6 +392,14 @@ def _merge_train_policy_plan_payload(source_event_id: str) -> dict[str, object]:
 
 
 class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.setting_gaps = self.enterContext(
+            patch(
+                "control_plane.privileged_operation_registry.merge_train_target_setting_gaps",
+                return_value=(),
+            )
+        )
+
     def _app(
         self,
         *,
@@ -2349,6 +2357,27 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         evidence_json = json.dumps(payload["record"]["evidence"], sort_keys=True)
         self.assertNotIn("GH_TOKEN", evidence_json)
         self.assertNotIn("launchplane-merge-train", evidence_json)
+
+    async def test_enrollment_refusal_tells_the_proposer_what_to_add(self) -> None:
+        self.setting_gaps.return_value = ("Require status checks on main.",)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-refused"),
+                )
+            self.assertFalse(store.list_privileged_operation_records())
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("Require status checks on main.", response.json()["detail"]["message"])
 
     async def test_merge_train_policy_approval_reports_history_drift_as_stale(self) -> None:
         with TemporaryDirectory() as temporary_directory:

@@ -243,7 +243,7 @@ def _bound_batch_pull_request(
 
 
 def close_batch_pull_request(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate, reason: str
 ) -> None:
     """Close PRs owned by this generated ref even when their mutable fields drift."""
     if not candidate.candidate_sha or candidate.head_check_reuse is not None:
@@ -266,6 +266,11 @@ def close_batch_pull_request(
             continue
         if pull_request.get("state") != "open":
             raise MergeAdmissionReconciliationRequiredError("Batch PR lifecycle is unavailable.")
+        client.comment_pull_request(
+            repository=candidate.repository,
+            pull_request_number=number,
+            body=f"Launchplane closed this batch: {reason}",
+        )
         response = client.transport.request(
             method="PATCH",
             path=f"/repos/{_repository_path(candidate.repository)}/pulls/{number}",

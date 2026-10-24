@@ -1016,7 +1016,20 @@ no administration access. A pinned App requirement needs explicit matching App
 identity on its check run or commit status; a creator login cannot supply that
 identity. Commit statuses without verified App attribution can satisfy unpinned
 or `app_id = -1` any-App requirements. Tenant admission records an unprotected
-policy as unavailable. A missing named or pinned check is explicitly pending even after
+policy as unavailable.
+
+A policy proposal that enrolls a repository branch is refused at planning,
+before anyone reviews it, when the branch requires no status checks or the
+repository lacks the target's enqueue label. The refusal names each missing
+setting and the supported fix: the codex-skills `gh-rulesets.py` standard
+ruleset pair and its `checks-plan`, or the label. If an enrolled branch later
+loses its required checks, the controller reports `target_not_ready` instead
+of waiting: ready pull requests get a blocked comment naming the setting, the
+active batch is kept, and the stall monitor raises `target_not_ready` with the
+same text at once. The train resumes on its own once the setting exists.
+Every batch pull request the controller closes gets a comment with the reason.
+
+A missing named or pinned check is explicitly pending even after
 unrelated checks finish. Failed, pending, stale or unavailable required evidence
 cannot qualify a candidate.
 
