@@ -51,6 +51,7 @@ class ReleaseInvitationBackoff:
     settled: dict[str, tuple[str, float]] = field(default_factory=dict)
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
     diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
+    release_records: dict[str, float] = field(default_factory=dict)
 
 
 def advance_release_invitations(
@@ -70,6 +71,9 @@ def advance_release_invitations(
         if stop_event is not None and stop_event.is_set():
             break
         try:
+            _settle_release_records(
+                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
+            )
             publish_release_invitation(
                 store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
             )
@@ -438,6 +442,113 @@ def _pages(
     raise ValueError("Release invitation lookup exceeds the supported size.")
 
 
+def _close_issue(*, path: str, token: str, number: int) -> None:
+    result = github_api_request(path=path, token=token, method="PATCH", body={"state": "closed"})
+    if (
+        not isinstance(result, dict)
+        or result.get("number") != number
+        or result.get("state") != "closed"
+    ):
+        raise ValueError("Release issue closure was not confirmed.")
+
+
+def _settle_release_records(
+    *,
+    store: ReleaseReviewStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    backoff: ReleaseInvitationBackoff | None,
+) -> None:
+    from control_plane.client_release import read_client_release_run
+    from control_plane.release_review_record import release_decision_marker
+
+    for decision in store.list_release_review_decision_records(product=profile.product):
+        if (
+            not decision.release_start
+            or not decision.release_issue_url
+            or decision.checklist.repository != profile.repository
+        ):
+            continue
+        if backoff is not None:
+            if monotonic() < backoff.release_records.get(decision.record_id, 0):
+                continue
+            backoff.release_records[decision.record_id] = monotonic() + 300
+        with store.release_review_publication_lock(record_id=decision.record_id):
+            run = read_client_release_run(store=store, profile=profile, decision=decision)
+            if (
+                run is None
+                or run.decision_record_id != decision.record_id
+                or run.state not in {"passed", "stopped"}
+                or any(
+                    step.status in {"pending", "running", "reconciliation_required"}
+                    for step in run.steps
+                )
+                or (
+                    run.state == "stopped"
+                    and not any(step.status in {"fail", "cancelled"} for step in run.steps)
+                )
+            ):
+                continue
+            outcome = (
+                ("Rolled back" if decision.release_start == "rollback" else "Released")
+                if run.state == "passed"
+                else "Failed"
+            )
+            match = re.fullmatch(
+                rf"https://github\.com/{re.escape(profile.repository)}/issues/([1-9][0-9]*)",
+                decision.release_issue_url,
+            )
+            if match is None:
+                raise ValueError("Release record destination does not match its repository.")
+            number = int(match[1])
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            with launchplane_github_token(
+                token_resolver=resolve_launchplane_github_token,
+                api_request=github_api_request,
+                control_plane_root=control_plane_root,
+                context_name=lane.context,
+                repository=profile.repository,
+                purpose="release_record",
+            ) as token:
+                if not token:
+                    raise ValueError("Release record source-control access is unavailable.")
+                path = f"/repos/{quote(profile.repository)}/issues/{number}"
+                issue = github_api_request(path=path, token=token)
+                if (
+                    not isinstance(issue, dict)
+                    or issue.get("number") != number
+                    or "pull_request" in issue
+                    or not isinstance(issue.get("body"), str)
+                    or _comment_lines(issue)[:1] != [release_decision_marker(decision.record_id)]
+                ):
+                    raise ValueError("Release record identity was not confirmed.")
+                if (
+                    store.read_product_profile_record(profile.product) != profile
+                    or store.read_release_review_decision_record(
+                        product=profile.product, record_id=decision.record_id
+                    )
+                    != decision
+                    or read_client_release_run(store=store, profile=profile, decision=decision)
+                    != run
+                ):
+                    continue
+                marker = f"<!-- launchplane:release-outcome:{decision.record_id} -->"
+                comments = _pages(f"{path}/comments", token)
+                if not any(marker in _receipt_lines(comment) for comment in comments):
+                    result = github_api_request(
+                        path=f"{path}/comments",
+                        token=token,
+                        method="POST",
+                        body={"body": f"{marker}\n{outcome}: this release has finished.\n"},
+                    )
+                    if not isinstance(result, dict) or not isinstance(result.get("id"), int):
+                        raise ValueError("Release outcome publication was not confirmed.")
+                if issue.get("state") != "closed":
+                    _close_issue(path=path, token=token, number=number)
+                if backoff is not None:
+                    backoff.release_records[decision.record_id] = float("inf")
+
+
 def _settle_completed_invitation(
     *,
     store: ReleaseReviewStore,
@@ -598,18 +709,7 @@ def _settle_completed_invitation(
                 if not completed():
                     return
                 if issues[0].get("state") != "closed":
-                    result = github_api_request(
-                        path=f"{path}/{number}",
-                        token=token,
-                        method="PATCH",
-                        body={"state": "closed"},
-                    )
-                    if (
-                        not isinstance(result, dict)
-                        or result.get("number") != number
-                        or result.get("state") != "closed"
-                    ):
-                        raise ValueError("Release invitation issue closure was not confirmed.")
+                    _close_issue(path=f"{path}/{number}", token=token, number=number)
             # Nothing remains to settle for this production snapshot, even when
             # a different candidate waits for its own decision.
             if backoff is not None:

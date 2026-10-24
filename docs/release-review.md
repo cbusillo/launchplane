@@ -10,6 +10,18 @@ retains the copy's data, applies its normal overrides and records the matching
 tuple. This check neither mints a tuple nor changes acceptance. Legacy lanes
 retain their existing qualification path.
 
+## Completed release records
+
+The notification worker posts a short outcome on each saved release record and
+closes its issue once the release's persisted operations have passed, failed or
+been cancelled. A successful rejection rollback says **Rolled back**; a stopped
+forward release says **Failed**, including one whose automatic recovery restored
+the previous version. Pending, running and reconciliation-required operations
+keep the record open. This also settles older completed releases after a worker
+restart or deployment, independently of the current lane versions or invitation.
+The saved decision and original issue body remain unchanged. Retries reuse the
+outcome receipt and the invitation's confirmed issue-closure path.
+
 ## Odoo business hours
 
 An authorized caller selects the company through the standalone
