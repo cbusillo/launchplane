@@ -3598,9 +3598,9 @@ Ordinary `verify` seals the complete ordered `business_validations` history
 into the final upgraded snapshot’s `business_validation_sha256`; it refuses a
 known failed latest validation. Earlier passing and committed failed outcomes
 keep their identified writes in that history. The final sanitized old-version
-tuple stays unchanged. Record both managed tuples and value-free validation
-receipts before ordinary retirement, preserving their recorded custody.
-Product repositories own business checks and cutover fallback plans.
+tuple stays unchanged. Both managed tuples and value-free validation receipts
+remain in recorded custody through ordinary retirement. Product repositories
+own business scenarios and cutover fallback plans.
 
 Use `readback` with the original intent/action to inspect its completed effect.
 Retirement readback verifies stopped containers and immutable files without
