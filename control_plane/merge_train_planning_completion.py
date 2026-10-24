@@ -1,9 +1,3 @@
-"""GitHub adapter for planning metadata after a confirmed change landing.
-
-This never closes an issue. Closing references only discover already-completed
-records; waits, native prerequisites and reporter-owned records stay for review.
-"""
-
 from __future__ import annotations
 
 import json
@@ -31,6 +25,7 @@ from github_plan_status import (
     wait_records,
 )
 from github_plan_status.body import PLAN_MANAGED_PROVENANCE_MARKER, contributor_plan_body
+from github_plan_status.references import linked_issues
 from control_plane.merge_train_planning_scope import (
     PlanningRepositoryScope,
     PlanningScopeResolver,
@@ -45,7 +40,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $config: S
     defaultBranchRef { name }
     object(expression: $config) { ... on Blob { text } }
     pullRequest(number: $number) {
-      merged mergedAt baseRefName mergeCommit { oid }
+      merged mergedAt baseRefName title body mergeCommit { oid }
       closingIssuesReferences(first: 100, after: $after) {
         nodes { number repository { nameWithOwner } }
         pageInfo { hasNextPage endCursor }
@@ -94,6 +89,10 @@ class _IssueReview(PlanningCompletionReview):
 
 class _IssueProjectReview(_IssueReview):
     """Project membership evidence is missing for this source only."""
+
+
+class _OpenFinishLineReview(_IssueReview):
+    pass
 
 
 @dataclass(frozen=True)
@@ -171,6 +170,32 @@ def _pages(token: str, path: str) -> list[dict[str, Any]]:
         if len(response) < 100:
             return rows
     raise PlanningCompletionReview("Planning completion list exceeded its coverage bound.")
+
+
+def _source_references(
+    token: str, repository: str, number: int, pull: dict[str, Any]
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    if (
+        not isinstance(pull.get("title"), str)
+        or "body" not in pull
+        or not isinstance(pull["body"], (str, type(None)))
+    ):
+        raise PlanningCompletionReview("Planning completion source text was unavailable.")
+    references = linked_issues(repository, pull)
+    path = f"/repos/{repository}/issues/{number}"
+    for comment in _pages(token, path + "/comments"):
+        body = comment.get("body")
+        if not isinstance(body, str):
+            raise PlanningCompletionReview("Planning completion source comment was unavailable.")
+        references.extend(linked_issues(repository, {"body": body}))
+    timeline = []
+    for event in _pages(token, path + "/timeline"):
+        if event.get("event") != "cross-referenced":
+            continue
+        issue = _object(_object(event.get("source")).get("issue"))
+        if "pull_request" not in issue:
+            timeline.append(_reference(issue, repository))
+    return list(dict.fromkeys(references)), list(dict.fromkeys(timeline))
 
 
 def _labels(issue: dict[str, Any]) -> set[str]:
@@ -322,6 +347,8 @@ class _Target:
     repository: str
     number: int
     source: bool = False
+    closing_reference: bool = False
+    reference_only: bool = False
     scope: PlanningRepositoryScope | None = field(default=None, repr=False)
     discovery_error: Exception | None = field(default=None, repr=False)
 
@@ -519,12 +546,16 @@ def _reconcile_target(
                 path=f"/repos/{scope.repository}/issues/{target.number}", token=scope.token
             )
         )
+        if "pull_request" in initial_issue:
+            row["status"] = "not_planning_issue"
+            return
         if initial_issue.get("state") == "open":
-            # Every keyword source can still be awaiting GitHub's closure,
-            # including non-plan and reporter-owned records. Its shape or wait
-            # history must not turn that temporary graph projection into a
-            # terminal receipt that never refreshes its dependent again.
-            _require_projection(initial_issue, merged_at, attempted)
+            if target.closing_reference:
+                _require_projection(initial_issue, merged_at, attempted)
+            raise _OpenFinishLineReview(
+                "Review the full finish line and discussion; use gh-plan.py close only when complete, "
+                "then rerun reconcile-landing. References do not prove completion."
+            )
     snapshot = _snapshot(target, config=config, initial_issue=initial_issue)
     if not is_planning_issue(snapshot.issue, snapshot.labels):
         row["status"] = "not_planning_issue"
@@ -615,6 +646,7 @@ def reconcile_completed_change(
     config: dict[str, Any] = {}
     landing = None
     merged_at = None
+    source_text = None
     attempted = _timestamp(attempted_at)
     for _ in range(10):
         data = _graphql(
@@ -670,6 +702,12 @@ def reconcile_completed_change(
             raise PlanningCompletionReview("Planning completion landing changed during its read.")
         landing = sha
         merged_at = observed_merge_time
+        observed_text = (pull.get("title"), pull.get("body"))
+        if source_text is not None and source_text != observed_text:
+            raise PlanningCompletionReview(
+                "Planning completion source text changed during its read."
+            )
+        source_text = observed_text
         blob = repo.get("object")
         if blob is not None:
             config = _object(json.loads(_object(blob)["text"]))
@@ -694,6 +732,7 @@ def reconcile_completed_change(
             "Planning completion references exceeded their coverage bound."
         )
     assert merged_at is not None
+    explicit, timeline = _source_references(token, repository, number, pull)
     source_scope = PlanningRepositoryScope(repository, base_branch, token, trusted_author_ids)
     scopes: dict[str, PlanningRepositoryScope] = {repository.casefold(): source_scope}
     targets: dict[tuple[str, int], _Target] = {}
@@ -722,28 +761,48 @@ def reconcile_completed_change(
             scopes[key] = scope
         return scopes[key]
 
-    def add(target_repository: str, target_number: int, *, source: bool = False) -> _Target:
+    def add(
+        target_repository: str,
+        target_number: int,
+        *,
+        source: bool = False,
+        closing_reference: bool = False,
+        reference_only: bool = False,
+    ) -> _Target:
         key = (target_repository.casefold(), target_number)
         if key not in targets:
             if len(targets) >= 100:
                 raise PlanningCompletionReview(
                     "Planning direct neighborhood exceeded its coverage bound."
                 )
-            targets[key] = _Target(target_repository, target_number, source)
+            targets[key] = _Target(
+                target_repository,
+                target_number,
+                source=source,
+                closing_reference=closing_reference,
+                reference_only=reference_only,
+            )
         if source:
             targets[key].source = True
+            targets[key].reference_only = False
+        if closing_reference:
+            targets[key].closing_reference = True
         return targets[key]
 
     for target_repository, target_number in references:
+        add(target_repository, target_number, source=True, closing_reference=True)
+    for target_repository, target_number in explicit:
         add(target_repository, target_number, source=True)
-    # Discover the complete bounded one-hop neighborhood before any metadata write.
-    # Non-plan closing sources still unblock planning dependents and native parents.
     for target in list(targets.values()):
         if stopped or target.repository.casefold() in denied_repositories:
             continue
         try:
             target.scope = resolve(target.repository)
             path = f"/repos/{target.scope.repository}/issues/{target.number}"
+            if not target.closing_reference and "pull_request" in _object(
+                github_api_request(path=path, token=target.scope.token)
+            ):
+                continue
             dependents = _pages(target.scope.token, path + "/dependencies/blocking")
             for neighbor in dependents:
                 neighbor_repository, neighbor_number = _reference(neighbor, target.repository)
@@ -768,14 +827,24 @@ def reconcile_completed_change(
                 denied_repositories.add(target.repository.casefold())
             stopped = stopped or bool(disposition["stop_writes"])
 
+    for target_repository, target_number in timeline:
+        if (target_repository.casefold(), target_number) not in targets:
+            add(target_repository, target_number, reference_only=True)
+
     for target in targets.values():
         row: dict[str, Any] = {
             "repo": target.repository,
             "number": target.number,
-            "role": "source" if target.source else "related",
+            "role": "source" if target.source or target.reference_only else "related",
+            "closing_reference": target.closing_reference,
         }
         key = target.repository.casefold()
-        if target.discovery_error is None and (stopped or key in denied_repositories):
+        if target.reference_only:
+            row.update(
+                status="review_reference_only",
+                reason="Timeline mention requires owning-agent review; it does not prove completion.",
+            )
+        elif target.discovery_error is None and (stopped or key in denied_repositories):
             row.update(
                 status="not_attempted_after_stop" if stopped else "not_attempted_posting_authority",
                 reason="Prior provider outcome prevents writes in this delivery.",
@@ -798,7 +867,9 @@ def reconcile_completed_change(
                 pending_reasons.append(error.message)
             except (_IssueReview, PlanningScopeReview) as error:
                 row.update(
-                    status="review_reporter_acceptance"
+                    status="review_open_finish_line"
+                    if isinstance(error, _OpenFinishLineReview)
+                    else "review_reporter_acceptance"
                     if isinstance(error, _IssueReview)
                     else "review_posting_authority",
                     reason=error.message,
@@ -865,11 +936,12 @@ def reconcile_completed_change(
             classify_outcome(
                 row["status"],
                 verified=bool(row.get("verified")),
-                required=target.source,
+                required=target.closing_reference,
                 projection_status=row.get("projection_status"),
-                completion_required=target.source,
+                completion_required=target.closing_reference,
             )
         )
+        row["review_required"] = receipt_summary([row])["review_required"]
         outcomes.append(row)
     receipt = {**receipt_summary(outcomes), "landing_sha": landing, "issues": outcomes}
     if provider_errors:

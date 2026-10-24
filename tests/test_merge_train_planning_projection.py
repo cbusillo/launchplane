@@ -37,7 +37,8 @@ from tests.test_merge_train_scheduler import _policy_record
 class NativeGraphProvider:
     """Repository-specific state; a source token cannot pass as target authority."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, pull_number: int = 9001) -> None:
+        self.pull_number = pull_number
         self.nodes: dict[tuple[str, int], PlanningProvider] = {}
         self.blocking: list[dict[str, Any]] = []
         self.parent: dict[str, Any] | None = None
@@ -56,6 +57,7 @@ class NativeGraphProvider:
         labels: tuple[str, ...] = ("plan", "blocked"),
     ) -> PlanningProvider:
         node = PlanningProvider()
+        node.pull_number = self.pull_number
         node.issue.update(
             number=number,
             node_id=f"{repo}#{number}",
@@ -96,7 +98,7 @@ class NativeGraphProvider:
             number = int(parts[5]) if len(parts) > 5 and parts[4] == "issues" else None
             node = (
                 self.nodes[repo, number]
-                if number
+                if number and number != self.pull_number
                 else next(node for (target, _), node in self.nodes.items() if target == repo)
             )
         if token != self.token(repo):
@@ -135,7 +137,7 @@ class NativePlanningProjectionTests(TestCase):
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
                 repository=_REPO,
-                pull_request_number=9,
+                pull_request_number=self.graph.pull_number,
                 event="completed",
                 controller_action="land_batch",
             ),
@@ -150,6 +152,116 @@ class NativePlanningProjectionTests(TestCase):
 
     def rows(self, record: Any) -> dict[tuple[str, int], dict[str, Any]]:
         return {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
+
+    def test_nonclosing_source_refreshes_neighborhood_and_records_remaining_judgment(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", state_reason=None)
+        parent = self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+        dependent = self.graph.add(_REPO, 10)
+        dependent.blockers = [{"number": 7, "state": "open"}]
+        self.graph.blocking = [self.graph.ref(_REPO, 10)]
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        receipt = _receipt(record)
+        self.assertTrue(receipt["ok"])
+        self.assertTrue(receipt["review_required"])
+        rows = self.rows(record)
+        self.assertEqual(rows[_REPO, 7]["status"], "review_open_finish_line")
+        self.assertFalse(rows[_REPO, 7]["closing_reference"])
+        self.assertTrue(rows[_REPO, 7]["informational"])
+        self.assertEqual(rows[_REPO, 8]["derived_status"], "active")
+        self.assertEqual(rows[_REPO, 10]["derived_status"], "blocked")
+        self.assertEqual(source.issue["body"], before["body"])
+        self.assertEqual(source.issue["state"], before["state"])
+        self.assertEqual(
+            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
+        )
+
+    def test_completed_reference_in_pr_comment_reconciles_without_closing_keyword(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_comments = [{"body": "Prior progress"}] * 100 + [
+            {"body": "Refs #7", "user": {"id": _BOT}}
+        ]
+        before = copy.deepcopy(source.issue)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        row = self.rows(record)[_REPO, 7]
+        self.assertFalse(row["closing_reference"])
+        self.assertTrue(row["verified"])
+        self.assertEqual(
+            {x["name"] for x in source.issue["labels"]}, {_LABELS["plan"], _LABELS["done"]}
+        )
+        self.assertEqual(source.issue["body"], before["body"])
+
+    def test_closing_reference_keeps_required_completion_when_also_explicit(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", state_reason=None)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(record.retryable)
+        row = self.rows(record)[_REPO, 7]
+        self.assertTrue(row["closing_reference"])
+        self.assertFalse(row["ok"])
+
+    def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.timeline = [
+            {"event": "cross-referenced", "source": {"issue": self.graph.ref(_REPO, 7)}}
+        ]
+        source.issue.update(state="open", state_reason=None)
+        self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        rows = self.rows(record)
+        self.assertIn((_REPO, 7), rows)
+        self.assertNotIn((_REPO, 8), rows)
+        self.assertTrue(rows[_REPO, 7]["review_required"])
+        self.assertFalse(source.writes)
+
+    def test_unread_pr_links_fail_before_any_metadata_write(self) -> None:
+        def refuse(call: dict[str, Any]) -> None:
+            if call["path"].startswith(f"/repos/{_REPO}/issues/{self.graph.pull_number}/comments?"):
+                raise click.ClickException("PR comments unavailable") from URLError("offline")
+
+        self.graph.fail = refuse
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(record.retryable)
+        self.assertFalse(self.graph.nodes[_REPO, 7].writes)
+        self.comment_mock.assert_not_called()
+
+    def test_short_reference_to_a_pr_does_not_create_finish_line_review(self) -> None:
+        source = self.graph.nodes[_REPO, 7]
+        source.references = []
+        source.pull_body = "Refs #7"
+        source.issue.update(state="open", pull_request={"url": "https://example.test/pull/7"})
+        self.graph.add(_REPO, 8)
+        self.graph.parent = self.graph.ref(_REPO, 8)
+
+        record = self.record()
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertFalse(_receipt(record)["review_required"])
+        self.assertNotIn((_REPO, 8), self.rows(record))
+        self.assertFalse(source.writes)
 
     def test_parent_and_dependents_keep_only_current_blockers_and_person_waits(self) -> None:
         parent = self.graph.add(_REPO, 8)
@@ -391,7 +503,7 @@ class NativePlanningProjectionTests(TestCase):
         self.addCleanup(error.close)
 
         def fail(call: dict[str, Any]) -> None:
-            if "/comments?" in call["path"]:
+            if "/issues/7/comments?" in call["path"]:
                 raise click.ClickException("provider refused") from error
 
         self.graph.fail = fail

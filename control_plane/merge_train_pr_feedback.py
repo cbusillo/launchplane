@@ -143,8 +143,6 @@ def queue_landing_planning_feedback(
     The existing terminal-feedback recovery uses current policy and its normal
     delivery lock. No workstation, caller comeback, or new watcher owns this job.
     """
-    if not repository_policy.enqueue.trusted_automation_github_user_ids:
-        return
     if not landing_record.landing_plan.entries or any(
         entry.status != "merged" for entry in landing_record.landing_plan.entries
     ):
@@ -343,9 +341,7 @@ def deliver_merge_train_pr_feedback_record(
         try:
             # Completion is persisted/retried by this same native feedback path,
             # including scheduler landings with no surviving workstation driver.
-            if record.event == "completed" and (
-                planning_author_ids or PLANNING_RECEIPT_PREFIX in record.comment_markdown
-            ):
+            if record.event == "completed":
                 # Keep the existing persisted record schema readable by older
                 # workers during a rolling deploy or rollback. The receipt is
                 # evidence in its saved comment, never an authorization input.

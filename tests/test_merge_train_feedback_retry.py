@@ -64,6 +64,14 @@ def _record(
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def setUp(self) -> None:
+        planning = patch(
+            "control_plane.merge_train_pr_feedback.reconcile_completed_change",
+            return_value={"ok": True, "issues": []},
+        )
+        planning.start()
+        self.addCleanup(planning.stop)
+
     def test_retry_and_new_status_serialize_one_managed_comment(self) -> None:
         policy = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))

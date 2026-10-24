@@ -20,6 +20,7 @@ from control_plane.merge_train_pr_feedback import (
     deliver_merge_train_pr_feedback_record,
     PLANNING_RECEIPT_PREFIX,
     _PLANNING_NOTE_START,
+    queue_landing_planning_feedback,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
@@ -88,6 +89,11 @@ class PlanningProvider:
         self.drop_project_write = False
         self.missing_project_item = False
         self.references = [7]
+        self.pull_title = ""
+        self.pull_number = 9
+        self.pull_body = ""
+        self.pull_comments: list[dict[str, Any]] = []
+        self.timeline: list[dict[str, Any]] = []
         self.merged = True
         self.base_branch = "main"
         self.default_branch: Any = "main"
@@ -107,6 +113,8 @@ class PlanningProvider:
                             "defaultBranchRef": {"name": self.default_branch},
                             "object": {"text": json.dumps(self.config)},
                             "pullRequest": {
+                                "title": self.pull_title,
+                                "body": self.pull_body,
                                 "merged": self.merged,
                                 "mergedAt": self.merged_at,
                                 "baseRefName": self.base_branch,
@@ -173,6 +181,11 @@ class PlanningProvider:
             }
         if path == "/users/example":
             return {"type": "User"}
+        if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/comments?"):
+            page = int(path.rsplit("page=", 1)[1])
+            return copy.deepcopy(self.pull_comments[(page - 1) * 100 : page * 100])
+        if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/timeline?"):
+            return copy.deepcopy(self.timeline)
         if "/comments?" in path:
             return copy.deepcopy(self.comments)
         if "/dependencies/blocked_by?" in path:
@@ -273,6 +286,41 @@ class PlanningCompletionTests(TestCase):
         self.assertEqual(retry.delivery_status, "delivered")
         self.assertEqual(self.provider.writes, writes)
 
+    def test_native_landing_without_trusted_authors_still_queues_completion_review(self) -> None:
+        policy_record = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        policy = policy_record.policy.policies[0]
+        _, landing = _records((_entry(9, 1),), repository=_REPO)
+        landing = landing.model_copy(
+            update={
+                "landing_plan": landing.landing_plan.model_copy(
+                    update={
+                        "entries": tuple(
+                            entry.model_copy(
+                                update={"status": "merged", "merge_commit_sha": "landed"}
+                            )
+                            for entry in landing.landing_plan.entries
+                        )
+                    }
+                )
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            queue_landing_planning_feedback(
+                store=store, landing_record=landing, repository_policy=policy, trace_id="no-authors"
+            )
+            queued = store.list_merge_train_pr_feedback_records(repository=_REPO)
+            self.assertEqual(len(queued), 1)
+            reviewed = deliver_merge_train_pr_feedback_record(
+                record=queued[0], token="fixture", attempted_at="2026-10-17T00:00:00Z"
+            )
+        self.assertEqual(reviewed.delivery_status, "failed")
+        self.assertFalse(reviewed.retryable)
+        self.assertTrue(_receipt(reviewed)["review_required"])
+        self.assertFalse(self.provider.writes)
+
     def test_scheduler_landing_reconciles_before_persisting_completed_feedback(self) -> None:
         policy_record = _policy_record(
             (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
@@ -317,6 +365,8 @@ class PlanningCompletionTests(TestCase):
     def test_direct_controller_landing_queues_cleanup_for_idle_worker_without_caller_return(
         self,
     ) -> None:
+        self.provider.references = []
+        self.provider.pull_body = "Refs #7"
         policy_record = _policy_record(
             (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )

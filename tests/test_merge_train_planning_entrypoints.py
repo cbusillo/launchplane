@@ -80,7 +80,7 @@ def _policy(*, authorized: bool = True, target_author: int = 73) -> MergeTrainPo
 
 
 def _graph() -> tuple[NativeGraphProvider, dict[str, str]]:
-    graph = NativeGraphProvider()
+    graph = NativeGraphProvider(pull_number=9)
     target = graph.add(_TARGET, 8, wait="waiting")
     target.default_branch = "release"
     names = {key: f"target:{key}" for key in DEFAULT_STATUS_LABELS}

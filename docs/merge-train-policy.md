@@ -2441,11 +2441,17 @@ clock is later: the new receipt retains that later observed timestamp and its
 fresh creation order. A completed record with a saved planning receipt is not
 queued again; legacy completion without that receipt can recover. Newer feedback
 from a different controller attempt remains protected. Queueing performs no
-provider calls under the controller lease.
+provider calls under the controller lease. Completion is queued and reconciled
+even when the current policy has no trusted automation authors. Missing author
+trust remains a source-review hold in the receipt; it never silently skips
+reconciliation or grants metadata authority.
 
 For a merged PR on the default branch, completed feedback discovers its native
-closing references and their direct blocking dependents and parents, including
-neighbors of non-plan or held sources. The deduplicated neighborhood is bounded
+closing references and explicit source references in its title, body and issue
+comments, using the catalog's shared reference parser. It refreshes their direct
+blocking dependents and parents, including neighbors of non-plan or held sources.
+Timeline-only issue mentions are recorded for review without expanding their
+neighborhood or changing them. The deduplicated neighborhood is bounded
 to 100 records and is discovered before metadata writes; it is not recursive.
 Each planning target's status and labels derive from its current open native
 blockers and trusted structured wait through the same pinned pure package used
@@ -2464,6 +2470,13 @@ with an actual or unread wait can receive only lifecycle label cleanup; its
 full completion remains unverified. An issue-specific Project membership gap
 also permits label cleanup while keeping full completion in review. Configured
 Project mutations retain their existing capability and readback requirements.
+Open non-closing sources receive `review_open_finish_line` in the saved receipt;
+their review is informational and does not prevent successful independent metadata
+repairs or delivery of the landing comment. Closing sources still require verified
+completion. The authoring agent supplies completion judgment before Ready, closing
+what the PR completes and splitting remaining work into owned follow-up issues
+with a named next actor. Landing reconciliation records unresolved judgment for the
+existing stranded-work digest; it never treats a reference as completion evidence.
 
 Every target uses its actual default branch's `.github/github.json`, or verified
 standard planning labels when that file is absent. Same-account foreign targets
@@ -2510,7 +2523,8 @@ slightly future merge timestamp wait only within 15 minutes of the verified
 merge time. Every still-open closing source receives this projection check before
 its planning, authorship or wait-history guards, so a non-plan or reporter-owned
 source cannot leave a delivered receipt before its dependent sees closure.
-Still-open sources after that grace require owning review.
+Still-open closing sources after that grace require owning review. A non-closing
+reference does not await keyword projection; its finish line needs review immediately.
 
 The persisted feedback record schema remains compatible with older workers
 through rolling deployment and rollback. A receipt is evidence, never authority.
