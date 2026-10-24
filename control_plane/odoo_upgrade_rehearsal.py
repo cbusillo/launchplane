@@ -1238,6 +1238,7 @@ class OdooRehearsalAdapter:
         operation_key: str = "",
         inspect_capture: bool = False,
         abandoned_attempt_sha256: str = "",
+        abandoned_action: str = "",
     ) -> str:
         if mode == "observe" or self.request.action in {
             "validate-business",
@@ -1260,6 +1261,7 @@ class OdooRehearsalAdapter:
         spec["inspect_capture"] = mode == "observe" and inspect_capture
         if abandoned_attempt_sha256:
             spec["abandoned_attempt_sha256"] = abandoned_attempt_sha256
+            spec["abandoned_action"] = abandoned_action or "validate-business"
         if self.request.action == "validate-business":
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
