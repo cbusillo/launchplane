@@ -110,6 +110,17 @@ class AffectedTestSelectionTests(unittest.TestCase):
 
 
 class PullRequestSelectionTests(unittest.TestCase):
+    def test_native_inventory_resolves_from_tracked_repository_inputs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        sources = {
+            path: ""
+            for path in git(root, "ls-tree", "-r", "--name-only", "HEAD", "tests").splitlines()
+            if path.endswith(".py")
+        }
+        sources["control_plane/cli_ci.py"] = git(root, "show", "HEAD:control_plane/cli_ci.py")
+        configuration = json.loads(git(root, "show", "HEAD:.github/github.json"))
+        self.assertTrue(native_test_modules(sources, configuration))
+
     def test_only_proven_same_repo_default_branch_pr_uses_tracked_inputs(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

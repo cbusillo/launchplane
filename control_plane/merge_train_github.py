@@ -3643,15 +3643,12 @@ class GitHubMergeTrainSnapshotReader:
             ):
                 result.append(pull_request)
                 continue
-            status, diagnostic = _required_checks_observation(
-                transport=self.transport,
+            status, diagnostic = self._required_checks_observation(
                 repository_path=repository_path,
-                encoded_head_sha=quote(pull_request.head_sha, safe=""),
+                head_sha=pull_request.head_sha,
                 base_branch=base_branch,
+                full_suite=True,
                 owner_review_required=pull_request.owner_review_required,
-                owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
-                if pull_request.owner_review_required
-                else None,
                 config_comparison=_config_comparison(
                     self._branch_refresh_store,
                     repository=pull_request.base_repository,
@@ -4762,6 +4759,7 @@ class GitHubMergeTrainSnapshotReader:
         base_branch: str,
         owner_review_required: bool = False,
         config_comparison: "_ConfigComparison | None" = None,
+        full_suite: bool = False,
     ) -> tuple[MergeTrainCheckStatus, str]:
         encoded_head_sha = quote(head_sha, safe="")
         try:
@@ -4772,7 +4770,7 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=base_branch,
                 owner_review_required=owner_review_required,
                 config_comparison=config_comparison,
-                source_screening=self._source_screening,
+                source_screening=self._source_screening and not full_suite,
                 owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
                 if owner_review_required
                 else None,

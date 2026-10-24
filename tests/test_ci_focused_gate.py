@@ -1,11 +1,21 @@
 import os
+from pathlib import Path
 import subprocess
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.merge_admission import MergeAdmissionEvaluator
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerRunOnceEnvelope,
+    execute_merge_train_controller_run_once,
+)
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
+    MergeTrainGitHubPolicyUnavailableError,
     _candidate_required_checks_status,
     _required_checks_observation,
 )
@@ -13,6 +23,10 @@ from tests.test_merge_train_github import (
     _batch_candidate,
     _protected_branch_with_checks,
     _combined_status,
+    _github_branch,
+    _github_pull_request,
+    _conversation_rule,
+    _required_check_run,
 )
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -47,6 +61,77 @@ class FocusedSourceGateTests(unittest.TestCase):
         return self.client.build_batch_candidate(
             candidate=candidate.model_copy(update={"entries": candidate.entries[:1]})
         )
+
+    def test_controller_plans_focused_ready_head_for_full_candidate_checks(self) -> None:
+        head = "a" * 40
+        repository = "example/merge-train-repo"
+        policy = build_test_merge_train_policy(repository=repository)
+        pull = _github_pull_request(
+            1,
+            repository=repository,
+            author_association="OWNER",
+            base_sha="base-main",
+            head_sha=head,
+        )
+        pull["labels"] = []
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                [pull],
+                [
+                    {
+                        "id": 1,
+                        "body": f"Ready for the merge train\n\nHead: {head}",
+                        "user": {"id": 20, "login": "example"},
+                        "created_at": "2026-10-16T10:00:00Z",
+                    }
+                ],
+                pull,
+                _protected_branch_with_checks("ci-gate"),
+                [],
+                _combined_status(),
+                {
+                    "check_runs": [
+                        _required_check_run("pr-ci-gate", "completed", "success")
+                        | {"app": {"id": 15368, "slug": "github-actions"}}
+                    ]
+                },
+                _conversation_rule(),
+                [],
+                [{"filename": "application.py"}],
+                pull,
+            )
+        )
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_controller_run_once.UrllibMergeTrainGitHubTransport",
+                return_value=transport,
+            ),
+            patch("control_plane.merge_train_codeowners._read_patterns", return_value=()),
+        ):
+            store = FilesystemRecordStore(Path(directory))
+            result = execute_merge_train_controller_run_once(
+                request=MergeTrainControllerRunOnceEnvelope(repository=repository),
+                policy=policy,
+                policy_sha256=policy.policy_sha256,
+                repository_policy=policy.policies[0],
+                token="fixture",
+                trace_id="focused-controller",
+                recorded_at="2026-10-16T10:00:00Z",
+                candidate_store=store,
+                landing_store=store,
+                stack_collapse_store=store,
+                controller_state_store=store,
+                admission_store=store,
+                admission_evaluator=Mock(spec=MergeAdmissionEvaluator),
+            )
+        self.assertEqual(
+            result.accepted_result["controller_action"], "plan_candidate", result.accepted_result
+        )
+        candidate = MergeTrainBatchCandidate.model_validate(result.accepted_result["candidate"])
+        self.assertEqual(candidate.entries[0].head_sha, head)
+        self.assertEqual(candidate.status, "planned")
 
     def test_focused_source_qualifies_screening_but_cannot_qualify_candidate_or_reuse(self) -> None:
         self.transport.observed_names = ("pr-ci-gate", "security-gate")
@@ -142,6 +227,18 @@ class FocusedSourceGateTests(unittest.TestCase):
             pull_requests=(pull,),
         )[0]
         self.assertEqual(full.required_checks_status, "pass")
+        with patch(
+            "control_plane.merge_train_github._required_checks_observation",
+            side_effect=MergeTrainGitHubPolicyUnavailableError("Policy unavailable"),
+        ):
+            unknown = reader._require_full_individual_checks(
+                repository_path="example/merge-train-repo",
+                base_branch="main",
+                base_sha=self.transport.base_sha,
+                pull_requests=(pull,),
+            )[0]
+        self.assertEqual(unknown.required_checks_status, "unknown")
+        self.assertTrue(unknown.required_checks_observation_error)
 
     def test_new_focused_suite_supersedes_an_old_failed_suite_with_provider_proof(self) -> None:
         checks, runs = _superseded_with_unrelated_running()
