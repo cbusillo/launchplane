@@ -180,7 +180,10 @@ def main() -> int:
             and result.get("action", draft.action) != draft.action
         ):
             raise ValueError("The receipt describes a different rehearsal action.")
-        if draft.action in {"retire-incomplete", "abandon-validation"} and args.mode != "dry-run":
+        if (
+            draft.action in {"retire-incomplete", "abandon-validation"}
+            or draft.consumer_confirmation is not None
+        ) and args.mode != "dry-run":
             IncompleteRehearsalRetirementReceipt.model_validate(result)
         unobserved_readback = (
             args.mode == "readback"

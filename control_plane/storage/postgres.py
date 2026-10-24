@@ -12804,11 +12804,33 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.provider_operations import provider_operation_response_payload
 
         abandoning = result.get("action") == "abandon-validation"
+        reclaiming = result.get("action") == "retire"
         later = bool(expected.copies) and not abandoning
         if later:
             admitted = (
                 later_phase_copies(expected, expected.state) and original.state == "completed"
             )
+            if reclaiming:
+                from control_plane.contracts.odoo_upgrade_rehearsal import (
+                    IncompleteRehearsalRetirementReceipt,
+                )
+
+                receipt = IncompleteRehearsalRetirementReceipt.model_validate(result)
+                progress = expected.incomplete_retirement
+                confirmation = progress.consumer_confirmation if progress else None
+                admitted = bool(
+                    expected.state == "retired"
+                    and original.state == "completed"
+                    and original.provider_effect_phase == "retire"
+                    and progress is not None
+                    and progress.host_disposal == receipt.host_disposal
+                    and confirmation is not None
+                    and confirmation.preserving_retire_key == original.idempotency_key
+                    and confirmation.evidence == receipt.consumer_confirmation_evidence
+                    and receipt.copies == expected.copies
+                    and isinstance(original.response_payload.get("result"), dict)
+                    and original.response_payload["result"].get("resources_preserved") is True
+                )
         elif abandoning:
             admitted = (
                 expected.state in {"switched", "rebuilding"}
@@ -12843,7 +12865,7 @@ class PostgresRecordStore(HumanSessionStore):
                 and replacement.abandoned_validations != expected.abandoned_validations
             )
             or result.get("disposed") is not True
-            or result.get("action") not in {"retire-incomplete", "abandon-validation"}
+            or result.get("action") not in {"retire", "retire-incomplete", "abandon-validation"}
             or (
                 abandoning
                 and (

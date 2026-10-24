@@ -1259,6 +1259,21 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
+        if self.request.action == "retire" and self.request.consumer_confirmation is not None:
+            spec["retain_final_recovery"] = True
+            progress = record.incomplete_retirement
+            if progress is not None:
+                if (
+                    progress.consumer_confirmation != self.request.consumer_confirmation
+                    or not progress.record_binding_sha256
+                    or progress.record_updated_at is None
+                    or record.model_copy(
+                        update={"updated_at": progress.record_updated_at}
+                    ).binding_sha256
+                    != progress.record_binding_sha256
+                ):
+                    raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                spec["record_binding_sha256"] = progress.record_binding_sha256
         if abandoned_attempt_sha256:
             spec["abandoned_attempt_sha256"] = abandoned_attempt_sha256
             spec["abandoned_action"] = abandoned_action or "validate-business"
