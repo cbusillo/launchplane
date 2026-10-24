@@ -1129,7 +1129,7 @@ lane's data-workflow schedule.
 For an existing non-root SSH reader, upstream capture requests `pg_dump -U ROLE
 -Fc DATABASE` and uses rsync for regular filestore files without links, devices
 or special files. The source can restrict that login to those two reads. Root
-readers retain their existing database-owner command. A restricted filestore
+readers retain their existing command for the database role. A restricted filestore
 namespace may be `/`. Upgrade rehearsal capture and sizing still require their
 separate remote tar and Python read capabilities; selecting a restricted reader
 does not authorize those commands or qualify a rehearsal.
