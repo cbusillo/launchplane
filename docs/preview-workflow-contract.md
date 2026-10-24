@@ -404,13 +404,18 @@ managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
 stale explicit runtime-environment value cannot override the compose default
 and make required module dependencies unavailable. Refresh then deploys the
 compose and runs the managed Odoo data-workflow schedule before any
-smoke check can pass. A preview with an upstream source runs the existing devkit
-restore on every refresh, replacing even a partially initialized database before
+smoke check can pass. An Odoo preview with `data_transport_mode="driver"` runs the
+existing devkit upstream restore on every refresh, replacing even a partially initialized database before
 OpenUpgrade. That path requires complete upstream settings, a non-root reader
 and an explicit dedicated SSH directory. It forces bootstrap off and sanitization
-on; no integration credentials are retained from the source. Existing-preview
+on and disables copied crons. The existing SQL connection-isolation library runs
+and verifies its committed changes at the devkit's pre-registry credential boundary,
+before OpenUpgrade or addon code. The unsanitized recovery dump is removed before
+that code runs and cleaned up on failure. No integration credentials are retained
+from the source. Existing-preview
 resource qualification preserves the read-only SSH mount for this restore.
-Source-free previews use post-deploy maintenance. A new source-free preview has
+Previews with `data_transport_mode="none"` use post-deploy maintenance without
+host SSH mounts, even if their template carries upstream settings. A new source-free preview has
 no database yet, and its web container
 cannot create one, because it waits for the integration read-back and that
 needs the database. So the preview schedule first asks the preview's own

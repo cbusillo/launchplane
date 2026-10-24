@@ -42,6 +42,7 @@ from control_plane.dokploy.source import (
     DokployTargetDefinition,
 )
 from control_plane.odoo_preview_import_source import preview_fishbowl_clear_program
+from control_plane.odoo_preview_restore import preview_restore_program
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
@@ -849,6 +850,8 @@ def run_compose_post_deploy_update(
             target_definition.instance
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
+        preview_restore=run_destructive_restore
+        and runtime_key_safety_environment_class(target_definition.instance) == "preview",
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         website_settings_instance=target_definition.instance.strip().lower()
@@ -2710,6 +2713,7 @@ def _build_dokploy_data_workflow_script(
     readback_policy: IntegrationReadbackPolicy,
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
+    preview_restore: bool = False,
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
@@ -2723,6 +2727,8 @@ def _build_dokploy_data_workflow_script(
     """
     if bootstrap_missing_database and workflow_mode != "maintenance":
         raise ValueError("Only a maintenance run can bootstrap a missing database.")
+    if preview_restore and workflow_mode != "restore":
+        raise ValueError("Preview restore requires the restore workflow.")
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
     quoted_database_name = shlex.quote(database_name)
@@ -2756,6 +2762,11 @@ def _build_dokploy_data_workflow_script(
     }
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
+    workflow_command = (
+        "python3 -u -c " + shlex.quote(preview_restore_program())
+        if preview_restore
+        else 'python3 -u /volumes/scripts/run_odoo_data_workflows.py "${workflow_arguments[@]}"'
+    )
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     restore_failure_grep_arguments = " ".join(
@@ -3083,7 +3094,7 @@ docker exec \
     -e DATA_WORKFLOW_SSH_KEY="$workflow_identity_key" \
     "${{workflow_environment[@]}}" \
     "${{script_runner_container_id}}" \
-    python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
+    {workflow_command} \
     2>&1 | tee "$workflow_output_file"
 workflow_pipeline_status=("${{PIPESTATUS[@]}}")
 workflow_exit_status=${{workflow_pipeline_status[0]}}

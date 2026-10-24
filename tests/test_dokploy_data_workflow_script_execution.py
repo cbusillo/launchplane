@@ -203,6 +203,11 @@ def main(argv):
         log("workflow arguments " + " ".join(program[3:]))
         kept_key = "ODOO_RESTORE_KEPT_INTEGRATIONS"
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
+        if program[2] == "-c":
+            return subprocess.run([sys.executable, *program[1:]], env={
+                **os.environ, **exec_environment,
+                "PYTHONPATH": str(state_dir / "modules"),
+            }).returncode
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
@@ -1203,6 +1208,32 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertIn("workflow arguments --post-deploy-maintenance", run.docker_log)
 
     def test_upstream_preview_restores_even_when_a_partial_database_exists(self) -> None:
+        (self.root / "modules" / "run_odoo_data_workflows.py").write_text("""
+import os
+from pathlib import Path
+from types import SimpleNamespace
+import psycopg2
+
+def LocalServerSettings() -> SimpleNamespace:
+    return SimpleNamespace(host="database", platform_instance="preview", db_name="example_testing",
+                           data_workflow_lock_file=Path(os.environ["FAKE_DOCKER_STATE"])/".lock")
+
+class OdooDataWorkflowRunner:
+    def __init__(self, local: SimpleNamespace, upstream: object, environment: object) -> None:
+        self.local = local
+    def prepare_credentials_before_registry(self, **arguments: bool) -> None:
+        pass
+    def connect_to_db(self) -> object:
+        return psycopg2.connect()
+    def _connect_with_retry(self, database: str) -> object:
+        return psycopg2.connect()
+
+def main(arguments: list[str]) -> int:
+    runner = OdooDataWorkflowRunner(LocalServerSettings(), None, None)
+    runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    print("fixture_addon_after_boundary=true")
+    return 0
+""")
         script = _render_post_deploy_script(
             None,
             instance="pr-45",
@@ -1217,12 +1248,14 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                     FAKE_DATABASE_PRESENT=database_present,
                     FAKE_CONTAINER_PAYLOAD="payload-a",
                     FAKE_ODOO_DB=_fake_database(),
+                    PLATFORM_INSTANCE="preview",
                 )
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                 self.assertNotIn("probe database", run.docker_log)
                 self.assertNotIn("workflow arguments --bootstrap", run.docker_log)
                 self.assertNotIn("workflow arguments --post-deploy-maintenance", run.docker_log)
                 self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+                self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
                 self.assertTrue(run.readback_ran, run.docker_log)
                 self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
 

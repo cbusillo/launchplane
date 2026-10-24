@@ -514,6 +514,7 @@ def execute_odoo_preview_apply_result(
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
+        restore_upstream=profile.preview.data_transport_mode == "driver",
         provider_mutation_guard=provider_mutation_guard,
     )
     return driver_result.model_dump(mode="json")

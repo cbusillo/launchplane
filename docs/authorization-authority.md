@@ -429,8 +429,9 @@ Docker-reported backing directories, and complete container mount inventory (inc
 stopped containers). Foreign consumers, writable parent mounts, unknown backing,
 host networking or published ports refuse. Read-only administrative parent mounts
 are allowed; exact/child consumers are protected. Existing data is inspected,
-never emptied or deleted. The qualified Director refresh generates a compose with no host ports or host
-SSH mounts. Existing scoped/source-reconciler SSH behavior is unchanged. Managed integration-key filtering and exact managed-source authority
+never emptied or deleted by inspection. The qualified Director refresh generates a compose with no host ports;
+its data source and SSH mounts follow the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff).
+Managed integration-key filtering and exact managed-source authority
 remain in force; no template source allowance is inherited.
 
 The schedule receipt binds the target/project/volumes, is consumed immediately,

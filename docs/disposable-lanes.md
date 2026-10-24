@@ -652,7 +652,8 @@ filesystem namespace. Unsupported backing options, shared consumers, incomplete
 or conflicting inspection and changed target placement/resources refuse. Unrelated
 container churn and disjoint stale bind sources are not protected use. It neither
 clears existing data nor creates a positive custody report. The qualified Director
-refresh omits host SSH mounts and retains managed integration/source filtering.
+refresh follows the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff)
+and retains managed integration/source filtering.
 
 Managed settings, aliases, protection reports, overrides and key policy are frozen
 for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
