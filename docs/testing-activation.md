@@ -507,6 +507,16 @@ ContainerSpec fields and whether each is service-only, task-only or unequal.
 Unknown field names collapse to `other`; values and environment-variable names
 are never included. These diagnostics preserve the exact comparison and refusal.
 `unequal` includes list ordering differences; it does not prove a value changed.
+The guarded native runner reads the stored retained service through Docker's
+configured connection with default insertion disabled, using the CLI's negotiated
+API version. Its ID, name and positive version must match the same CLI snapshot.
+Every stored ContainerSpec input must agree with the displayed service; complete
+task comparisons use the stored inputs rather than CLI-added display defaults.
+The saved CLI TaskTemplate witness and original execution keys stay unchanged.
+This fixed read rejects incomplete, ambiguous, oversized or changed observations;
+raw inputs stay inside the runner and never enter diagnostics or persisted intent.
+Lock and fence recovery do not depend on this read. A tag-only retained template
+still needs actual immutable image proof; display defaults never satisfy it.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.

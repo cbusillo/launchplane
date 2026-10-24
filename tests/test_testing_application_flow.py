@@ -228,6 +228,10 @@ class ApplicationFlowTests(unittest.TestCase):
         self.schedule_runs: list[str] = []
         self.nodes = [{"ID": "fixture-node", "Self": True}]
         self.services: dict[str, dict[str, Any]] = {}
+        self.cli_container_defaults: dict[str, Any] = {}
+        self.stored_service_reads = 0
+        self.stored_service_view: Any = None
+        self.after_stored_service_read: Any = None
         self.tasks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
         self.images: dict[str, str] = {}
@@ -543,6 +547,7 @@ class ApplicationFlowTests(unittest.TestCase):
         }
         self.services[name] = {
             "ID": service,
+            "Version": {"Index": 1},
             "Spec": {
                 "Name": name,
                 "Mode": {"Replicated": {"Replicas": 1}},
@@ -747,7 +752,13 @@ class ApplicationFlowTests(unittest.TestCase):
         if args[:2] == ["node", "ls"]:
             value: Any = "\n".join(json.dumps(node) for node in self.nodes)
         elif args[:2] == ["service", "inspect"]:
-            value = [self.services[args[2]]]
+            displayed = deepcopy(self.services[args[2]])
+            configuration = displayed["Spec"]["TaskTemplate"]["ContainerSpec"]
+            for key, default in self.cli_container_defaults.items():
+                configuration.setdefault(key, deepcopy(default))
+            value = [displayed]
+        elif args[:1] == ["version"]:
+            value = "1.47"
         elif args[:2] == ["volume", "inspect"]:
             value = [self.storage.volumes[args[2]]]
         elif args[:2] == ["service", "ps"]:
@@ -1493,6 +1504,127 @@ class ApplicationFlowTests(unittest.TestCase):
                 identity.pop("release_tuple_id", None)
                 environment["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = json.dumps(identity)
                 configuration["Env"] = [key + "=" + value for key, value in environment.items()]
+
+    def test_retained_stored_inputs_survive_cli_defaults_and_original_reentry(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        witness = self.adapter.preflight_application_route(self.planned)
+        assert witness is not None
+        displayed = deepcopy(self.services["old-app"]["Spec"]["TaskTemplate"])
+        displayed["ContainerSpec"].update(self.cli_container_defaults)
+        self.assertEqual(witness.task_template_sha256, canonical_json_sha256(displayed))
+        original = self.planned.model_copy(update={"predecessor": witness})
+        self.assertEqual(self.adapter.preflight_application_route(original), witness)
+        result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+        self.assertGreater(routing.effect_count, 0)
+        effects = routing.effect_count
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(routing.effect_count, effects)
+
+    def test_retained_stored_service_witness_and_complete_task_inputs_are_required(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        for configuration in (
+            self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"],
+            self.tasks["old-app-task"]["Spec"]["ContainerSpec"],
+            self.containers["old-app-container"]["Config"],
+        ):
+            configuration["Env"].append("FIXTURE_INPUT=fixture-private-value")
+        witness = self.adapter.preflight_application_route(self.planned)
+        assert witness is not None
+        record = self.planned.model_copy(update={"predecessor": witness})
+        self.adapter.route_admission(record)
+        service = deepcopy(self.services["old-app"])
+        tasks = deepcopy(self.tasks)
+        for problem in (
+            "id",
+            "name",
+            "version",
+            "boolean-version",
+            "missing",
+            "display-drift",
+            "race",
+        ):
+            with self.subTest(problem=problem):
+                self.services["old-app"] = deepcopy(service)
+                self.stored_service_view = None
+                self.after_stored_service_read = None
+
+                def change(raw: Any) -> Any:
+                    if problem == "id":
+                        raw["ID"] = "foreign-service"
+                    elif problem == "name":
+                        raw["Spec"]["Name"] = "foreign-name"
+                    elif problem in {"version", "boolean-version"}:
+                        raw["Version"]["Index"] = True if problem == "boolean-version" else 2
+                    elif problem == "missing":
+                        return None
+                    elif problem == "display-drift":
+                        raw["Spec"]["TaskTemplate"]["ContainerSpec"]["Command"] = ["foreign"]
+                    return raw
+
+                self.stored_service_view = change
+                if problem == "race":
+                    self.after_stored_service_read = lambda: self.services["old-app"][
+                        "Version"
+                    ].update(Index=2)
+                with self.assertRaises(ValueError):
+                    self.adapter.route_admission(record)
+                self.assertEqual(routing.effect_count, 0)
+        self.stored_service_view = self.after_stored_service_read = None
+        for problem in (
+            "explicit-display-values",
+            "shutdown-mismatch",
+            "env-order",
+            "unknown",
+            "null",
+        ):
+            with self.subTest(problem=problem):
+                self.services["old-app"] = deepcopy(service)
+                self.tasks = deepcopy(tasks)
+                configuration = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+                task = self.tasks["old-app-task"]
+                task_configuration = task["Spec"]["ContainerSpec"]
+                if problem in {"explicit-display-values", "shutdown-mismatch"}:
+                    configuration.update(self.cli_container_defaults)
+                    if problem == "shutdown-mismatch":
+                        task["DesiredState"] = "shutdown"
+                elif problem == "env-order":
+                    task_configuration["Env"].reverse()
+                elif problem == "unknown":
+                    task_configuration["FutureInput"] = "fixture-private-value"
+                else:
+                    task_configuration["DNSConfig"] = None
+                with self.assertRaises(ValueError):
+                    self.adapter.route_admission(record)
+                self.assertEqual(routing.effect_count, 0)
+        self.services["old-app"] = service
+        self.tasks = tasks
+        self.assertEqual(self.adapter.preflight_application_route(record), witness)
+
+    def test_cli_defaults_do_not_replace_actual_immutable_image_proof(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        configuration = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+        configuration["Image"] = "ghcr.io/example/site:retained-tag"
+        task = self.tasks["old-app-task"]
+        task["Spec"]["ContainerSpec"] = deepcopy(configuration)
+        self.containers["old-app-container"]["Config"]["Image"] = configuration["Image"]
+        self.adapter.preflight_application_route(self.planned)
+        task["Status"] = {"State": "ready", "ContainerStatus": {}}
+        self.containers.pop("old-app-container")
+        with self.assertRaises(ValueError) as caught:
+            self.adapter.preflight_application_route(self.planned)
+        self.assertEqual(getattr(caught.exception, "container_fields", None), ())
+        self.assertGreater(self.stored_service_reads, 0)
+        self.assertEqual(routing.effect_count, 0)
 
     def test_retained_template_refusal_reports_fields_without_input_values(self) -> None:
         from control_plane.http_error_evidence import log_handled_error_cause
@@ -4174,16 +4306,22 @@ class ApplicationFlowTests(unittest.TestCase):
                     ).encode(),
                     stderr=b"",
                 )
-            if arguments[1:3] in (
-                ["service", "inspect"],
-                ["service", "ps"],
-                ["node", "ls"],
-                ["image", "inspect"],
-            ) or arguments[1:4] == [
-                "inspect",
-                "--type",
-                "task",
-            ]:
+            if (
+                arguments[1] == "version"
+                or arguments[1:3]
+                in (
+                    ["service", "inspect"],
+                    ["service", "ps"],
+                    ["node", "ls"],
+                    ["image", "inspect"],
+                )
+                or arguments[1:4]
+                == [
+                    "inspect",
+                    "--type",
+                    "task",
+                ]
+            ):
                 result = self.docker(arguments, **kwargs)
                 return subprocess.CompletedProcess(
                     arguments,
@@ -4194,6 +4332,51 @@ class ApplicationFlowTests(unittest.TestCase):
             return native(arguments, **kwargs)
 
         self.enterContext(patch.object(routing, "command", side_effect=command))
+        self.stored_service_reads = 0
+        self.stored_service_view = None
+        self.after_stored_service_read = None
+
+        def stdio() -> Any:
+            from io import BytesIO
+            from unittest.mock import MagicMock
+            from urllib.parse import urlsplit, parse_qs
+
+            process = MagicMock()
+            process.__enter__.return_value = process
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+
+            def request(data: bytes) -> int:
+                path = urlsplit(data.split(b" ")[1].decode())
+                service = next(
+                    row
+                    for row in self.services.values()
+                    if row["ID"] == path.path.rsplit("/", 1)[-1]
+                )
+                result = deepcopy(service)
+                if parse_qs(path.query).get("insertDefaults") != ["false"]:
+                    for key, default in self.cli_container_defaults.items():
+                        result["Spec"]["TaskTemplate"]["ContainerSpec"].setdefault(
+                            key, deepcopy(default)
+                        )
+                if self.stored_service_view is not None:
+                    result = self.stored_service_view(result)
+                body = json.dumps(result).encode()
+                process.stdout = BytesIO(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+                self.stored_service_reads += 1
+                if self.after_stored_service_read is not None:
+                    self.after_stored_service_read()
+                return len(data)
+
+            process.stdin.write.side_effect = request
+            return process
+
+        routing.docker_stdio = stdio
         profile = self.store.read_product_profile_record(self.product)
         profile.public_website = "required"
         lane = next(item for item in profile.lanes if item.instance == "testing")
@@ -4346,6 +4529,7 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertTrue(self.adapter.current().published)
 
     def test_lost_inverse_reply_settles_its_original_and_never_resumes_forward(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
         self.assert_lost_inverse_reentry()
 
     def test_proxy_restart_after_lost_inverse_reply_reuses_original_child(self) -> None:

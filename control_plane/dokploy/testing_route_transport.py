@@ -36,6 +36,7 @@ from control_plane.dokploy.native_copy_stream import (
     NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
     NATIVE_CONTAINER_SPEC_FIELDS,
 )
+from control_plane.dokploy.native_service_read import read_stored_docker_service
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -94,6 +95,8 @@ def testing_route_host_program() -> str:
         + inspect.getsource(select_testing_route_raw)
         + "\n"
         + inspect.getsource(docker_daemon_authorization_denied)
+        + "\n"
+        + inspect.getsource(read_stored_docker_service)
         + "\n"
         + inspect.getsource(parse_testing_route_fence)
         + inspect.getsource(retained_inventory_sha256)
@@ -241,6 +244,21 @@ def retained_application_backend(containers, binding, proxy_networks):
     if ((binding.get('service_id') and service['ID']!=binding['service_id'])
         or (binding.get('task_template_sha256') and template_sha256!=binding['task_template_sha256'])):
         raise RuntimeError('The admitted retained service template changed')
+    api_version=docker('version','--format','{{.Client.APIVersion}}').decode().strip()
+    stored=read_stored_docker_service(service['ID'],api_version,max_bytes=MAX_API_BYTES)
+    version=service.get('Version',{}).get('Index')
+    stored_specification=stored.get('Spec')
+    if (stored.get('ID')!=service['ID'] or type(version) is not int or version<=0
+        or type(stored.get('Version',{}).get('Index')) is not int
+        or stored['Version']['Index']!=version or not isinstance(stored_specification,dict)
+        or stored_specification.get('Name')!=binding['name']):
+        raise RuntimeError('The stored retained service witness changed')
+    stored_template=stored_specification.get('TaskTemplate')
+    stored_configuration=stored_template.get('ContainerSpec') if isinstance(stored_template,dict) else None
+    if (not isinstance(stored_configuration,dict)
+        or any(key not in configuration or configuration[key]!=value for key,value in stored_configuration.items())):
+        raise RuntimeError('Stored and displayed retained service inputs differ')
+    configuration=stored_configuration
     def environment(items):
         if not isinstance(items,list): raise RuntimeError('Retained environment is unavailable')
         values={}
