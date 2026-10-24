@@ -9,6 +9,8 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 )
 from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter, RehearsalRefused
 from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+from control_plane.contracts.odoo_rehearsal_timing import RehearsalPhaseTiming
+from control_plane.contracts.canonical_json import canonical_json_sha256
 
 from tests import test_odoo_incomplete_rehearsal_retirement as retirement
 
@@ -20,6 +22,19 @@ class FinalRecoveryRetirementTests(unittest.TestCase):
         self.addCleanup(self.later.doCleanups)
         self.fixture = self.later.fixture
         self.store = self.fixture.store
+        switched = self.later.switched.model_copy(
+            update={
+                "phase_timings": (
+                    RehearsalPhaseTiming(
+                        action="execute",
+                        attempt_sha256=canonical_json_sha256({"fixture": "timed-execute"}),
+                        observed={"source_captured": self.later.switched.created_at.isoformat()},
+                    ),
+                )
+            }
+        )
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.later.switched, switched)
+        self.later.switched = switched
         self.copies = (*self.later.switched.copies, self.fixture.copy("final_upgrade"))
 
         def host(adapter: Any, record: Any, mode: str, check: Any, **_: Any) -> Any:
@@ -88,6 +103,8 @@ class FinalRecoveryRetirementTests(unittest.TestCase):
             patch.object(type(operation), "placement", return_value=True),
         ):
             plan = operation.plan()
+            self.assertFalse(plan["disposes_recovery_snapshots"])
+            self.assertTrue(plan["disposes_initial_source_snapshot"])
             operation.adapter.request = operation.adapter.request.model_copy(
                 update={"reviewed_plan_sha256": plan["plan_sha256"]}
             )
@@ -106,8 +123,15 @@ class FinalRecoveryRetirementTests(unittest.TestCase):
         self.assertEqual(self.later.journal("preserving-retire"), original)
         current = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
         assert current is not None
-        for field in ("copies", "business_validations", "elapsed_seconds", "abandoned_validations"):
+        for field in (
+            "copies",
+            "business_validations",
+            "elapsed_seconds",
+            "abandoned_validations",
+            "phase_timings",
+        ):
             self.assertEqual(getattr(current, field), getattr(self.record, field))
+        self.assertTrue(current.phase_timings)
         replay = self.fixture.run_operation(self.preserving, "preserving-retire")
         self.assertEqual(replay.status, "replayed")
         self.assertEqual(replay.response_payload, self.preserved.response_payload)
@@ -228,6 +252,78 @@ class FinalRecoveryRetirementTests(unittest.TestCase):
             operation.adapter.host_script(
                 current.model_copy(update={"server_id": "another-server"}), "dry-run"
             )
+
+    def test_cleanup_transport_survives_removal_of_its_compose(self) -> None:
+        operation = self.operation()
+        with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=AssertionError("compose is gone"),
+            ) as compose,
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.post_deploy.run_manual_data_schedule",
+                return_value={"rehearsal_result": "native"},
+            ) as dispatch,
+        ):
+            evidence = operation.adapter.run_script(
+                self.record, operation.adapter.host_script(self.record, "dry-run"), lambda: None
+            )
+        compose.assert_not_called()
+        self.assertEqual(evidence, {"rehearsal_result": "native"})
+        self.assertEqual(dispatch.call_args.kwargs["schedule_type"], "server")
+        self.assertEqual(dispatch.call_args.kwargs["schedule_lookup_id"], self.record.server_id)
+
+    def test_placement_removal_does_not_substitute_for_publication(self) -> None:
+        operation = self.operation()
+        with (
+            patch.object(type(operation), "host", side_effect=self.host),
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            with patch.object(
+                self.store,
+                "complete_incomplete_rehearsal_retirement",
+                side_effect=RuntimeError("lost before publication"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    self.run_retirement(operation)
+            self.assertEqual(self.run_retirement(operation).status, "completed")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_provider_target_record(
+                context_name=self.record.rehearsal_id, instance_name="rehearsal"
+            )
+
+    def test_lost_publication_reply_settles_without_publishing_twice(self) -> None:
+        operation = self.operation()
+        publish = self.store.complete_incomplete_rehearsal_retirement
+
+        def lost_reply(**kwargs: Any) -> None:
+            publish(**kwargs)
+            raise TimeoutError("publication committed; reply lost")
+
+        with (
+            patch.object(type(operation), "host", side_effect=self.host),
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            with patch.object(
+                self.store, "complete_incomplete_rehearsal_retirement", side_effect=lost_reply
+            ) as publication:
+                with self.assertRaises(TimeoutError):
+                    self.run_retirement(operation)
+                self.assertEqual(self.run_retirement(operation).status, "adopted")
+                publication.assert_called_once()
 
 
 class FinalRecoveryRetirementHostTests(unittest.TestCase):

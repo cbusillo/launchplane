@@ -569,7 +569,10 @@ class IncompleteRehearsalRetirement:
                 "plan_sha256": digest,
                 "original_key_required": True,
                 "disposes_raw_capture": not self.abandoning,
-                "disposes_recovery_snapshots": bool(record.copies) and not self.abandoning,
+                "disposes_recovery_snapshots": bool(record.copies)
+                and not self.abandoning
+                and not self.reclaiming,
+                **({"disposes_initial_source_snapshot": True} if self.reclaiming else {}),
                 "recovery_tuples_produced": False,
                 "host_disposal": native,
                 **(
@@ -665,6 +668,15 @@ class IncompleteRehearsalRetirement:
 
     def later_readback(self, record: OdooUpgradeRehearsalRecord) -> dict[str, object]:
         """Rebuild the receipt; the original completed journal is never rewritten."""
+        if self.reclaiming:
+            try:
+                self.adapter.store.read_provider_target_record(
+                    context_name=record.rehearsal_id, instance_name="rehearsal"
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
         progress = record.incomplete_retirement
         if (
             record.state != "retired"

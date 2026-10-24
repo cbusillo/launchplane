@@ -1101,30 +1101,38 @@ class OdooRehearsalAdapter:
 
         api.validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        payload = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=record.compose_id
+        confirmed_retire = (
+            self.request.action == "retire" and self.request.consumer_confirmation is not None
         )
-        if payload.get("serverId") != record.server_id or not re.fullmatch(
-            re.escape(record.rehearsal_id) + r"(?:-[a-z0-9]{6})?", str(payload.get("appName") or "")
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE)
-        if payload.get("env") not in (None, "") or payload.get("composeFile") not in (None, ""):
-            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        from control_plane.dokploy_target_setup_http import (
-            fetch_dokploy_compose_domains_for_target_setup,
-        )
+        server: str | None
+        if confirmed_retire:
+            kind, lookup_id, server = "server", record.server_id, record.server_id
+        else:
+            payload = api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=record.compose_id
+            )
+            if payload.get("serverId") != record.server_id or not re.fullmatch(
+                re.escape(record.rehearsal_id) + r"(?:-[a-z0-9]{6})?",
+                str(payload.get("appName") or ""),
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE)
+            if payload.get("env") not in (None, "") or payload.get("composeFile") not in (None, ""):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            from control_plane.dokploy_target_setup_http import (
+                fetch_dokploy_compose_domains_for_target_setup,
+            )
 
-        if fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=record.compose_id
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        kind, lookup_id, _project, server = post_deploy._resolve_dokploy_schedule_runtime(
-            host=host,
-            token=token,
-            compose_id=record.compose_id,
-            compose_name=record.rehearsal_id,
-            target_payload=payload,
-        )
+            if fetch_dokploy_compose_domains_for_target_setup(
+                host=host, token=token, compose_id=record.compose_id
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            kind, lookup_id, _project, server = post_deploy._resolve_dokploy_schedule_runtime(
+                host=host,
+                token=token,
+                compose_id=record.compose_id,
+                compose_name=record.rehearsal_id,
+                target_payload=payload,
+            )
         name = "Launchplane Odoo upgrade rehearsal"
         schedule = api.find_matching_dokploy_schedule(
             host=host,
@@ -1143,7 +1151,7 @@ class OdooRehearsalAdapter:
             target_definition=source.DokployTargetDefinition(
                 context=record.rehearsal_id,
                 instance="rehearsal",
-                target_id=record.compose_id,
+                target_id="" if confirmed_retire else record.compose_id,
                 target_name=record.rehearsal_id,
             ),
             schedule_lookup_id=lookup_id,
