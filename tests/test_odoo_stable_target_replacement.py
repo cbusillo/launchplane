@@ -142,6 +142,7 @@ def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
 
 
 _UPSTREAM_RESTORE_ENV = {
+    "DATA_WORKFLOW_SSH_DIR": "/fixture/restore-ssh",
     "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
     "ODOO_UPSTREAM_HOST": "source.example.test",
     "ODOO_UPSTREAM_USER": "restore",
@@ -3802,6 +3803,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         test_instance="testing",
                         fresh_generation=fresh,
                         route_writes=route_writes,
+                        provider_extra_env=tuple(
+                            f"{key}={value}"
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        ),
                     )
                     self.assertEqual(result.deploy_status, "pass")
                     self.assertEqual(store.odoo_instance_override_record, override)
@@ -3823,8 +3829,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         post_deploy.call_args.kwargs["fresh_testing_generation"], fresh
                     )
                     post_deploy.assert_called_once()
-                    self.assertTrue(
-                        post_deploy.call_args.kwargs["fresh_restore_source_environment"]
+                    self.assertEqual(
+                        post_deploy.call_args.kwargs["fresh_restore_source_environment"],
+                        {
+                            key: value
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        },
                     )
                     self.assertFalse(
                         any(
