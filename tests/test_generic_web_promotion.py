@@ -1708,6 +1708,35 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
         self.assertNotIn("previous_run_ids", first.payload)
         self.assertNotIn("dispatch_started_at", first.payload)
 
+    def test_observation_refuses_ambiguous_and_predispatch_runs(self) -> None:
+        cases = {
+            "ambiguous": (
+                {"id": 101, "created_at": "2026-10-23T12:01:00Z"},
+                {"id": 102, "created_at": "2026-10-23T12:01:00Z"},
+            ),
+            "predispatch": ({"id": 101, "created_at": "2026-10-23T11:59:00Z"},),
+        }
+        for name, runs in cases.items():
+            with (
+                self.subTest(name),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                    return_value={"workflow_runs": list(runs)},
+                ),
+            ):
+                self.assertEqual(
+                    _latest_workflow_dispatch_run(
+                        owner="example",
+                        repo="site",
+                        workflow_id="promote.yml",
+                        ref="main",
+                        token="fixture-token",
+                        previous_run_ids=set(),
+                        min_created_at=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+                    ),
+                    {},
+                )
+
     def test_observation_accepts_run_created_in_same_second_as_dispatch(self) -> None:
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None

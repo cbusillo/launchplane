@@ -6,7 +6,6 @@ from typing import Any
 from control_plane.contracts.operation_descriptor import OperationDescriptor
 
 
-OBSERVATION_AUTHZ_ACTION = "launchplane_service.read"
 _OPERATION_DESCRIPTOR_ATTRIBUTE = "__launchplane_operation_descriptor__"
 
 

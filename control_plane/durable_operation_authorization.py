@@ -721,7 +721,6 @@ def _managed_rule_allows(
     product: str,
     context: str,
     target: AuthorizationTarget,
-    require_explicit_action: bool = False,
 ) -> bool:
     rules: tuple[Any, ...] = _rules_for_identity(policy=policy, identity=identity)
     matches = tuple(
@@ -730,8 +729,6 @@ def _managed_rule_allows(
         if rule.managed_set_id == managed_set_id and rule.managed_rule_id == managed_rule_id
     )
     if len(matches) != 1:
-        return False
-    if require_explicit_action and action not in matches[0].actions:
         return False
     return bool(
         matches[0].allows(

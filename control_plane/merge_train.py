@@ -277,16 +277,6 @@ class MergeTrainBranchUpdateResult(BaseModel):
     detail: str
 
 
-class MergeTrainRereadResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["reread", "skipped"]
-    repository: str
-    base_branch: str
-    refreshed_result: MergeTrainDryRunResult | None = None
-    detail: str
-
-
 class MergeTrainWaitResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

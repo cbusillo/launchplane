@@ -836,6 +836,55 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(retired_placeholder.binding_key, "DISCORD_TOKEN")
         self.assertEqual(retired_placeholder.status, "disabled")
 
+    def test_placeholder_retirement_preserves_more_specific_routes(self) -> None:
+        for context in ("", "discord-blue"):
+            with self.subTest(context=context):
+                store = _FakeProductConfigStore()
+                placeholder = SecretBinding(
+                    binding_id="exact-placeholder",
+                    secret_id="exact-secret",
+                    integration="runtime_environment",
+                    binding_key="DISCORD_TOKEN",
+                    context=context,
+                    status="disabled",
+                    created_at="2026-05-01T00:00:00Z",
+                    updated_at="2026-05-01T00:00:00Z",
+                )
+                more_specific = placeholder.model_copy(
+                    update={
+                        "binding_id": "instance-placeholder",
+                        "secret_id": "instance-secret",
+                        "context": "discord-blue",
+                        "instance": "prod",
+                    }
+                )
+                for binding in (placeholder, more_specific):
+                    store.write_secret_binding(binding)
+                updated_at = "2026-05-02T00:00:00Z"
+                retirements = control_plane_product_config._planned_disabled_runtime_secret_placeholder_retirements(
+                    record_store=store,
+                    configured_binding=placeholder.model_copy(
+                        update={
+                            "binding_id": "configured-binding",
+                            "secret_id": "configured-secret",
+                            "status": "configured",
+                        }
+                    ),
+                    updated_at=updated_at,
+                )
+                self.assertEqual(
+                    retirements,
+                    (
+                        placeholder.model_copy(
+                            update={
+                                "integration": f"retired:{placeholder.integration}",
+                                "updated_at": updated_at,
+                            }
+                        ),
+                    ),
+                )
+                self.assertEqual(store.secret_bindings[more_specific.binding_id], more_specific)
+
     def test_product_config_rejects_existing_configured_runtime_secret_duplicate(
         self,
     ) -> None:

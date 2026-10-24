@@ -12,6 +12,8 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
+    ManagedRuleAuthorizationError,
+    require_single_explicit_action_managed_rule_identity,
     capture_durable_operation_authorization,
     durable_operation_administrator_grant_allows,
     durable_operation_authorization_allows,
@@ -318,6 +320,30 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
                         policy_record=empty_action_record,
                     )
                 )
+
+    def test_explicit_action_rule_matching_rejects_legacy_wildcards(self) -> None:
+        action = "odoo_stable_bootstrap.execute"
+        policy = self._policy(actions=(action,))
+        identity = self._identity()
+        target = AuthorizationTarget(scope="instance", instances=("testing",))
+        matched = require_single_explicit_action_managed_rule_identity(
+            policy=policy,
+            identity=identity,
+            action=action,
+            product="odoo-tenant-cm",
+            context="cm",
+            target=target,
+        )
+        self.assertEqual(matched.managed_rule_id, policy.github_actions[0].managed_rule_id)
+        with self.assertRaises(ManagedRuleAuthorizationError):
+            require_single_explicit_action_managed_rule_identity(
+                policy=self._policy(actions=()),
+                identity=identity,
+                action=action,
+                product="odoo-tenant-cm",
+                context="cm",
+                target=target,
+            )
 
     def test_v3_managed_github_id_helpers_preserve_immutable_id_requirements(self) -> None:
         identity = GitHubHumanIdentity(

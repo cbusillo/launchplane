@@ -13,7 +13,6 @@ from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.launchplane_github_delivery import DELIVERY_GITHUB_APP_ID_KEY
 from control_plane.operation_authorization import (
-    OBSERVATION_AUTHZ_ACTION,
     bind_operation_handler,
     operation_observation_is_declared,
     register_operation_route,
@@ -47,7 +46,7 @@ def standing_policy() -> LaunchplaneAuthzPolicy:
                 token_labels=("local-owner-read",),
                 products=("launchplane",),
                 contexts=("launchplane",),
-                actions=(OBSERVATION_AUTHZ_ACTION,),
+                actions=("launchplane_service.read",),
             ),
         ),
     )
