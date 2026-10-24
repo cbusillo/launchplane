@@ -215,7 +215,11 @@ function OwnerPreviewReviewRoute({
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
-          onDecided={setReview}
+          onDecided={(decided) => setReview((current) => ({
+            ...decided,
+            pull_request_title: current?.pull_request_title ?? "",
+            client_test_notes: current?.client_test_notes ?? "",
+          }))}
           onRefresh={() => loadReview()}
         />
         </>

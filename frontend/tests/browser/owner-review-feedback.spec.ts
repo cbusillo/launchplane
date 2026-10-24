@@ -158,6 +158,9 @@ test("the Client sees the change title and what to check before deciding", { tag
   await expect(page.getByRole("link", { name: "Topics to discuss" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-review-notes.png"), fullPage: true });
+  await page.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect(page.getByLabel("Recorded decision")).toContainText("Accepted");
+  await expect(card.locator(".release-review-notes li")).toHaveCount(2);
 });
 
 for (const [scenario, message] of [

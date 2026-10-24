@@ -350,7 +350,6 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before.json()["pull_request_title"], "Show the repair price")
         self.assertEqual(before.json()["client_test_notes"], "Open the price list.")
         self.assertEqual(written.status_code, 200)
-        self.assertEqual(written.json()["client_test_notes"], "Open the price list.")
         latest = after.json()["latest_decision"]
         self.assertEqual(latest["decision"], "changes_requested")
         self.assertEqual(latest["reason"], "The price is wrong.")

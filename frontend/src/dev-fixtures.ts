@@ -2635,8 +2635,8 @@ export function productReviewForFixture(
     repository: "example/control-plane",
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
-    pull_request_title: scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
-    client_test_notes: {
+    pull_request_title: latestDecision || scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    client_test_notes: latestDecision ? "" : {
       "missing-notes": "",
       "notes-unavailable": "",
       "nothing-to-test": "Nothing for the Client to test: CI tests only.",

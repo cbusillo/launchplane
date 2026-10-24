@@ -28,7 +28,7 @@ from control_plane.product_review import (
     source_control_pull_request_url,
     viewer_is_product_owner,
 )
-from control_plane.release_review import PullRequestNotes
+from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
 
@@ -176,12 +176,12 @@ def register_product_review_routes(
         pull_request_number: int,
         trace_id: str,
         decision_id: str = "",
+        notes: PullRequestNotes = UNREAD_PULL_REQUEST_NOTES,
     ) -> ProductReviewResponse:
         preview = resolve_serving_preview(
             store=store, profile=profile, pull_request_number=pull_request_number
         )
         viewer_is_owner = viewer_is_product_owner(profile=profile, identity=identity)
-        notes = dependencies.read_pull_request_notes(profile, pull_request_number, trace_id)
         if not profile.owner.is_set:
             cannot_decide_reason = _NO_OWNER_REASON
         elif not viewer_is_owner:
@@ -240,6 +240,7 @@ def register_product_review_routes(
             pull_request_number=pull_request,
             trace_id=trace_id,
             decision_id=decision_id,
+            notes=dependencies.read_pull_request_notes(profile, pull_request, trace_id),
         )
 
     def retry_product_review_feedback(
