@@ -128,6 +128,8 @@ Launchplane accepts a product-review decision.
 A preview invitation's first visible line names **Change review (preview)** and
 asks whether this one change is exactly right. It links that change's preview
 and explains that Accept approves the change while nothing goes live yet.
+The review page shows the pull request's title and its Client test notes under
+**What to check**, read from the pull request when the page loads.
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub

@@ -387,7 +387,9 @@ from control_plane.http_routes.release_review import (
 )
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
+    PullRequestNotes,
     current_release_review,
+    read_pull_request_notes,
 )
 from control_plane.release_review_record import publish_release_decision
 from control_plane.release_invitation import publish_release_invitation, adopt_release_invitation
@@ -4439,6 +4441,9 @@ def create_launchplane_fastapi_app(
     github_app_webhook_handler: GitHubAppWebhookHandler | None = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
+    product_review_notes_reader: (
+        Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes] | None
+    ) = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
@@ -29927,6 +29932,15 @@ def create_launchplane_fastapi_app(
             publish_owner_review_status=lambda store, profile, pull_request_number: (
                 resolved_owner_review_status_publisher.publish(
                     store=store, profile=profile, pull_request_number=pull_request_number
+                )
+            ),
+            read_pull_request_notes=product_review_notes_reader
+            or (
+                lambda profile, pull_request_number, trace_id: read_pull_request_notes(
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    trace_id=trace_id,
                 )
             ),
         ),
