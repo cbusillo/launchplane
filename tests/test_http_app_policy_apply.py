@@ -124,6 +124,20 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
             },
             raw_body=b"not-json",
         )
+        from tests.test_reviewed_workflow_rule_retirement import (
+            retirement_policy,
+            retirement_proposal,
+        )
+
+        retirement_response = await _asgi_request(
+            github_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=retirement_proposal(retirement_policy())
+            .reconcile_request()
+            .model_dump(mode="json"),
+        )
 
         terminal_policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -192,6 +206,10 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
 
         self.assertEqual(github_response.status_code, 400)
         self.assertEqual(github_response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(retirement_response.status_code, 400)
+        self.assertEqual(
+            retirement_response.json()["error"]["code"], "reviewed_policy_proposal_required"
+        )
         self.assertEqual(terminal_response.status_code, 403)
         self.assertEqual(terminal_response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(local_response.status_code, 403)

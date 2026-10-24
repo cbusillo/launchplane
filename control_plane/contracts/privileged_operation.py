@@ -31,6 +31,7 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.workflow_rule_retirement import WorkflowRuleRetirementRequest
 from control_plane.contracts.backup_policy_proposal import (
     BackupPolicyProposalInput,
     BackupPolicyHumanEvidence,
@@ -256,7 +257,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    managed_set_id: str = Field(min_length=1, max_length=96)
+    managed_set_id: str = Field(max_length=96)
     desired_policy: LaunchplaneAuthzPolicy
     schema_migration: Literal["reject", "migrate_v2_to_v3"] = Field(
         default="reject",
@@ -272,6 +273,11 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             exclude_if=lambda value: value is None,
             json_schema_extra={"x-launchplane-optional-response": True},
         )
+    )
+    workflow_rule_retirement: WorkflowRuleRetirementRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
     @model_validator(mode="after")
@@ -293,6 +299,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             reason=reason,
             related_issue=related_issue,
             desired_policy=self.desired_policy,
+            workflow_rule_retirement=self.workflow_rule_retirement,
         )
         object.__setattr__(self, "managed_set_id", reconcile_request.managed_set_id)
         object.__setattr__(self, "desired_policy", reconcile_request.desired_policy)
@@ -318,6 +325,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             related_issue=self.related_issue,
             reviewed_plan_sha256=reviewed_plan_sha256,
             desired_policy=self.desired_policy,
+            workflow_rule_retirement=self.workflow_rule_retirement,
         )
 
 

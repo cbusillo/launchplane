@@ -674,7 +674,10 @@ def _build_privileged_operation_semantic_review(
         else:
             authz_review_title = "Managed authorization policy review"
             authz_change_summary = (
-                "Managed authorization rules would be reconciled by exact policy CAS."
+                "Only the selected workflow rules would be removed. All other authorization "
+                "rules, administrator access and policy settings remain unchanged."
+                if record.request.workflow_rule_retirement is not None
+                else "Managed authorization rules would be reconciled by exact policy CAS."
             )
         return PrivilegedOperationSemanticReview(
             operation_id=record.operation_id,
@@ -710,10 +713,14 @@ def _build_privileged_operation_semantic_review(
                     if is_terminal_enrollment_requester
                     else "The terminal connection-request access added by this setup."
                     if is_terminal_enrollment_requester_removal
+                    else "Bounded to the exact selected workflow-rule fingerprints."
+                    if record.request.workflow_rule_retirement is not None
                     else "Bounded to one managed authorization rule set."
                 ),
                 affected_count=(
-                    diff.added_rule_count
+                    diff.removed_rule_count
+                    if record.request.workflow_rule_retirement is not None
+                    else diff.added_rule_count
                     + diff.adopted_rule_count
                     + diff.updated_rule_count
                     + diff.removed_rule_count
