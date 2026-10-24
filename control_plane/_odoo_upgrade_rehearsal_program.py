@@ -102,13 +102,7 @@ def bounded_capture(arguments,path,bound,*,filestore=False):
 
 
 def save(path,payload):
-    temporary=path.with_suffix('.pending')
-    with temporary.open('x') as output:
-        os.chmod(temporary,0o600)
-        json.dump(payload,output,sort_keys=True)
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(temporary,path)
+    write_snapshot_receipt(path,payload)
 
 
 def phase_stamp(spec,boundary,*,at=None):

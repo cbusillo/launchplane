@@ -322,6 +322,9 @@ class TestingDrillTests(TestingDrillScenario):
         current = current.model_copy(update={"completed_at": stamp})
         self.store.write_fresh_odoo_testing_generation(current)
         previous = CleanTestingSnapshot(
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
             product=profile.product,
             context=self.context,
             snapshot_id="e" * 64,

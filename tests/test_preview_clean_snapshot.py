@@ -8,13 +8,17 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 from typing import Any
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
 from control_plane.dokploy.api import validate_dokploy_schedule_script
+from control_plane.dokploy import api, post_deploy
+from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 
 
@@ -40,6 +44,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         }
         (self.source / "receipt.json").write_text(json.dumps(receipt))
         self.snapshot = CleanTestingSnapshot(
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
             product="example-odoo",
             context="example",
             server_id="fixture-server",
@@ -61,8 +68,10 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.calls: list[list[str]] = []
         self.present = False
         self.sanitized = True
+        self.runner_failure = False
         self.paused = False
-        self.containers = {
+        self.volume_created_at = datetime.now(timezone.utc).isoformat()
+        self.containers: dict[str, dict[str, Any]] = {
             role: {
                 "Id": role,
                 "Config": {
@@ -117,6 +126,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         }
         script = build_preview_clean_snapshot_script(**arguments)
         validate_dokploy_schedule_script({"script": script, "appName": self.project})
+        return self.execute_script(script)
+
+    def execute_script(self, script: str) -> str:
         program = script.partition("<<'LP_PREVIEW_SNAPSHOT'\n")[2].rsplit(
             "\nLP_PREVIEW_SNAPSHOT", 1
         )[0]
@@ -165,6 +177,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                         "Driver": "local",
                         "Options": {},
                         "Mountpoint": str(self.volumes[arguments[-1]]),
+                        "CreatedAt": self.volume_created_at,
                         "Labels": {"com.docker.compose.project": self.project},
                     }
                 ]
@@ -182,6 +195,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 output = b"integration_readback_ok=true" if self.sanitized else b""
             elif kwargs.get("input"):
                 self.assertFalse(self.paused)
+                if self.runner_failure:
+                    return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
+                self.present = True
                 output = b"\n".join(
                     key + b"=true"
                     for key in (
@@ -202,6 +218,61 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         )
         self.assertIn(["docker", "start", "web"], self.calls)
 
+    def test_service_schedule_uses_the_snapshot_without_resolving_an_upstream(self) -> None:
+        environment = {
+            "DOCKER_IMAGE_REFERENCE": self.image,
+            "ODOO_DB_NAME": self.database,
+            "ODOO_DATA_VOLUME": "preview-data",
+            "ODOO_DB_VOLUME": "preview-db",
+            "ODOO_LOG_VOLUME": "preview-logs",
+            "ODOO_INSTALL_MODULES": "website",
+        }
+
+        def schedule(**arguments: Any) -> dict[str, str]:
+            output = self.execute_script(arguments["schedule_payload"]["script"])
+            logs: list[api.JsonValue] = list(output.splitlines())
+            return {
+                "log_available": "true",
+                **post_deploy.extract_odoo_post_deploy_readback_markers({"logs": logs}),
+            }
+
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"env": api.serialize_dokploy_env_text(environment)},
+            ),
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            patch.object(
+                post_deploy,
+                "_resolve_dokploy_schedule_runtime",
+                return_value=(
+                    "dokploy-server",
+                    self.snapshot.server_id,
+                    self.project,
+                    self.snapshot.server_id,
+                ),
+            ),
+            patch.object(
+                post_deploy,
+                "resolve_upstream_restore_workflow_environment",
+                side_effect=AssertionError("A snapshot preview cannot resolve a production reader"),
+            ),
+            patch.object(post_deploy, "INTEGRATION_READBACK_PROGRAM", "fixture-readback"),
+            patch.object(post_deploy, "run_manual_data_schedule", side_effect=schedule),
+        ):
+            evidence = post_deploy.run_compose_post_deploy_update(
+                host="https://provider.invalid",
+                token="fixture",
+                target_definition=DokployTargetDefinition(
+                    context=self.snapshot.context, instance="pr-23", target_id="fixture-preview"
+                ),
+                env_file=None,
+                clean_preview_snapshot=self.snapshot,
+            )
+        self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
+        self.assertIn(["docker", "start", "web"], self.calls)
+
     def test_existing_preview_data_and_staff_edits_are_never_overwritten(self) -> None:
         self.present = True
         with self.assertRaises(RuntimeError):
@@ -213,11 +284,99 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.present = False
+        self.sanitized = True
         (self.source / "database.dump").write_bytes(b"corrupted snapshot")
         self.calls.clear()
         with self.assertRaises(RuntimeError):
             self.run_script()
-        self.assertFalse(self.calls)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
+    def test_failed_copy_retries_only_redundant_frozen_filestore(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.runner_failure = False
+        self.run_script(snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64}))
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
+        self.run_script()
+        shutil.rmtree(self.data / "filestore")
+        self.present = False
+        self.volume_created_at = datetime.now(timezone.utc).isoformat()
+        self.calls.clear()
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_failed_copy_preserves_files_added_outside_its_snapshot(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        extra = self.data / "filestore" / self.database / "client-edit"
+        extra.write_bytes(b"keep this")
+        self.runner_failure = False
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertEqual(extra.read_bytes(), b"keep this")
+
+    def test_failed_readback_resumes_database_without_recloning_staff_edits(self) -> None:
+        self.sanitized = False
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment.write_bytes(b"preview edit")
+        self.calls.clear()
+        self.sanitized = True
+        self.run_script()
+        self.assertEqual(attachment.read_bytes(), b"preview edit")
+        self.assertFalse(
+            any(call[0] == "cp" or call[:2] == ["docker", "cp"] for call in self.calls)
+        )
+
+    def test_shared_guard_refuses_privilege_and_snapshot_mount_exposure(self) -> None:
+        self.containers["script-runner"]["HostConfig"] = {"Privileged": True}
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.containers["script-runner"].pop("HostConfig")
+        self.containers["script-runner"]["Mounts"].append(
+            {
+                "Type": "bind",
+                "Source": str(self.source.parent),
+                "Destination": "/snapshot",
+                "RW": False,
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_full_copy_headroom_is_checked_before_stopping_preview(self) -> None:
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)):
+            with self.assertRaises(RuntimeError):
+                self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_obsolete_snapshot_retirement_preserves_incomplete_reader(self) -> None:
+        library: dict[str, Any] = {}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        root = self.source.parent
+        attempts = root / "preview-attempts"
+        attempts.mkdir()
+        attempt = attempts / "fixture.json"
+        payload: dict[str, Any] = {"snapshot": self.snapshot.model_dump(mode="json")}
+        attempt.write_text(json.dumps(payload))
+        spec = {
+            "copy_binding_sha256": "b" * 64,
+            "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+        }
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.is_dir())
+            payload["completed"] = True
+            attempt.write_text(json.dumps(payload))
+            library["retire_clean_snapshots"](spec)
+        self.assertFalse(self.source.exists())
 
     def test_production_reader_and_cross_host_fallback_are_refused(self) -> None:
         for updates in (

@@ -13312,6 +13312,108 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("The published snapshot differs from its product lane.")
         return snapshot
 
+    def clean_snapshot_retirement_candidates(
+        self, product: str, context: str, server_id: str, *, now: datetime | None = None
+    ) -> tuple["CleanTestingSnapshot", ...]:
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+        )
+        from control_plane.odoo_preview_apply_http import (
+            ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            ODOO_PREVIEW_APPLY_ROUTE,
+        )
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
+
+        observed = now or datetime.now(timezone.utc)
+        with self._session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(
+                        or_(
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path == CLEAN_SNAPSHOT_ROUTE,
+                                LaunchplaneIdempotencyRow.scope == CLEAN_SNAPSHOT_SCOPE,
+                            ),
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path
+                                == ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+                                LaunchplaneIdempotencyRow.payload["response_payload"]["result"][
+                                    "dry_run_plan"
+                                ]["clean_snapshot"]["snapshot_id"]
+                                .as_string()
+                                .is_not(None),
+                                LaunchplaneIdempotencyRow.payload["response_payload"]["result"][
+                                    "plan_provenance"
+                                ]["expires_at"].as_string()
+                                >= observed.isoformat(),
+                            ),
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                                LaunchplaneIdempotencyRow.state.in_(
+                                    ("running", "reconcile_required")
+                                ),
+                            ),
+                        )
+                    )
+                    .limit(10001)
+                )
+            )
+            if len(rows) > 10000:
+                return ()
+            captures = []
+            pinned: set[str] = set()
+            for row in rows:
+                record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                if (
+                    record.route_path == CLEAN_SNAPSHOT_ROUTE
+                    and record.scope == CLEAN_SNAPSHOT_SCOPE
+                ):
+                    snapshot = CleanTestingSnapshot.model_validate(record.response_payload)
+                    if (snapshot.product, snapshot.context, snapshot.server_id) != (
+                        product,
+                        context,
+                        server_id,
+                    ):
+                        continue
+                    if record.idempotency_key.startswith("capture:"):
+                        captures.append(snapshot)
+                    else:
+                        pinned.add(snapshot.snapshot_id)
+                elif record.route_path == ODOO_PREVIEW_APPLY_INPUTS_ROUTE:
+                    plan = OdooPreviewApplyInputsResult.model_validate(
+                        record.response_payload.get("result")
+                    )
+                    if plan.plan_provenance is None:
+                        return ()
+                    if (
+                        plan.plan_provenance.expires_at > observed
+                        and plan.dry_run_plan.clean_snapshot is not None
+                    ):
+                        pinned.add(plan.dry_run_plan.clean_snapshot.snapshot_id)
+                elif record.state in {"running", "reconcile_required"}:
+                    intent = self._original_mutation_intent(session, record)
+                    if not intent:
+                        return ()
+                    pending = [intent]
+                    while pending:
+                        item = pending.pop()
+                        if isinstance(item, dict):
+                            snapshot_id = item.get("snapshot_id")
+                            if isinstance(snapshot_id, str):
+                                pinned.add(snapshot_id)
+                            pending.extend(item.values())
+                        elif isinstance(item, list):
+                            pending.extend(item)
+            captures.sort(
+                key=lambda item: datetime.fromisoformat(item.captured_at.replace("Z", "+00:00")),
+                reverse=True,
+            )
+            pinned.update(item.snapshot_id for item in captures[:2])
+            return tuple(item for item in captures if item.snapshot_id not in pinned)
+
     def write_clean_testing_snapshot(self, record: "CleanTestingSnapshot") -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)

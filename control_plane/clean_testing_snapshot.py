@@ -30,6 +30,7 @@ class CleanTestingSnapshot(BaseModel):
     database_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     filestore_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     captured_at: str
+    storage_budget: OdooTestingDrillStorageBudget
 
     @field_validator("captured_at")
     @classmethod
@@ -85,6 +86,7 @@ def clean_snapshot_from_evidence(
     server_id: str,
     evidence: dict[str, str],
     captured_at: str,
+    storage_budget: OdooTestingDrillStorageBudget,
 ) -> CleanTestingSnapshot:
     if any(
         evidence.get(key) != "true"
@@ -104,6 +106,7 @@ def clean_snapshot_from_evidence(
         database_sha256=evidence.get("clean_snapshot_database_sha256", ""),
         filestore_sha256=evidence.get("clean_snapshot_filestore_sha256", ""),
         captured_at=captured_at,
+        storage_budget=storage_budget,
     )
 
 
@@ -151,6 +154,8 @@ def completed_operation_snapshot(
         }
         server_id = evidence.get("clean_snapshot_server_id", "")
         captured_at = generation.completed_at
+    if generation.drill_storage_budget is None:
+        raise ValueError("Clean snapshot publication lacks reviewed storage headroom.")
     return clean_snapshot_from_evidence(
         product=operation.product,
         context=operation.context,
@@ -158,4 +163,5 @@ def completed_operation_snapshot(
         server_id=server_id,
         evidence=evidence,
         captured_at=captured_at,
+        storage_budget=generation.drill_storage_budget,
     )

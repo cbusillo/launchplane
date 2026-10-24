@@ -459,6 +459,8 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         site_odoo_version: str = "",
         preview_payload: str = "",
         website_bootstrap: bool = False,
+        snapshot_enabled: bool = False,
+        template_extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -484,7 +486,8 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                         )
                     }
                 )
-            store.write_product_profile_record(profile)
+            if snapshot_enabled:
+                profile.preview.clean_testing_snapshot = True
             if website_bootstrap:
                 store.write_odoo_instance_override_record(
                     OdooInstanceOverrideRecord(
@@ -514,7 +517,11 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                         scope="instance",
                         context="cm",
                         instance="testing",
-                        env={"ODOO_DB_USER": "odoo", "ODOO_VERSION": site_odoo_version},
+                        env={
+                            "ODOO_DB_USER": "odoo",
+                            "ODOO_VERSION": site_odoo_version,
+                            **(template_extra or {}),
+                        },
                         updated_at="2026-05-09T12:30:00Z",
                         source_label="test",
                     )
@@ -543,6 +550,30 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                     manifest=manifest,
                     database_url=database_url,
                 ).values
+
+    def test_snapshot_preview_never_receives_template_source_connections(self) -> None:
+        from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+
+        imported_key = config_parameter_runtime_key("fishbowl.password")
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            site_odoo_version="19.0",
+            snapshot_enabled=True,
+            template_extra={
+                "ODOO_UPSTREAM_HOST": "production.invalid",
+                "ODOO_UPSTREAM_PASSWORD": "source-secret",
+                "DATA_WORKFLOW_SSH_DIR": "/private-reader",
+                "OPENUPGRADE_ENABLED": "true",
+                imported_key: "import-secret",
+            },
+        )
+        self.assertFalse(
+            any(key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_")) for key in values)
+        )
+        self.assertNotIn(imported_key, values)
+        self.assertEqual(values["BOOTSTRAP"], "false")
+        self.assertEqual(values["OPENUPGRADE_ENABLED"], "false")
+        self.assertEqual(values["ODOO_MAX_CRON_THREADS"], "0")
 
     def test_artifact_odoo_version_supplies_a_declared_key_the_site_lacks(self) -> None:
         values = self._service_environment(manifest_odoo_version="19.0")

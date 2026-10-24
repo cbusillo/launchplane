@@ -8,9 +8,9 @@ Previews read a frozen, sanitized snapshot captured immediately after a
 successful refresh, before testing serves staff.
 
 The source contract is tracked in [#4756](https://github.com/cbusillo/launchplane/issues/4756).
-The preview API/deployment hooks and CM import-completion integration remain
-prerequisites until that issue's implementation is complete. This page does
-not establish live activation or qualify any product's data source.
+The preview API binds its selected snapshot into the existing issued plan.
+CM import-completion integration remains a prerequisite on [#4753](https://github.com/cbusillo/launchplane/issues/4753).
+This page does not establish live activation or qualify any product's data source.
 
 ## Refresh and publication
 
@@ -23,7 +23,7 @@ existing admission checks.
 `preview.clean_testing_snapshot` opts a product into clean snapshots. It
 requires the testing lane's reviewed `odoo_testing_drill_storage` budget.
 Scheduled refresh remains separately enabled by `odoo_testing_drill_enabled`.
-Snapshot products are staggered inside the scheduler's nightly window.
+Snapshot products are staggered inside the scheduler's 5:00–6:00 AM UTC nightly window.
 A missed slot can catch up when the scheduler resumes. The same
 existing worker executes the operation.
 
@@ -50,7 +50,11 @@ is cloned or copied into exclusively owned storage with the preview writer
 stopped and runner paused. It restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and
 connection-readback boundary before starting web. Existing preview databases
-and Client edits are preserved.
+and Client edits are preserved. A failed initial clone can resume using its
+private target-bound restore receipt. If a failed import left no database,
+filestore replacement requires proof that every remaining byte is also in the
+retained frozen source. Unknown files are preserved and execution refuses.
+Existing successfully deployed previews keep their own data on later builds.
 
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. The #4057 capability provides filestore reflinks where the
@@ -59,10 +63,11 @@ database copy-on-write.
 
 ## Product transition and custody
 
-OPW first needs its current preview repair, the Director's actual testing
-hold lift and the existing source/artifact/custody qualification. A successful
-testing refresh can then publish the first clean snapshot before fresh
-previews switch to it. This changes no production key or access grant.
+OPW's preview repair landed in PR4734. Its transition still needs the Director's actual testing
+hold lift and the existing source/artifact/custody qualification. After source deployment, opt the product in and run its first admitted
+refresh. New preview creation refuses until that refresh publishes a clean
+snapshot. Existing preview data remains intact. Enable the existing daily
+drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
 
 CM first needs CMSEED's qualified Fishbowl/RepairShopr fill and supported
 sanitizer/import-completion execution. Capture must attach to that completion;
@@ -71,7 +76,11 @@ production reader is the later source once CM runs its business on Odoo.
 Existing Client-used previews remain protected.
 
 Snapshot bytes remain in private host custody, independently of testing or
-preview volume retirement. No new automatic deletion is introduced. Reviewed
-headroom and the capture bound refuse a refresh before filling the snapshot
-filesystem; refusal preserves the last usable source. Retirement or a wider
-retention policy requires its own proved custody and active-reader handling.
+preview volume retirement. Cleanup keeps the published source and its predecessor,
+unexpired issued preview plans, active or uncertain preview operations, and
+incomplete host clone attempts. Only obsolete copies with matching immutable
+service receipts may be removed. Host copying and retirement share a lock.
+Unknown reader evidence preserves copies. Reviewed headroom is checked before
+testing stops; insufficient capacity keeps the previous source usable.
+PostgreSQL restore and full filestore-copy headroom are also required for a new
+preview. Neither cleanup path removes testing originals, backups or unknown files.

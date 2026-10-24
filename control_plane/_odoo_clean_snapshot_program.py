@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 import stat
+import fcntl
+import shutil
 
 
 def clean_snapshot_root(snapshot_id, *, create=True):
@@ -56,6 +58,39 @@ def verified_clean_snapshot(snapshot_id):
         or snapshot_tree_digest(path / 'filestore') != receipt.get('filestore_sha256')):
         raise RuntimeError('Clean snapshot integrity readback failed')
     return path, receipt
+
+
+def retire_clean_snapshots(spec):
+    root = clean_snapshot_root(spec['copy_binding_sha256']).parent
+    with (root / 'snapshot.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pinned = set()
+        attempts = root / 'preview-attempts'
+        if attempts.exists():
+            if attempts.is_symlink():
+                raise RuntimeError('Snapshot reader custody is aliased')
+            for attempt in attempts.iterdir():
+                if attempt.is_symlink() or not attempt.is_file() or attempt.stat().st_size > 8192:
+                    raise RuntimeError('Snapshot reader custody is unavailable')
+                payload = json.loads(attempt.read_text())
+                if not payload.get('completed'):
+                    pinned.add(payload['snapshot']['snapshot_id'])
+        for snapshot in spec.get('clean_snapshot_retirements', []):
+            snapshot_id = snapshot['snapshot_id']
+            if snapshot_id == spec['copy_binding_sha256'] or snapshot_id in pinned:
+                continue
+            path = clean_snapshot_root(snapshot_id)
+            if not path.exists():
+                continue
+            path, receipt = verified_clean_snapshot(snapshot_id)
+            if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
+                raise RuntimeError('Obsolete snapshot differs from its immutable service receipt')
+            shutil.rmtree(path)
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def capture_clean_snapshot(spec, containers):

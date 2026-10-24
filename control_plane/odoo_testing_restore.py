@@ -11,7 +11,7 @@ from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LI
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from typing import Literal, TypeVar, TypedDict
+from typing import Literal, TypeVar, TypedDict, NotRequired
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
@@ -435,6 +435,7 @@ class FreshRestoreScriptArguments(TypedDict):
     runtime_environment: dict[str, str]
     clear_stale_lock: bool
     data_workflow_lock_path: str
+    clean_snapshot_retirements: NotRequired[list[dict[str, object]]]
 
 
 def build_fresh_testing_restore_script(
@@ -451,6 +452,7 @@ def build_fresh_testing_restore_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> str:
     spec = fresh_testing_restore_spec(
         generation=generation,
@@ -465,6 +467,7 @@ def build_fresh_testing_restore_script(
         clear_stale_lock=clear_stale_lock,
         data_workflow_lock_path=data_workflow_lock_path,
         native_capture=native_capture,
+        clean_snapshot_retirements=clean_snapshot_retirements,
     )
     return render_fresh_testing_restore_spec(spec)
 
@@ -534,6 +537,7 @@ def fresh_testing_restore_spec(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     from control_plane.dokploy.compose import (
         ODOO_DATABASE_DATA_DIRECTORY,
@@ -551,6 +555,7 @@ def fresh_testing_restore_spec(
         readback_spec=readback_spec,
     )
     spec = {
+        "clean_snapshot_retirements": clean_snapshot_retirements or [],
         "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
@@ -1055,6 +1060,8 @@ def restore_main():
     if present not in {"0", "1"}:
         raise RuntimeError("Fresh testing database inventory is ambiguous")
     resume = present == "1"
+    if gen.get('clean_snapshot_enabled'):
+        retire_clean_snapshots(spec)
     staged_bytes = 0
     assembly_bytes = 0
     if not resume and gen.get('drill_storage_budget') and gen.get('source_mode') == 'container-export':

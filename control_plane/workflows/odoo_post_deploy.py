@@ -535,6 +535,7 @@ def execute_odoo_post_deploy(
                 fresh_testing_generation=fresh_testing_generation,
                 fresh_restore_source_environment=fresh_restore_source_environment,
                 prepare_native_source=native_preparer,
+                database_url=getattr(record_store, "database_url", None),
             )
             or {}
         )
