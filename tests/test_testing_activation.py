@@ -130,6 +130,33 @@ class ComposeQualificationTests(unittest.TestCase):
 
 
 class ActivationTests(unittest.TestCase):
+    def test_nested_source_sites_keep_each_exception_raise_location(self) -> None:
+        from traceback import walk_tb
+        from control_plane import http_error_evidence
+        from control_plane.contracts import canonical_json
+
+        payload: object = 0.5
+        for _ in range(12):
+            payload = [payload]
+        try:
+            canonical_json.canonical_json_bytes(payload)
+        except ValueError as root:
+            root_line = list(walk_tb(root.__traceback__))[-1][1]
+            try:
+                canonical_json.canonical_json_bytes(object())
+            except TypeError as error:
+                outer_line = list(walk_tb(error.__traceback__))[-1][1]
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(error, "nested-source-test")
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(
+            evidence["sites"],
+            [
+                {"module": canonical_json.__name__, "line": outer_line},
+                {"module": canonical_json.__name__, "line": root_line},
+            ],
+        )
+
     def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
         import asyncio
         from control_plane import http_error_evidence
@@ -142,7 +169,10 @@ class ActivationTests(unittest.TestCase):
         private = "private-provider-diagnostic-sentinel"
 
         def fail_dependency() -> None:
-            canonical_json.canonical_json_sha256({private: 0.5})
+            try:
+                canonical_json.canonical_json_sha256({private: 0.5})
+            except ValueError as error:
+                raise RuntimeError(private) from error
 
         bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
         app = create_launchplane_fastapi_app(
