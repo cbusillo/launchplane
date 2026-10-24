@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from types import SimpleNamespace
+import click
 from unittest.mock import Mock, patch
 
 from control_plane import secrets as control_plane_secrets
@@ -27,6 +29,7 @@ from control_plane.odoo_preview_apply_http import (
     _odoo_preview_service_environment,
     issue_odoo_preview_apply_plan,
     preview_uses_upstream_restore,
+    preview_has_completed_restore,
     validate_odoo_preview_issued_plan,
 )
 from control_plane.provider_operations import DurableProviderOperationResult
@@ -123,6 +126,89 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        plan = OdooPreviewApplyEnvelope.model_validate(
+            _refresh_payload()
+        ).apply.dry_run_plan.model_copy(update={"compose_ref": "compose-fixture"})
+        preview = SimpleNamespace(preview_id="preview-fixture", state="active")
+        identity = RuntimeIdentity(
+            product=profile.product,
+            context=profile.preview.context,
+            instance=plan.preview_slug,
+            environment_kind="preview",
+            deployment_record_id="original-operation",
+            artifact_id="original-artifact",
+            source_git_ref=_HEAD_SHA,
+            preview_id=preview.preview_id,
+            preview_generation_id="original-generation",
+        )
+        generation = SimpleNamespace(
+            preview_id=preview.preview_id,
+            generation_id=identity.preview_generation_id,
+            runtime_identity=identity,
+            state="superseded",
+        )
+        result = {
+            "status": "pass",
+            "operation": "refresh",
+            "product": profile.product,
+            "repository": profile.repository,
+            "preview_slug": plan.preview_slug,
+            "preview_url": plan.preview_url,
+            "domain_host": plan.domain_host,
+            "compose_id": plan.compose_ref,
+            "compose_name": plan.compose_name,
+            "module_install_update_status": "pass",
+            "module_install_update_evidence": {"odoo_restore_completed": "true"},
+        }
+        operation = SimpleNamespace(
+            state="completed",
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            response_status_code=202,
+            response_payload={
+                "records": {
+                    "preview_id": preview.preview_id,
+                    "generation_id": generation.generation_id,
+                },
+                "result": result,
+            },
+        )
+        store = SimpleNamespace(
+            list_preview_generation_records=Mock(return_value=[generation]),
+            read_idempotency_record_by_id=Mock(return_value=operation),
+        )
+
+        def retained() -> bool:
+            return preview_has_completed_restore(
+                record_store=store, profile=profile, plan=plan, pr_number=42
+            )
+
+        with patch("control_plane.odoo_preview_apply_http.find_preview_record", return_value=None):
+            self.assertFalse(retained())
+        with patch(
+            "control_plane.odoo_preview_apply_http.find_preview_record", return_value=preview
+        ):
+            self.assertTrue(retained())
+            changes: tuple[dict[str, object], ...] = (
+                {"compose_id": "replacement-compose"},
+                {"status": "fail"},
+                {"module_install_update_evidence": {}},
+                {"preview_slug": "other-preview"},
+            )
+            for change in changes:
+                operation.response_payload["result"] = {**result, **change}
+                with self.subTest(change=change), self.assertRaises(click.ClickException):
+                    retained()
+            operation.response_payload["result"] = result
+            store.read_idempotency_record_by_id.return_value = None
+            with self.assertRaises(click.ClickException):
+                retained()
+
     def test_driver_selects_upstream_restore_only_when_it_has_an_upstream_source(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         for mode in ("none", "driver"):

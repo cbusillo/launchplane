@@ -1133,6 +1133,7 @@ def execute_odoo_preview_dokploy_apply(
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
     restore_upstream: bool = False,
+    preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
@@ -1182,6 +1183,7 @@ def execute_odoo_preview_dokploy_apply(
         integration_allowances=integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
         restore_upstream=restore_upstream,
+        preserve_existing_data=preserve_existing_data,
         provider_mutation_guard=provider_mutation_guard,
     )
 
@@ -1559,14 +1561,18 @@ def _preview_refresh_environment_values(
                 desired_env_map=environment_values
             )
         )
-        ssh_directory = PurePosixPath(environment_values.get("DATA_WORKFLOW_SSH_DIR", ""))
+        ssh_directory = PurePosixPath(
+            "/" + environment_values.get("DATA_WORKFLOW_SSH_DIR", "").lstrip("/")
+        )
+        source_directory = environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
         if (
             environment_values["ODOO_UPSTREAM_USER"] == "root"
-            or not ssh_directory.is_absolute()
+            or not source_directory.startswith("/")
             or ".." in ssh_directory.parts
             or ssh_directory == PurePosixPath("/")
             or ssh_directory.is_relative_to("/root")
             or ssh_directory.is_relative_to("/home/ubuntu")
+            or ssh_directory in PurePosixPath("/home/ubuntu").parents
         ):
             raise click.ClickException(
                 "Preview upstream restore requires a non-root reader and a dedicated SSH directory."
@@ -1602,6 +1608,7 @@ def _execute_refresh(
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
     restore_upstream: bool = False,
+    preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     database_url: str | None = None,
 ) -> OdooPreviewDokployApplyResult:
@@ -1624,9 +1631,16 @@ def _execute_refresh(
         provider_effect_attempted = True
 
     try:
+        if preserve_existing_data and restore_upstream:
+            raise click.ClickException(
+                "A retained preview copy cannot request a destructive restore."
+            )
         environment_values = _preview_refresh_environment_values(
             request=request, restore_upstream=restore_upstream
         )
+        if restore_upstream or preserve_existing_data:
+            environment_values["ODOO_MAX_CRON_THREADS"] = "0"
+            environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
         if qualify_existing_refresh and creating_compose:
             raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
@@ -1665,11 +1679,12 @@ def _execute_refresh(
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
             mount_workflow_ssh=restore_upstream,
+            protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_refresh:
+            if qualify_existing_refresh or preserve_existing_data:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(
@@ -1812,7 +1827,7 @@ def _execute_refresh(
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
             run_destructive_restore=restore_upstream,
-            bootstrap_missing_database=True,
+            bootstrap_missing_database=not preserve_existing_data,
             clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,
             provider_mutation_guard=provider_mutation_guard,

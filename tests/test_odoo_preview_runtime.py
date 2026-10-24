@@ -1669,6 +1669,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             {"DATA_WORKFLOW_SSH_DIR": "/home/ubuntu/.ssh"},
             {"DATA_WORKFLOW_SSH_DIR": "/root//.ssh/."},
             {"DATA_WORKFLOW_SSH_DIR": "/var/lib/reader/../../root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//"},
+            {"DATA_WORKFLOW_SSH_DIR": "/home"},
         ):
             with (
                 self.subTest(override=override),

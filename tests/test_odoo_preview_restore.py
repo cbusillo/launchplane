@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.odoo_preview_restore import preview_restore_program
+from control_plane import odoo_preview_restore
 from tests.test_odoo_connection_isolation import SqliteCursor, seed
 
 
@@ -40,6 +41,60 @@ class PreviewConnection:
 
 
 class PreviewRestoreTests(unittest.TestCase):
+    def test_source_process_refuses_root_capabilities_or_privilege_escalation(self) -> None:
+        for uid, root_access, privileges, capabilities in (
+            (1000, False, 1, 0),
+            (0, True, 1, 0),
+            (1000, True, 1, 0),
+            (1000, False, 0, 0),
+            (1000, False, 1, 1),
+        ):
+            status = f"NoNewPrivs:\t{privileges}\nCapEff:\t{capabilities:x}\nCapPrm:\t{capabilities:x}\nCapAmb:\t{capabilities:x}\n"
+            with (
+                self.subTest(
+                    uid=uid,
+                    root_access=root_access,
+                    privileges=privileges,
+                    capabilities=capabilities,
+                ),
+                patch("os.geteuid", return_value=uid),
+                patch("os.access", return_value=root_access),
+                patch.object(Path, "read_text", return_value=status),
+            ):
+                program = odoo_preview_restore.preview_source_process_program()
+                if uid == 1000 and not root_access and privileges == 1 and capabilities == 0:
+                    exec(program, {})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(program, {})
+
+    def test_capture_cleanup_removes_only_current_preview_capture_and_temporary_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture = root / ".preview-upstream-restore"
+            capture.mkdir()
+            (capture / "database.dump").write_text("synthetic")
+            identity = root / "identity"
+            identity.mkdir()
+            sentinel = root / "other-preview-data"
+            sentinel.write_text("preserved")
+            with (
+                patch.object(odoo_preview_restore, "PREVIEW_WORKFLOW_SSH_DIRECTORY", identity),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ODOO_DB_NAME": "preview",
+                        "ODOO_DATA_WORKFLOW_LOCK_FILE": str(root / ".lock"),
+                    },
+                ),
+            ):
+                exec(odoo_preview_restore.preview_capture_cleanup_program(), {})
+            self.assertFalse(capture.exists())
+            self.assertFalse(identity.exists())
+            self.assertTrue(sentinel.exists())
+
     def test_connections_are_scrubbed_and_dump_removed_before_addon_code(self) -> None:
         self._exercise(False)
 
@@ -63,6 +118,9 @@ class PreviewRestoreTests(unittest.TestCase):
                 db_name="preview",
                 data_workflow_lock_file=root / ".workflow-lock",
             )
+            identity_directory = root / "identity"
+            identity_directory.mkdir()
+            (identity_directory / "synthetic-identity").write_text("synthetic")
             boundary_calls: list[bool] = []
             hooks: list[str] = []
             case = self
@@ -71,6 +129,7 @@ class PreviewRestoreTests(unittest.TestCase):
                 def __init__(self, local: Any, _upstream: object, _environment: object) -> None:
                     self.local = local
                     self.connection = PreviewConnection(database)
+                    self.os_env = dict(os.environ)
 
                 def connect_to_db(self) -> PreviewConnection:
                     return self.connection
@@ -84,6 +143,19 @@ class PreviewRestoreTests(unittest.TestCase):
                     boundary_calls.append(restored_copy and do_sanitize)
                     if fail_boundary:
                         raise RuntimeError("credential boundary refused")
+
+                def _prepare_restored_database(
+                    self, target_owner: str | None, *, do_sanitize: bool
+                ) -> None:
+                    case.assertFalse(identity_directory.exists())
+                    for environment in (self.os_env, os.environ):
+                        case.assertFalse(
+                            any(
+                                key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                                for key in environment
+                            )
+                        )
+                    hooks.append("addon code")
 
             workflow = ModuleType("run_odoo_data_workflows")
             workflow.LocalServerSettings = lambda: settings  # type: ignore[attr-defined]
@@ -120,13 +192,20 @@ class PreviewRestoreTests(unittest.TestCase):
                         )
                     finally:
                         observer.close()
-                    hooks.append("addon code")
+                    runner._prepare_restored_database(None, do_sanitize=True)
                     return 0
                 finally:
                     runner.connection.close()
 
             workflow.main = main  # type: ignore[attr-defined]
             with (
+                patch.object(
+                    odoo_preview_restore, "preview_source_process_program", return_value=""
+                ),
+                patch.object(
+                    odoo_preview_restore, "PREVIEW_WORKFLOW_SSH_DIRECTORY", identity_directory
+                ),
+                patch.object(sys, "path", list(sys.path)),
                 patch.dict(sys.modules, {workflow.__name__: workflow}),
                 patch.dict(
                     os.environ,
@@ -135,6 +214,9 @@ class PreviewRestoreTests(unittest.TestCase):
                         "ENV_OVERRIDE_DISABLE_CRON": "false",
                         "NO_SANITIZE": "true",
                         "BOOTSTRAP": "true",
+                        "DATA_WORKFLOW_SSH_DIR": str(identity_directory),
+                        "DATA_WORKFLOW_SSH_KEY": str(identity_directory / "synthetic-identity"),
+                        "ODOO_UPSTREAM_HOST": "source.example.test",
                     },
                 ),
             ):

@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane import odoo_preview_restore
 from control_plane.dokploy.compose import render_odoo_raw_compose_file
 from control_plane.integration_readback import (
     INTEGRATION_FAMILIES,
@@ -213,7 +214,8 @@ def main(argv):
     if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
         log("exec qualify" + (" -i" if interactive else ""))
         return subprocess.run([sys.executable, *program[1:]],
-                              stdin=None if interactive else subprocess.DEVNULL).returncode
+                              stdin=None if interactive else subprocess.DEVNULL,
+                              env={**os.environ, **exec_environment}).returncode
     if program[:2] == ["python3", "-"]:
         log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
@@ -827,6 +829,19 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
         self.enterContext(
+            patch.object(
+                odoo_preview_restore, "PREVIEW_WORKFLOW_SSH_DIRECTORY", self.root / "identity"
+            )
+        )
+        self.enterContext(
+            patch.object(odoo_preview_restore, "preview_source_process_program", return_value="")
+        )
+        self.enterContext(
+            patch.object(
+                dokploy_post_deploy, "DEFAULT_DATA_WORKFLOW_LOCK_PATH", str(self.root / ".lock")
+            )
+        )
+        self.enterContext(
             patch.object(dokploy_post_deploy, "ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY", self.root)
         )
         bin_dir = self.root / "bin"
@@ -1222,6 +1237,8 @@ def LocalServerSettings() -> SimpleNamespace:
 class OdooDataWorkflowRunner:
     def __init__(self, local: SimpleNamespace, upstream: object, environment: object) -> None:
         self.local = local
+        self.os_env = dict(os.environ)
+        Path(self.os_env['DATA_WORKFLOW_SSH_DIR']).mkdir(exist_ok=True)
     def prepare_credentials_before_registry(self, **arguments: bool) -> None:
         if os.environ.get("FAKE_PREVIEW_SANITIZER_FAILURE") == "1":
             raise RuntimeError("synthetic credential refusal")
@@ -1229,10 +1246,13 @@ class OdooDataWorkflowRunner:
         return psycopg2.connect()
     def _connect_with_retry(self, database: str) -> object:
         return psycopg2.connect()
+    def _prepare_restored_database(self, target_owner: str | None, *, do_sanitize: bool) -> None:
+        assert not any(key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) for key in self.os_env)
 
 def main(arguments: list[str]) -> int:
     runner = OdooDataWorkflowRunner(LocalServerSettings(), None, None)
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    runner._prepare_restored_database(None, do_sanitize=True)
     print("fixture_addon_after_boundary=true")
     print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
     return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
