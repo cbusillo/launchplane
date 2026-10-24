@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
+from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -159,6 +160,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
         self.publisher = Mock(spec=OwnerReviewStatusPublisher)
+        self.pull_request_notes = UNREAD_PULL_REQUEST_NOTES
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -179,6 +181,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
             owner_review_status_publisher=self.publisher,
+            product_review_notes_reader=lambda *_: self.pull_request_notes,
         )
 
     async def _get(self, app: FastAPI, human: GitHubHumanIdentity) -> Response:
@@ -325,6 +328,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:
         self._write_product()
+        self.pull_request_notes = PullRequestNotes(
+            title="Show the repair price", client_test_notes="Open the price list."
+        )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
 
@@ -341,7 +347,10 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             before.json()["pull_request_url"], "https://github.com/every/example-site/pull/42"
         )
         self.assertIsNone(before.json()["latest_decision"])
+        self.assertEqual(before.json()["pull_request_title"], "Show the repair price")
+        self.assertEqual(before.json()["client_test_notes"], "Open the price list.")
         self.assertEqual(written.status_code, 200)
+        self.assertEqual(written.json()["client_test_notes"], "Open the price list.")
         latest = after.json()["latest_decision"]
         self.assertEqual(latest["decision"], "changes_requested")
         self.assertEqual(latest["reason"], "The price is wrong.")

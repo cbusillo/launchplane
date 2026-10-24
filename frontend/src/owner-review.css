@@ -214,6 +214,7 @@
   margin-block-end: 0.4rem;
 }
 
+.owner-review-topics a,
 .release-review-checklist a,
 .release-review-untested a {
   color: var(--accent-strong);

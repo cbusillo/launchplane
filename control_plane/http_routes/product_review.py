@@ -28,6 +28,7 @@ from control_plane.product_review import (
     source_control_pull_request_url,
     viewer_is_product_owner,
 )
+from control_plane.release_review import PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
 
@@ -49,6 +50,7 @@ class ProductReviewRouteDependencies:
     publish_owner_review_status: Callable[
         [ProductReviewStore, LaunchplaneProductProfileRecord, int], object
     ]
+    read_pull_request_notes: Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes]
 
 
 class ProductReviewDecisionEnvelope(BaseModel):
@@ -88,6 +90,8 @@ class ProductReviewResponse(BaseModel):
     repository: str
     pull_request_number: int
     pull_request_url: str
+    pull_request_title: str
+    client_test_notes: str
     preview_url: str
     head_sha: str
     preview_generation_id: str
@@ -177,6 +181,7 @@ def register_product_review_routes(
             store=store, profile=profile, pull_request_number=pull_request_number
         )
         viewer_is_owner = viewer_is_product_owner(profile=profile, identity=identity)
+        notes = dependencies.read_pull_request_notes(profile, pull_request_number, trace_id)
         if not profile.owner.is_set:
             cannot_decide_reason = _NO_OWNER_REASON
         elif not viewer_is_owner:
@@ -194,6 +199,8 @@ def register_product_review_routes(
             pull_request_url=source_control_pull_request_url(
                 repository=profile.repository, pull_request_number=pull_request_number
             ),
+            pull_request_title=notes.title,
+            client_test_notes=notes.client_test_notes,
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
