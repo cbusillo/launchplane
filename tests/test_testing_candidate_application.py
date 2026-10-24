@@ -1,6 +1,8 @@
 """A private candidate uses the current build and only testing-local passwords."""
 
 import os
+import hashlib
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -25,6 +27,7 @@ from control_plane.contracts.testing_candidate_application import TestingCandida
 from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeOdooSourceAuthority,
+    NativeTestingCopyCapture,
 )
 from control_plane import testing_candidate_runtime as compiler
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -718,6 +721,114 @@ class CandidateApplicationTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             self.inputs(persisted, "production")
+        self.fixture.assert_serving_unchanged()
+
+    def test_prepared_native_copy_removes_raw_cache_and_recovers_a_lost_cleanup_reply(self) -> None:
+        from control_plane import odoo_testing_native_source as native
+        from control_plane.odoo_testing_restore import generation_binding
+        from tests.test_odoo_testing_native_source import descriptor
+
+        source = descriptor().model_copy(
+            update={
+                "product": self.profile.product,
+                "context": next(
+                    lane.context for lane in self.profile.lanes if lane.instance == "prod"
+                ),
+            }
+        )
+        authority = NativeOdooSourceAuthority.model_validate(
+            source.model_dump(include=set(NativeOdooSourceAuthority.model_fields))
+        )
+        with (
+            patch.object(compiler, "native_testing_source_authority", return_value=authority),
+            patch.object(compiler, "resolve_native_testing_source", return_value=source),
+        ):
+            self.execution("production")
+        generation = self.compiled.plan.generation
+        assert generation is not None
+        serving_generation = self.store.read_fresh_odoo_testing_generation(
+            generation.product, generation.context
+        )
+        cache = (self.root / "source-cache").resolve()
+        cache.mkdir()
+        captures: list[NativeTestingCopyCapture] = []
+        restore = self.restore
+
+        def stream(**kwargs: Any) -> None:
+            receipts = {}
+            for part in ("database", "filestore"):
+                data = f"private {part} fixture".encode()
+                kwargs["receive"](
+                    {"type": "data", "part": part, "data": base64.b64encode(data).decode()}
+                )
+                receipts[part] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            kwargs["receive"]({"type": "complete", **receipts})
+
+        def restore_with_capture(**kwargs: Any) -> dict[str, str]:
+            captures.append(
+                native.capture_native_testing_source(
+                    self.store, root=self.root, generation=generation, descriptor=source
+                )
+            )
+            for namespace, receipt in (
+                ("foreign-candidate", captures[0]),
+                (
+                    self.allocation.namespace,
+                    captures[0].model_copy(update={"generation_binding_sha256": "0" * 64}),
+                ),
+                (
+                    self.allocation.namespace,
+                    captures[0].model_copy(update={"capture_id": "0" * 32}),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    self.store.write_native_testing_copy_capture(
+                        receipt, candidate_namespace=namespace
+                    )
+            return restore(**kwargs)
+
+        remove = native.remove_completed_native_capture_cache
+
+        def lost_reply(saved: NativeTestingCopyCapture) -> None:
+            remove(saved)
+            raise TimeoutError("Fixture lost cleanup reply")
+
+        with (
+            patch.object(native, "_cache_directory", return_value=cache),
+            patch.object(native, "read_native_source", side_effect=stream),
+            patch.object(
+                post_deploy, "run_compose_post_deploy_update", side_effect=restore_with_capture
+            ),
+        ):
+            with (
+                patch.object(
+                    native, "remove_completed_native_capture_cache", side_effect=lost_reply
+                ),
+                self.assertRaises(TimeoutError),
+            ):
+                self.prepare_application()
+            capture = captures[0]
+            directory = cache / capture.capture_id
+            self.assertFalse(directory.exists())
+            prepared = self.store.read_testing_candidate(self.allocation.namespace)
+            assert prepared is not None and prepared.application is not None
+            self.assertEqual(prepared.application.phase, "prepared")
+            with patch.object(
+                compiler,
+                "resolve_native_testing_source",
+                side_effect=AssertionError("A prepared copy reuses its original capture receipt"),
+            ):
+                self.compiled = self.inputs(prepared, "production")
+                self.assertEqual(self.prepare_application(), prepared)
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        self.assertEqual(captures, [capture])
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(generation.product, generation.context),
+            serving_generation,
+        )
+        self.assertEqual(self.effects, ["configure", "deploy", "restore"])
         self.fixture.assert_serving_unchanged()
 
     def test_undelivered_global_change_does_not_rebind_or_block_candidate(self) -> None:

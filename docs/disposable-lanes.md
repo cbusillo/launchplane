@@ -2190,6 +2190,14 @@ recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
 
+Native rebuilds bind a capture to their original private candidate's recorded
+generation while its restore remains undispatched and its allocation custody
+and predecessor selection agree. The serving generation stays unchanged until
+healthy publication. Once the candidate's restore and private readiness are
+proved and its prepared receipt is saved, preparation removes the raw source
+cache while retaining the immutable database capture receipt. A lost cleanup
+reply resumes that same prepared candidate and repeats only the cleanup.
+
 Fresh restore sends its host program and input through compressed Python stdin.
 Only the capture identity and artifact receipts cross the host boundary; the
 full persisted source observation stays in the service. Before native capture

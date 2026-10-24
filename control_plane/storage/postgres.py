@@ -13212,7 +13212,9 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
             return NativeTestingCopyCapture.model_validate(row.payload) if row else None
 
-    def write_native_testing_copy_capture(self, record: NativeTestingCopyCapture) -> None:
+    def write_native_testing_copy_capture(
+        self, record: NativeTestingCopyCapture, *, candidate_namespace: str = ""
+    ) -> None:
         from control_plane.odoo_testing_restore import generation_binding
 
         with self._session_factory() as session:
@@ -13223,9 +13225,41 @@ class PostgresRecordStore(HumanSessionStore):
                 (record.product, record.context),
                 with_for_update=True,
             )
-            if generation_row is None:
+            candidate_row = (
+                session.get(
+                    LaunchplaneTestingCandidateRow, candidate_namespace, with_for_update=True
+                )
+                if candidate_namespace
+                else None
+            )
+            if candidate_row is not None:
+                candidate = TestingCandidateAllocation.model_validate(candidate_row.payload)
+                app = candidate.application
+                custody = session.get(
+                    LaunchplaneProviderTargetRow, (candidate.namespace, "testing-candidate")
+                )
+                serving = session.get(LaunchplaneProviderTargetRow, (record.context, "testing"))
+                if (
+                    (candidate.product, candidate.context) != (record.product, record.context)
+                    or app is None
+                    or app.phase != "restoring"
+                    or app.restore_workflow_started is not False
+                    or app.plan.source != "production"
+                    or app.plan.generation is None
+                    or custody is None
+                    or (custody.provider_id, custody.target_category, custody.target_id)
+                    != ("dokploy", "compose", candidate.compose_id)
+                    or serving is None
+                    or serving.target_id != candidate.serving_target_id
+                ):
+                    raise ValueError(
+                        "Native capture requires its original private candidate custody."
+                    )
+                generation = app.plan.generation
+            elif generation_row is not None:
+                generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            else:
                 raise ValueError("Native capture requires its recorded generation.")
-            generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
             if (
                 generation.source_mode != "container-export"
                 or generation.completed_at

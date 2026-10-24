@@ -629,7 +629,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
         )
 
     def test_receipt_is_published_after_bytes_and_original_capture_is_reused(self) -> None:
-        def persist(receipt: NativeTestingCopyCapture) -> None:
+        def persist(receipt: NativeTestingCopyCapture, **_: object) -> None:
             files = verify_native_capture_files(receipt)
             self.assertEqual([path.read_bytes() for path in files], list(self.data.values()))
             self.assertTrue(all(path.stat().st_mode & 0o077 == 0 for path in files))
@@ -664,7 +664,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
         self.assertFalse(any(path.is_file() for path in self.root.rglob("*")))
 
     def test_lost_receipt_commit_reply_retains_published_bytes_for_resume(self) -> None:
-        def committed(receipt: NativeTestingCopyCapture) -> None:
+        def committed(receipt: NativeTestingCopyCapture, **_: object) -> None:
             self.store.read_native_testing_copy_capture.return_value = receipt
             raise OSError("fixture lost commit reply")
 

@@ -381,7 +381,9 @@ def capture_native_testing_source(
             # A failed commit reply may still have committed. Keep private bytes
             # even on an exception; deleting them can destroy the recorded copy.
             # Unreferenced private caches have a documented custody cleanup path.
-            store.write_native_testing_copy_capture(capture)
+            store.write_native_testing_copy_capture(
+                capture, candidate_namespace=generation.namespace
+            )
             return capture
         finally:
             for handle in handles.values():
