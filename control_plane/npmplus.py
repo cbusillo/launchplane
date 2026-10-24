@@ -25,6 +25,39 @@ NpmplusAuthRequest = Literal[
 ]
 
 
+def _normalize_proxy_host_domains(values: tuple[str, ...]) -> tuple[str, ...]:
+    names: list[str] = []
+    for raw in values:
+        name = raw.strip().lower()
+        if not name:
+            raise ValueError("NPMplus proxy host domain names must be non-empty")
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise ValueError("NPMplus proxy host requires at least one domain name")
+    return tuple(names)
+
+
+class NpmplusHostIdentity(Protocol):
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def domain_names(self) -> tuple[str, ...]: ...
+
+
+class NpmplusProxyHostClaim(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(ge=1)
+    domain_names: tuple[str, ...]
+
+    @field_validator("domain_names", mode="after")
+    @classmethod
+    def _normalize_domain_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _normalize_proxy_host_domains(value)
+
+
 class NpmplusAccessList(BaseModel):
     """Non-secret list metadata, without expanding authentication entries."""
 
@@ -107,16 +140,7 @@ class NpmplusProxyHostPayload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_domain_names(self) -> "NpmplusProxyHostPayload":
-        normalized_domain_names: list[str] = []
-        for raw_domain_name in self.domain_names:
-            domain_name = raw_domain_name.strip().lower()
-            if not domain_name:
-                raise ValueError("NPMplus proxy host domain names must be non-empty")
-            if domain_name not in normalized_domain_names:
-                normalized_domain_names.append(domain_name)
-        if not normalized_domain_names:
-            raise ValueError("NPMplus proxy host requires at least one domain name")
-        self.domain_names = tuple(normalized_domain_names)
+        self.domain_names = _normalize_proxy_host_domains(self.domain_names)
         return self
 
     def to_api_payload(self) -> JsonObject:
@@ -270,17 +294,17 @@ class NpmplusClient:
             )
         self._authenticated = True
 
-    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+    def list_proxy_hosts(self) -> tuple[NpmplusProxyHostClaim, ...]:
         payload = self._request(method="GET", path="/api/nginx/proxy-hosts")
         if not isinstance(payload, list):
             raise click.ClickException("NPMplus proxy-host list returned an invalid payload.")
-        proxy_hosts: list[NpmplusProxyHost] = []
+        proxy_hosts: list[NpmplusProxyHostClaim] = []
         for index, host_payload in enumerate(payload):
             if not isinstance(host_payload, dict):
                 raise click.ClickException(
                     f"NPMplus proxy-host list entry {index} returned an invalid payload."
                 )
-            proxy_hosts.append(NpmplusProxyHost.model_validate(host_payload))
+            proxy_hosts.append(NpmplusProxyHostClaim.model_validate(host_payload))
         return tuple(proxy_hosts)
 
     def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
@@ -305,7 +329,10 @@ class NpmplusClient:
             )
         ):
             raise click.ClickException("NPMplus route is not a loaded public proxy host.")
-        return NpmplusProxyHost.model_validate(payload)
+        host = NpmplusProxyHost.model_validate(payload)
+        if host.id != host_id:
+            raise click.ClickException("NPMplus proxy host identity does not match the request.")
+        return host
 
     def list_other_host_domains(self) -> tuple[str, ...]:
         domains: list[str] = []

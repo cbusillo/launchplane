@@ -33,6 +33,9 @@ class _FakeNpmplusIngressClient:
         self.calls.append("list")
         return tuple(self.proxy_hosts)
 
+    def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        return next(host for host in self.proxy_hosts if host.id == host_id)
+
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
         self.calls.append("create")
         created = NpmplusProxyHost.model_validate({"id": self.next_id, **payload.to_api_payload()})

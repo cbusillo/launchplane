@@ -334,6 +334,7 @@ def prepare_candidate_application(
             inputs=inputs,
             deployment_id=app.deployment_id,
         )
+        remove_prepared_candidate_source_cache(store, record)
         return record
 
     def payload() -> api.JsonObject:
@@ -550,7 +551,28 @@ def prepare_candidate_application(
         host=host, token=token, allocation=record, inputs=inputs, deployment_id=app.deployment_id
     )
     save(phase="prepared", prepared=prepared)
+    remove_prepared_candidate_source_cache(store, record)
     return record
+
+
+def remove_prepared_candidate_source_cache(
+    store: PostgresRecordStore, record: TestingCandidateAllocation
+) -> None:
+    from control_plane.odoo_testing_native_source import (
+        recorded_native_testing_capture,
+        remove_completed_native_capture_cache,
+    )
+
+    app = record.application
+    if app is None or app.phase != "prepared":
+        raise ValueError("Raw source cleanup requires the prepared candidate proof.")
+    generation = app.plan.generation
+    if generation is None or generation.source_mode != "container-export":
+        return
+    capture = recorded_native_testing_capture(store, generation)
+    if capture is None:
+        raise ValueError("The prepared native copy has no original capture receipt.")
+    remove_completed_native_capture_cache(capture)
 
 
 def candidate_restore_terminal(
