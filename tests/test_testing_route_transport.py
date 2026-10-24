@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from traceback import walk_tb
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
@@ -18,6 +19,7 @@ from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane import http_error_evidence
 from control_plane.dokploy import testing_route_transport as transport, compose
 from control_plane.dokploy import testing_route as routing
 from control_plane.dokploy import native_copy_stream
@@ -44,6 +46,8 @@ from tests.test_odoo_testing_native_source import Connection
 
 
 class TestingRouteTransportTests(unittest.TestCase):
+    program_filename = "<testing-route-host>"
+
     def setUp(self, *, initialize_fence: bool = True) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -358,7 +362,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             ):
                 try:
                     exec(
-                        compile(kwargs["program"], "<testing-route-host>", "exec"),
+                        compile(kwargs["program"], self.program_filename, "exec"),
                         {"__name__": "__main__"},
                     )
                 except SystemExit:
@@ -370,7 +374,13 @@ class TestingRouteTransportTests(unittest.TestCase):
                 if frame["type"] == "denied":
                     raise NativeSourceAuthorizationDenied("fixture denied")
                 if frame["type"] == "failed":
-                    raise NativeSourceUnavailable("fixture unavailable")
+                    native_copy_stream._read_program(
+                        Connection(frame),
+                        program=kwargs["program"],
+                        payload=kwargs["payload"],
+                        timeout_seconds=5,
+                        receive=kwargs["receive"],
+                    )
                 kwargs["receive"](frame)
 
         guard = kwargs.get("dispatch_guard")
@@ -378,6 +388,44 @@ class TestingRouteTransportTests(unittest.TestCase):
             dispatch()
         else:
             guard(dispatch)
+
+    def test_failed_native_reads_preserve_actual_program_sites_without_private_values(self) -> None:
+        program = transport.testing_route_host_program()
+        original = self.command
+        observed: list[list[int]] = []
+        for failed_command in ("ps", "inspect"):
+            private = "private-native-error-sentinel-" + failed_command
+            failure = RuntimeError(private)
+
+            def command(arguments: list[str], **kwargs: Any) -> Any:
+                if arguments[1] == failed_command:
+                    raise failure
+                return original(arguments, **kwargs)
+
+            with patch.object(self, "command", side_effect=command):
+                with self.assertRaises(native_copy_stream.NativeProgramFailed) as raised:
+                    self.client.read()
+            try:
+                raise ValueError("private-wrapper-sentinel") from raised.exception
+            except ValueError as wrapped:
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(wrapped, "native-route-test")
+            text = logs.records[-1].getMessage()
+            native = json.loads(text)["native_programs"][0]
+            expected = [
+                line
+                for frame, line in walk_tb(failure.__traceback__)
+                if frame.f_code.co_filename == self.program_filename
+            ][-native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT :]
+            self.assertTrue(expected)
+            self.assertEqual(native["lines"], expected)
+            self.assertEqual(native["sha"], hashlib.sha256(program.encode()).hexdigest())
+            self.assertNotIn(private, text)
+            self.assertNotIn("private-wrapper-sentinel", text)
+            self.assertFalse(raised.exception.has_diagnostic)
+            self.assertEqual(self.effect_count, 0)
+            observed.append(native["lines"])
+        self.assertNotEqual(*observed)
 
     def publish(self, backend: str | None, expected: str | None) -> None:
         execution = self.client.execution_intent(

@@ -29,6 +29,8 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTI
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
 
+NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+
 
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
     """The existing source transport explicitly refused this identity."""
@@ -45,8 +47,27 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
 class NativeProgramFailed(NativeSourceUnavailable):
     """A fixed program returned a failed frame; this proves no writer exclusion."""
 
-    def __init__(self, message: str, *, predicate: str = "", kind: str = "unavailable") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        predicate: str = "",
+        kind: str = "unavailable",
+        program: str = "",
+        program_sites: object = None,
+    ) -> None:
         super().__init__(message)
+        line_count = len(program.splitlines())
+        self.program_sites: tuple[int, ...] = (
+            tuple(program_sites)
+            if isinstance(program_sites, list)
+            and 0 < len(program_sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+            and all(type(line) is int and 1 <= line <= line_count for line in program_sites)
+            else ()
+        )
+        self.program_sha256 = (
+            hashlib.sha256(program.encode()).hexdigest() if self.program_sites else ""
+        )
         self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
         self.evidence = readback_failure_evidence(
             {
@@ -251,6 +272,8 @@ def _read_program(
                 "The registered source read did not pass.",
                 predicate=predicate if isinstance(predicate, str) else "",
                 kind=kind if isinstance(kind, str) else "unavailable",
+                program=program,
+                program_sites=value.get("sites"),
             )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")

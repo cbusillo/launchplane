@@ -30,7 +30,11 @@ from control_plane.dokploy.testing_route_execution import (
 )
 from control_plane.testing_application_capabilities import retained_application_inventory_header
 from control_plane.docker_errors import docker_daemon_authorization_denied
-from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import (
+    _read_remote,
+    NativeSourceUnavailable,
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+)
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -111,6 +115,8 @@ def testing_route_host_program() -> str:
         + repr(MAX_TRAEFIK_API_BYTES)
         + "\nAPI_READER="
         + repr(READ_TRAEFIK_API)
+        + "\nSOURCE_SITE_LIMIT="
+        + repr(NATIVE_PROGRAM_SOURCE_SITE_LIMIT)
         + r"""
 
 def docker(*arguments, stdin=None):
@@ -580,9 +586,15 @@ if __name__=='__main__':
     except PermissionError:
         print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
-    except Exception:
+    except Exception as error:
         kind='route_write_not_started' if payload.get('mode') in {'publish_v2','initialize_v2','allocate_lock_v2'} and not WRITE_STARTED else 'failed'
-        print(sys.argv[2]+json.dumps({'type':kind}),flush=True)
+        sites=[]
+        trace=error.__traceback__
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename==main.__code__.co_filename:
+                sites.append(trace.tb_lineno)
+            trace=trace.tb_next
+        print(sys.argv[2]+json.dumps({'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}),flush=True)
         sys.exit(1)
 """
     )
