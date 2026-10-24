@@ -19,7 +19,13 @@ from control_plane.testing_separation_resources import (
 
 
 def inspect_preparation_programs(
-    *, root: Path, resources: OdooTestingResources, store: PostgresRecordStore, application: bool
+    *,
+    root: Path,
+    resources: OdooTestingResources,
+    store: PostgresRecordStore,
+    application: bool,
+    namespace: str | None = None,
+    include_storage: bool = True,
 ) -> list[SeparationProgramInspection]:
     specifications: list[tuple[SeparationProgramInspection, str, str | None, str | None]] = []
     if application:
@@ -53,18 +59,21 @@ def inspect_preparation_programs(
                     capability_binding,
                 )
             )
-    for kind, suffix, script in (
-        ("storage_preparation", "", resources.script("prepare")),
-        ("storage_readback", " readback", resources.script("readback")),
-    ):
-        specifications.append(
-            (
-                SeparationProgramInspection.model_validate({"kind": kind, "status": "unavailable"}),
-                STORAGE_PROGRAM_NAME + suffix,
-                script,
-                resources.binding_sha256,
+    if include_storage:
+        for kind, suffix, script in (
+            ("storage_preparation", "", resources.script("prepare")),
+            ("storage_readback", " readback", resources.script("readback")),
+        ):
+            specifications.append(
+                (
+                    SeparationProgramInspection.model_validate(
+                        {"kind": kind, "status": "unavailable"}
+                    ),
+                    STORAGE_PROGRAM_NAME + suffix,
+                    script,
+                    resources.binding_sha256,
+                )
             )
-        )
     try:
         host, token = source.read_dokploy_config(control_plane_root=root)
         payload = api.fetch_dokploy_target_payload(
@@ -92,7 +101,9 @@ def inspect_preparation_programs(
         return [item[0] for item in specifications]
     result = []
     for observed, name, expected_script, binding in specifications:
-        inventory = classify_program_inventory(rows, name=name, namespace=resources.namespace)
+        inventory = classify_program_inventory(
+            rows, name=name, namespace=namespace or resources.namespace
+        )
         program = inventory.program
         if program is None:
             observed.status = (
