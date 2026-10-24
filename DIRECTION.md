@@ -93,7 +93,13 @@ blocks that run is the next piece of work.
 - billing and collections inside Launchplane
 - the blanket authorization freeze; granting access is a stop boundary instead
 - product repositories calling Launchplane: workflow-identity grants, pinned
-  reusable Launchplane workflows, and Launchplane-held build settings
+  reusable Launchplane workflows, and Launchplane-held build settings. One
+  exception: three updater workflows may ask Launchplane to open a pull
+  request. They are the codex-skills PEP 723 updater, the homebrew-tap
+  bd-to-avp bump, and the VeriReel dependency-override cleanup. Launchplane
+  checks the repository, workflow and default branch first. The pull request
+  then goes through normal CI, review and the merge train. Product build and
+  deploy calls stay retired.
 - caller-grant rules for the preview and testing deploys Launchplane starts
   from source-control events
 - GitHub workflows as the way to run an operation a person or agent decides
