@@ -12694,10 +12694,11 @@ class PostgresRecordStore(HumanSessionStore):
             )
         elif abandoning:
             admitted = (
-                expected.state == "switched"
+                expected.state in {"switched", "rebuilding"}
                 and later_phase_copies(expected, "switched")
                 and original.state in {"running", "reconcile_required"}
-                and original.provider_effect_phase == "validate-business"
+                and original.provider_effect_phase
+                == {"switched": "validate-business", "rebuilding": "rebuild-final"}[expected.state]
             )
         else:
             admitted = (
@@ -12734,6 +12735,8 @@ class PostgresRecordStore(HumanSessionStore):
                     or replacement.abandoned_validations[:-1] != expected.abandoned_validations
                     or replacement.abandoned_validations[-1].original != original
                     or expected.incomplete_retirement is None
+                    or expected.incomplete_retirement.original_key_sha256
+                    != canonical_json_sha256({"operation_key": original.idempotency_key})
                     or replacement.abandoned_validations[-1].host_disposal
                     != expected.incomplete_retirement.host_disposal
                     or not replacement.abandoned_validations[

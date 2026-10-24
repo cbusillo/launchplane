@@ -3090,7 +3090,9 @@ not a reason to invoke a local live-target command.
 
 `action: abandon-validation` explicitly abandons only an original
 `validate-business` attempt whose outcome is unknown on a standalone `switched`
-rehearsal. It uses the existing incomplete-retirement executor and reviewed
+rehearsal, or an unsettled `rebuild-final` attempt on its `rebuilding` replacement.
+Use the original key of the attempt being abandoned. It uses the existing
+incomplete-retirement executor and reviewed
 inventory, with the unchanged rehearsal intent and original validation key.
 An active reservation lease, host execution lock, container exec, production
 alias, missing or changed INITIAL/FINAL sanitized source tuple, other unsettled
@@ -3111,6 +3113,17 @@ validation. Historical abandonment readback remains available after rebuilding
 and returns the preserved receipt without inspecting the replacement. Its `original_outcome` remains
 `unknown`; completion of abandonment proves no commit or rollback result for
 the old validation. This route has no production-lane equivalent.
+
+For a failed rebuild, preserving abandonment replaces the earlier disposal's
+checkpoint and remains resumable after its own checkpoint is written. The archive
+retains the rebuild's original journal and effect marker. A subsequent rebuild
+ignores only markers belonging to archived attempts; any other started effect
+still refuses before a new restoration starts. New runtime data and log volumes
+receive the same runner ownership as the initial sanitized copy during snapshot
+restoration, before cloning and upgrading the FINAL tuple. Abandonment requires
+the original per-attempt restoration marker and a fully inspected idle runtime.
+An earlier interruption without that proof remains held; a preparation marker
+cannot stand in for the original attempt's effects.
 
 After deployment, use `scripts/odoo-upgrade-rehearsal.py` from that deployed
 revision. Derive private intent files by changing only `action` on the saved

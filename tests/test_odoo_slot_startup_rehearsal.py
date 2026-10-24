@@ -1,5 +1,6 @@
 """Opt-in real Compose qualification of stopped startup and durable recovery."""
 
+import ast
 import base64
 import json
 import os
@@ -130,6 +131,51 @@ class StartupRehearsalEndpointTests(unittest.TestCase):
             ),
         ):
             require_local_docker_endpoint()
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_STARTUP_IMAGE"), "Select a local immutable image"
+)
+class RehearsalCloneTests(unittest.TestCase):
+    def test_clone_preserves_runner_owned_files_under_root_owned_parent(self) -> None:
+        from control_plane.odoo_upgrade_rehearsal import rehearsal_host_program
+
+        require_local_docker_endpoint()
+        image = os.environ["LAUNCHPLANE_TEST_STARTUP_IMAGE"]
+        self.assertRegex(image, r"@sha256:[a-f0-9]{64}$")
+        subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=True)
+        module = ast.parse(rehearsal_host_program())
+        module.body.pop()
+        fixture = Path(__file__).parent / "fixtures/rehearsal_clone.py"
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--tmpfs",
+                "/volumes:rw,size=1m",
+                "--user",
+                "0:0",
+                "--mount",
+                f"type=bind,src={fixture},dst=/fixture.py,readonly",
+                "--entrypoint",
+                "python3",
+                "-i",
+                image,
+                "/fixture.py",
+            ],
+            input=ast.unparse(module),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 @unittest.skipUnless(

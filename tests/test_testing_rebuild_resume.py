@@ -415,6 +415,70 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_original_worker_continues_without_another_route_dispatch(self) -> None:
         await self.resume_and_complete_original_worker()
 
+    async def test_pending_worker_logs_nested_source_sites_without_private_error_data(self) -> None:
+        await self.assert_pending_worker_source_sites(nested=True)
+
+    async def test_pending_worker_logs_error_without_cause(self) -> None:
+        await self.assert_pending_worker_source_sites(nested=False)
+
+    async def assert_pending_worker_source_sites(self, *, nested: bool) -> None:
+        import json
+        from datetime import timedelta
+        from control_plane import http_error_evidence
+        from control_plane.contracts import canonical_json
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+
+        pending = self.held.model_copy(
+            update={"status": "pending", "phase": "created", "error_code": "", "error_message": ""}
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(pending)
+        now = datetime.now(UTC)
+        claimed = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="observing-worker",
+            claimed_at=now.isoformat(),
+            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        assert claimed is not None
+        private = "private-provider-diagnostic-sentinel"
+
+        def observe(**_kwargs: Any) -> None:
+            if not nested:
+                raise service.NativeTestingRebuildPending(private)
+            try:
+                canonical_json.canonical_json_sha256({private: 0.5})
+            except ValueError as error:
+                error.args = (private,)
+                raise service.NativeTestingRebuildPending("Original observation remains pending")
+
+        with (
+            patch.object(worker, "execute_native_testing_rebuild", side_effect=observe),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
+        ):
+            self.assertTrue(
+                worker._execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=self.worker.root,
+                    operation=claimed,
+                    lease_owner=claimed.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["operation_id"], claimed.operation_id)
+        if nested:
+            self.assertTrue(
+                any(site["module"] == canonical_json.__name__ for site in evidence["sites"]),
+                evidence,
+            )
+        self.assertNotIn(private, str(logs.output))
+        current = self.store.read_odoo_stable_target_replacement_operation_record(
+            claimed.operation_id
+        )
+        self.assertEqual(current.status, "pending")
+        self.assertFalse(current.finished_at)
+        self.assert_original_fences()
+
     async def test_worker_denial_holds_original_fences_before_explicit_resume(self) -> None:
         from datetime import timedelta
         from control_plane.workflows import odoo_stable_operation_worker as worker

@@ -32,6 +32,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     provider_operation_response_payload,
 )
+from control_plane._odoo_incomplete_rehearsal_retirement import preserved_rehearsal_abandonment
 
 # A completed later phase is attributed to the operation whose stored result is
 # exactly that phase. Verified rehearsals hold a post-write tuple and retire
@@ -78,14 +79,17 @@ def require_abandonable_validation(
     observed_at: str,
 ) -> None:
     if (
-        record.state != "switched"
+        record.state not in {"switched", "rebuilding"}
         or not later_phase_copies(record, "switched")
         or original is None
         or original.state not in {"running", "reconcile_required"}
         or original.provider_target_key != record.rehearsal_id
         or original.reconciliation_key
-        != canonical_json_sha256({"rehearsal": record.rehearsal_id, "action": "validate-business"})
-        or original.provider_effect_phase != "validate-business"
+        != canonical_json_sha256(
+            {"rehearsal": record.rehearsal_id, "action": original.provider_effect_phase}
+        )
+        or original.provider_effect_phase
+        != {"switched": "validate-business", "rebuilding": "rebuild-final"}[record.state]
         or not original.provider_effect_started_at
         or (
             original.state == "running"
@@ -128,6 +132,20 @@ class IncompleteRehearsalRetirement:
 
     def reservation_scope(self) -> str:
         return self.adapter.principal + "|incomplete-retirement"
+
+    def progress(
+        self, record: OdooUpgradeRehearsalRecord
+    ) -> IncompleteRehearsalRetirementCheckpoint | None:
+        progress = record.incomplete_retirement
+        if (
+            self.abandoning
+            and record.state == "rebuilding"
+            and record.abandoned_validations
+            and progress is not None
+            and progress.host_disposal == record.abandoned_validations[-1].host_disposal
+        ):
+            return None
+        return progress
 
     def request_fingerprint(self) -> str:
         # One retirement of one original execute. The checkpoint and host fence
@@ -230,13 +248,25 @@ class IncompleteRehearsalRetirement:
             or not (
                 (record.state == "prepared" and not record.copies)
                 or later_phase_copies(record, record.state)
+                or (
+                    self.abandoning
+                    and record.state == "rebuilding"
+                    and later_phase_copies(record, "switched")
+                )
             )
             or not all((record.compose_id, record.environment_id, record.project_id))
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         require_unaliased_rehearsal(adapter.store, record)
         self.original(record)
-        progress = record.incomplete_retirement
+        progress = self.progress(record)
+        if (
+            self.abandoning
+            and record.state == "rebuilding"
+            and progress is None
+            and not preserved_rehearsal_abandonment(record.model_dump(mode="json"))
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
         if progress is not None and (
             progress.original_key_sha256
             != canonical_json_sha256({"operation_key": self.original_key})
@@ -250,7 +280,11 @@ class IncompleteRehearsalRetirement:
             original_validation_attempt(self.original(record)) if self.abandoning else ""
         )
         script = self.adapter.host_script(
-            record, mode, operation_key=self.original_key, abandoned_attempt_sha256=original_attempt
+            record,
+            mode,
+            operation_key=self.original_key,
+            abandoned_attempt_sha256=original_attempt,
+            abandoned_action=self.original(record).provider_effect_phase if self.abandoning else "",
         )
         try:
             self.adapter.validate_apply_script(record, script)
@@ -432,7 +466,7 @@ class IncompleteRehearsalRetirement:
         self, record: OdooUpgradeRehearsalRecord, check: Callable[[], None]
     ) -> tuple[str, dict[str, object] | None]:
         self.placement()
-        progress = record.incomplete_retirement
+        progress = self.progress(record)
         if progress is not None and progress.host_disposal is not None:
             return progress.reviewed_plan_sha256, progress.host_disposal.model_dump(mode="json")
         native = self.host("dry-run", check)
@@ -459,6 +493,7 @@ class IncompleteRehearsalRetirement:
                 raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
             record = self.record()
             digest, native = self.qualification(record, check)
+            progress = self.progress(record)
             public = self.adapter.public(record)
             public.pop("resources_preserved", None)
             return {
@@ -475,10 +510,10 @@ class IncompleteRehearsalRetirement:
                 if native and native["disposed"]
                 else "host-disposal",
                 "review_refusal_required": bool(
-                    record.incomplete_retirement
+                    progress
                     and native
-                    and record.incomplete_retirement.host_binding_sha256 != native["binding_sha256"]
-                    and not self.review_was_refused(record.incomplete_retirement, native)
+                    and progress.host_binding_sha256 != native["binding_sha256"]
+                    and not self.review_was_refused(progress, native)
                 ),
             }
 
@@ -629,7 +664,7 @@ class IncompleteRehearsalRetirement:
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
 
             checkpoint()
-            progress = record.incomplete_retirement
+            progress = self.progress(record)
             if progress is None or progress.reviewed_plan_sha256 != digest:
                 assert native is not None
                 if progress is not None and (

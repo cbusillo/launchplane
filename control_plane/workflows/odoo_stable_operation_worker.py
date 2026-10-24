@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol, cast
 
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.odoo_testing_drill import DrillSkipped, DrillPrerequisite
 from control_plane.odoo_testing_restore import read_current_testing_generation
 from control_plane.testing_rebuild_service import (
@@ -2447,6 +2448,9 @@ def _execute_target_replacement_with_checkpoint(
             else f"Continue observing the original testing effects after {type(error).__name__}."
         )
         if rebuild_pending:
+            log_handled_error_cause(
+                error, operation.runner_trace_id, operation_id=operation.operation_id
+            )
             logging.warning(
                 "Native testing rebuild %s remains pending: %s",
                 operation.operation_id,
