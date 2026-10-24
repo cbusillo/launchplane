@@ -239,7 +239,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "public_ingress_monitor.run_once": ActionDeclaration("write"),
         "public_ingress_notification_policy.apply": ActionDeclaration("write"),
         "repository_inventory.read": ActionDeclaration("read"),
-        "repository_inventory.write": ActionDeclaration("write"),
+        "repository_inventory.write": ActionDeclaration("write", director_agent_write=True),
         "route_binding.apply": ActionDeclaration("write"),
         "route_binding.external.apply": ActionDeclaration("write"),
         "route_binding.external.plan": ActionDeclaration("plan"),
