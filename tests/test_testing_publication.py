@@ -158,6 +158,8 @@ class TestingPublicationTests(unittest.TestCase):
             _validate_candidate,
         )
         from control_plane.release_review import release_version
+        from control_plane.cli import _read_source_release_tuple_for_promotion
+        from control_plane.contracts.promotion_record import PromotionRequest
         from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
         from control_plane.workflows.odoo_prod_promotion import (
             OdooProdPromotionRequest,
@@ -166,6 +168,21 @@ class TestingPublicationTests(unittest.TestCase):
 
         self.prepare()
         self.publish()
+        held_operations = self.store.list_odoo_stable_target_replacement_operation_records(
+            context_name=self.candidate.context,
+            instance_name="testing",
+            statuses=("pending", "running", "reconciliation_required"),
+        )
+        for held in held_operations:
+            self.store.write_odoo_stable_target_replacement_operation_record(
+                held.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "finished_at": self.now.isoformat(),
+                    }
+                )
+            )
         app = self.candidate.application
         assert app is not None
         current = app.plan.artifact
@@ -175,6 +192,11 @@ class TestingPublicationTests(unittest.TestCase):
         self.store.write_artifact_manifest(stale)
         profile = self.store.read_product_profile_record(self.candidate.product)
         production = next(lane for lane in profile.lanes if lane.instance == "prod")
+        self.enterContext(
+            patch(
+                "control_plane.odoo_website_settings.matches_production_origin", return_value=True
+            )
+        )
         for artifact in (stale, current):
             self.store.write_release_tuple_record(
                 build_release_tuple_record_from_artifact_manifest(
@@ -202,6 +224,19 @@ class TestingPublicationTests(unittest.TestCase):
                 artifact_id=artifact.artifact_id,
                 backup_record_id="synthetic-backup",
             )
+            cli_request = PromotionRequest(
+                artifact_id=artifact.artifact_id,
+                source_git_ref=artifact.source_commit,
+                context=self.candidate.context,
+                from_instance="testing",
+                to_instance="prod",
+                target_name="synthetic-production",
+                target_type="compose",
+                provider_id="dokploy",
+                target_category="compose",
+                provider_target_type="compose",
+                deploy_mode="recreate-in-place",
+            )
             readers = (
                 (
                     "review",
@@ -215,17 +250,20 @@ class TestingPublicationTests(unittest.TestCase):
                     "promotion",
                     lambda: _read_source_tuple(record_store=self.store, request=promotion),
                 ),
+                (
+                    "cli",
+                    lambda: _read_source_release_tuple_for_promotion(
+                        record_store=self.store, request=cli_request
+                    ),
+                ),
             )
-            with patch(
-                "control_plane.odoo_website_settings.matches_production_origin", return_value=True
-            ):
-                for name, read in readers:
-                    with self.subTest(reader=name, current=artifact == current):
-                        if artifact == current:
+            for name, read in readers:
+                with self.subTest(reader=name, current=artifact == current):
+                    if artifact == current:
+                        read()
+                    else:
+                        with self.assertRaises((ValueError, click.ClickException)):
                             read()
-                        else:
-                            with self.assertRaises((ValueError, click.ClickException)):
-                                read()
             inputs = resolve_generic_promotion_inputs(
                 record_store=self.store,
                 request=GenericPromotionInputsRequest(context=self.candidate.context),
@@ -248,6 +286,74 @@ class TestingPublicationTests(unittest.TestCase):
                     request=GenericPromotionInputsRequest(context=self.candidate.context),
                 )
                 self.assertEqual(inputs.input_status, "blocked")
+
+        marker = "synthetic-private-metadata"
+        with patch(
+            "control_plane.testing_serving_copy.published_testing_copy",
+            side_effect=ValueError(marker),
+        ):
+            for name, read in readers:
+                with self.subTest(reader=name, private_error=True):
+                    with self.assertRaises((ValueError, click.ClickException)) as error:
+                        read()
+                    self.assertNotIn(marker, str(error.exception))
+            inputs = resolve_generic_promotion_inputs(
+                record_store=self.store,
+                request=GenericPromotionInputsRequest(context=self.candidate.context),
+            )
+            self.assertNotIn(marker, inputs.error_message)
+
+        operation = self.store.list_odoo_stable_target_replacement_operation_records(
+            context_name=self.candidate.context, instance_name="testing"
+        )[0]
+        ongoing = operation.model_copy(
+            update={"status": "running", "phase": "running", "finished_at": ""}
+        )
+        with patch.object(
+            self.store,
+            "list_odoo_stable_target_replacement_operation_records",
+            return_value=(ongoing,),
+        ):
+            for name, read in readers:
+                with self.subTest(reader=name, active_operation=True):
+                    with self.assertRaises((ValueError, click.ClickException)):
+                        read()
+            inputs = resolve_generic_promotion_inputs(
+                record_store=self.store,
+                request=GenericPromotionInputsRequest(context=self.candidate.context),
+            )
+            self.assertEqual(inputs.input_status, "blocked")
+
+        latest = self.store.read_deployment_record(self.plan.deployment.record_id)
+        failed = latest.model_copy(
+            update={
+                "record_id": latest.record_id + "-ordinary-failed",
+                "deploy": latest.deploy.model_copy(
+                    update={
+                        "status": "fail",
+                        "started_at": (self.now + timedelta(seconds=1)).isoformat(),
+                        "finished_at": (self.now + timedelta(seconds=2)).isoformat(),
+                    }
+                ),
+            }
+        )
+        self.store.write_deployment_record(failed)
+        for name, read in readers:
+            with self.subTest(reader=name, failed_ship=True):
+                with self.assertRaises((ValueError, click.ClickException)):
+                    read()
+        inputs = resolve_generic_promotion_inputs(
+            record_store=self.store,
+            request=GenericPromotionInputsRequest(context=self.candidate.context),
+        )
+        self.assertEqual(inputs.input_status, "blocked")
+        self.store.write_deployment_record(
+            failed.model_copy(
+                update={"deploy": failed.deploy.model_copy(update={"status": "pass"})}
+            )
+        )
+        for _, read in readers:
+            read()
 
     def test_real_legacy_refresh_preserves_serving_authority_before_first_rebuild(self) -> None:
         from tests.test_route_binding_refresh_controller import _service_binding, _Store, _profile

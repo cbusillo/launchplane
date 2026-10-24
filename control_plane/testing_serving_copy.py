@@ -4,6 +4,7 @@ from pathlib import Path
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.contracts.testing_publication import TestingPublicationRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -125,6 +126,15 @@ def published_testing_copy(
 def require_published_testing_release(store: object, release: ReleaseTupleRecord) -> None:
     if release.channel != "testing" or not isinstance(store, PostgresRecordStore):
         return
+    try:
+        _require_published_testing_release(store, release)
+    except (FileNotFoundError, ValueError):
+        raise ValueError("The current testing copy does not qualify its release record.") from None
+
+
+def _require_published_testing_release(
+    store: PostgresRecordStore, release: ReleaseTupleRecord
+) -> None:
     bindings = tuple(
         binding
         for binding in store.list_route_binding_records(
@@ -163,6 +173,31 @@ def require_published_testing_release(store: object, release: ReleaseTupleRecord
     runtime = inventory.runtime_identity
     if runtime is None or runtime.artifact_id != release.artifact_id:
         raise ValueError("The testing release does not match its current published copy.")
+    if store.list_odoo_stable_target_replacement_operation_records(
+        context_name=release.context,
+        instance_name="testing",
+        statuses=("pending", "running", "reconciliation_required"),
+    ):
+        raise ValueError("Testing has an unresolved replacement operation.")
+    latest = next(
+        (
+            record
+            for record in store.list_deployment_records(
+                context_name=release.context, instance_name="testing"
+            )
+            if record.resolved_target is None
+            or record.resolved_target.target_id == publication.plan.candidate.compose_id
+        ),
+        None,
+    )
+    if (
+        latest is None
+        or latest.resolved_target is None
+        or not deployment_record_passed(latest)
+        or latest.artifact_identity is None
+        or latest.artifact_identity.artifact_id != release.artifact_id
+    ):
+        raise ValueError("The latest testing deployment does not qualify its release record.")
 
 
 def testing_maintenance_secret_keys(store: PostgresRecordStore, context: str) -> frozenset[str]:
