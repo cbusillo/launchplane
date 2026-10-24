@@ -491,7 +491,9 @@ Handled failures with an explicit cause retain a trace-bound `handled_error_caus
 event in the service logs. It contains at most eight trusted Launchplane source
 module/line locations from the caught traceback, without exception text,
 source text, frame locals, request payloads or headers. Use the supported
-service-log reader to identify the failing check before another forward action.
+[Launchplane service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md),
+`launchplane-service-logs.py`, to identify the failing check before another
+forward action.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.

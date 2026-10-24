@@ -132,6 +132,7 @@ class ComposeQualificationTests(unittest.TestCase):
 class ActivationTests(unittest.TestCase):
     def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
         import asyncio
+        from control_plane import http_error_evidence
         from control_plane.contracts import canonical_json
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -156,7 +157,7 @@ class ActivationTests(unittest.TestCase):
         ).model_dump(mode="json")
         with (
             patch.object(TestingActivationAdapter, "current", side_effect=fail_dependency),
-            self.assertLogs("control_plane", level="WARNING") as logs,
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
         ):
             response = asyncio.run(
                 request(

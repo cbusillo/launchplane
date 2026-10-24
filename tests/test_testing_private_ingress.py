@@ -284,9 +284,11 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
     async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
+        from control_plane import http_error_evidence
+
         private = "private-provider-diagnostic-sentinel"
         self.factory.side_effect = ValueError(private)
-        with self.assertLogs("control_plane", level="WARNING") as logs:
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
             response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         evidence = json.loads(logs.records[-1].getMessage())
