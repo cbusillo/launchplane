@@ -1163,7 +1163,7 @@ after that commit, the same operation copies its persisted abandonment receipt
 into the failed rebuild checkpoint without repeating provider work, changing
 serving authority or retiring either copy.
 
-A failed setup with explicit undispatched evidence can therefore resume its original
+A failed setup with explicit undispatched evidence can resume its original
 setup or retain the private copy without starting a job. This action does not
 stop or remove either copy. Once restore dispatch started, running, absent and
 ambiguous provider jobs cannot be abandoned or redispatched. Older records
