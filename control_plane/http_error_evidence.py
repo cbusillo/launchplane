@@ -10,7 +10,7 @@ _SOURCE_ROOT = Path(__file__).parent
 _MAX_SOURCE_SITES = 8
 
 
-def log_dependency_failure(error: BaseException, trace_id: str) -> None:
+def log_handled_error_cause(error: BaseException, trace_id: str) -> None:
     sites: deque[dict[str, str | int]] = deque(maxlen=_MAX_SOURCE_SITES)
     for frame, line in walk_tb(error.__traceback__):
         try:
@@ -22,7 +22,5 @@ def log_dependency_failure(error: BaseException, trace_id: str) -> None:
             sites.append({"module": ".".join((_SOURCE_ROOT.name, *parts)), "line": line})
     _logger.warning(
         "%s",
-        json.dumps(
-            {"event": "request_dependency_failure", "trace_id": trace_id, "sites": list(sites)}
-        ),
+        json.dumps({"event": "handled_error_cause", "trace_id": trace_id, "sites": list(sites)}),
     )

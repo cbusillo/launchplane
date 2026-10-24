@@ -55,7 +55,7 @@ from control_plane.contracts.updater_proposal import (
 from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
-from control_plane.http_error_evidence import log_dependency_failure
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.http_routes.health_alert_drill import register_health_alert_drill_routes
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
@@ -31667,7 +31667,7 @@ def create_launchplane_fastapi_app(
             authz_evaluation = http_error.authz_evaluation
             authz_policy_provenance = http_error.authz_policy_provenance
             if http_error.__cause__ is not None:
-                log_dependency_failure(http_error.__cause__, trace_id)
+                log_handled_error_cause(http_error.__cause__, trace_id)
         else:
             message = (
                 http_error.detail

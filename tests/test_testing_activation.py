@@ -143,10 +143,11 @@ class ActivationTests(unittest.TestCase):
         def fail_dependency() -> None:
             canonical_json.canonical_json_sha256({private: 0.5})
 
+        bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(),
-            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            bearer_identity_config=bearer_config,
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
         )
@@ -162,7 +163,7 @@ class ActivationTests(unittest.TestCase):
                     app,
                     "POST",
                     ROUTE.format(product=self.product),
-                    headers={"Authorization": "Bearer local-operator-token"},
+                    headers={"Authorization": f"Bearer {bearer_config.local_operator_token}"},
                     payload=body,
                 )
             )
@@ -181,7 +182,7 @@ class ActivationTests(unittest.TestCase):
             all(type(site["line"]) is int and site["line"] > 0 for site in evidence["sites"])
         )
         self.assertNotIn(private, response.text + str(logs.output))
-        self.assertNotIn("local-operator-token", str(logs.output))
+        self.assertNotIn(bearer_config.local_operator_token, str(logs.output))
         self.assertTrue(
             all(record.exc_info is None and record.stack_info is None for record in logs.records)
         )

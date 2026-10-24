@@ -487,7 +487,7 @@ route cutover and changed authority; provider or unexpected exception text
 remains private. The testing-hold continuation preserves those same categories.
 Keep the request trace
 and original allocation/key while addressing that check, then plan again.
-Handled dependency failures retain a trace-bound `request_dependency_failure`
+Handled failures with an explicit cause retain a trace-bound `handled_error_cause`
 event in the service logs. It contains at most eight trusted Launchplane source
 module/line locations from the caught traceback, without exception text,
 source text, frame locals, request payloads or headers. Use the supported
