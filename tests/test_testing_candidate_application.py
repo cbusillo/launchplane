@@ -770,6 +770,23 @@ class CandidateApplicationTests(unittest.TestCase):
                     self.store, root=self.root, generation=generation, descriptor=source
                 )
             )
+            for context, instance in (
+                (self.allocation.namespace, "testing-candidate"),
+                (self.allocation.context, "testing"),
+            ):
+                original = self.store.read_provider_target_record(
+                    context_name=context, instance_name=instance
+                )
+                self.store.write_provider_target_record(
+                    original.model_copy(update={"target_id": "foreign-custody-fixture"})
+                )
+                try:
+                    with self.assertRaises(ValueError):
+                        self.store.write_native_testing_copy_capture(
+                            captures[0], candidate_namespace=self.allocation.namespace
+                        )
+                finally:
+                    self.store.write_provider_target_record(original)
             for namespace, receipt in (
                 ("foreign-candidate", captures[0]),
                 (

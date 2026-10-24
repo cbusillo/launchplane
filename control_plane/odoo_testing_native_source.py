@@ -225,7 +225,7 @@ def resolve_native_testing_source(
     return result
 
 
-def _cache_directory(generation_binding: str) -> Path:
+def _cache_directory(generation_binding: str, *, create: bool = True) -> Path:
     state = os.environ.get("LAUNCHPLANE_STATE_DIR", "")
     if not state or not re.fullmatch(r"[a-f0-9]{64}", generation_binding):
         raise ValueError("Native copy needs the service's explicit artifact state directory.")
@@ -234,8 +234,9 @@ def _cache_directory(generation_binding: str) -> Path:
     root = private / generation_binding
     if not root.is_absolute() or root.resolve() != root.absolute():
         raise ValueError("Native copy cache cannot traverse symlinks.")
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
+    if create:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root.chmod(0o700)
     return root
 
 
@@ -380,7 +381,6 @@ def capture_native_testing_source(
                 os.close(descriptor_fd)
             # A failed commit reply may still have committed. Keep private bytes
             # even on an exception; deleting them can destroy the recorded copy.
-            # Unreferenced private caches have a documented custody cleanup path.
             store.write_native_testing_copy_capture(
                 capture, candidate_namespace=generation.namespace
             )
@@ -522,10 +522,6 @@ def prepare_native_testing_delivery(
 
 
 def remove_completed_native_capture_cache(capture: NativeTestingCopyCapture) -> None:
-    """Dispose raw private bytes after restore proof, retaining the DB receipt."""
-    root = _cache_directory(capture.generation_binding_sha256)
-    directory = root / capture.capture_id
-    if directory.is_symlink() or directory.resolve() != directory.absolute():
-        raise ValueError("The private capture cache has unexpected custody.")
-    if directory.exists():
-        shutil.rmtree(directory)
+    root = _cache_directory(capture.generation_binding_sha256, create=False)
+    if root.exists():
+        shutil.rmtree(root)

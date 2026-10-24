@@ -34,6 +34,7 @@ from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.odoo_testing_native_source import (
     capture_native_testing_source,
     prepare_native_testing_delivery,
+    remove_completed_native_capture_cache,
     verify_native_capture_files,
 )
 from control_plane.odoo_testing_restore import generation_binding, NATIVE_TESTING_FILES_PROGRAM
@@ -662,6 +663,32 @@ class NativeCopyCustodyTests(unittest.TestCase):
                 self.capture()
         self.store.write_native_testing_copy_capture.assert_not_called()
         self.assertFalse(any(path.is_file() for path in self.root.rglob("*")))
+
+    def test_completed_cleanup_removes_orphan_attempts_without_other_generation_bytes(self) -> None:
+        self.store.write_native_testing_copy_capture.side_effect = OSError("Fixture commit failed")
+        with patch(
+            "control_plane.odoo_testing_native_source.read_native_source", side_effect=self.stream
+        ):
+            with self.assertRaises(OSError):
+                self.capture()
+            self.store.write_native_testing_copy_capture.side_effect = None
+            capture = self.capture()
+        root = verify_native_capture_files(capture)[0].parent.parent
+        self.assertEqual(len(list(root.iterdir())), 2)
+        interrupted = root / "capture-interrupted"
+        interrupted.mkdir()
+        (interrupted / "database").write_bytes(self.data["database"])
+        retained = root.parent / ("0" * 64)
+        retained.mkdir()
+        witness = retained / "original"
+        witness.write_bytes(self.data["filestore"])
+        (root / "outside-link").symlink_to(retained, target_is_directory=True)
+        remove_completed_native_capture_cache(capture)
+        self.assertFalse(root.exists())
+        self.assertEqual(witness.read_bytes(), self.data["filestore"])
+        remove_completed_native_capture_cache(capture)
+        self.assertFalse(root.exists())
+        self.assertEqual(witness.read_bytes(), self.data["filestore"])
 
     def test_lost_receipt_commit_reply_retains_published_bytes_for_resume(self) -> None:
         def committed(receipt: NativeTestingCopyCapture, **_: object) -> None:

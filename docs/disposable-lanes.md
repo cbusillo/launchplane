@@ -2195,8 +2195,14 @@ generation while its restore remains undispatched and its allocation custody
 and predecessor selection agree. The serving generation stays unchanged until
 healthy publication. Once the candidate's restore and private readiness are
 proved and its prepared receipt is saved, preparation removes the raw source
-cache while retaining the immutable database capture receipt. A lost cleanup
-reply resumes that same prepared candidate and repeats only the cleanup.
+generation's cache, including interrupted unreferenced attempts, while retaining
+the immutable database capture receipt. Cleanup does not recreate an absent
+generation directory or remove other generations. A lost cleanup reply resumes
+that same prepared candidate and repeats only the cleanup after private proof.
+Failed, abandoned or uncertain copies retain raw source bytes as private custody,
+including runner chunks. Abandonment is not source-byte disposal authority.
+Their later disposal requires a separately supported, authorized procedure;
+successful preparation does not claim that failed-copy custody is resolved.
 
 Fresh restore sends its host program and input through compressed Python stdin.
 Only the capture identity and artifact receipts cross the host boundary; the
