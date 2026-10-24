@@ -419,12 +419,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         branch_refresh_recorder: MergeTrainBranchRefreshRecorder | None = None,
         branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
         wait: Callable[[float], None] = sleep,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
         self._branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
         self._wait = wait
+        self._source_screening = source_screening
         self._snapshot_policy: MergeTrainRepositoryPolicy | None = None
         self._reuse_snapshots = False
         self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
@@ -450,6 +452,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport,
             branch_refresh_store=self._branch_refresh_store,
             repository_policy=self._snapshot_policy,
+            source_screening=self._source_screening,
         ).read_merge_train_snapshot(repository=repository, base_branch=base_branch)
         if self._reuse_snapshots:
             self._snapshots[key] = snapshot.model_copy(deep=True)
@@ -462,6 +465,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             transport=self.transport,
             branch_refresh_store=self._branch_refresh_store,
             repository_policy=self._snapshot_policy,
+            source_screening=self._source_screening,
         ).read_pull_request_snapshot(repository=repository, pull_request_number=pull_request_number)
 
     def read_review_conversations(
@@ -3539,10 +3543,16 @@ class GitHubMergeTrainSnapshotReader:
         transport: MergeTrainGitHubTransport,
         branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
         repository_policy: MergeTrainRepositoryPolicy | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
         self._branch_refresh_store = branch_refresh_store
         self._repository_policy = repository_policy
+        self._source_screening = bool(
+            source_screening
+            and repository_policy is not None
+            and repository_policy.merge_method == "merge"
+        )
         self._actor_roles: dict[tuple[str, str], str] = {}
         self._author_roles: dict[tuple[str, str], str] = {}
         self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
@@ -3593,6 +3603,13 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=base_sha,
             pull_requests=pull_requests,
         )
+        if self._source_screening:
+            pull_requests = self._require_full_individual_checks(
+                repository_path=repository_path,
+                base_branch=normalized_base_branch,
+                base_sha=base_sha,
+                pull_requests=pull_requests,
+            )
         by_number = {pr.number: pr for pr in pull_requests}
         pull_requests = tuple(
             by_number.get(_required_int(pr["number"], "GitHub pull request entry requires number."))
@@ -3609,6 +3626,50 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=base_sha,
             pull_requests=pull_requests,
         )
+
+    def _require_full_individual_checks(
+        self,
+        *,
+        repository_path: str,
+        base_branch: str,
+        base_sha: str,
+        pull_requests: tuple[MergeTrainPullRequestSnapshot, ...],
+    ) -> tuple[MergeTrainPullRequestSnapshot, ...]:
+        result = []
+        for pull_request in pull_requests:
+            if (
+                not pull_request.requires_individual_landing
+                or pull_request.required_checks_status != "pass"
+            ):
+                result.append(pull_request)
+                continue
+            status, diagnostic = _required_checks_observation(
+                transport=self.transport,
+                repository_path=repository_path,
+                encoded_head_sha=quote(pull_request.head_sha, safe=""),
+                base_branch=base_branch,
+                owner_review_required=pull_request.owner_review_required,
+                owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
+                if pull_request.owner_review_required
+                else None,
+                config_comparison=_config_comparison(
+                    self._branch_refresh_store,
+                    repository=pull_request.base_repository,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    head_sha=pull_request.head_sha,
+                    policy=self._repository_policy,
+                ),
+            )
+            result.append(
+                pull_request.model_copy(
+                    update={
+                        "required_checks_status": status,
+                        "required_checks_observation_error": diagnostic,
+                    }
+                )
+            )
+        return tuple(result)
 
     def _with_unknown_mergeability_refresh(
         self,
@@ -4711,7 +4772,7 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=base_branch,
                 owner_review_required=owner_review_required,
                 config_comparison=config_comparison,
-                source_screening=True,
+                source_screening=self._source_screening,
                 owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
                 if owner_review_required
                 else None,
@@ -5250,16 +5311,28 @@ def _required_checks_observation(
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
     )
+    observed_requirements = filtered_requirements
+    if source_screening:
+        observed_requirements += tuple(
+            ("pr-ci-gate", app_id)
+            for name, app_id in filtered_requirements
+            if name.casefold() == "ci-gate"
+        )
     check_runs_payload = _list_check_runs(
         transport=transport,
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
-        required_checks=filtered_requirements,
+        required_checks=observed_requirements,
     )
     focused_source = False
     raw_checks = check_runs_payload.get("check_runs")
     raw_statuses = status_payload.get("statuses")
-    if source_screening and isinstance(raw_checks, list) and isinstance(raw_statuses, list):
+    if (
+        source_screening
+        and any(name.casefold() == "ci-gate" for name, _ in filtered_requirements)
+        and isinstance(raw_checks, list)
+        and isinstance(raw_statuses, list)
+    ):
         observed_names = {
             str(check.get("name", "")).casefold() for check in raw_checks if isinstance(check, dict)
         } | {

@@ -253,6 +253,7 @@ def _execute_plan_mode(
 ) -> MergeTrainBatchCandidateRunOnceResult:
     snapshot = GitHubMergeTrainSnapshotReader(
         transport=transport,
+        source_screening=True,
         branch_refresh_store=review_store,
         repository_policy=policy.find_repository_policy(
             repository=request.repository, base_branch=request.base_branch

@@ -25,7 +25,7 @@ permissions:
 
 concurrency:
   group: >-
-    ${{ github.workflow }}-${{ github.event_name == 'push' &&
+    ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'manual-' || '' }}${{ github.event_name == 'push' &&
     !(startsWith(github.ref, 'refs/heads/launchplane/train/') &&
     !github.event.created && !github.event.forced) && github.sha ||
     (github.event.pull_request.number || github.ref) }}
@@ -197,6 +197,15 @@ jobs:
             schedule)
               BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
               ;;
+            workflow_dispatch)
+              if [[ -z "$DEFAULT_BRANCH" || "$EVENT_REF" != refs/heads/* || "$EVENT_REF" = refs/heads/launchplane/* ]]; then
+                echo "Manual full CI requires a source branch and repository default branch." >&2
+                exit 1
+              fi
+              git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null
+              git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+              BASE_SHA="$(git merge-base "refs/remotes/origin/${DEFAULT_BRANCH}" "$HEAD_SHA")"
+              ;;
             *) echo "No comment comparison range for ${EVENT_NAME}." >&2; exit 1 ;;
           esac
           if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ ]]; then
@@ -233,14 +242,23 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
           python_gate=true
           image_gate=true
           # Schedules and unprovable diffs retain absolute gates.
-          if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "push" ]; then
+          if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "push" ] || [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             comparison_base="${BASE_SHA}"
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              comparison_base=""
+              if [[ -n "${DEFAULT_BRANCH:-}" && "$REF" = refs/heads/* && "$REF" != refs/heads/launchplane/* ]] &&
+                git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null &&
+                git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"; then
+                comparison_base="refs/remotes/origin/${DEFAULT_BRANCH}"
+              fi
+            fi
             if [[ "${REF}" == refs/heads/launchplane/train/* ]]; then
               comparison_base=origin/main
             fi

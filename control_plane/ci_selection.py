@@ -29,7 +29,11 @@ def module_name(path: str) -> str:
 
 
 def select_modules(
-    sources: dict[str, str], changed: set[str], *, max_modules: int = MAX_FOCUSED_MODULES
+    sources: dict[str, str],
+    changed: set[str],
+    *,
+    max_modules: int = MAX_FOCUSED_MODULES,
+    native_modules: frozenset[str] = frozenset(),
 ) -> list[str] | None:
     consumers: dict[str, set[str]] = defaultdict(set)
     modules = {module_name(path) for path in sources if path.endswith(".py")}
@@ -38,7 +42,22 @@ def select_modules(
             continue
         module = module_name(path)
         package = module if path.endswith("/__init__.py") else module.rsplit(".", 1)[0]
-        for node in ast.walk(ast.parse(content)):
+        nodes = tuple(ast.walk(ast.parse(content)))
+        if any(
+            isinstance(node, ast.Constant) and node.value == "control_plane" for node in nodes
+        ) and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "rglob"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "*.py"
+            for node in nodes
+        ):
+            for source_module in modules:
+                if source_module.startswith("control_plane."):
+                    consumers[source_module].add(module)
+        for node in nodes:
             imports: list[str] = []
             if isinstance(node, ast.Import):
                 imports = [alias.name for alias in node.names]
@@ -77,7 +96,11 @@ def select_modules(
     for path in changed:
         if path.startswith("docs/") and path.endswith(".md") or path in {"README.md", "AGENTS.md"}:
             continue
-        if not path.endswith(".py") or not path.startswith(("control_plane/", "tests/")):
+        if (
+            path not in sources
+            or not path.endswith(".py")
+            or not path.startswith(("control_plane/", "tests/"))
+        ):
             return None
         if not all(component.isidentifier() for component in module_name(path).split(".")):
             return None
@@ -91,7 +114,11 @@ def select_modules(
                 continue
             seen.add(module)
             pending.extend(consumers[module])
+        if any(name.startswith("scripts.") for name in seen):
+            return None
         tests = {name for name in seen if name.startswith("tests.test") and name in modules}
+        if tests & native_modules:
+            return None
         if not tests:
             return None
         affected.update(tests)
@@ -138,17 +165,58 @@ def plan(root: Path, event: dict[str, object], event_name: str) -> list[str] | N
             return None
         break
     sources: dict[str, str] = {}
-    for revision in (comparison_base, "HEAD"):
-        archive = subprocess.check_output(
-            ["git", "archive", revision, "control_plane", "tests"], cwd=root
+    archive = subprocess.check_output(
+        ["git", "archive", "HEAD", "control_plane", "tests", "scripts"], cwd=root
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive)) as snapshot:
+        for member in snapshot:
+            if member.isfile() and member.name.endswith(".py"):
+                source = snapshot.extractfile(member)
+                assert source is not None
+                sources[member.name] = source.read().decode()
+    configuration = json.loads(git(root, "show", "HEAD:.github/github.json"))
+    native_modules = native_test_modules(sources, configuration)
+    return select_modules(sources, changed, native_modules=native_modules)
+
+
+def native_test_modules(
+    sources: dict[str, str], configuration: dict[str, object]
+) -> frozenset[str]:
+    assignments = ast.walk(ast.parse(sources["control_plane/cli_ci.py"]))
+    inventory = next(
+        node.value
+        for node in assignments
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "POSTGRES_INTEGRATION_MODULES"
+            for target in node.targets
         )
-        with tarfile.open(fileobj=io.BytesIO(archive)) as snapshot:
-            for member in snapshot:
-                if member.isfile() and member.name.endswith(".py"):
-                    source = snapshot.extractfile(member)
-                    assert source is not None
-                    sources[member.name] = source.read().decode()
-    return select_modules(sources, changed)
+    )
+    postgres_targets = ast.literal_eval(inventory)
+    if not isinstance(postgres_targets, (tuple, list)) or not all(
+        isinstance(target, str) for target in postgres_targets
+    ):
+        raise ValueError("Unprovable native PostgreSQL inventory")
+    quality_gate = configuration["qualityGate"]
+    if not isinstance(quality_gate, dict) or not isinstance(
+        tests := quality_gate.get("test"), dict
+    ):
+        raise ValueError("Missing native rehearsal inventory")
+    command = shlex.split(tests["testingRouteReaderRehearsal"])
+    rehearsal_targets = [
+        target for target in command[command.index("unittest") + 1 :] if target.startswith("tests.")
+    ]
+    if not rehearsal_targets:
+        raise ValueError("Unprovable native rehearsal inventory")
+    modules = {module_name(path) for path in sources if path.endswith(".py")}
+    selected = set()
+    for target in (*postgres_targets, *rehearsal_targets):
+        while target and target not in modules:
+            target = target.rpartition(".")[0]
+        if not target:
+            raise ValueError("Unknown native test module")
+        selected.add(target)
+    return frozenset(selected)
 
 
 def run_selected(root: Path, modules: list[str]) -> None:
@@ -173,7 +241,14 @@ def main() -> None:
             json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
             os.environ["EVENT_NAME"],
         )
-    except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as error:
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        StopIteration,
+        SyntaxError,
+        subprocess.CalledProcessError,
+    ) as error:
         print(f"Full suite fallback: {type(error).__name__}")
         modules = None
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
