@@ -102,6 +102,33 @@ test("legacy attempts without an original actor binding remain observation-only"
   }));
 });
 
+test("failed storage writes cannot prove a legacy request was never dispatched", async () => {
+  const { original_scope, ...payload } = original.payload;
+  const attempt = { ...original, payload, dispatchStarted: false };
+  const stored = JSON.stringify(attempt);
+  const storage = {
+    getItem: () => stored,
+    setItem: () => { throw new Error("Fixture storage write failed"); },
+    removeItem: () => { throw new Error("Fixture storage removal failed"); },
+  };
+  let submissions = 0;
+  await assert.rejects(runTestingRebuild(attempt, dependencies({
+    submit: async (_product, _payload, options) => {
+      options.onDispatch(); submissions++;
+      throw new Error("Fixture reply lost after dispatch");
+    },
+    persist: value => saveTestingRebuildAttempt(original.product, value, storage),
+  })));
+  assert.equal(submissions, 1);
+  assert.equal(JSON.parse(stored).dispatchStarted, false);
+  let lookups = 0;
+  await assert.rejects(runTestingRebuild(readTestingRebuildAttempt(original.product, storage), dependencies({
+    submit: async () => assert.fail("Uncertain legacy recovery cannot submit"),
+    lookup: async () => { lookups++; throw new LaunchplaneApiError("Absent", 404, "trace", "testing_rebuild_not_observed"); },
+  })));
+  assert.equal(lookups, 1);
+});
+
 test("a confirmed first-submit legacy denial keeps its existing discard disposition", () => {
   const { original_scope, ...payload } = original.payload;
   const originalDenial = { ...original, payload, dispatchStarted: true, denied: true };

@@ -642,7 +642,9 @@ def register_testing_rebuild_routes(
         methods=["POST"],
         operation_id="settle_testing_rebuild",
         response_model=TestingRebuildSettlementResponse,
-        responses={status: {"model": common.error_response_model} for status in (400, 401, 403)},
+        responses={
+            status: {"model": common.error_response_model} for status in (400, 401, 403, 409, 503)
+        },
     )
     app.add_api_route(
         TESTING_REBUILD_ROUTE + "/lookup",
