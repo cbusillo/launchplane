@@ -6591,7 +6591,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             apply_response["error"]["code"], "authz_policy_schema_v3_transition_denied"
         )
-        self.assertIn("ordinary_enable_scope_not_singleton", apply_response["error"]["message"])
+        self.assertIn("ordinary_authority_retired", apply_response["error"]["message"])
 
     def test_managed_authz_reconcile_rejects_admin_human_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
