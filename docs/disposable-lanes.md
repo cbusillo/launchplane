@@ -3212,7 +3212,7 @@ original intent. For each step run `dry-run`, review the saved evidence, run
    validates the newly built working copy. Validation readback needs that
    attempt's saved evidence file.
 4. `verify`, with its own key and review, to preserve the post-write Odoo tuple
-   for the rollback rehearsal.
+   as forward-rehearsal evidence and recovery custody.
 
 Do not reuse an old validation review for the rebuilt copy. The record says
 `rebuilding` while the new placement and working copy are being produced, so
@@ -3394,8 +3394,8 @@ key and new evidence file:
    consuming rehearsal; health/login proof is not Client acceptance.
 5. Without a consumer confirmation, `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
-   volumes, provider placement, snapshots or keys. Their custodian carries them
-   into the rollback rehearsal or use the confirmed-final-input cleanup below.
+   volumes, provider placement, snapshots or keys. Keep their recorded custody;
+   use the confirmed-final-input cleanup below when its prerequisites are met.
 
 #### Retire working copies while retaining final recovery inputs
 
@@ -3598,9 +3598,9 @@ Ordinary `verify` seals the complete ordered `business_validations` history
 into the final upgraded snapshot’s `business_validation_sha256`; it refuses a
 known failed latest validation. Earlier passing and committed failed outcomes
 keep their identified writes in that history. The final sanitized old-version
-tuple stays unchanged. Hand both managed tuples and the value-free validation
-receipts to the rollback consumer before ordinary retirement. Launchplane does
-not perform that consumer’s business checks or rollback.
+tuple stays unchanged. Both managed tuples and value-free validation receipts
+remain in recorded custody through ordinary retirement. Product repositories
+own business scenarios and cutover fallback plans.
 
 Use `readback` with the original intent/action to inspect its completed effect.
 Retirement readback verifies stopped containers and immutable files without
