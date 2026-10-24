@@ -44,6 +44,11 @@ refuse the read. Configuration on unrelated hosts is not qualified as a
 Launchplane write payload. A selected host is read independently by ID and
 fully qualified, including its current names, loaded configuration, certificate,
 access list and ownership receipt, before any testing effect or successful readback.
+When the HTTP refusal retains its provider cause, the trace-bound
+`handled_error_cause` log also carries bounded validation kinds, schema-owned
+field locations and trusted validator source sites. Dynamic keys, provider
+values, exception messages and validation contexts are withheld. These diagnostics
+do not change accepted provider data or route qualification.
 The existing scoped ingress planner also accepts an active testing private
 endpoint hostname when an access list is supplied; public-route rules remain.
 
