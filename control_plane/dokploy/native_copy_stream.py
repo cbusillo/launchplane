@@ -30,6 +30,36 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import connect
 
 NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+NATIVE_CONTAINER_SPEC_FIELDS = (
+    "Image",
+    "Labels",
+    "Command",
+    "Args",
+    "Hostname",
+    "Env",
+    "Dir",
+    "User",
+    "Groups",
+    "Privileges",
+    "Init",
+    "StopSignal",
+    "TTY",
+    "OpenStdin",
+    "ReadOnly",
+    "Mounts",
+    "StopGracePeriod",
+    "Healthcheck",
+    "Hosts",
+    "DNSConfig",
+    "Secrets",
+    "Configs",
+    "Isolation",
+    "Sysctls",
+    "CapabilityAdd",
+    "CapabilityDrop",
+    "Ulimits",
+    "OomScoreAdj",
+)
 
 
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
@@ -55,6 +85,7 @@ class NativeProgramFailed(NativeSourceUnavailable):
         kind: str = "unavailable",
         program: str = "",
         program_sites: object = None,
+        container_fields: object = None,
     ) -> None:
         super().__init__(message)
         line_count = len(program.splitlines())
@@ -67,6 +98,23 @@ class NativeProgramFailed(NativeSourceUnavailable):
         )
         self.program_sha256 = (
             hashlib.sha256(program.encode()).hexdigest() if self.program_sites else ""
+        )
+        self.container_fields: tuple[tuple[str, str], ...] = (
+            tuple((item["field"], item["difference"]) for item in container_fields)
+            if self.program_sites
+            and isinstance(container_fields, list)
+            and 0 < len(container_fields) <= len(NATIVE_CONTAINER_SPEC_FIELDS) + 1
+            and all(
+                isinstance(item, dict)
+                and set(item) == {"field", "difference"}
+                and isinstance(item["field"], str)
+                and item["field"] in (*NATIVE_CONTAINER_SPEC_FIELDS, "other")
+                and isinstance(item["difference"], str)
+                and item["difference"] in ("service_only", "task_only", "unequal")
+                for item in container_fields
+            )
+            and len({item["field"] for item in container_fields}) == len(container_fields)
+            else ()
         )
         self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
         self.evidence = readback_failure_evidence(
@@ -274,6 +322,7 @@ def _read_program(
                 kind=kind if isinstance(kind, str) else "unavailable",
                 program=program,
                 program_sites=value.get("sites"),
+                container_fields=value.get("container_fields"),
             )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")

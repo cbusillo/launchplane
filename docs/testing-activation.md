@@ -502,6 +502,11 @@ evidence. The transport drops malformed or out-of-range locations. Use the suppo
 [Launchplane service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md),
 `launchplane-service-logs.py`, to identify the failing check before another
 forward action.
+Retained task/template refusals additionally report allowlisted top-level
+ContainerSpec fields and whether each is service-only, task-only or unequal.
+Unknown field names collapse to `other`; values and environment-variable names
+are never included. These diagnostics preserve the exact comparison and refusal.
+`unequal` includes list ordering differences; it does not prove a value changed.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
