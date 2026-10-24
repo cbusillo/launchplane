@@ -355,6 +355,8 @@ def build_merge_train_dry_run_result(
         planned_dependency_heads=planned_dependency_heads,
         planned_handoff_heads=planned_handoff_heads,
     )
+    if batch_landing:
+        queue = _defer_unsupported_stacks(policy=policy, snapshot=snapshot, queue=queue)
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
         # Accepted features start a batch; remaining planned heads keep its
@@ -527,6 +529,41 @@ def merge_train_snapshot_of(
                 if pull_request.number in numbers
             )
         }
+    )
+
+
+def _defer_unsupported_stacks(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    queue: tuple[MergeTrainQueueEntry, ...],
+) -> tuple[MergeTrainQueueEntry, ...]:
+    child_bases = {
+        pr.base_ref for pr in snapshot.pull_requests if pr.base_ref != snapshot.base_branch
+    }
+    stacked_roots = {pr.number for pr in snapshot.pull_requests if pr.head_ref in child_bases}
+    refusals: dict[int, tuple[str, ...]] = {}
+    for entry in queue:
+        if not entry.eligible or entry.number not in stacked_roots:
+            continue
+        discovery = discover_merge_train_stack(
+            policy=policy, snapshot=snapshot, root_pull_request_number=entry.number
+        )
+        if discovery.status == "unsupported":
+            refusals[entry.number] = discovery.unsupported_reasons
+    if not refusals or not any(entry.eligible and entry.number not in refusals for entry in queue):
+        return queue
+    return tuple(
+        entry.model_copy(
+            update={
+                "eligible": False,
+                "ineligible_reasons": (*entry.ineligible_reasons, *refusals[entry.number]),
+                "deferred_reasons": refusals[entry.number],
+            }
+        )
+        if entry.number in refusals
+        else entry
+        for entry in queue
     )
 
 
