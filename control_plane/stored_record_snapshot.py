@@ -158,8 +158,6 @@ class _Scrubber:
                 return value
             except ValueError:
                 pass
-        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
-            return self._digest(value)[: len(value)]
         if value.isdecimal():
             return str(self.number(value))
         digest = self._digest(value)
@@ -202,6 +200,8 @@ class _Scrubber:
             and (addresses := _normalized(public_dns_addresses, (value,)))
         ):
             return self._public_address(addresses[0])
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+            return digest[: len(value)]
         if name == "slug_template":
             return f"snapshot-{digest[:12]}" + ("-{number}" if "{number}" in value else "")
         if name.endswith("url") or name == "urls":

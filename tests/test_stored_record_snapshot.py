@@ -153,7 +153,10 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             update={
                 "product": "declared-transport",
                 "preview": transport.preview.model_copy(
-                    update={"app_name_prefix": "sample-preview", "transport_database_prefix": "db"}
+                    update={
+                        "app_name_prefix": "sample-preview",
+                        "transport_database_prefix": "a" * 40,
+                    }
                 ),
             }
         )
@@ -228,10 +231,18 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         transport = profile.model_copy(
             update={"preview": profile.preview.model_copy(update={"app_name_prefix": "app"})}
         ).model_dump(mode="json")
+        prefix_limit = schema["$defs"]["ProductPreviewProfile"]["properties"][
+            "transport_database_prefix"
+        ]["maxLength"]
         invalid = (
             (dns, target, "public_name", "bad_name"),
             (dns, target, "addresses", ["10.0.0.1"]),
-            (transport, transport["preview"], "transport_database_prefix", "x" * 41),
+            (
+                transport,
+                transport["preview"],
+                "transport_database_prefix",
+                "x" * (prefix_limit + 1),
+            ),
             (transport, transport["preview"], "transport_database_prefix", "Bad-Prefix"),
         )
         for payload, holder, field, value in invalid:
@@ -359,7 +370,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             "filestore_bytes": 1,
             "staging_bytes": 1,
             "reserve_bytes": 1,
-            "retained_copy_bindings": ["1" * 64],
+            "retained_copy_bindings": ["ab12" * 16],
         }
         payload["lanes"].append(
             {
@@ -368,7 +379,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                 "generic_web_cutover": {
                     "route_id": "hidden-route",
                     "host": "hidden.example.test",
-                    "runtime_settings_sha256": "2" * 64,
+                    "runtime_settings_sha256": "cd34" * 16,
                     "writers": [],
                     "slots": [
                         {
@@ -387,7 +398,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         scrubbed = _Scrubber().scrub(payload, schema, schema)
         profile = LaunchplaneProductProfileRecord.model_validate(scrubbed)
         encoded = json.dumps(scrubbed)
-        for private in ("hidden", "1" * 64, "2" * 64):
+        for private in ("hidden", "ab12" * 16, "cd34" * 16):
             self.assertNotIn(private, encoded)
         cutover = profile.lanes[1].generic_web_cutover
         assert cutover is not None

@@ -80,10 +80,11 @@ Declared cron expressions, preview app-name suffixes, preview transport
 database prefixes, DNS expectation names and public addresses receive salted,
 format-valid substitutes so a valid source profile remains readable. A DNS name
 is pseudonymized after normalization, so names that collide in the source still
-collide. Hexadecimal digests stay hexadecimal even when every digit is decimal,
-and fixed-position array items use their position's schema. Invalid
-historical values remain invalid; scrubbing does not repair them. Arbitrary
-map values with those names receive no format exemption.
+collide. Fixed-position array items use their position's schema. An invalid
+value in one of these formats gets an ordinary pseudonym, so it still fails.
+Other free text always gets an ordinary pseudonym, which can hide some invalid
+history, such as a blank or too-long value, or two values that differ only in
+case. Arbitrary map values with those names receive no format exemption.
 
 ## Candidate rehearsal
 
