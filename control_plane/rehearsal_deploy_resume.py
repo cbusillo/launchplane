@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     OdooUpgradeRehearsalRecord,
     OdooUpgradeRehearsalRequest,
@@ -247,6 +248,13 @@ def observe_checkpoint(
     from control_plane.provider_operations import build_provider_operation_key
 
     reservation = checkpoint.reservation
+    operation_key = build_provider_operation_key(
+        scope=reservation.scope,
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+        reconciliation_key=reservation.reconciliation_key,
+    )
     adapter = OdooRehearsalAdapter(
         root,
         store,
@@ -267,11 +275,19 @@ def observe_checkpoint(
         original = checkpoint.rehearsal
         published = (
             record.state == "upgraded"
+            and (
+                record.phase_timings == original.phase_timings
+                or record.phase_timings[:-1] == original.phase_timings
+                and record.phase_timings[-1].action == "execute"
+                and record.phase_timings[-1].attempt_sha256
+                == canonical_json_sha256({"operation_key": operation_key})
+            )
             and record.model_copy(
                 update={
                     "state": original.state,
                     "copies": original.copies,
                     "elapsed_seconds": original.elapsed_seconds,
+                    "phase_timings": original.phase_timings,
                     "updated_at": original.updated_at,
                 }
             )
@@ -286,13 +302,6 @@ def observe_checkpoint(
         return "recovery_required"
     if job_status != "terminal":
         return "pending"
-    operation_key = build_provider_operation_key(
-        scope=reservation.scope,
-        route_path=reservation.route_path,
-        idempotency_key=reservation.idempotency_key,
-        request_fingerprint=reservation.request_fingerprint,
-        reconciliation_key=reservation.reconciliation_key,
-    )
     observation = adapter.observe(
         operation_key,
         reservation.provider_effect_phase,
