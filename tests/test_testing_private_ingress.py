@@ -1,6 +1,7 @@
 """Exercise testing hostname creation against real records and fake providers."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -282,6 +283,22 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
+        from control_plane import http_error_evidence
+
+        private = "private-provider-diagnostic-sentinel"
+        self.factory.side_effect = ValueError(private)
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(evidence["sites"])
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def test_historical_cleanup_receipt_requires_exact_successful_ownership(self) -> None:
         self.create()
         receipt = self.store.list_ingress_route_audit_records()[0]

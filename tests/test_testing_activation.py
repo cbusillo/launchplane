@@ -130,6 +130,65 @@ class ComposeQualificationTests(unittest.TestCase):
 
 
 class ActivationTests(unittest.TestCase):
+    def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
+        import asyncio
+        from control_plane import http_error_evidence
+        from control_plane.contracts import canonical_json
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        private = "private-provider-diagnostic-sentinel"
+
+        def fail_dependency() -> None:
+            canonical_json.canonical_json_sha256({private: 0.5})
+
+        bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=bearer_config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = self.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        with (
+            patch.object(TestingActivationAdapter, "current", side_effect=fail_dependency),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={"Authorization": f"Bearer {bearer_config.local_operator_token}"},
+                    payload=body,
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value,
+        )
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(
+            any(site["module"] == canonical_json.__name__ for site in evidence["sites"]),
+            evidence,
+        )
+        self.assertTrue(
+            all(type(site["line"]) is int and site["line"] > 0 for site in evidence["sites"])
+        )
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertNotIn(bearer_config.local_operator_token, str(logs.output))
+        self.assertTrue(
+            all(record.exc_info is None and record.stack_info is None for record in logs.records)
+        )
+        self.assertEqual(self.writes, [])
+
     def test_native_external_refusal_keeps_backoff_through_http(self) -> None:
         import asyncio
         from control_plane.discord_identity import DiscordIdentityResult
