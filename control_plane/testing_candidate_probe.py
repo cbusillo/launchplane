@@ -64,12 +64,28 @@ except psycopg2.Error:
 try:
     with connection.cursor() as cursor:
         cursor.execute('SET TRANSACTION READ ONLY')
-        cursor.execute('SELECT password FROM res_users WHERE login = %s AND active',
-                       (os.environ.get('ODOO_ADMIN_LOGIN', '').strip() or 'admin',))
-        rows = cursor.fetchall()
-        if (len(rows) != 1 or not rows[0][0]
-                or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
-            refuse_readiness()
+        preserved = False
+        if spec.get('copy_binding_sha256'):
+            sys.path.insert(0, '/volumes/scripts')
+            try:
+                from odoo_admin_password import restored_logins_preserved
+            except ImportError:
+                pass
+            else:
+                preserved = restored_logins_preserved(cursor) is True
+        login = os.environ.get('ODOO_ADMIN_LOGIN', '').strip() or 'admin'
+        if preserved:
+            cursor.execute('SELECT password FROM res_users WHERE login = ANY(%s) AND active',
+                           (list(dict.fromkeys(['admin', login])),))
+            default_context = CryptContext(schemes=['pbkdf2_sha512', 'plaintext'])
+            if any(row[0] and default_context.verify('admin', row[0]) for row in cursor.fetchall()):
+                refuse_readiness()
+        else:
+            cursor.execute('SELECT password FROM res_users WHERE login = %s AND active', (login,))
+            rows = cursor.fetchall()
+            if (len(rows) != 1 or not rows[0][0]
+                    or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
+                refuse_readiness()
 finally:
     try:
         connection.rollback()
