@@ -142,7 +142,10 @@ class ActivationTests(unittest.TestCase):
         private = "private-provider-diagnostic-sentinel"
 
         def fail_dependency() -> None:
-            canonical_json.canonical_json_sha256({private: 0.5})
+            try:
+                canonical_json.canonical_json_sha256({private: 0.5})
+            except ValueError as error:
+                raise RuntimeError(private) from error
 
         bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
         app = create_launchplane_fastapi_app(

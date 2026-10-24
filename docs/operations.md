@@ -129,6 +129,12 @@ running call is waiting, send the web process `SIGUSR1`, for example
 `docker kill --signal=USR1 <container>`. It writes every thread's stack to
 stderr and does not stop the service.
 
+Pending native testing rebuilds log bounded source module/line locations from
+their observation's exception chain, correlated with the original operation ID.
+The same logger retains nested causes for handled HTTP errors. It omits exception
+text, payloads and local variables; these locations explain the waiting checkpoint
+without changing the operation's status, original key or recovery fences.
+
 ## Retired Approval Policies
 
 Change-impact and Client policy endpoints are removed. Do not repair
