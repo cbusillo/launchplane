@@ -6,7 +6,6 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
-from ipaddress import ip_address
 import hmac
 import json
 import re
@@ -28,6 +27,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_dns import public_dns_addresses, public_dns_name
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_BYTES,
     SNAPSHOT_MAX_ROWS,
@@ -60,9 +60,16 @@ SNAPSHOT_RECORD_TYPES: tuple[tuple[Any, type[BaseModel]], ...] = (
 
 
 LANE_KINDS = frozenset({"testing", "prod"})
-LANE_INSTANCE_FIELDS = frozenset({"instance", "template_instance"})
 PUBLIC_ADDRESS_FIELDS = frozenset({"addresses", "expected_addresses", "observed_addresses"})
 DATABASE_PREFIX = re.compile(r"[a-z][a-z0-9_]*")
+
+
+SCRUBBED_MODELS: tuple[type[BaseModel], ...] = (
+    *(model for _, model in SNAPSHOT_RECORD_TYPES),
+    MergeTrainDryRunResult,
+    MergeTrainDryRunSnapshot,
+    MergeTrainWorkerStepResult,
+)
 
 
 SnapshotAuthorization = Callable[
@@ -122,6 +129,9 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
 class _Scrubber:
     def __init__(self) -> None:
         self._salt = secrets.token_bytes(32)
+        self._code_tokens = LANE_KINDS.union(
+            *(_code_tokens(model.model_json_schema()) for model in SCRUBBED_MODELS)
+        )
         self._numbers: dict[str, int] = {}
         self._used_numbers: set[int] = set()
 
@@ -146,7 +156,7 @@ class _Scrubber:
     def string(
         self, value: str, name: str, *, protocol: bool = False, maximum_length: int | None = None
     ) -> str:
-        if not value or value == "*":
+        if not value or value == "*" or value in self._code_tokens:
             return value
         # Action names and driver identifiers are code protocol, not identities.
         if (
@@ -154,8 +164,6 @@ class _Scrubber:
             and name in {"actions", "driver_id"}
             and re.fullmatch(r"[a-z_][a-z_.-]*", value)
         ):
-            return value
-        if protocol and name in LANE_INSTANCE_FIELDS and value in LANE_KINDS:
             return value
         if protocol and (name.endswith("_at") or name in {"started_at", "finished_at"}):
             try:
@@ -186,11 +194,16 @@ class _Scrubber:
             if expression == value.strip():
                 expression = f"{(minute + 1) % 60} {hour} * * {weekday}"
             return expression
-        if protocol and name == "transport_database_prefix" and DATABASE_PREFIX.fullmatch(value):
+        if (
+            protocol
+            and name == "transport_database_prefix"
+            and DATABASE_PREFIX.fullmatch(value)
+            and (maximum_length is None or len(value) <= maximum_length)
+        ):
             return f"snapshot_{digest[:12]}"
-        if protocol and name == "public_name":
+        if protocol and name == "public_name" and _is_valid(public_dns_name, value):
             return f"snapshot-{digest[:12]}.invalid"
-        if protocol and name in PUBLIC_ADDRESS_FIELDS and _is_ip_address(value):
+        if protocol and name in PUBLIC_ADDRESS_FIELDS and _is_valid(public_dns_addresses, (value,)):
             return ".".join(("8", *(str(int(digest[i : i + 2], 16)) for i in (0, 2, 4))))
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
@@ -268,11 +281,7 @@ class _Scrubber:
                 for item in value
             ]
         if isinstance(value, str):
-            if (
-                value in schema.get("enum", [])
-                or ("const" in schema and value == schema["const"])
-                or value == schema.get("default")
-            ):
+            if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
                 return value
             return self.string(
                 value, name, protocol=declared, maximum_length=schema.get("maxLength")
@@ -297,12 +306,22 @@ class _Scrubber:
         return value
 
 
-def _is_ip_address(value: str) -> bool:
+def _is_valid(validate: Callable[[Any], object], value: object) -> bool:
     try:
-        ip_address(value.strip())
+        validate(value)
     except ValueError:
         return False
     return True
+
+
+def _code_tokens(schema: object) -> set[str]:
+    if isinstance(schema, list):
+        return set().union(*(_code_tokens(item) for item in schema))
+    if not isinstance(schema, Mapping):
+        return set()
+    default = schema.get("default")
+    tokens = {default} if isinstance(default, str) and default.strip() else set()
+    return tokens.union(*(_code_tokens(item) for item in schema.values()))
 
 
 def _statement_timeout_ms(remaining: int) -> int:

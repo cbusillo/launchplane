@@ -215,6 +215,34 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             {tuple(item["loc"]) for item in oversized.exception.errors()},
         )
 
+    def test_invalid_historical_dns_and_database_prefix_still_fail_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+        from tests.test_generic_web_preview_extensions import _driver_profile
+        from tests.test_public_dns_diagnostics import _dns_profile
+
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        dns = _dns_profile().model_dump(mode="json")
+        target = dns["lanes"][0]["health_monitoring"]["checks"][0]["expected_dns_targets"][0]
+        profile = _driver_profile(driver_id="generic-web", declared_transport=True)
+        transport = profile.model_copy(
+            update={"preview": profile.preview.model_copy(update={"app_name_prefix": "app"})}
+        ).model_dump(mode="json")
+        invalid = (
+            (dns, target, "public_name", "bad_name"),
+            (dns, target, "addresses", ["10.0.0.1"]),
+            (transport, transport["preview"], "transport_database_prefix", "x" * 41),
+            (transport, transport["preview"], "transport_database_prefix", "Bad-Prefix"),
+        )
+        for payload, holder, field, value in invalid:
+            original = holder[field]
+            holder[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValidationError):
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _Scrubber().scrub(payload, schema, schema)
+                    )
+            holder[field] = original
+
     def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
         from sqlalchemy import insert
         from control_plane.storage.postgres import LaunchplaneOwnerAcceptanceSubjectSequenceRow
