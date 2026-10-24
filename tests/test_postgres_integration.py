@@ -13353,6 +13353,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def test_external_admission_refuses_foreign_or_combined_progress(self) -> None:
         self.fixture.test_external_admission_refuses_foreign_or_combined_progress()
 
+    def test_released_external_admission_reobserves_under_same_key(self) -> None:
+        self.fixture.test_released_external_admission_reobserves_under_same_key()
+
     def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
         from control_plane.storage.postgres import PostgresRecordStore
         from control_plane.contracts.ingress_route_audit_record import (

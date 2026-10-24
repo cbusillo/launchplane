@@ -1023,6 +1023,31 @@ class ApplicationFlowTests(unittest.TestCase):
             )
             self.assertEqual(discord.call_count, reads)
 
+    def test_released_external_admission_reobserves_under_same_key(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare_external_discord()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=ApplicationCredentialTests().discord_response,
+        ) as discord:
+            with patch.object(
+                self.adapter,
+                "preflight_application_route",
+                side_effect=TestingActivationRefusal("Fixture pre-effect refusal"),
+            ):
+                with self.assertRaises(TestingActivationRefusal):
+                    self.activate()
+            self.assertFalse(self.adapter.current().external_capabilities)
+            reads = discord.call_count
+            self.assertGreater(reads, 0)
+            result = self.activate()
+            self.assertEqual(result.status, "completed", result)
+            self.assertGreater(discord.call_count, reads)
+            self.assertTrue(self.adapter.current().external_capabilities)
+            self.assertEqual(self.adapter.current().plan_sha256, self.planned.plan_sha256)
+
     def test_external_admission_refuses_foreign_or_combined_progress(self) -> None:
         from tests.test_testing_application_activation import ApplicationCredentialTests
         from control_plane.testing_external_capabilities import observe_activation_discord
