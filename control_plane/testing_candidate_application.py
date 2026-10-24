@@ -539,6 +539,7 @@ def prepare_candidate_application(
             fresh_restore_source_environment=inputs.plan.upstream_source,
             prepare_native_source=native if inputs.native_source else None,
             testing_candidate_namespace=record.namespace,
+            database_url=store.database_url,
         )
         save(workflow_evidence=evidence)
     # On an interrupted restore, inspect the actual copy/gate/credentials instead

@@ -400,6 +400,11 @@ class ProductPreviewProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    clean_testing_snapshot: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     context: str = ""
     slug_template: str = snapshot_protocol_default("pr-{number}")
     app_name_prefix: str = ""
@@ -884,6 +889,18 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile default_branch cannot contain whitespace")
         if self.preview.transport_extension and self.driver_id != "generic-web":
             raise ValueError("declared preview transport requires the generic-web driver")
+        if self.preview.clean_testing_snapshot:
+            testing = [lane for lane in self.lanes if lane.instance == "testing"]
+            if (
+                self.driver_id != "odoo"
+                or self.preview.template_instance != "testing"
+                or len(testing) != 1
+                or testing[0].context != self.preview.context
+                or testing[0].odoo_testing_drill_storage is None
+            ):
+                raise ValueError(
+                    "Clean snapshots require an owned Odoo testing lane and reviewed storage headroom."
+                )
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")

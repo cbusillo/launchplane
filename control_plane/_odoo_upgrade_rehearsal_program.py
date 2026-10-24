@@ -12,6 +12,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
 )
 from control_plane._filestore_capture import FILESTORE_TAR_WARNING_LIBRARY
+from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -23,6 +24,7 @@ from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKE
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     FILESTORE_TAR_WARNING_LIBRARY
+    + SNAPSHOT_FILES_LIBRARY
     + REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
@@ -89,50 +91,16 @@ def one_inspection(identifier):
 
 
 def digest(path):
-    value=hashlib.sha256()
-    with path.open('rb') as stream:
-        for chunk in iter(lambda:stream.read(1024*1024),b''):
-            value.update(chunk)
-    return value.hexdigest()
+    return snapshot_file_digest(path)
 
 
 def bounded_capture(arguments,path,bound,*,filestore=False):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    errors=b''
-    error_bytes=0
-    try:
-        size=0
-        with path.open('xb') as output:
-            os.chmod(path,0o600)
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout,selectors.EVENT_READ,'capture')
-                selector.register(process.stderr,selectors.EVENT_READ,'error')
-                while selector.get_map():
-                    for event,_ in selector.select():
-                        chunk=os.read(event.fd,65536)
-                        if not chunk:
-                            selector.unregister(event.fileobj)
-                        elif event.data=='error':
-                            error_bytes+=len(chunk)
-                            errors=(errors+chunk)[-DIAGNOSTIC_TAIL_LIMIT-1:]
-                        else:
-                            size+=len(chunk)
-                            if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
-                            output.write(chunk)
-        status=process.wait(timeout=30)
-        if status and not (filestore and filestore_tar_warning_only(status,errors,error_bytes>len(errors))):
-            diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,status))
-            raise RehearsalCommandFailure(diagnostic)
-        if not size:
-            raise RuntimeError('Incomplete source copy')
-    finally:
-        process.stdout.close()
-        process.stderr.close()
-        if process.poll() is None:
-            process.terminate()
-            try: process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill();process.wait()
+    status,errors,truncated=capture_snapshot_file(arguments,path,bound,DIAGNOSTIC_TAIL_LIMIT+1)
+    if status and not (filestore and filestore_tar_warning_only(status,errors,truncated)):
+        diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,status))
+        raise RehearsalCommandFailure(diagnostic)
+    if not path.stat().st_size:
+        raise RuntimeError('Incomplete source copy')
 
 
 def save(path,payload):

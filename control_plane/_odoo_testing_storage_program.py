@@ -44,8 +44,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if size:
             required[device] = required.get(device, 0) + size
         available[device] = min(available.get(device, free), free)
-    for suffix, size in (('-db', budget['database_bytes']), ('-data', budget['filestore_bytes'])):
-        volume = json.loads(docker('volume', 'inspect', gen['namespace'] + suffix))[0]
+    for role, suffix, size in (('database', '-db', budget['database_bytes']), ('data', '-data', budget['filestore_bytes'])):
+        name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
+        volume = json.loads(docker('volume', 'inspect', name))[0]
         demand(volume['Mountpoint'], size)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
@@ -64,6 +65,11 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if not upper:
             raise RuntimeError('Database staging backing is unavailable')
         demand(upper, database_staging_bytes)
+    if gen.get('clean_snapshot_enabled'):
+        snapshot_path = clean_snapshot_root(spec['copy_binding_sha256'], create=False).parent
+        while not snapshot_path.exists():
+            snapshot_path = snapshot_path.parent
+        demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
     return capacity
 """.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))
