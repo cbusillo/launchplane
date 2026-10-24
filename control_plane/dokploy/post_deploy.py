@@ -69,8 +69,11 @@ from control_plane.odoo_testing_restore import (
     preflight_fresh_testing_intent,
 )
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
-from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
-from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS,
+)
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -238,7 +241,6 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {"website_settings_sha256"}
     | READBACK_FAILURE_MARKERS
-    | {CAPABILITY_FAILURE_SITES_MARKER}
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -402,7 +404,10 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key == CAPABILITY_FAILURE_SITES_MARKER:
         sites = value.split(",")
         return 0 < len(sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT and all(
-            site.isascii() and site.isdigit() and len(site) <= 20 and int(site) > 0
+            site.isascii()
+            and site.isdigit()
+            and len(site) <= NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS
+            and int(site) > 0
             for site in sites
         )
     if readback_marker_is_safe(key, value):

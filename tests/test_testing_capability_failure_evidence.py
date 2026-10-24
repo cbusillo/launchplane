@@ -2,7 +2,10 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
-from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+from control_plane.dokploy.native_copy_stream import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS,
+)
 from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 from control_plane.testing_application_capabilities import (
     CAPABILITY_FAILURE_REPORT,
@@ -10,7 +13,7 @@ from control_plane.testing_application_capabilities import (
     capability_program_body,
     retained_application_capability_program,
 )
-from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
 from control_plane.testing_separation_inspection import inspect_program_history
 from control_plane.testing_separation_resources import SeparationProgramInspection
 
@@ -24,7 +27,7 @@ class CapabilityFailureEvidenceTests(unittest.TestCase):
             "-1",
             "1,private-token",
             "1 " + "2",
-            "1" * 21,
+            "1" * (NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS + 1),
             ",".join(["1"] * (NATIVE_PROGRAM_SOURCE_SITE_LIMIT + 1)),
         ):
             with self.subTest(value=value):

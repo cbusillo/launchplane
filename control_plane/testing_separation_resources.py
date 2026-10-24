@@ -131,7 +131,20 @@ class ProgramLogReadStatus(StrEnum):
     AVAILABLE = "available"
 
 
-class SeparationProgramInspection(BaseModel):
+class ProgramFailureEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    failure_program_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
+    failure_program_sites: tuple[Annotated[StrictInt, Field(gt=0)], ...] | None = Field(
+        default=None,
+        max_length=NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+        exclude_if=lambda value: value is None,
+    )
+
+
+class SeparationProgramInspection(ProgramFailureEvidence):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal[
@@ -153,14 +166,6 @@ class SeparationProgramInspection(BaseModel):
     log_read_status: ProgramLogReadStatus = ProgramLogReadStatus.NOT_ATTEMPTED
     resources_ok: bool | None = None
     result_binding_matches: bool | None = None
-    failure_program_sha256: str | None = Field(
-        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None
-    )
-    failure_program_sites: tuple[Annotated[StrictInt, Field(gt=0)], ...] | None = Field(
-        default=None,
-        max_length=NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
-        exclude_if=lambda value: value is None,
-    )
 
 
 class SeparationResourcesInspection(SeparationResourcesStatus):
@@ -177,7 +182,7 @@ class PreparationProgramEvidence(TypedDict):
     placement_target_id: str
 
 
-class SeparationResourcesRefusal(SeparationResourcesPlan):
+class SeparationResourcesRefusal(SeparationResourcesPlan, ProgramFailureEvidence):
     applied: Literal[False] = False
     resources_verified: Literal[False] = False
     failure: Literal["retained_capability_refused"] = "retained_capability_refused"
@@ -391,6 +396,8 @@ class SeparationResourcesAdapter:
             allocation_operation_key=provider_operation_key,
             capability_schedule_id=capability.schedule_id,
             capability_deployment_id=capability.deployment_id,
+            failure_program_sha256=capability.failure_program_sha256,
+            failure_program_sites=capability.failure_program_sites,
         )
 
     def observe(

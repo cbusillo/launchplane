@@ -16,7 +16,7 @@ from control_plane.testing_separation_resources import (
     STORAGE_PROGRAM_NAME,
     ProgramLogReadStatus,
 )
-from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
 
 
 def inspect_preparation_programs(

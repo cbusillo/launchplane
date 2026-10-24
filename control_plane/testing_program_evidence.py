@@ -5,7 +5,6 @@ from control_plane.contracts.idempotency_record import parse_launchplane_mutatio
 from control_plane.dokploy import api
 
 MAX_PROGRAM_ROWS = 10000
-CAPABILITY_FAILURE_SITES_MARKER = "testing_resources_failure_sites"
 type ProgramHistoryStatus = Literal[
     "terminal", "pending", "empty", "ambiguous", "uncorrelated", "unavailable"
 ]

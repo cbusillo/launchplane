@@ -366,7 +366,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             patch("sys.stdout", output),
         ):
             try:
-                exec(header, {})
+                exec(compile(header, "<stdin>", "exec"), {})
             finally:
                 self.last_program_output = output.getvalue()
                 self.last_program_body = header
@@ -397,7 +397,7 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(SystemExit):
                 self.observe()
             markers = extract_odoo_post_deploy_readback_markers({"logs": self.last_program_output})
-            from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
+            from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
 
             failure = NativeProgramFailed(
                 "Retained capability refused.",
@@ -407,6 +407,17 @@ class RetainedCapabilityProgramTests(unittest.TestCase):
                 ],
             )
             self.assertTrue(failure.program_sites)
+            import ast
+            from control_plane.testing_application_capabilities import (
+                capability_program_body,
+                retained_application_capability_program,
+            )
+
+            body = capability_program_body(retained_application_capability_program(self.spec))
+            self.assertIn(
+                failure.program_sites[-1],
+                {node.lineno for node in ast.walk(ast.parse(body)) if isinstance(node, ast.Raise)},
+            )
             self.assertNotIn(private, self.last_program_output)
             for line in self.last_program_output.splitlines():
                 key, separator, value = line.partition("=")

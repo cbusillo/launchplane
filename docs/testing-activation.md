@@ -347,7 +347,7 @@ either read while retaining the original request and key.
 New retained-capability failures also emit bounded numeric locations in the
 generated Python program. Inspection exposes those locations and that recognized
 Python body's SHA-256 only for a matching, disabled, terminal capability run with
-available failure markers. Locations outside the recognized body are discarded.
+available failure markers. A location set outside the recognized body is discarded.
 No exception text, values or locals are emitted. Historical programs without the
 diagnostic fragment remain recognizable, including the preceding stricter
 prepared-container variant; missing locations remain unknown. These diagnostics
@@ -588,3 +588,6 @@ a nonqualifying edge response alone leaves the original key pending; a later
 passing response can finish without replaying the physical route write. Proven
 candidate failure or authority drift still uses the existing exact inverse, which
 restores the original route without calling the original application healthy.
+
+Completed negative preparation receipts preserve the same optional source and
+location evidence, including stable replay; historical receipts remain unchanged.

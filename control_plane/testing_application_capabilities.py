@@ -15,7 +15,7 @@ from control_plane.dokploy import api, source
 from control_plane.dokploy.application_runtime import fetch_application_runtime
 from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
 from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
-from control_plane.testing_program_evidence import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient, _target_reservations
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -364,7 +364,7 @@ CAPABILITY_FAILURE_REPORT = f"""except Exception as error:
     failure_sites = []
     failure_traceback = error.__traceback__
     while failure_traceback is not None:
-        if failure_traceback.tb_frame.f_code.co_filename in ("<stdin>", "<string>"):
+        if failure_traceback.tb_frame.f_code.co_filename == "<stdin>":
             failure_sites.append(failure_traceback.tb_lineno)
         failure_traceback = failure_traceback.tb_next
     print({CAPABILITY_FAILURE_SITES_MARKER!r} + "=" + ",".join(map(str, failure_sites[-{NATIVE_PROGRAM_SOURCE_SITE_LIMIT}:])))
