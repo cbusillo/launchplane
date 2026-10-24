@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+
 import hashlib
 import json
 import re
@@ -899,6 +901,11 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
     delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
     domain_certificate_type: OdooPreviewDomainCertificateType = "none"
+    clean_snapshot: CleanTestingSnapshot | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = ()
     operations: tuple[OdooPreviewDokployOperation, ...] = ()
     rollback_operations: tuple[OdooPreviewDokployOperation, ...] = ()
@@ -913,6 +920,10 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
         self.preview_slug = require_text(
             self.preview_slug, "Odoo preview dry-run plan requires preview_slug"
         )
+        if self.clean_snapshot is not None and (
+            self.operation != "refresh" or self.clean_snapshot.product != self.product
+        ):
+            raise ValueError("A clean snapshot plan must belong to its preview product.")
         self.preview_url = self.preview_url.strip()
         self.domain_host = self.domain_host.strip().lower()
         self.compose_ref = require_text(
@@ -1133,6 +1144,7 @@ def execute_odoo_preview_dokploy_apply(
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
     restore_upstream: bool = False,
+    restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OdooPreviewDokployApplyResult:
@@ -1183,6 +1195,7 @@ def execute_odoo_preview_dokploy_apply(
         integration_allowances=integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
         restore_upstream=restore_upstream,
+        restore_clean_snapshot=restore_clean_snapshot,
         preserve_existing_data=preserve_existing_data,
         provider_mutation_guard=provider_mutation_guard,
     )
@@ -1607,6 +1620,7 @@ def _execute_refresh(
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
     restore_upstream: bool = False,
+    restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     database_url: str | None = None,
@@ -1630,14 +1644,14 @@ def _execute_refresh(
         provider_effect_attempted = True
 
     try:
-        if preserve_existing_data and restore_upstream:
+        if preserve_existing_data and (restore_upstream or restore_clean_snapshot):
             raise click.ClickException(
                 "A retained preview copy cannot request a destructive restore."
             )
         environment_values = _preview_refresh_environment_values(
             request=request, restore_upstream=restore_upstream
         )
-        if restore_upstream or preserve_existing_data:
+        if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
         if qualify_existing_refresh and creating_compose:
@@ -1816,7 +1830,9 @@ def _execute_refresh(
             host=host,
             token=token,
             target_definition=dokploy_source.DokployTargetDefinition(
-                context=plan.product,
+                context=plan.clean_snapshot.context
+                if plan.clean_snapshot is not None
+                else plan.product,
                 instance=plan.preview_slug,
                 target_id=compose_id,
                 target_name=plan.compose_name,
@@ -1826,6 +1842,7 @@ def _execute_refresh(
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
             run_destructive_restore=restore_upstream,
+            clean_preview_snapshot=plan.clean_snapshot if restore_clean_snapshot else None,
             preview_ssh_source_directory=environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
             if restore_upstream
             else "",
@@ -1836,6 +1853,10 @@ def _execute_refresh(
             deployment_title=provider_operation_title,
         )
         module_install_update_evidence["upstream_restore_requested"] = str(restore_upstream).lower()
+        if plan.clean_snapshot is not None:
+            module_install_update_evidence["clean_snapshot_restore_requested"] = str(
+                restore_clean_snapshot
+            ).lower()
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             module_install_update_evidence
         )

@@ -21,6 +21,7 @@ from control_plane.contracts.odoo_runtime_environment import merge_required_odoo
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.odoo_testing_source import NativeOdooSourceAuthority
@@ -315,6 +316,8 @@ def candidate_runtime_inputs(
             prepared_at=allocation.created_at.isoformat(),
             source_mode="container-export" if source == "production" else "ssh",
             source_binding_sha256=source_binding,
+            clean_snapshot_enabled=profile.preview.clean_testing_snapshot,
+            drill_storage_budget=snapshot_storage_budget(profile, allocation.context),
         )
     )
     runtime_selection = RuntimeEnvironmentSetExpectation(

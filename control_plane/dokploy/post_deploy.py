@@ -1,3 +1,5 @@
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
     WRITER_ACTIONS,
@@ -208,6 +210,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         ODOO_COMPANY_EMAIL_CONTRACT_MARKER,
         "website_bootstrap_applied",
         "odoo_restore_completed",
+        "clean_testing_snapshot_completed",
+        "clean_preview_snapshot_restored",
         "odoo_restore_failure_logged",
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
@@ -240,7 +244,11 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
-    | {"website_settings_sha256"}
+    | {
+        "website_settings_sha256",
+        "clean_snapshot_database_sha256",
+        "clean_snapshot_filestore_sha256",
+    }
     | READBACK_FAILURE_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
@@ -435,6 +443,8 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         "recipient_recovery_data",
         "recipient_recovery_operation",
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
+        "clean_snapshot_database_sha256",
+        "clean_snapshot_filestore_sha256",
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
@@ -646,10 +656,12 @@ def run_compose_post_deploy_update(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    clean_preview_snapshot: CleanTestingSnapshot | None = None,
     fresh_restore_source_environment: dict[str, str] | None = None,
     prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
     testing_candidate_namespace: str = "",
+    database_url: str | None = None,
 ) -> dict[str, str]:
     if testing_candidate_namespace and (
         target_definition.instance != "testing"
@@ -661,6 +673,13 @@ def run_compose_post_deploy_update(
         )
     ):
         raise ValueError("Candidate schedule must belong to its isolated target namespace.")
+    if clean_preview_snapshot is not None and (
+        run_destructive_restore
+        or fresh_testing_generation is not None
+        or runtime_key_safety_environment_class(target_definition.instance) != "preview"
+        or clean_preview_snapshot.context != target_definition.context
+    ):
+        raise ValueError("Clean preview restore requires its own snapshot and no upstream source.")
     if fresh_testing_generation is not None:
         if (
             not run_destructive_restore
@@ -819,6 +838,12 @@ def run_compose_post_deploy_update(
             target_payload=target_payload,
         )
     )
+    if (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.clean_snapshot_enabled
+        and not schedule_server_id
+    ):
+        raise click.ClickException("Clean snapshot capture requires a registered execution server.")
     schedule_name = DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME
     schedule_app_name = (
         testing_candidate_namespace
@@ -889,7 +914,32 @@ def run_compose_post_deploy_update(
             clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
             data_workflow_lock_path=data_workflow_lock_path,
         )
+        if fresh_testing_generation.clean_snapshot_enabled and database_url and schedule_server_id:
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            snapshot_store = PostgresRecordStore(database_url=database_url)
+            fresh_arguments["clean_snapshot_retirements"] = [
+                item.model_dump(mode="json")
+                for item in snapshot_store.clean_snapshot_retirement_candidates(
+                    fresh_testing_generation.product,
+                    fresh_testing_generation.context,
+                    schedule_server_id,
+                )
+            ]
         schedule_script = build_fresh_testing_restore_script(**fresh_arguments)
+    if clean_preview_snapshot is not None:
+        schedule_script = build_preview_clean_snapshot_script(
+            snapshot=clean_preview_snapshot,
+            server_id=schedule_server_id or "",
+            compose_project=compose_app_name,
+            database_name=database_name,
+            image_reference=desired_env_map["DOCKER_IMAGE_REFERENCE"],
+            workflow_environment=resolved_workflow_environment_overrides,
+            runtime_environment=desired_env_map,
+            readback_spec=readback_policy.encoded_spec(),
+            readback_program=INTEGRATION_READBACK_PROGRAM,
+            web_gate_path=INTEGRATION_READBACK_PASSED_PATH,
+        )
     from control_plane.odoo_testing_restore import NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
 
     api.validate_dokploy_schedule_script(
@@ -1023,6 +1073,15 @@ def run_compose_post_deploy_update(
             evidence, allow_historical_contract=allow_historical_sender_contract
         )
     require_integration_readback_evidence(evidence, readback_policy)
+    if fresh_testing_generation is not None and fresh_testing_generation.clean_snapshot_enabled:
+        if evidence.get("clean_testing_snapshot_completed") != "true" or not schedule_server_id:
+            raise ValueError("Testing refresh lacks its clean snapshot capture proof.")
+        evidence["clean_snapshot_server_id"] = schedule_server_id
+    if (
+        clean_preview_snapshot is not None
+        and evidence.get("clean_preview_snapshot_restored") != "true"
+    ):
+        raise ValueError("Preview lacks its clean snapshot restore proof.")
     return evidence
 
 

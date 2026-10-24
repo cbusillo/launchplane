@@ -308,6 +308,112 @@ class TestingDrillScenario(unittest.TestCase):
 
 
 class TestingDrillTests(TestingDrillScenario):
+    def test_snapshot_publication_is_atomic_with_successful_worker_completion(self) -> None:
+        from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+
+        profile = self.profile.model_copy(deep=True)
+        profile.preview.clean_testing_snapshot = True
+        self.store.write_product_profile_record(profile)
+        self.scheduler.run_once()
+        operation = self.activate()
+        current = self.store.read_fresh_odoo_testing_generation(profile.product, self.context)
+        assert current is not None
+        stamp = datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+        current = current.model_copy(update={"completed_at": stamp})
+        self.store.write_fresh_odoo_testing_generation(current)
+        previous = CleanTestingSnapshot(
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+            product=profile.product,
+            context=self.context,
+            snapshot_id="e" * 64,
+            server_id="fixture-server",
+            database_sha256="f" * 64,
+            filestore_sha256="a" * 64,
+            captured_at=datetime.fromtimestamp(self.now - 1, timezone.utc).isoformat(),
+        )
+        self.store.write_clean_testing_snapshot(previous)
+        evidence = {
+            "post_deploy_readback_testing_copy_sanitized": "true",
+            "post_deploy_readback_integration_readback_ok": "true",
+            "post_deploy_readback_odoo_restore_completed": "true",
+            "post_deploy_readback_clean_testing_snapshot_completed": "true",
+            "post_deploy_readback_clean_snapshot_database_sha256": "b" * 64,
+            "post_deploy_readback_clean_snapshot_filestore_sha256": "c" * 64,
+            "post_deploy_readback_clean_snapshot_server_id": "fixture-server",
+        }
+        result = OdooStableTargetReplacementApplyResult(
+            product=operation.product,
+            context=operation.context,
+            instance="testing",
+            strategy="recreate-in-place",
+            deploy_status="pass",
+            post_deploy_status="pass",
+            health_status="pass",
+            target_id=current.target_id,
+            post_deploy_override_evidence=evidence,
+        )
+        completed = operation.model_copy(
+            update={
+                "status": "pass",
+                "phase": "completed",
+                "finished_at": stamp,
+                "result": result,
+            }
+        )
+        for marker in (
+            "testing_copy_sanitized",
+            "integration_readback_ok",
+            "odoo_restore_completed",
+            "clean_testing_snapshot_completed",
+        ):
+            key = "post_deploy_readback_" + marker
+            result.post_deploy_override_evidence[key] = "false"
+            with self.subTest(marker=marker), self.assertRaises(ValueError):
+                self.store.complete_odoo_stable_target_replacement_operation_record(
+                    record=completed,
+                    lease_owner=operation.lease_owner,
+                )
+            self.assertEqual(self.operation().status, "running")
+            self.assertEqual(
+                self.store.read_clean_testing_snapshot(profile.product, self.context), previous
+            )
+            result.post_deploy_override_evidence[key] = "true"
+        self.assertTrue(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=completed,
+                lease_owner=operation.lease_owner,
+            )
+        )
+        published = self.store.read_clean_testing_snapshot(profile.product, self.context)
+        assert published is not None
+        self.assertEqual(published.snapshot_id, generation_binding(current))
+        self.assertEqual(self.operation().status, "pass")
+
+    def test_snapshot_refresh_slot_turns_over_in_the_nightly_window(self) -> None:
+        from control_plane.odoo_testing_drill import CLEAN_SNAPSHOT_REFRESH_HOUR_UTC
+
+        profile = self.profile.model_copy(deep=True)
+        profile.preview.clean_testing_snapshot = True
+        hour = CLEAN_SNAPSHOT_REFRESH_HOUR_UTC
+        old_offset = ((hour + 6) % 24) * 3600
+        key = f"{old_offset:08x}" + "0" * 56
+        now = (
+            datetime.now(timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        with (
+            patch.object(self.store, "enqueue_odoo_testing_drill") as enqueue,
+            patch("control_plane.odoo_testing_drill.lane_key", return_value=key),
+        ):
+            self.scheduler._advance_lane(profile, self.context, now + hour * 3600 - 1)
+            first = enqueue.call_args.args[2]
+            self.scheduler._advance_lane(profile, self.context, now + (hour + 1) * 3600)
+            second = enqueue.call_args.args[2]
+        self.assertNotEqual(first, second)
+
     def test_native_copy_refusal_keeps_its_predicate_without_queueing(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
         from control_plane.copy_readback_diagnostics import ReadbackPredicate

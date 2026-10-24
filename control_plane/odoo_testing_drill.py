@@ -63,6 +63,7 @@ from control_plane.lane_usage import (
 )
 
 DRILL_INTERVAL_SECONDS = 24 * 60 * 60
+CLEAN_SNAPSHOT_REFRESH_HOUR_UTC = 5
 DRILL_TIMEOUT_SECONDS = 2 * 60 * 60
 DRILL_POLL_SECONDS = 30
 DRILL_ALERT_RETRY_SECONDS = 300
@@ -372,6 +373,7 @@ def prepare_drill(
             "request_sha256": canonical_json_sha256([key, database]),
             "source_binding_sha256": source_binding,
             "drill_storage_budget": lane.odoo_testing_drill_storage,
+            "clean_snapshot_enabled": profile.preview.clean_testing_snapshot,
         }
     )
     runtime = runtime.model_copy(
@@ -560,8 +562,9 @@ class OdooTestingDrillScheduler:
             for lane in profile.lanes
         ):
             return
-        # Spread recurring slots across the day without storing a second lane catalog.
         offset = int(prefix[:8], 16) % DRILL_INTERVAL_SECONDS
+        if profile.preview.clean_testing_snapshot:
+            offset = CLEAN_SNAPSHOT_REFRESH_HOUR_UTC * 3600 + int(prefix[:8], 16) % 3600
         key = f"{prefix}:{int((now - offset) // DRILL_INTERVAL_SECONDS)}"
         self.store.enqueue_odoo_testing_drill(profile.product, context, key, now)
 
