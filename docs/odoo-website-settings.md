@@ -88,6 +88,9 @@ rollback receipt remains recovery evidence, rather than a configured website
 snapshot in release review. The historical baseline therefore retains its
 accepted identity through the drill, allowing the second backup and re-promotion
 under the same acceptance. Re-promotion applies the accepted candidate settings.
+An accepted rollback restores that baseline even when it had no configured
+settings and the artifact is unchanged. Manual same-artifact recovery continues
+to reuse its verified applied snapshot.
 For configured website snapshots, subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
 

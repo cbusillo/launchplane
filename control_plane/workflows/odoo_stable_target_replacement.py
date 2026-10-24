@@ -1935,6 +1935,7 @@ def execute_odoo_stable_target_replacement_apply(
     hold_uncertain_effects: bool = False,
     rollback: bool = False,
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    restore_release_website_settings: bool = False,
     release_operation: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
@@ -3017,6 +3018,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 artifact_id=artifact_id,
                 release_website_settings=release_website_settings,
+                restore_release_website_settings=restore_release_website_settings,
                 release_operation=release_operation,
                 rollback=rollback,
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
@@ -3126,6 +3128,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 artifact_id=artifact_id,
                 release_website_settings=release_website_settings,
+                restore_release_website_settings=restore_release_website_settings,
                 release_operation=release_operation,
                 rollback=rollback,
                 run_destructive_restore=False,

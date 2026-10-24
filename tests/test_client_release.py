@@ -390,12 +390,32 @@ class ClientReleaseTests(unittest.TestCase):
         )
 
     def test_settings_release_completes_drill_and_reapplies_accepted_settings(self) -> None:
+        self._assert_settings_release_drill(same_artifact=False)
+
+    def test_settings_only_release_completes_drill_and_reapplies_accepted_settings(self) -> None:
+        self._assert_settings_release_drill(same_artifact=True)
+
+    def _assert_settings_release_drill(self, *, same_artifact: bool) -> None:
+        settings = intent()
+        if same_artifact:
+            settings = settings.model_copy(update={"artifact_id": "artifact-prod"})
+            testing = self.store.read_release_tuple_record(
+                context_name=CONTEXT, channel_name="testing"
+            )
+            self.store.write_release_tuple_record(
+                testing.model_copy(
+                    update={
+                        "artifact_id": settings.artifact_id,
+                        "repo_shas": {"example/site": BASE},
+                    }
+                )
+            )
         self.store.write_product_profile_record(website_profile())
         self.store.write_odoo_instance_override_record(
             OdooInstanceOverrideRecord(
                 context=CONTEXT,
                 instance="prod",
-                website_settings=intent(),
+                website_settings=settings,
                 updated_at="2026-09-23T00:00:00Z",
             )
         )
@@ -455,18 +475,35 @@ class ClientReleaseTests(unittest.TestCase):
                             else accepted.checklist.candidate
                         )
                         self.set_prod(version.artifact_id)
+                        if rollback and same_artifact:
+                            manual = execute_odoo_post_deploy(
+                                control_plane_root=self.root,
+                                record_store=self.store,
+                                request=OdooPostDeployRequest(context=CONTEXT, instance="prod"),
+                                artifact_id=version.artifact_id,
+                                release_operation=True,
+                                rollback=True,
+                            )
+                            self.assertEqual(manual.post_deploy_status, "pass")
+                            self.assertEqual(applied[-1], settings.settings)
                         result = execute_odoo_post_deploy(
                             control_plane_root=self.root,
                             record_store=self.store,
                             request=OdooPostDeployRequest(context=CONTEXT, instance="prod"),
                             artifact_id=version.artifact_id,
                             release_operation=True,
+                            restore_release_website_settings=True,
                             rollback=rollback,
                             release_website_settings=accepted.checklist.production_website_settings
                             if rollback
                             else accepted.checklist.website_settings,
                         )
                         self.assertEqual(result.post_deploy_status, "pass")
+                        if rollback:
+                            self.assertFalse(applied[-1].public_indexing_enabled)
+                            self.assertFalse(applied[-1].google_analytics_key)
+                            self.assertIsNone(applied[-1].cookies_bar)
+                            self.assertIsNone(applied[-1].block_third_party_domains)
                         retained = self.store.read_odoo_instance_override_record(
                             context_name=CONTEXT, instance_name="prod"
                         )
@@ -482,10 +519,8 @@ class ClientReleaseTests(unittest.TestCase):
         )
         assert run is not None
         self.assertEqual(run.state, "passed")
-        self.assertEqual(applied[0], intent().settings)
-        self.assertEqual(applied[-1], intent().settings)
-        self.assertFalse(applied[1].public_indexing_enabled)
-        self.assertFalse(applied[1].google_analytics_key)
+        self.assertEqual(applied[0], settings.settings)
+        self.assertEqual(applied[-1], settings.settings)
         self.assertEqual(
             self.store.list_release_review_decision_records(product=PRODUCT), (accepted,)
         )
