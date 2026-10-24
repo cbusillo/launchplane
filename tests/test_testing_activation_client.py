@@ -257,7 +257,36 @@ class ActivationClientTests(unittest.TestCase):
                     ],
                     result.model_dump(mode="json"),
                 )
+                post.side_effect = None
+                post.return_value = {
+                    "status": "accepted",
+                    "trace_id": "fresh-trace",
+                    "result": result.model_dump(mode="json"),
+                }
+                with (
+                    patch("runpy.run_path", return_value=transport),
+                    patch("sys.argv", args),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(client["main"](), 1)
+                self.assertEqual(post.call_count, len(modes))
                 return
+            if refused:
+                repeated = list(apply_args)
+                repeated[1] = "readback"
+                post.side_effect = None
+                post.return_value = {
+                    "status": "accepted",
+                    "trace_id": "fresh-trace",
+                    "result": result.model_dump(mode="json"),
+                }
+                with (
+                    patch("runpy.run_path", return_value=transport),
+                    patch("sys.argv", repeated),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(client["main"](), 1)
+                self.assertEqual(post.call_count, len(modes))
             self.assertEqual(
                 post.call_args_list[1].kwargs["body"]["reviewed_plan_sha256"], plan.plan_sha256
             )

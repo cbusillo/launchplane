@@ -341,7 +341,9 @@ environment or credential values and starts no program or recovery. Missing or
 unavailable evidence stays unknown. `qualification: not_evaluated` grants no
 retry, separation or health credit; the generic refusal does not identify its
 underlying exception. Preserve the original receipt and choose a fresh evidence
-path for each inspection.
+path for each inspection or readback. The caller rejects an already-used output
+path before making the service read; `--evidence-file` may name a fresh path for
+either read while retaining the original request and key.
 Public readiness observation and
 publication freshness use the same database clock.
 

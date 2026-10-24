@@ -98,8 +98,15 @@ def main() -> int:
             ).plan_sha256
         if args.mode in {"receipt", "inspect"} and not args.idempotency_key.strip():
             raise ValueError("Receipt read requires the original activation key.")
-        if args.mode == "dry-run" and args.evidence_file.exists():
-            raise ValueError("Preserve the saved review; choose a fresh evidence path.")
+        output = (
+            args.evidence_file
+            if args.mode == "dry-run"
+            else args.evidence_file.with_name(args.evidence_file.name + "." + args.mode + ".json")
+        )
+        if args.mode in {"dry-run", "inspect", "readback"} and (
+            output.exists() or output.is_symlink()
+        ):
+            raise ValueError("Preserve the saved evidence; choose a fresh evidence path.")
         body["mode"] = args.mode
         submitted = args.mode == "apply"
         response = transport["request_launchplane"](
@@ -126,11 +133,6 @@ def main() -> int:
             else TestingActivationResult
         )
         result = result_model.model_validate(response["result"]).model_dump(mode="json")
-        output = (
-            args.evidence_file
-            if args.mode == "dry-run"
-            else args.evidence_file.with_name(args.evidence_file.name + "." + args.mode + ".json")
-        )
         save(
             output,
             {

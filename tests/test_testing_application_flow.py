@@ -4414,6 +4414,72 @@ class ApplicationFlowTests(unittest.TestCase):
                 self.assertEqual(denied.status_code, 409, denied.text)
         self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
 
+        for changed in (
+            None,
+            record.model_copy(update={"actor": "different-agent"}),
+            record.model_copy(update={"namespace": record.namespace + "-different"}),
+            record.model_copy(update={"preparation_record_id": "different-preparation-record"}),
+            record.model_copy(
+                update={
+                    "retained_target_id": record.retained_target_id.model_copy(
+                        update={"target_id": "different-target"}
+                    )
+                }
+            ),
+        ):
+            with (
+                self.subTest(record=changed),
+                patch(
+                    "control_plane.testing_activation_inspection.activation_record",
+                    return_value=changed,
+                ),
+                patch(
+                    "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                    side_effect=AssertionError("Foreign custody must refuse before provider reads"),
+                ),
+            ):
+                denied = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "activation",
+                        },
+                        payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                    )
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
+
+        foreign_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(
+                token_label="local-owner-write"
+            ).model_copy(update={"local_operator_subject": "different-agent"}),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch(
+            "control_plane.testing_activation_inspection.inspect_preparation_programs",
+            side_effect=AssertionError("Foreign caller must refuse before provider reads"),
+        ):
+            denied = asyncio.run(
+                request(
+                    foreign_app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+
     def addressed(self) -> Any:
         """Reuse the native transport's real isolated file/lock/process harness."""
         from tests.test_testing_route_transport import TestingRouteTransportTests
