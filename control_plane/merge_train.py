@@ -355,7 +355,7 @@ def build_merge_train_dry_run_result(
         planned_dependency_heads=planned_dependency_heads,
         planned_handoff_heads=planned_handoff_heads,
     )
-    if batch_landing:
+    if batch_landing and new_candidate:
         queue = _defer_unsupported_stacks(policy=policy, snapshot=snapshot, queue=queue)
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
@@ -544,7 +544,12 @@ def _defer_unsupported_stacks(
     stacked_roots = {pr.number for pr in snapshot.pull_requests if pr.head_ref in child_bases}
     refusals: dict[int, tuple[str, ...]] = {}
     for entry in queue:
-        if not entry.eligible or entry.number not in stacked_roots:
+        if (
+            not entry.eligible
+            or entry.number not in stacked_roots
+            or entry.required_checks_status == "fail"
+            or entry.mergeable == "conflicting"
+        ):
             continue
         discovery = discover_merge_train_stack(
             policy=policy, snapshot=snapshot, root_pull_request_number=entry.number

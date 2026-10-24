@@ -4,7 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
+from control_plane.merge_train import (
+    MergeTrainDryRunSnapshot,
+    build_merge_train_dry_run_result,
+    discover_merge_train_stack,
+)
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
@@ -78,7 +82,7 @@ class UnfinishedStackTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
             results = []
-            for _ in range(5):
+            for _ in range(12):
                 response = await _post_merge_train_controller_run_once(
                     app,
                     {
@@ -90,6 +94,8 @@ class UnfinishedStackTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 202, response.text)
                 results.append(response.json()["result"])
+                if results[-1]["controller_action"] == "land_batch":
+                    break
             self.assertEqual(results[0]["controller_action"], "plan_candidate", results)
             feedback = build_feedback_payloads(response={"result": results[0]})
             held = next(item for item in feedback if item["pull_request_number"] == 1)
@@ -135,6 +141,10 @@ class UnfinishedStackSelectionTests(unittest.TestCase):
             policy=policy, snapshot=ready_snapshot, batch_landing=True, new_candidate=True
         )
         self.assertEqual(ready.queue_order, (1, 3))
+        discovery = discover_merge_train_stack(
+            policy=policy, snapshot=ready_snapshot, root_pull_request_number=1
+        )
+        self.assertEqual(discovery.status, "ready_for_collapse")
         self.assertEqual(
             ready.selected_pr.head_sha if ready.selected_pr else None,
             snapshot.pull_requests[0].head_sha,
@@ -152,10 +162,13 @@ class UnfinishedStackSelectionTests(unittest.TestCase):
             .pull_requests[2]
         )
         policy = build_test_merge_train_policy()
+        repository_policy = policy.find_repository_policy(
+            repository=snapshot.repository, base_branch=snapshot.base_branch
+        )
         child_updates = (
             {"is_draft": True},
             {"labels": ()},
-            {"labels": ("ready-to-merge", "merge-blocked")},
+            {"labels": (repository_policy.enqueue_label, repository_policy.blocked_label)},
             {"head_repository": "example/fork"},
         )
         for update in child_updates:
@@ -175,3 +188,35 @@ class UnfinishedStackSelectionTests(unittest.TestCase):
                 self.assertEqual(result.queue_order, (3,))
                 self.assertEqual(result.intended_next_action, "merge")
                 self.assertTrue(result.queue[0].deferred_reasons)
+
+    def test_existing_candidate_recheck_does_not_defer_a_root_for_its_child(self) -> None:
+        snapshot = _UnfinishedStackReader(transport=object()).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+        )
+        self.assertEqual(result.queue_order, (1, 3))
+
+    def test_root_failure_is_reported_before_its_unfinished_child(self) -> None:
+        snapshot = _UnfinishedStackReader(transport=object()).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+        for update in ({"required_checks_status": "fail"}, {"mergeable": "conflicting"}):
+            with self.subTest(update=update):
+                failed_root = snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            snapshot.pull_requests[0].model_copy(update=update),
+                            *snapshot.pull_requests[1:],
+                        )
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=failed_root,
+                    batch_landing=True,
+                    new_candidate=True,
+                )
+                self.assertEqual(result.intended_next_action, "block")
+                self.assertEqual(result.selected_pr.number if result.selected_pr else None, 1)
