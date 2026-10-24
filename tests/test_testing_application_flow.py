@@ -62,6 +62,27 @@ from tests import test_testing_event_deploy_recovery as historical
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
 
 
+def build_mount_response(body: dict[str, Any], *, mount_id: str) -> dict[str, Any]:
+    mount: dict[str, Any] = dict.fromkeys(
+        (
+            "hostPath",
+            "filePath",
+            "content",
+            "composeId",
+            "postgresId",
+            "mysqlId",
+            "mariadbId",
+            "mongoId",
+            "redisId",
+            "libsqlId",
+        )
+    )
+    mount.update(body)
+    mount["applicationId"] = mount.pop("serviceId")
+    mount["mountId"] = mount_id
+    return mount
+
+
 class ApplicationProvider(_FakeGenericWebDeployProvider):
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
@@ -249,13 +270,16 @@ class ApplicationFlowTests(unittest.TestCase):
         self.old_backing.mkdir()
         (self.old_backing / "keep").write_text("Retained original data")
         self.payloads[self.old_id]["mounts"] = [
-            {
-                "type": "volume",
-                "volumeName": "retained-state",
-                "mountPath": "/var/lib/example",
-                "serviceType": "application",
-                "serviceId": self.old_id,
-            }
+            build_mount_response(
+                {
+                    "type": "volume",
+                    "volumeName": "retained-state",
+                    "mountPath": "/var/lib/example",
+                    "serviceType": "application",
+                    "serviceId": self.old_id,
+                },
+                mount_id="retained-mount",
+            )
         ]
         self.lose_command = False
         self.lose_create = False
@@ -705,8 +729,9 @@ class ApplicationFlowTests(unittest.TestCase):
                 raise OSError("Lost application create reply")
             return deepcopy(self.payloads[identifier])
         if path == "/api/mounts.create":
-            self.payloads[body["serviceId"]]["mounts"].append({**body, "mountId": "new-mount"})
-            return {}
+            mount = build_mount_response(body, mount_id="new-mount")
+            self.payloads[body["serviceId"]]["mounts"].append(mount)
+            return deepcopy(mount)
         if path in {
             "/api/application.update",
             "/api/application.saveDockerProvider",
@@ -3233,6 +3258,62 @@ class ApplicationFlowTests(unittest.TestCase):
             instance_name="testing",
             target_environment={},
         ).values["DB_PASSWORD"]
+
+    def test_lost_mount_reply_adopts_provider_row_once_and_fences_conflicts(self) -> None:
+        self.prepare()
+        interrupted = False
+
+        def lose_mount_reply(**kwargs: Any) -> Any:
+            nonlocal interrupted
+            response = self.provider(**kwargs)
+            if kwargs["path"] == "/api/mounts.create" and not interrupted:
+                interrupted = True
+                raise OSError("Lost mount create reply")
+            return response
+
+        retained_password = self.canonical_password()
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=lose_mount_reply),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        record = self.adapter.current()
+        self.assertEqual(record.phase, "create_application_mount")
+        original = deepcopy(self.payloads[record.target_id]["mounts"])
+        self.assertEqual(len(original), 1)
+        mount = original[0]
+        conflicts = [("absent", []), ("duplicate", [mount, deepcopy(mount)])]
+        conflicts.extend(
+            (key, [{**mount, key: value}])
+            for key, value in (
+                ("applicationId", "foreign-application"),
+                ("serviceType", "compose"),
+                ("volumeName", "foreign-volume"),
+                ("mountPath", "/other-state"),
+                ("type", "bind"),
+                ("mountId", None),
+                ("hostPath", "/host-state"),
+                ("filePath", "state-file"),
+                ("content", "foreign-content"),
+                ("composeId", "foreign-compose"),
+            )
+        )
+        for reason, mounts in conflicts:
+            with self.subTest(reason=reason):
+                self.payloads[record.target_id]["mounts"] = mounts
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertFalse(self.adapter.current().published)
+                self.assertFalse(self.deployments.get(record.target_id))
+                self.assertEqual(self.canonical_password(), retained_password)
+        self.payloads[record.target_id]["mounts"] = original
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertEqual(self.adapter.current().state_recipient["mount_verified"], "true")
+        self.assertEqual(len(self.payloads[record.target_id]["mounts"]), 1)
+        self.assertEqual(len([path for path, _ in self.writes if path == "/api/mounts.create"]), 1)
+        self.assertEqual(len(self.deployments[record.target_id]), 1)
 
     def test_lost_application_create_reply_adopts_exact_original_without_recreation(self) -> None:
         self.prepare()
