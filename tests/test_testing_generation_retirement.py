@@ -18,6 +18,7 @@ from control_plane.storage.postgres import DbOnlyMutationRequest
 from control_plane.testing_generation_retirement import (
     ROUTE,
     TestingGenerationRetirementRequest,
+    inspect_retained_testing_custody,
     retirement_snapshot,
 )
 from control_plane.testing_replacement_recovery import (
@@ -186,6 +187,74 @@ class TestingGenerationRetirementTests(unittest.TestCase):
     def apply(self) -> Any:
         return self.store.retire_testing_generation(
             product=self.product, request=self.apply_body, mutation=self.mutation
+        )
+
+    def test_custody_inspection_reads_original_targets_without_releasing_hosts(self) -> None:
+        import asyncio
+        from tests.support.http import request
+
+        self.apply()
+        retained = self.store.read_retained_testing_generation(self.operation.operation_id)
+        assert retained is not None
+        allocation = self.store.read_disposable_resource_preparation(self.gen.operation_id)
+        assert allocation is not None
+        from control_plane.storage.postgres import LaunchplaneDisposableTestingResourceAllocationRow
+
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow, allocation.operation_id
+            )
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "retained_target_record": self.store._payload_dict(retained.target),
+            }
+            session.commit()
+        hosts = self.store.retained_disposable_hostnames()
+        with patch("control_plane.dokploy.api._dokploy_request") as provider:
+            inspection = inspect_retained_testing_custody(self.store, retained)
+            generation_entry = next(
+                item
+                for item in inspection.reservations
+                if item.source_kind == "retained_generation"
+            )
+            self.assertEqual(generation_entry.target_id, self.gen.target_id)
+            self.assertEqual(generation_entry.hostname, self.gen.domain_host)
+            self.assertEqual(generation_entry.operation_id, self.operation.operation_id)
+            self.assertEqual(
+                generation_entry.custody_sha256,
+                canonical_json_sha256(self.store._payload_dict(retained)),
+            )
+            allocation_entries = tuple(
+                item
+                for item in inspection.reservations
+                if item.source_kind == "retained_allocation"
+            )
+            self.assertTrue(allocation_entries)
+            self.assertTrue(
+                all(item.target_id == allocation.retained_target_id for item in allocation_entries)
+            )
+            self.assertEqual({item.hostname for item in inspection.reservations}, set(hosts))
+            self.assertFalse(inspection.hostname_release_authorized)
+            provider.assert_not_called()
+        response = asyncio.run(
+            request(
+                self.fixture.fixture.app,
+                "POST",
+                ROUTE.format(product=self.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={**self.body.model_dump(mode="json"), "mode": "inspect"},
+            )
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["plan"], retained.plan.model_dump(mode="json"))
+        self.assertFalse(response.json()["result"]["hostname_release_authorized"])
+        self.assertTrue(
+            all("env" not in item for item in response.json()["result"]["reservations"])
+        )
+        self.assertEqual(self.store.retained_disposable_hostnames(), hosts)
+        self.assertEqual(
+            self.store.read_retained_testing_generation(self.operation.operation_id), retained
         )
 
     def test_retirement_preserves_original_operation_and_reserves_its_hostname(self) -> None:
