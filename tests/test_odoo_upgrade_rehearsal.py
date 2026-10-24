@@ -3560,7 +3560,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 "ODOO_DB_NAME=" + self.fixture.database,
                 "ODOO_MAX_CRON_THREADS=0",
             ]
-            container["NetworkSettings"]["Networks"] = {"testing-data": {}}
+            container["NetworkSettings"]["Networks"] = {
+                "testing-data": {"NetworkID": self.fixture.data_network["Id"]}
+            }
             for mount in container["Mounts"]:
                 mount["Name"] = mount["Name"].replace(previous, self.identifier)
             container["State"] = {"Running": True}
@@ -3581,6 +3583,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 return json.dumps(
                     [
                         {
+                            "Id": self.fixture.data_network["Id"],
                             "Internal": True,
                             "Containers": {
                                 item["Id"]: {} for item in self.fixture.containers.values()
@@ -4006,6 +4009,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.fixture.containers["foreign"] = {
             "Id": "foreign-container",
             "Config": {"Labels": {}},
+            "NetworkSettings": {"Networks": {}},
             "Mounts": [
                 {
                     "Type": "bind",
@@ -4026,6 +4030,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 return json.dumps(
                     [
                         {
+                            "Id": self.fixture.data_network["Id"],
                             "Internal": True,
                             "Containers": {
                                 item["Id"]: {}

@@ -284,7 +284,8 @@ def incomplete_retirement_locked(spec,root):
     network_present=manifest['network_name'] in networks
     if network_present:
         network=one_inspection(manifest['network_name'])
-        if network.get('Id')!=manifest['network_id'] or network.get('Internal') is not True or not isinstance(network.get('Containers'),dict) or not set(network['Containers'])<=set(remaining):
+        if (network.get('Id')!=manifest['network_id'] or network.get('Internal') is not True
+            or not docker_network_members_are_owned(network,all_containers,set(remaining))):
             raise RuntimeError('Network ownership changed')
     # No uninspected mount, even in an owned container, may acquire disposable storage.
     for item in all_containers:

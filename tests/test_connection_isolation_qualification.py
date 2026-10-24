@@ -82,6 +82,7 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
             {
                 "id": "private-network",
                 "project": "example-testing-app",
+                "internal": True,
                 "members": [item["id"] for item in containers],
             }
         ],
@@ -173,6 +174,8 @@ class ResourceQualificationTests(unittest.TestCase):
         for change in (
             "port",
             "network",
+            "stopped_network_peer",
+            "external_network",
             "volume_options",
             "unknown_options",
             "bind",
@@ -186,6 +189,15 @@ class ResourceQualificationTests(unittest.TestCase):
                     snapshot["containers"][1]["ports"] = {"5432/tcp": [{"HostPort": "5432"}]}
                 elif change == "network":
                     snapshot["networks"][0]["members"].append("foreign-id")
+                elif change == "stopped_network_peer":
+                    foreign = copy.deepcopy(snapshot["containers"][1])
+                    foreign.update(
+                        id="foreign-id", project="another-project", running=False, mounts=[]
+                    )
+                    foreign["networks"]["external-network"] = ""
+                    snapshot["containers"].append(foreign)
+                elif change == "external_network":
+                    snapshot["networks"][0]["internal"] = False
                 elif change in {"volume_options", "unknown_options"}:
                     snapshot["volumes"][0]["has_options"] = (
                         True if change == "volume_options" else None
@@ -210,7 +222,9 @@ class ResourceQualificationTests(unittest.TestCase):
         self.snapshot["networks"][0]["members"].remove("web-id")
         digest, _ = self.run_qualifier()
         foreign = copy.deepcopy(self.snapshot["containers"][1])
-        foreign.update(id="foreign-id", project="another", mounts=[])
+        foreign.update(
+            id="foreign-id", project="another", mounts=[], networks={"other-network": ""}
+        )
         self.snapshot["containers"].append(foreign)
         self.snapshot["volumes"].append({"name": "foreign", "driver": "nfs"})
         self.assertEqual(self.run_qualifier()[0], digest)

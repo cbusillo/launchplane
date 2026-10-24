@@ -146,7 +146,7 @@ def fresh_testing_mode_refusal(
 # A missing boundary is an unsupported artifact, never permission to run it.
 TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
 TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
-TESTING_COPY_RUNNER = (
+TESTING_COPY_CREDENTIAL_LIBRARY = (
     ATTACHMENT_VALIDATION_LIBRARY
     + f"NATIVE_ATTACHMENT_FAILURE_MARKER = {'readback_failed_predicate=' + ReadbackPredicate.ATTACHMENTS!r}\n"
     + """import base64
@@ -160,18 +160,6 @@ from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
 """
     + connection_isolation_library()
     + r"""
-logging.disable(logging.CRITICAL)
-expected_copy_instance = globals().get("expected_copy_instance", "testing")
-if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
-    raise SystemExit("Testing copy requires its exact instance")
-for key in tuple(os.environ):
-    if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
-        os.environ.pop(key)
-os.environ["ODOO_RESTORE_KEPT_INTEGRATIONS"] = ""
-os.environ["ENV_OVERRIDE_DISABLE_CRON"] = "true"
-os.environ["NO_SANITIZE"] = "false"
-
-
 class CopyRunner(OdooDataWorkflowRunner):
     def validate_native_attachments(self) -> None:
         if sys.argv[7:] != ['container-export']:
@@ -225,7 +213,23 @@ class CopyRunner(OdooDataWorkflowRunner):
         print("testing_copy_pre_registry_sanitized=true", flush=True)
         if globals().get("rehearsal_timing_marker"):
             print(rehearsal_timing_marker+"sql_sanitized="+datetime.now(timezone.utc).isoformat(), flush=True)
+"""
+)
 
+
+TESTING_COPY_RUNNER = (
+    TESTING_COPY_CREDENTIAL_LIBRARY
+    + r"""
+logging.disable(logging.CRITICAL)
+expected_copy_instance = globals().get("expected_copy_instance", "testing")
+if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
+    raise SystemExit("Testing copy requires its exact instance")
+for key in tuple(os.environ):
+    if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
+        os.environ.pop(key)
+os.environ["ODOO_RESTORE_KEPT_INTEGRATIONS"] = ""
+os.environ["ENV_OVERRIDE_DISABLE_CRON"] = "true"
+os.environ["NO_SANITIZE"] = "false"
 
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
     raise SystemExit("Artifact lacks the pre-registry credential boundary")
@@ -387,13 +391,17 @@ def validate_fresh_testing_intent(
 ) -> None:
     """Refuse predictable execution failures before any production capture."""
     import re
-    from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_ACCEPTED_VALUES
-
     names = [name.strip() for name in modules.split(",") if name.strip()]
     if not names or any(
         name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in names
     ):
         raise ValueError("Fresh testing requires exact declared module intent.")
+    validate_fresh_testing_overrides(encoded_payload=encoded_payload, readback_spec=readback_spec)
+
+
+def validate_fresh_testing_overrides(*, encoded_payload: str, readback_spec: str) -> None:
+    from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_ACCEPTED_VALUES
+
     if not encoded_payload:
         return
     payload = json.loads(base64.b64decode(encoded_payload, validate=True))

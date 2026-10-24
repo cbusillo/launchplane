@@ -867,6 +867,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
+    require_testing_isolation_hold_clear,
     resolve_disposable_preview,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
@@ -22479,29 +22480,82 @@ def create_launchplane_fastapi_app(
                     str(error), code="disposable_lane_safety_unknown"
                 ) from error
 
-        try:
-            driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
-                control_plane_root=resolved_control_plane_root,
-                database_url=live_target_runtime_store.database_url,
-                product_name=live_target_runtime_request.product,
-                context_name=live_target_runtime_request.context,
-                instance_name=live_target_runtime_request.instance,
-                apply_changes=live_target_runtime_request.apply_changes,
-                deploy=live_target_runtime_request.deploy,
-                no_cache=live_target_runtime_request.no_cache,
-                deploy_timeout_seconds=live_target_runtime_request.deploy_timeout_seconds,
-                before_provider_mutation=(
-                    disposable_runtime_checkpoint if director_disposable_apply else None
-                ),
-                allow_owned_preview=director_disposable_apply,
-                requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
-                selected_keys=live_target_runtime_request.selected_keys,
-                deploy_trigger=(
-                    control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
-                ),
+        testing_runtime_start = (
+            live_target_runtime_request.apply_changes
+            and live_target_runtime_request.deploy
+            and live_target_runtime_request.instance == "testing"
+        )
+
+        def runtime_mutation_checkpoint() -> None:
+            if director_disposable_apply:
+                disposable_runtime_checkpoint()
+            if testing_runtime_start:
+                try:
+                    require_testing_isolation_hold_clear(
+                        live_target_runtime_store,
+                        context=live_target_runtime_request.context,
+                        instance=live_target_runtime_request.instance,
+                    )
+                except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                    raise control_plane_live_target_runtime.LiveTargetRuntimeError(
+                        "The retained testing isolation hold prevents an ordinary deployment.",
+                        code="testing_lane_start_held",
+                    ) from error
+
+        @contextmanager
+        def runtime_start_guard() -> Iterator[None]:
+            if not testing_runtime_start:
+                yield
+                return
+            runtime_mutation_checkpoint()
+            profile = live_target_runtime_store.read_product_profile_record(
+                live_target_runtime_request.product
             )
+            reservation = (
+                live_target_runtime_store.odoo_synchronous_lane_reservation(
+                    product=live_target_runtime_request.product,
+                    context=live_target_runtime_request.context,
+                    instance=live_target_runtime_request.instance,
+                )
+                if profile.driver_id == "odoo"
+                else nullcontext()
+            )
+            with reservation as owner:
+                if owner is not None:
+                    raise control_plane_live_target_runtime.LiveTargetRuntimeError(
+                        "An existing operation holds the testing lane.", code="testing_lane_busy"
+                    )
+                runtime_mutation_checkpoint()
+                yield
+
+        try:
+            with runtime_start_guard():
+                driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
+                    control_plane_root=resolved_control_plane_root,
+                    database_url=live_target_runtime_store.database_url,
+                    product_name=live_target_runtime_request.product,
+                    context_name=live_target_runtime_request.context,
+                    instance_name=live_target_runtime_request.instance,
+                    apply_changes=live_target_runtime_request.apply_changes,
+                    deploy=live_target_runtime_request.deploy,
+                    no_cache=live_target_runtime_request.no_cache,
+                    deploy_timeout_seconds=live_target_runtime_request.deploy_timeout_seconds,
+                    before_provider_mutation=(
+                        runtime_mutation_checkpoint
+                        if director_disposable_apply or testing_runtime_start
+                        else None
+                    ),
+                    allow_owned_preview=director_disposable_apply,
+                    requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
+                    selected_keys=live_target_runtime_request.selected_keys,
+                    deploy_trigger=(
+                        control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
+                    ),
+                )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             status_code = 400
+            if error.code in {"testing_lane_start_held", "testing_lane_busy"}:
+                status_code = 409
             if error.code in {
                 "runtime_environment_unavailable",
                 "dokploy_target_read_failed",
@@ -31316,6 +31370,7 @@ def create_launchplane_fastapi_app(
             http_error=_launchplane_http_error,
             control_plane_root=resolved_control_plane_root,
             error_response_model=LaunchplaneErrorResponse,
+            copy_actor=launchplane_identity_actor,
         ),
     )
     register_walkthrough_route(

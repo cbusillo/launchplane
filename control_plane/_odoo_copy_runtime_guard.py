@@ -3,6 +3,7 @@
 import inspect
 
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
+from control_plane.copy_network_membership import COPY_NETWORK_MEMBERSHIP_LIBRARY
 
 COPY_WEB_GATE_READ_PROGRAM = r"""
 import hashlib,os,sys
@@ -59,6 +60,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
+    + COPY_NETWORK_MEMBERSHIP_LIBRARY
     + "\nCOPY_WEB_GATE_READ_PROGRAM="
     + repr(COPY_WEB_GATE_READ_PROGRAM)
     + "\n"
@@ -122,12 +124,10 @@ def inspect_copy_runtime(spec, *, expected_instance):
     data_networks = set(containers["database"][1]["NetworkSettings"]["Networks"])
     if set(containers["script-runner"][1]["NetworkSettings"]["Networks"]) != data_networks or set(containers["web"][1]["NetworkSettings"]["Networks"]) != data_networks | ({"dokploy-network"} if expected_instance == "testing" else set()):
         raise CopyReadbackRefused(ReadbackPredicate.NETWORK_REACH)
-    if expected_instance == 'rehearsal':
-        own={item[1]['Id'] for item in containers.values()}
-        network=one_inspection(next(iter(data_networks)))
-        members=network.get('Containers')
-        if not isinstance(members,dict) or not set(members)<=own:
-            raise CopyReadbackRefused(ReadbackPredicate.NETWORK_MEMBERS)
+    own={item[1]['Id'] for item in containers.values()}
+    network=one_inspection(next(iter(data_networks)))
+    if not docker_network_members_are_owned(network,all_containers,own):
+        raise CopyReadbackRefused(ReadbackPredicate.NETWORK_MEMBERS)
     for container in all_containers:
         if container in [item[1] for item in containers.values()]:
             continue

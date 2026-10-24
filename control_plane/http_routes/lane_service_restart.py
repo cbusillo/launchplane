@@ -26,6 +26,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.drivers import native_routes
 from control_plane.dokploy.api import redact_dokploy_log_line
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.lane_service_restart import (
     ServiceRestartAdapter,
@@ -53,6 +54,7 @@ class ServiceRestartDependencies:
     http_error: HttpErrorFactory
     control_plane_root: Path
     error_response_model: type[BaseModel]
+    copy_actor: Callable[[LaunchplaneIdentity], str]
 
 
 def register_service_restart_route(
@@ -101,6 +103,16 @@ def register_service_restart_route(
             )
         if not operator or not allowed:
             refuse("authorization_denied", "Identity cannot restart this product lane.", 403)
+        if (
+            payload.qualification_mode is not None
+            and payload.mode != "dry-run"
+            and not director_testing
+        ):
+            refuse(
+                "authorization_denied",
+                "Only the Director agent can qualify a retained testing copy.",
+                403,
+            )
         if not isinstance(record_store, PostgresRecordStore):
             refuse("database_required", "Service restart requires shared database storage.", 503)
         assert isinstance(record_store, PostgresRecordStore)
@@ -111,6 +123,8 @@ def register_service_restart_route(
             if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
             else ""
         )
+        if payload.qualification_mode is not None:
+            actor = dependencies.copy_actor(identity)
         scope = restart_activity_scope(payload.product)
         fingerprint = hashlib.sha256(
             (actor + "\n" + payload.model_copy(update={"mode": "apply"}).model_dump_json()).encode()
@@ -178,10 +192,15 @@ def register_service_restart_route(
                 ) as owner:
                     if owner is not None:
                         raise ServiceRestartRefused("A release operation holds this lane.")
+                planning_payload = payload
+                if recovering and payload.qualification_mode is not None:
+                    from control_plane.testing_copy_qualification import ordinary_restart_request
+
+                    planning_payload = ordinary_restart_request(payload)
                 plan, expected, host, token, health_url = plan_service_restart(
                     store=record_store,
                     root=dependencies.control_plane_root,
-                    request=payload,
+                    request=planning_payload,
                     actor=actor,
                 )
             except FileNotFoundError:
@@ -201,6 +220,13 @@ def register_service_restart_route(
                         "Original restart is unsettled; the lane or identity is temporarily unavailable. Preserve the original request.",
                     )
                 refuse("restart_refused", str(error))
+                raise AssertionError
+            except NativeSourceAuthorizationDenied:
+                refuse(
+                    "authorization_denied",
+                    "The existing provider transport refused copy qualification; retain the original request.",
+                    403,
+                )
                 raise AssertionError
             except (ValueError, click.ClickException, OSError):
                 if recovering:
@@ -242,7 +268,12 @@ def register_service_restart_route(
                     "restart_identity_changed",
                     "Service identity changed. Inspect and review again.",
                 )
-            adapter = ServiceRestartAdapter(
+            adapter_type = ServiceRestartAdapter
+            if payload.qualification_mode is not None:
+                from control_plane.testing_copy_qualification import TestingCopyQualificationAdapter
+
+                adapter_type = TestingCopyQualificationAdapter
+            adapter = adapter_type(
                 store=record_store,
                 root=dependencies.control_plane_root,
                 request=payload,
@@ -264,8 +295,16 @@ def register_service_restart_route(
                     lease_owner=trace,
                     response_trace_id=trace,
                     adapter=adapter,
-                    allow_mutation=not recovering and payload.mode == "apply",
+                    allow_mutation=payload.mode == "apply"
+                    and (not recovering or payload.qualification_mode is not None),
                 )
+            except NativeSourceAuthorizationDenied:
+                refuse(
+                    "authorization_denied",
+                    "The existing provider transport refused copy qualification; retain the original request and custody.",
+                    403,
+                )
+                raise AssertionError
             except DisposableLaneSafetyUnknown:
                 refuse(
                     "disposable_lane_safety_unknown",

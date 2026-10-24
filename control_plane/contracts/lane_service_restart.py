@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.testing_copy_qualification import (
+    TestingCopyQualificationPlan,
+    TestingCopyQualificationProof,
+)
 
 
 SERVICE_RESTART_ROUTE = "/v1/drivers/odoo/service-restart"
@@ -26,6 +30,12 @@ class LaneServiceRestartRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
     mode: Literal["dry-run", "apply", "reconcile"] = "dry-run"
     reviewed_plan_sha256: str = ""
+    qualification_mode: Literal["sanitize", "start"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    qualification_source_key: str = Field(
+        default="", max_length=200, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_request(self) -> "LaneServiceRestartRequest":
@@ -38,6 +48,13 @@ class LaneServiceRestartRequest(BaseModel):
             raise ValueError("Apply requires the reviewed restart plan digest.")
         if self.mode == "dry-run" and self.reviewed_plan_sha256:
             raise ValueError("Dry-run cannot carry a reviewed plan digest.")
+        if self.qualification_mode is not None and (
+            self.instance != "testing" or self.service != "database"
+        ):
+            raise ValueError("Copy qualification is limited to the testing database.")
+        self.qualification_source_key = self.qualification_source_key.strip()
+        if bool(self.qualification_source_key) != (self.qualification_mode == "start"):
+            raise ValueError("Qualification start requires its original sanitization key.")
         return self
 
 
@@ -79,6 +96,9 @@ class LaneServiceRestartPlan(BaseModel):
     deployment_record_id: str
     acceptance_record_id: str = ""
     before: RestartContainerIdentity
+    qualification: TestingCopyQualificationPlan | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     def digest(self) -> str:
         return hashlib.sha256(
@@ -94,6 +114,11 @@ class LaneServiceRestartResult(BaseModel):
     plan_sha256: str
     after: RestartContainerIdentity | None = None
     error_message: str = ""
+    qualification_proof: TestingCopyQualificationProof | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class LaneServiceRestartResponse(BaseModel):

@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -1287,12 +1290,53 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
         ) as driver:
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
+
             record_safety(self.store, "example-site", self.context, "testing")
             self.assertEqual(await self.sync(), 202)
             driver.assert_called_once()
             self.assertIsNotNone(driver.call_args.kwargs["before_provider_mutation"])
             driver.reset_mock()
             record_safety(self.store, "example-site", self.context, "testing", data="only_copy")
+            self.assertEqual(await self.sync(deploy=True), 409)
+            driver.assert_not_called()
+
+    async def test_explicit_runtime_grant_cannot_deploy_an_isolation_held_copy(self) -> None:
+        from control_plane.service_auth import LocalOperatorPolicyRule
+
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-write",),
+                    products=("example-site",),
+                    contexts=(self.context,),
+                    actions=("live_target_runtime.apply",),
+                ),
+            ),
+        )
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=policy,
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+            purpose="isolation_staging",
+            reason="Retained unsafe copy",
+            recorded_by="fixture-director",
+        )
+        self.store.write_dokploy_target_record(target)
+        with (
+            scoped_agent_transport(),
+            patch(
+                "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+                return_value={},
+            ) as driver,
+        ):
             self.assertEqual(await self.sync(deploy=True), 409)
             driver.assert_not_called()
 

@@ -9,6 +9,7 @@ from control_plane.disposable_lanes import (
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.lane_usage import lane_usage_protected
 from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_predicate_library
+from control_plane.copy_network_membership import COPY_NETWORK_MEMBERSHIP_LIBRARY
 
 
 def require_connection_isolation_lane(
@@ -62,7 +63,8 @@ def require_connection_isolation_lane(
 # Executed inside the lane runner. Inputs are Docker metadata, never SQL or
 # caller-provided commands. It emits only fixed refusal names and a digest.
 RESOURCE_QUALIFICATION_LIBRARY = (
-    f"DATABASE_DATA_DIRECTORY = {ODOO_DATABASE_DATA_DIRECTORY!r}\n"
+    COPY_NETWORK_MEMBERSHIP_LIBRARY
+    + f"DATABASE_DATA_DIRECTORY = {ODOO_DATABASE_DATA_DIRECTORY!r}\n"
     + r"""
 import hashlib
 import ipaddress
@@ -113,7 +115,10 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
     network_id = next(iter(common))
     network = networks[network_id]
     owned_ids = {item["id"] for item in owned.values()}
-    if (network["project"] != project or not set(network["members"]) <= owned_ids
+    attachments = {item["id"]: set(item["networks"]) for item in containers}
+    if (network["project"] != project or network.get("internal") is not True
+        or len(attachments) != len(containers)
+        or not network_members_are_owned(network_id, set(network["members"]), attachments, owned_ids)
         or set(network["members"]) - {owned["web"]["id"]} != {db["id"], runner["id"]}):
         raise ResourceQualificationRefused("testing_resources/shared_network")
     address = str(ipaddress.IPv4Address(db["networks"][network_id]))
@@ -199,7 +204,9 @@ try:
         elif kind == "volume":
             snapshot["volumes"].append(row)
         elif kind == "network":
-            row["members"] = sorted((row["members"] or {}).keys())
+            if not isinstance(row["members"], dict):
+                raise ValueError("testing_resources/inventory_shape")
+            row["members"] = sorted(row["members"])
             snapshot["networks"].append(row)
         else:
             raise ValueError("testing_resources/inventory_shape")
@@ -245,7 +252,7 @@ snapshot=$(set -e
         docker volume inspect --format '{"kind":"volume","name":{{json .Name}},"driver":{{json .Driver}},"has_options":{{if .Options}}true{{else}}false{{end}},"mountpoint":{{json .Mountpoint}}}' "${volume_ids[@]}" || exit 1
     fi
     if [ "${#network_ids[@]}" -gt 0 ]; then
-        docker network inspect --format '{"kind":"network","id":{{json .Id}},"project":{{json (index .Labels "com.docker.compose.project")}},"members":{{json .Containers}}}' "${network_ids[@]}" || exit 1
+        docker network inspect --format '{"kind":"network","id":{{json .Id}},"project":{{json (index .Labels "com.docker.compose.project")}},"internal":{{json .Internal}},"members":{{json .Containers}}}' "${network_ids[@]}" || exit 1
     fi
 ) || inventory_refused inventory_unverified
 [ "$(docker ps -aq | sort)" = "$(printf '%s\n' "${inventory_ids[@]}")" ] || inventory_refused inventory_changed

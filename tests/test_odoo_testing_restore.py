@@ -5,11 +5,12 @@ import hashlib
 import tarfile
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory, NamedTemporaryFile
-from typing import Any
+from typing import Any, cast
 import unittest
 import yaml
 from unittest.mock import Mock, patch
@@ -21,6 +22,7 @@ from control_plane.dokploy.compose import (
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -272,6 +274,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.resume_verified = False
         self.gate_payload = "payload-fixture"
         self.gate_hash = ""
+        self.data_network: dict[str, Any] = {
+            "Id": "private-network-id",
+            "Internal": True,
+            "Containers": {service: {} for service in ("web", "database", "script-runner")},
+        }
         for suffix in ("data", "logs", "db"):
             name = self.gen.namespace + "-" + suffix
             backing = self.root / name
@@ -311,10 +318,14 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     }
                     for suffix in suffixes
                 ],
-                "NetworkSettings": {"Networks": {"testing-data": {}}},
+                "NetworkSettings": {
+                    "Networks": {"testing-data": {"NetworkID": self.data_network["Id"]}}
+                },
             }
 
-        self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
+        self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {
+            "NetworkID": "external-id"
+        }
 
     def command(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
@@ -328,7 +339,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             result = "\n".join(self.containers).encode()
         elif command[:2] == ["docker", "inspect"]:
             item = (
-                {"Internal": True} if command[2] == "testing-data" else self.containers[command[2]]
+                self.data_network if command[2] == "testing-data" else self.containers[command[2]]
             )
             result = json.dumps([item]).encode()
         elif command[:3] == ["docker", "volume", "inspect"]:
@@ -407,6 +418,59 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
+
+    def test_copy_guard_rejects_foreign_network_peers_in_every_container_state(self) -> None:
+        def docker(*arguments: str) -> bytes:
+            return self.command(["docker", *arguments]).stdout
+
+        def inspect_one(identifier: str) -> dict[str, Any]:
+            return cast(dict[str, Any], json.loads(docker("inspect", identifier))[0])
+
+        namespace: dict[str, Any] = {
+            "json": json,
+            "re": re,
+            "Path": Path,
+            "docker": docker,
+            "one_inspection": inspect_one,
+        }
+        exec(COPY_RUNTIME_INSPECTION_LIBRARY, namespace)
+        inspect_runtime = namespace["inspect_copy_runtime"]
+        for container in self.containers.values():
+            container["State"] = {"Status": "exited", "Running": False}
+        self.data_network["Containers"] = {}
+        self.assertEqual(
+            set(inspect_runtime(self.spec, expected_instance="testing")), set(self.containers)
+        )
+        for running in (True, False):
+            with self.subTest(running=running):
+                self.containers["foreign"] = {
+                    "Id": "foreign",
+                    "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+                    "State": {"Status": "running" if running else "exited", "Running": running},
+                    "Mounts": [],
+                    "NetworkSettings": {
+                        "Networks": {
+                            "another-network-alias": {"NetworkID": self.data_network["Id"]},
+                            "external": {"NetworkID": "external-id"},
+                        }
+                    },
+                }
+                self.data_network["Containers"] = {"foreign": {}} if running else {}
+                with self.assertRaisesRegex(RuntimeError, ReadbackPredicate.NETWORK_MEMBERS):
+                    inspect_runtime(self.spec, expected_instance="testing")
+                self.containers.pop("foreign")
+        unavailable_members: tuple[object, ...] = (None, [], "unavailable")
+        for members in unavailable_members:
+            with self.subTest(members=members):
+                self.data_network["Containers"] = members
+                with self.assertRaisesRegex(RuntimeError, ReadbackPredicate.NETWORK_MEMBERS):
+                    inspect_runtime(self.spec, expected_instance="testing")
+        self.data_network["Containers"] = {}
+        self.containers["database"]["NetworkSettings"]["Networks"]["testing-data"]["NetworkID"] = (
+            "unmatched-network"
+        )
+        with self.assertRaisesRegex(RuntimeError, ReadbackPredicate.NETWORK_MEMBERS):
+            inspect_runtime(self.spec, expected_instance="testing")
 
     def test_new_copy_starts_without_performing_inline_disposal(self) -> None:
         previous = "lp_drill_" + "b" * 32
@@ -943,11 +1007,16 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         for service, container in self.containers.items():
             networks = composition["services"][service]["networks"]
-            container["NetworkSettings"]["Networks"] = dict.fromkeys(networks, {})
+            container["NetworkSettings"]["Networks"] = {
+                name: {"NetworkID": name} for name in networks
+            }
         # The installed provider preserves explicit networks and appends these
         # two names when a domain routes to web (Dokploy upstream #4499).
         self.containers["web"]["NetworkSettings"]["Networks"].update(
-            {"default": {}, "dokploy-network": {}}
+            {
+                "default": {"NetworkID": "default"},
+                "dokploy-network": {"NetworkID": "dokploy-network"},
+            }
         )
         command = self.command
 
@@ -957,7 +1026,15 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     arguments,
                     0,
                     stdout=json.dumps(
-                        [{"Internal": composition["networks"][arguments[2]].get("internal", False)}]
+                        [
+                            {
+                                "Id": arguments[2],
+                                "Internal": composition["networks"][arguments[2]].get(
+                                    "internal", False
+                                ),
+                                "Containers": {item["Id"]: {} for item in self.containers.values()},
+                            }
+                        ]
                     ).encode(),
                 )
             return command(arguments, **kwargs)
@@ -1167,6 +1244,13 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_resume_rejects_a_copy_from_another_generation_without_dropping_it(self) -> None:
         self.boundary_case("foreign-witness", phase="resume")
 
+    def test_offline_client_uses_original_copy_without_registry_and_refuses_failed_boundary(
+        self,
+    ) -> None:
+        for fault in ("normal", "rollback", "readback", "foreign-witness"):
+            with self.subTest(fault=fault):
+                self.boundary_case(fault, phase="resume", sanitize_only=True, offline=True)
+
     def boundary_case(
         self,
         fault: str,
@@ -1175,6 +1259,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         instance: str = "testing",
         sanitize_only: bool = False,
         native_attachment: str = "",
+        offline: bool = False,
     ) -> None:
         import logging
         import sqlite3
@@ -1186,6 +1271,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         events: list[str] = []
         self.addCleanup(logging.disable, logging.root.manager.disable)
         self.enterContext(patch.object(sys, "path", list(sys.path)))
+        self.enterContext(patch.object(sys, "meta_path", list(sys.meta_path)))
         with TemporaryDirectory() as directory:
             fixture_root = Path(directory).resolve()
             database = fixture_root / "fresh.db"
@@ -1363,6 +1449,21 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
                 def prepare_credentials_before_registry(self, **_: object) -> None:
                     connection.execute("UPDATE res_users SET password=NULL")
+                    connection.execute(
+                        "INSERT OR REPLACE INTO ir_config_parameter VALUES (?, ?)",
+                        (
+                            "fixture.credential.boundary",
+                            "c" * 8
+                            + "-"
+                            + "c" * 4
+                            + "-"
+                            + "c" * 4
+                            + "-"
+                            + "c" * 4
+                            + "-"
+                            + "c" * 12,
+                        ),
+                    )
 
                 def _resolve_filestore_owner(self) -> str:
                     return "fixture-owner"
@@ -1401,7 +1502,10 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 db_name="fresh",
                 platform_instance=instance,
                 db_conn=Connection(connection, writer=True),
+                data_workflow_lock_file=fixture_root / "workflow.lock",
             )
+            artifact.BOUNDARY_COMMIT_PARAMETER = "fixture.credential.boundary"
+            artifact.credential_parameter_integration = lambda key: None
             artifact.OdooDataWorkflowRunner = NativeRunner
             (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
@@ -1454,22 +1558,44 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                if fault == "normal":
-                    program = (
-                        rehearsal_copy_runner(sanitize_source_only=sanitize_only)
-                        if instance == "rehearsal"
-                        else TESTING_COPY_RUNNER
+                program = (
+                    rehearsal_copy_runner(sanitize_source_only=sanitize_only)
+                    if instance == "rehearsal"
+                    else TESTING_COPY_RUNNER
+                )
+                if offline:
+                    from control_plane._testing_copy_qualification_program import (
+                        COPY_QUALIFICATION_CLIENT,
                     )
+
+                    program = COPY_QUALIFICATION_CLIENT
+                    offline_spec = {
+                        "environment": {"PLATFORM_INSTANCE": "testing"},
+                        "database_name": "fresh",
+                        "readback_spec": "fixture-spec",
+                        "readback_program": "fixture readback",
+                        "copy_binding_sha256": "fixture-copy-binding",
+                        "source_mode": "ssh",
+                        "operation": "a" * 64,
+                    }
+                    sys.argv = [
+                        "copy-client",
+                        base64.b64encode(json.dumps(offline_spec).encode()).decode(),
+                    ]
+                if fault == "normal":
                     exec(compile(program, "<copy-runner>", "exec"), {})
                 else:
                     with self.assertRaises(RuntimeError):
-                        exec(compile(TESTING_COPY_RUNNER, "<copy-runner>", "exec"), {})
+                        exec(compile(program, "<copy-runner>", "exec"), {})
             if fault == "normal":
                 if sanitize_only:
                     self.assertNotIn("registry", events)
                 else:
                     self.assertIn("registry", events)
-                self.assertIn("testing_copy_sanitized=true", output.getvalue())
+                self.assertIn(
+                    "copy_qualification_client=" if offline else "testing_copy_sanitized=true",
+                    output.getvalue(),
+                )
                 from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
                 from datetime import datetime, timedelta
 
@@ -1497,7 +1623,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 isolated()
             else:
                 self.assertNotIn("registry", events)
-                if phase == "fresh":
+                if phase == "fresh" and not offline:
                     self.assertIn("drop-fresh", events)
                 else:
                     self.assertNotIn("drop-fresh", events)

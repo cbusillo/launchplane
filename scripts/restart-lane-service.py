@@ -37,6 +37,9 @@ def main() -> int:
     parser.add_argument("--evidence-file", type=Path, required=True)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
+    parser.add_argument("--qualification-mode", choices=("sanitize", "start"))
+    parser.add_argument("--qualification-source-key", default="")
+    parser.add_argument("--result-file", type=Path)
     args = parser.parse_args()
     if args.mode == "dry-run" and args.evidence_file.exists():
         parser.error("The evidence file already exists; choose a new file for this inspection.")
@@ -46,12 +49,22 @@ def main() -> int:
         instance=args.instance,
         service=args.service,
         reason=redact_dokploy_log_line(args.reason),
+        qualification_mode=args.qualification_mode,
+        qualification_source_key=args.qualification_source_key,
     )
     if args.mode == "resume":
         recovery = LaneServiceRestartRecovery.model_validate_json(args.evidence_file.read_text())
         if any(
             getattr(recovery.request, field) != getattr(payload, field)
-            for field in ("product", "context", "instance", "service", "reason")
+            for field in (
+                "product",
+                "context",
+                "instance",
+                "service",
+                "reason",
+                "qualification_mode",
+                "qualification_source_key",
+            )
         ):
             parser.error("The recovery handle does not match this original restart request.")
         if args.idempotency_key and args.idempotency_key != recovery.idempotency_key:
@@ -72,6 +85,10 @@ def main() -> int:
                 getattr(plan, field) != getattr(payload, field)
                 for field in ("product", "context", "instance", "service", "reason")
             )
+            or (plan.qualification.mode if plan.qualification else None)
+            != payload.qualification_mode
+            or (plan.qualification.source_key if plan.qualification else "")
+            != payload.qualification_source_key
         ):
             parser.error("The evidence file does not match this exact restart request.")
         payload = payload.model_copy(
@@ -131,6 +148,10 @@ def main() -> int:
             parser.error("Cannot create the private evidence file; choose a new writable path.")
         with os.fdopen(descriptor, "w") as output:
             output.write(response.model_dump_json(indent=2) + "\n")
+    if args.result_file is not None:
+        descriptor = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(response.model_dump_json(indent=2) + "\n")
     print(
         json.dumps(
             {
@@ -142,6 +163,9 @@ def main() -> int:
                 if response.result.after
                 else "",
                 "replayed": response.replayed or False,
+                "qualification_proof": response.result.qualification_proof.model_dump(mode="json")
+                if response.result.qualification_proof
+                else None,
             }
         )
     )

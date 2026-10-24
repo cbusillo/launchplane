@@ -217,6 +217,19 @@ def require_lane_target_ownership(
         raise DisposableLaneSafetyUnknown("The target aliases another lane's target.")
 
 
+def require_testing_isolation_hold_clear(
+    store: DisposableLaneStore, *, context: str, instance: str
+) -> None:
+    if instance != "testing":
+        return
+    target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
+    hold = target.policies.staff_testing_hold
+    if hold is not None and hold.purpose == "isolation_staging":
+        raise DisposableLaneSafetyUnknown(
+            "The retained testing isolation hold prevents ordinary service starts."
+        )
+
+
 def require_disposable_lane(
     store: DisposableLaneStore,
     *,

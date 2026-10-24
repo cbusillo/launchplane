@@ -25,6 +25,7 @@ from control_plane.dokploy import api, source
 from control_plane.disposable_lanes import (
     DisposableLaneSafetyUnknown,
     require_disposable_lane,
+    require_testing_isolation_hold_clear,
 )
 from control_plane.dokploy.service_restart import (
     ServiceInspectionUnavailable,
@@ -74,6 +75,10 @@ def plan_service_restart(
     request: LaneServiceRestartRequest,
     actor: str,
 ) -> tuple[LaneServiceRestartPlan, RuntimeIdentity, str, str, str]:
+    if request.qualification_mode is not None:
+        from control_plane.testing_copy_qualification import plan_copy_qualification
+
+        return plan_copy_qualification(store=store, root=root, request=request, actor=actor)
     profile = store.read_product_profile_record(request.product)
     lane = next(
         (
@@ -421,6 +426,9 @@ class ServiceRestartAdapter:
                     raise ServiceRestartRefused(
                         "Restart identity changed; inspect and review again."
                     )
+                require_testing_isolation_hold_clear(
+                    self.store, context=self.plan.context, instance=self.plan.instance
+                )
                 if self.require_disposable:
                     runtime_stopped = fresh.service == "web" and (
                         not fresh.before.running or fresh.before.health == "unhealthy"

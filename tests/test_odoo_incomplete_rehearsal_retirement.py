@@ -1711,6 +1711,8 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.network = True
         self.original_docker = self.fixture.host["docker"]
         self.network_id = hashlib.sha256(b"isolated fixture network").hexdigest()
+        for container in self.fixture.fixture.containers.values():
+            container["NetworkSettings"]["Networks"]["testing-data"]["NetworkID"] = self.network_id
         self.fixture.host["docker"] = self.docker
         self.fixture.host["one_inspection"] = lambda name: __import__("json").loads(
             self.docker("inspect", name)

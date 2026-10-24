@@ -5,6 +5,7 @@ from tests.support.auth import scoped_agent_test
 import asyncio
 from contextlib import redirect_stderr
 from contextlib import contextmanager
+from contextlib import nullcontext
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
+    TestingHoldPurpose,
 )
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.contracts.product_environment_read_model import build_product_activity_read_model
@@ -59,7 +61,7 @@ from control_plane.service_auth import (
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
-from tests.support.auth import StubVerifier, identity, local_operator_policy
+from tests.support.auth import StubVerifier, identity, local_operator_policy, scoped_agent_transport
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.support.disposable_lanes import record_safety
@@ -876,13 +878,19 @@ class ServiceRestartTests(unittest.TestCase):
         target = self.store.read_dokploy_target_record(
             context_name=self.expected.context, instance_name="testing"
         )
-        for purpose in ("staff_testing", "isolation_staging"):
+        cases: tuple[tuple[TestingHoldPurpose, bool], ...] = (
+            ("staff_testing", False),
+            ("isolation_staging", False),
+            ("isolation_staging", True),
+        )
+        for purpose, scoped in cases:
             target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
                 reason="Staff is testing.", recorded_by="fixture-admin", purpose=purpose
             )
             self.store.write_dokploy_target_record(target)
             record_safety(self.store, self.expected.product, self.expected.context, "testing")
-            status, response = self.invoke(key=f"held-restart-{purpose}")
+            with scoped_agent_transport() if scoped else nullcontext():
+                status, response = self.invoke(key=f"held-restart-{purpose}-{scoped}")
             self.assertEqual(status, 409, response)
             self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         target.policies.staff_testing_hold = None
