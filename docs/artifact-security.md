@@ -36,6 +36,24 @@ product-profile write path (`POST /v1/product-profiles`) after registry reads
 are qualified. Default serialization omits this field so existing fingerprints
 do not change. A disabled scan is explicit in the reconcile plan.
 
+The authenticated Director agent may use that same profile path to change only
+`image.scan_enabled` from false to true on an existing active managed product.
+The request requires the current profile's `If-Match` revision and an
+`Idempotency-Key`. The service qualifies the verified testing candidate again
+before committing the exact profile change; a failing or unavailable scan
+returns `artifact_scan_refused` and leaves the gate disabled. The final profile
+compare-and-write rejects concurrent edits during qualification. This narrow
+standing path cannot disable scanning, create a product, edit other fields,
+change access or deploy anything. Other callers retain their existing policy
+requirements.
+
+Allow up to five minutes for activation's service-side qualification. A lost or
+timed-out activation response is an uncertain write, not a scan refusal. Read
+the stored profile before any retry, and retain the original idempotency key
+and exact payload for a supported replay. A second request can encounter a busy
+scanner while the original is still running; that response does not settle the
+original request's outcome.
+
 Qualify first with `GET /v1/artifacts/scan?product=<product>`, using the existing
 whole-product `artifact_protection.read` authority. The service selects and
 verifies the current testing build through the same provenance planner and
