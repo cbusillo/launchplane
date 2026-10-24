@@ -73,6 +73,7 @@ WALKTHROUGH_SECRET_INTEGRATION = "odoo_walkthrough"
 
 
 class WalkthroughPrerequisite(StrEnum):
+    NOT_REACHED = "testing_task_prerequisite_not_reached"
     IDENTITY = "testing_task_identity_unavailable"
     GENERATION = "testing_task_generation_unverified"
     GENERATION_MISSING = "testing_task_generation_missing"
@@ -220,7 +221,11 @@ def _walkthrough_preflight(
             with _prerequisite(code):
                 yield True
             return
-        if any(item not in passed for item in requires) or (task_required and request is None):
+        if any(item not in passed for item in requires):
+            checks.append((code, WalkthroughPrerequisite.NOT_REACHED, "unknown"))
+            yield False
+            return
+        if task_required and request is None:
             checks.append((code, code, "unknown"))
             yield False
             return
@@ -292,6 +297,7 @@ def _walkthrough_preflight(
                 context=context,
                 instance="testing",
                 task_account_cleanup=operation == "cleanup",
+                resource_qualification=checks is not None and operation != "cleanup",
             )
             if generation is None:
                 raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)

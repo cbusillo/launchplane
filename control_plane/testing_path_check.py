@@ -12,7 +12,7 @@ from control_plane.odoo_testing_restore import (
 )
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite, read_walkthrough_prerequisites
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
-from control_plane.product_path_check import ActionAllowed, PathCheckStep
+from control_plane.product_path_check import ActionAllowed, PathCheckStep, TESTING_HOLD_ACTIVE
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     WALKTHROUGH_ACTION,
@@ -38,6 +38,7 @@ from control_plane.testing_replacement_bootstrap import (
 )
 
 _WALKTHROUGH_DESCRIPTIONS = {
+    WalkthroughPrerequisite.NOT_REACHED: "This read was not reached because an earlier prerequisite did not pass.",
     WalkthroughPrerequisite.IDENTITY: "Verify the testing runtime identity and its separate HTTPS origin.",
     WalkthroughPrerequisite.GENERATION: "Verify the current generation still owns its independent target and resources.",
     WalkthroughPrerequisite.GENERATION_MISSING: "Create a fresh sanitized testing generation before provisioning a task account.",
@@ -55,6 +56,10 @@ _WALKTHROUGH_DESCRIPTIONS = {
     WalkthroughPrerequisite.PROTECTED_SIGNIN: "A protected sign-in was observed since preparation; preserve that use.",
     WalkthroughPrerequisite.CREDENTIAL: "Supply the task id to verify its account access and custody.",
 }
+
+
+class TestingPathHoldActive(ValueError):
+    pass
 
 
 def read_testing_prerequisites(
@@ -78,6 +83,9 @@ def read_testing_prerequisites(
         state: Literal["clear", "blocked", "unknown"] = "clear"
         try:
             read()
+        except TestingPathHoldActive:
+            state, code = "blocked", TESTING_HOLD_ACTIVE
+            description = "The testing hold prevents this action-admission check; inspect its recorded purpose and supported continuation."
         except TestingCredentialsOverlap:
             state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."
@@ -294,6 +302,9 @@ def read_testing_prerequisites(
             raise ValueError("Retained resource preparation is missing.")
         if (preparation.product, preparation.context) != (profile.product, context):
             raise ValueError("Retained resource preparation belongs to another lane.")
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         request = TestingReplacementResourcesRequest(
             context=context,
             operation_id=operation_id,
@@ -345,9 +356,14 @@ def read_testing_prerequisites(
         preparation = (
             store.read_disposable_resource_preparation(operation_id) if operation_id else None
         )
+        if preparation is not None and (preparation.product, preparation.context) != (
+            profile.product,
+            context,
+        ):
+            raise ValueError("Preparation belongs to another lane.")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         if preparation is not None:
-            if (preparation.product, preparation.context) != (profile.product, context):
-                raise ValueError("Preparation belongs to another lane.")
             require_initial_usage(
                 root,
                 store,

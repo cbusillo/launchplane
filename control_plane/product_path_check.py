@@ -72,6 +72,7 @@ GENERIC_WEB_PROMOTION_ACTION = "generic_web_prod_promotion.dispatch"
 
 PathName = Literal["testing", "promote", "rollback"]
 PATH_NAMES: tuple[PathName, ...] = ("testing", "promote", "rollback")
+TESTING_HOLD_ACTIVE = "testing_hold_active"
 TestingIntent = Literal["provision", "generation", "testing-replacement"]
 StepState = Literal["clear", "blocked", "unknown"]
 FixKind = Literal["none", "code", "grant", "owner_approval", "client_acceptance", "by_hand", "wait"]
@@ -322,9 +323,9 @@ def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
             _step(
                 "testing_hold",
                 "blocked",
-                "testing_hold_active",
-                "Site staff hold the testing lane; deploys wait until the hold is lifted.",
-                "wait",
+                TESTING_HOLD_ACTIVE,
+                "The testing lane has a protective hold. Review its purpose and use the supported hold continuation.",
+                "by_hand",
             )
         )
     else:

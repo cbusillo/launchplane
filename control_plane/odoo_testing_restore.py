@@ -1252,10 +1252,6 @@ def read_current_testing_generation(
                 resource_qualification=resource_qualification,
             ):
                 raise ValueError("The adopted testing copy has a staff testing hold.")
-            if resource_qualification:
-                require_distinct_testing_credentials(
-                    store, store.read_product_profile_record(product), context
-                )
             # Native publication's queue/copy/route receipt replaces the old
             # bootstrap and resource-adoption receipts. Empty copies carry none.
             return store.read_fresh_odoo_testing_generation(product, context)
