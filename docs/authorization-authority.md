@@ -540,6 +540,13 @@ definition of administrator. It does not widen anything else:
 
 ## Denial Handling
 
+The Director agent can conditionally enable an existing product's artifact-scan
+gate through the profile write path after the service qualifies its verified
+image. Only the false-to-true flag change is admitted; profile revision,
+idempotency and compare-and-write checks remain required. This changes no
+credentials, grants, provider state or release authority. See
+[artifact scanning](artifact-security.md) for qualification and recovery.
+
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
