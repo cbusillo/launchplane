@@ -84,6 +84,7 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 class ReleaseInvitationTests(unittest.TestCase):
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
+        self.prepare_settings()
         release_test_change = self.add_release_test_change()
         assert self.review.checklist is not None
         candidate_marker = release_invitation_marker(
@@ -1149,8 +1150,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertTrue(self.publish(ReleaseInvitationBackoff()))
         self.assertEqual(len(self.comments), 1)
         self.assertIn("@site-owner", self.comments[0]["body"])
-        self.assertIn("Website settings", self.comments[0]["body"])
-        self.assertNotIn("nothing new to test", self.comments[0]["body"])
+        assert self.review.checklist is not None
+        self.assertIn(
+            release_invitation_marker(self.profile.product, self.review.checklist.candidate),
+            self.comments[0]["body"],
+        )
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product), ()
         )
@@ -1161,27 +1165,37 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.prepare_settings()
         self.assertTrue(self.publish())
         self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[0]["body"])
-        self.assertIn("Website settings", self.comments[0]["body"])
         self.assertEqual(len(self.comments), 1)
 
     def test_settings_changes_notify_once_but_same_settings_on_new_build_do_not(self) -> None:
-        self.assertTrue(self.publish())
+        backoff = ReleaseInvitationBackoff()
+        self.assertTrue(self.publish(backoff))
         self.prepare_settings()
-        self.assertTrue(self.publish())
+        self.assertTrue(self.publish(backoff))
         self.assertEqual(len(self.comments), 2)
         self.assertIn("@site-owner", self.comments[-1]["body"])
-        self.assertIn("Website settings", self.comments[-1]["body"])
         assert self.review.checklist is not None
         self.assertNotIn(self.review.checklist.items[0].owner_test_notes, self.comments[-1]["body"])
-        self.assertTrue(self.publish())
+        self.assertTrue(self.publish(backoff))
         self.assertEqual(len(self.comments), 2)
         self.prepare_settings(key="G-NEXT456")
-        self.assertTrue(self.publish())
+        self.assertTrue(self.publish(backoff))
         self.assertEqual(len(self.comments), 3)
-        self.change_candidate(source_commit="e" * 40)
+        candidate = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="testing"
+        )
+        artifact = self.store.read_artifact_manifest(candidate.artifact_id).model_copy(
+            update={"artifact_id": "artifact-new-testing", "source_commit": "e" * 40}
+        )
+        self.store.write_artifact_manifest(artifact)
+        self.store.write_release_tuple_record(
+            candidate.model_copy(update={"artifact_id": artifact.artifact_id})
+        )
+        self.refresh_settings_review()
+        self.assertFalse(self.publish(backoff))
+        self.prepare_settings(key="G-NEXT456")
         self.assertTrue(self.publish(ReleaseInvitationBackoff()))
         self.assertEqual(len(self.comments), 3)
-        self.assertIn("Website settings", self.comments[-1]["body"])
 
     def test_settings_request_recovers_lost_response_without_a_duplicate(self) -> None:
         self.make_engineering_only()
@@ -1971,6 +1985,22 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.store.write_release_tuple_record(
             production.model_copy(update={"artifact_id": accepted.checklist.candidate.artifact_id})
         )
+        if accepted.checklist.website_settings is not None:
+            stored = self.store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.store.write_odoo_instance_override_record(
+                stored.model_copy(
+                    update={
+                        "last_apply": stored.last_apply.model_copy(
+                            update={
+                                "website_settings": accepted.checklist.website_settings,
+                                "website_settings_verified": True,
+                            }
+                        )
+                    }
+                )
+            )
         run = ClientReleaseRunView(
             decision_record_id=accepted.record_id, rollback_drill=False, state="passed", steps=()
         )

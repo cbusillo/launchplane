@@ -18,6 +18,7 @@ from control_plane.launchplane_github_delivery import resolve_delivery_github_ap
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
+    ReleaseChecklist,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
@@ -133,6 +134,18 @@ def _timestamp(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("Release invitation timestamp needs a timezone.")
     return parsed.astimezone(UTC)
+
+
+def _settings_invitation_key(checklist: ReleaseChecklist) -> str:
+    if (
+        checklist.website_settings is None
+        or checklist.candidate.website_settings_sha256
+        == checklist.production.website_settings_sha256
+    ):
+        return ""
+    return hashlib.sha256(
+        f"website-settings:{checklist.candidate.website_settings_sha256}".encode()
+    ).hexdigest()
 
 
 def _change_link(change: InvitationChange) -> str:
@@ -367,12 +380,14 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    identity = (
+    identity: tuple[str, ...] = (
         product,
         candidate.artifact_id,
         candidate.source_commit,
         candidate.shared_addons_digest,
     )
+    if candidate.website_settings_sha256:
+        identity += (candidate.website_settings_sha256,)
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
 
@@ -748,15 +763,7 @@ def publish_release_invitation(
         notification_changes = {
             key: change for key, change in client_changes.items() if change.client_review_requested
         }
-        settings_key = ""
-        if (
-            review.checklist.website_settings is not None
-            and review.checklist.candidate.website_settings_sha256
-            != review.checklist.production.website_settings_sha256
-        ):
-            settings_key = hashlib.sha256(
-                f"website-settings:{review.checklist.candidate.website_settings_sha256}".encode()
-            ).hexdigest()
+        settings_key = _settings_invitation_key(review.checklist)
         change_links = {key: _change_link(change) for key, change in client_changes.items()}
         notification_links = {key: change_links[key] for key in notification_changes}
         if settings_key:
@@ -961,7 +968,7 @@ def publish_release_invitation(
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
-                "review the prepared website settings and check the testing site, then press **Accept** or **Request changes**."
+                "review the prepared website settings on the release page, then press **Accept** or **Request changes**."
                 if settings_key
                 else "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
@@ -1043,6 +1050,11 @@ def adopt_release_invitation(
             + " -->"
         )
         changes = client_invitation_changes(store, profile, review.checklist)
+        notification_keys = {
+            key for key, change in changes.items() if change.client_review_requested
+        }
+        if settings_key := _settings_invitation_key(review.checklist):
+            notification_keys.add(settings_key)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -1111,8 +1123,7 @@ def adopt_release_invitation(
                     ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
-                        for key, change in sorted(changes.items())
-                        if change.client_review_requested
+                        for key in sorted(notification_keys)
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",
