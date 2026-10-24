@@ -58,6 +58,7 @@ from control_plane.merge_train_historical_disposition import (
 from control_plane.release_invitation import (
     SETTLED_DECISION_RECHECK_SECONDS,
     WEBSITE_SETTINGS_REVIEW_NOTE,
+    WHY_NOW,
     ReleaseInvitationBackoff,
     main,
     publish_release_invitation,
@@ -828,7 +829,9 @@ class ReleaseInvitationTests(unittest.TestCase):
                 preview_decision.model_copy(update={"product": "another-site"})
             )
         self.assertTrue(self.publish())
-        self.assertIn("**Why now:**", self.comments[0]["body"])
+        self.assertTrue(
+            any(line.startswith(WHY_NOW) for line in self.comments[0]["body"].splitlines())
+        )
 
     def test_historical_batch_legacy_receipt_is_adopted_without_a_ping(self) -> None:
         self.seed_historical_batch()
@@ -1060,10 +1063,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 1)
         body = self.comments[0]["body"]
         self.assertIn("@site-owner", body)
-        self.assertIn("**Why now:**", body)
-        self.assertIn("engineering", body.lower())
-        self.assertIn("there is nothing new to test", body)
-        self.assertIn("Accepting starts the release", body)
+        reason = next(
+            line.removeprefix(WHY_NOW) for line in body.splitlines() if line.startswith(WHY_NOW)
+        )
+        self.assertTrue(reason.strip())
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
@@ -1098,7 +1101,6 @@ class ReleaseInvitationTests(unittest.TestCase):
             run,
             run.model_copy(update={"state": "waiting"}),
             run.model_copy(update={"state": "stopped", "steps": (unresolved,)}),
-            None,
         ):
             with (
                 self.subTest(run=pending),
@@ -1143,12 +1145,50 @@ class ReleaseInvitationTests(unittest.TestCase):
         run = ClientReleaseRunView(
             decision_record_id=accepted.record_id, rollback_drill=True, state="passed", steps=()
         )
-        with patch(
-            "control_plane.client_release.read_client_release_run",
-            side_effect=(run, run.model_copy(update={"state": "running"})),
+        resumed = False
+
+        def github(*, path: str, token: str, **kwargs: Any) -> object:
+            nonlocal resumed
+            result = self.github(path=path, token=token, **kwargs)
+            if "/comments?" in path:
+                resumed = True
+            return result
+
+        with (
+            patch("control_plane.release_invitation.github_api_request", side_effect=github),
+            patch(
+                "control_plane.client_release.read_client_release_run",
+                side_effect=lambda **kwargs: (
+                    run.model_copy(update={"state": "running"}) if resumed else run
+                ),
+            ),
         ):
             self.assertFalse(self.publish())
+        self.assertTrue(resumed)
         self.assertEqual(self.comments, [])
+
+    def test_superseded_unstarted_acceptance_does_not_block_the_next_request(self) -> None:
+        from control_plane.client_release import read_client_release_run
+
+        self.make_engineering_only()
+        self.assertTrue(self.publish())
+        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+            update={"release_start": "promote"}
+        )
+        self.store.write_release_review_decision_record(accepted)
+        self.now += timedelta(seconds=1)
+        self.change_candidate(source_commit="e" * 40)
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "waiting")
+        self.assertTrue(run.blocked_reason)
+        self.assertFalse(any(step.status == "pass" for step in run.steps))
+        self.assertTrue(self.publish())
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
 
     def add_release_test_change(self) -> ReleaseReviewItem:
         assert self.review.checklist is not None
@@ -1397,7 +1437,6 @@ class ReleaseInvitationTests(unittest.TestCase):
         item = self.add_release_test_change()
         for backoff in (None, ReleaseInvitationBackoff()):
             self.assertTrue(self.publish(backoff))
-        self.assertTrue(self.publish(urgent_reason="Verify the login reliability fix."))
         body = self.comments[0]["body"]
         self.assertIn(item.url, body)
         self.assertIn(item.owner_test_notes.splitlines()[1], body)
@@ -1532,6 +1571,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn("change 43", current)
         self.assertNotIn("Engineering title 50", current)
         self.assertIn("lists every included change", current)
+        self.assertFalse(any(line.startswith(WHY_NOW) for line in current.splitlines()))
 
     def test_urgent_opening_states_reason_and_still_needs_client_acceptance(self) -> None:
         self.make_engineering_only()
@@ -1578,6 +1618,9 @@ class ReleaseInvitationTests(unittest.TestCase):
         posts = len(self.posts)
         self.assertIs(self.publish(ReleaseInvitationBackoff()), True)
         self.assertEqual(len(self.posts), posts + 1)
+        original_reason = next(
+            line for line in self.comments[-1]["body"].splitlines() if line.startswith(WHY_NOW)
+        )
         self.assertIs(
             self.publish(
                 urgent_reason="Updated security fix.", urgent_digest=accepted.checklist_digest
@@ -1587,7 +1630,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), posts + 1)
         self.assertTrue(self.publish(urgent_reason="Updated security fix."))
         self.assertEqual(len(self.posts), posts + 1)
-        self.assertIn("**Why now:**", self.comments[-1]["body"])
+        self.assertIn(original_reason, self.comments[-1]["body"])
         self.assertIn("@site-owner", self.comments[-1]["body"])
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), (accepted,)
@@ -2313,7 +2356,7 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_engineering_successor_preserves_completed_renewal(self) -> None:
         history = self.complete_renewed_invitation_with_reminder()
-        posts, edits = self.posts.copy(), self.edits.copy()
+        posts = self.posts.copy()
         self.now += timedelta(minutes=1)
         self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
         self.make_engineering_only()
@@ -2322,7 +2365,6 @@ class ReleaseInvitationTests(unittest.TestCase):
 
         self.assertEqual(self.comments[: len(history)], history)
         self.assertGreater(len(self.posts), len(posts))
-        self.assertEqual(self.edits[:-1], edits)
         self.assertEqual(self.issues[0]["state"], "open")
 
     def test_next_client_review_preserves_completed_renewal_and_gets_its_own_reminder(

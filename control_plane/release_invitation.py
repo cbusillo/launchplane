@@ -211,6 +211,9 @@ def _announced_changes(
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 COMPLETED_PREFIX = "<!-- launchplane:release-invitation-completed:"
 WHY_NOW = "**Why now:** "
+ENGINEERING_WHY_NOW = (
+    WHY_NOW + "Engineering updates are ready for production and need your release acceptance."
+)
 ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
 
 
@@ -363,11 +366,14 @@ def _accepted_release_in_progress(
     from control_plane.client_release import read_client_release_run
 
     run = read_client_release_run(store=store, profile=profile, decision=decision)
-    return (
-        run is None
-        or run.state in {"waiting", "running"}
+    return run is not None and (
+        run.state == "running"
         or any(
             step.status in {"pending", "running", "reconciliation_required"} for step in run.steps
+        )
+        or (
+            run.state == "waiting"
+            and (not run.blocked_reason or any(step.status == "pass" for step in run.steps))
         )
     )
 
@@ -864,8 +870,6 @@ def publish_release_invitation(
                 return True
             receipt_due = True
             backoff.delivered.pop(receipt[:2])
-    if _accepted_release_in_progress(store, profile, last_decision):
-        return False
     # A live temporary hotfix awaits the Client's review first; its release record
     # already asked them, and their review page shows that hotfix until they decide.
     from control_plane.client_release import live_temporary_hotfix
@@ -882,6 +886,8 @@ def publish_release_invitation(
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
             return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
+    if _accepted_release_in_progress(store, profile, last_decision):
+        return False
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
     # checklist without a new candidate, and the Client then needs a fresh request.
@@ -1140,11 +1146,8 @@ def publish_release_invitation(
             )
             if not request and urgent_reason:
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
-            elif not request and not notification_links:
-                why_now = (
-                    WHY_NOW + "Engineering updates are ready for production and need your "
-                    "release acceptance."
-                )
+            elif not why_now or why_now == ENGINEERING_WHY_NOW:
+                why_now = "" if notification_links else ENGINEERING_WHY_NOW
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."

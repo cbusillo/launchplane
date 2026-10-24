@@ -220,13 +220,17 @@ rechecks that at most every 30 minutes. Edited test notes that change the checkl
 Client a fresh request, including engineering-only candidates. This cache never
 supplies acceptance or bypasses release checks.
 
-While the current Client's accepted release is waiting, running, or has a step
-still pending, running or awaiting reconciliation, the publisher sends no new
-request or reminder. The acceptance covers the entire run, including its rollback
+While the current Client's accepted release can proceed or has started and is
+waiting, running, or awaiting reconciliation, the publisher sends no new
+request or reminder. An accepted release that is blocked before any step starts
+does not prevent requesting acceptance for a newer qualified candidate.
+The acceptance covers the entire started run, including its rollback
 drill and re-promotion, even when production temporarily differs from testing or
 testing advances. Publication rechecks the run after looking up its destination.
 Once the run finishes, the existing settle path reconciles all invitations for
 that released version, including a stray request posted after acceptance.
+An automatic engineering why-now line is refreshed as the release contents change;
+an admin-supplied reason on an existing request stays unchanged.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
