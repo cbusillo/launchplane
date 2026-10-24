@@ -35,6 +35,7 @@ from control_plane.authz_scope import (
     instance_scoped_authz_actions,
 )
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
+from control_plane.contracts.snapshot_protocol import LaneInstance
 
 
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -224,7 +225,7 @@ def _validated_instance_selectors(instances: tuple[str, ...]) -> tuple[str, ...]
 
 
 AuthzInstanceSelectors = Annotated[
-    tuple[str, ...],
+    tuple[LaneInstance, ...],
     AfterValidator(_validated_instance_selectors),
 ]
 

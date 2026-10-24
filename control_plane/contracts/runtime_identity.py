@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.snapshot_protocol import LaneInstance
+
 
 RuntimeIdentityStatus = Literal[
     "unchecked",
@@ -24,7 +26,7 @@ class RuntimeIdentity(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str = ""
     context: str
-    instance: str
+    instance: LaneInstance
     environment_kind: str = "stable"
     deployment_record_id: str
     artifact_id: str

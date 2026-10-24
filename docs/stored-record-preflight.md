@@ -59,9 +59,16 @@ pseudonymized too. The salt is discarded.
 
 Dictionary keys, absent fields, booleans, schema-defined numeric data, valid
 timestamps, schema enum/constant values, code action/driver names and required
-format markers such as `{number}` survive. Known code protocol fields can mark
-`x-launchplane-snapshot-protocol` in their schema. Arbitrary free text is never
-retained because it looks like protocol. Train run dictionaries use their
+format markers such as `{number}` survive. A schema field that marks
+`x-launchplane-snapshot-protocol` keeps a value only when the value is in that
+field's own list, for example lane kinds (`testing`, `prod`) at every
+lane-instance reference, the `runtime_environment` secret integration, bump
+levels, and the default preview slug template and promotion workflow names.
+Every lane-instance site shares one list, so references still agree; the six
+workflow input fields share one list, so a duplicate input name stays a
+duplicate. The same word in any other field, such as an override environment
+value, is pseudonymized. Arbitrary free text is never retained because it looks
+like protocol. Train run dictionaries use their
 producer schemas, and a valid repository/base-branch policy-key relationship
 survives. Raw payloads are not reserialized through current models: an old
 policy's absent `instances` stays absent and historical keys remain for the
@@ -69,8 +76,12 @@ candidate's supported readers. Source policy digests are validated first;
 scrubbed digests are recomputed and attest only rehearsal data. This private
 fixture is not a backup, restore or authorization artifact.
 
-Declared cron expressions and preview app-name suffixes receive salted,
-format-valid substitutes so a valid source profile remains readable. Invalid
+Declared cron expressions, preview app-name suffixes, preview transport
+database prefixes, DNS expectation names and public addresses receive salted,
+format-valid substitutes so a valid source profile remains readable. A DNS name
+is pseudonymized after normalization, so names that collide in the source still
+collide. Hexadecimal digests stay hexadecimal even when every digit is decimal,
+and fixed-position array items use their position's schema. Invalid
 historical values remain invalid; scrubbing does not repair them. Arbitrary
 map values with those names receive no format exemption.
 
