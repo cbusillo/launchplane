@@ -235,6 +235,12 @@ def release_version(
             raise ReleaseEvidenceUnavailable("release_record_missing") from error
         if release.context != lane.context or release.channel != instance:
             raise _identity_missing(instance)
+        from control_plane.testing_serving_copy import require_published_testing_release
+
+        try:
+            require_published_testing_release(store, release)
+        except (FileNotFoundError, ValueError) as error:
+            raise _identity_missing(instance) from error
 
         sources = sorted(
             (repository_key(source.repository), source.ref)

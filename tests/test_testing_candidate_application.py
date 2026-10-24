@@ -89,7 +89,7 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         self.artifact = ArtifactIdentityManifest(
             artifact_id="candidate-build",
-            source_commit="new-source",
+            source_commit="e" * 40,
             enterprise_base_digest="sha256:" + "b" * 64,
             odoo_install_modules=LAUNCHPLANE_REQUIRED_ODOO_MODULES,
             image=ArtifactImageReference(

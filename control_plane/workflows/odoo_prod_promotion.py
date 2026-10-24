@@ -430,6 +430,7 @@ def _read_source_tuple(
         channel_name=request.from_instance,
     )
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,
         context_name=request.context,
