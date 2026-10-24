@@ -495,7 +495,10 @@ and original allocation/key while addressing that check, then plan again.
 Handled failures with an explicit cause retain a trace-bound `handled_error_cause`
 event in the service logs. It contains at most eight trusted Launchplane source
 module/line locations from the caught traceback, without exception text,
-source text, frame locals, request payloads or headers. Use the supported
+source text, frame locals, request payloads or headers.
+Fixed route-program failures also retain bounded generated-program line numbers
+and the service-computed program hash, without adding recovery or qualification
+evidence. The transport drops malformed or out-of-range locations. Use the supported
 [Launchplane service-log reader](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/service-log-reader.md),
 `launchplane-service-logs.py`, to identify the failing check before another
 forward action.

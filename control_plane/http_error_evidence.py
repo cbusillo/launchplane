@@ -72,7 +72,10 @@ class ProviderResponseValidationError(ValueError):
 
 
 def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id: str = "") -> None:
+    from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
     sites: list[dict[str, str | int]] = []
+    native_programs: list[dict[str, object]] = []
     validation: list[dict[str, object]] = []
     validation_error_count = 0
     cause: BaseException | None = error
@@ -85,6 +88,10 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
         if isinstance(cause, ProviderResponseValidationError):
             validation.extend(cause.validation[: _MAX_VALIDATION_ERRORS - len(validation)])
             validation_error_count += cause.error_count
+        if isinstance(cause, NativeProgramFailed) and cause.program_sites:
+            native_programs.append(
+                {"sha": cause.program_sha256, "lines": list(cause.program_sites)}
+            )
         cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     evidence: dict[str, object] = {
         "event": "handled_error_cause",
@@ -96,4 +103,6 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
     if validation:
         evidence["validation"] = validation
         evidence["validation_error_count"] = validation_error_count
+    if native_programs:
+        evidence["native_programs"] = native_programs
     _logger.warning("%s", json.dumps(evidence))
