@@ -40,6 +40,17 @@ def _normalize_proxy_host_domains(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _positive_access_list_ids(value: object) -> list[int]:
+    if not isinstance(value, list) or any(
+        isinstance(access_list_id, bool)
+        or not isinstance(access_list_id, int)
+        or access_list_id < 1
+        for access_list_id in value
+    ):
+        raise ValueError("NPMplus proxy host access-list ids must be positive integers")
+    return value
+
+
 class NpmplusHostIdentity(Protocol):
     @property
     def id(self) -> int: ...
@@ -103,6 +114,24 @@ class NpmplusLocationPayload(BaseModel):
 class NpmplusLocation(NpmplusLocationPayload):
     model_config = ConfigDict(extra="ignore")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _require_round_trip_access_list_policy(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        membership_fields = ("npmplus_access_list_ids", "access_lists")
+        if not any(field in value for field in ("npmplus_access_list_type", *membership_fields)):
+            return value
+        if value.get("npmplus_access_list_type") != "global" or not any(
+            field in value for field in membership_fields
+        ):
+            raise ValueError("NPMplus location requires verified host access-list inheritance")
+        if any(value[field] != [] for field in membership_fields if field in value):
+            raise ValueError(
+                "NPMplus location cannot round-trip independent access-list membership"
+            )
+        return value
+
 
 class NpmplusProxyHostPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -165,6 +194,9 @@ class NpmplusProxyHostPayload(BaseModel):
             [] if self.access_list_id == 0 else [self.access_list_id]
         )
         payload["npmplus_access_list_type"] = "public" if self.access_list_id == 0 else "custom"
+        for location in payload["locations"]:
+            location["npmplus_access_list_type"] = "global"
+            location["npmplus_access_list_ids"] = []
         return payload
 
 
@@ -172,6 +204,7 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
     model_config = ConfigDict(extra="ignore")
 
     id: int = Field(ge=1)
+    access_list_id: int = Field(ge=0)
     locations: tuple[NpmplusLocation, ...] = ()
 
     @model_validator(mode="before")
@@ -181,17 +214,26 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
             return value
         access_list_ids = value.get("npmplus_access_list_ids")
         access_list_type = value.get("npmplus_access_list_type")
-        if access_list_ids is None and access_list_type is None:
+        if access_list_ids is None and access_list_type is None and "access_lists" not in value:
             return value
-        if access_list_ids is None or access_list_type is None:
-            raise ValueError("NPMplus proxy host access-list fields must be provided together")
-        if not isinstance(access_list_ids, list) or any(
-            isinstance(access_list_id, bool)
-            or not isinstance(access_list_id, int)
-            or access_list_id < 1
-            for access_list_id in access_list_ids
-        ):
-            raise ValueError("NPMplus proxy host access-list ids must be positive integers")
+        if access_list_type is None:
+            raise ValueError("NPMplus proxy host access-list type is required")
+        if "access_lists" in value:
+            relations = value["access_lists"]
+            if not isinstance(relations, list) or any(
+                not isinstance(relation, dict) or "id" not in relation for relation in relations
+            ):
+                raise ValueError("NPMplus proxy host access-list relations must contain ids")
+            related_ids = _positive_access_list_ids([relation["id"] for relation in relations])
+            if (
+                access_list_ids is not None
+                and _positive_access_list_ids(access_list_ids) != related_ids
+            ):
+                raise ValueError("NPMplus proxy host access-list representations disagree")
+            access_list_ids = related_ids
+        if access_list_ids is None:
+            raise ValueError("NPMplus proxy host access-list membership is required")
+        access_list_ids = _positive_access_list_ids(access_list_ids)
         if access_list_type == "public":
             if access_list_ids:
                 raise ValueError("Public NPMplus proxy hosts cannot reference access-list ids")
