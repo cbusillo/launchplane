@@ -7,6 +7,7 @@ import json
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -66,6 +67,7 @@ class FreshOdooTestingGeneration(BaseModel):
     drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    clean_snapshot_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     drill_database: str = Field(
         default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
     )
@@ -84,6 +86,8 @@ class FreshOdooTestingGeneration(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
+        if self.clean_snapshot_enabled and self.drill_storage_budget is None:
+            raise ValueError("Clean testing snapshots require reviewed storage headroom.")
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
@@ -162,7 +166,7 @@ from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
     + r"""
 logging.disable(logging.CRITICAL)
 expected_copy_instance = globals().get("expected_copy_instance", "testing")
-if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
+if expected_copy_instance not in {"testing", "rehearsal", "preview"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
     raise SystemExit("Testing copy requires its exact instance")
 for key in tuple(os.environ):
     if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
@@ -1149,6 +1153,11 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        if gen.get('clean_snapshot_enabled'):
+            snapshot = capture_clean_snapshot(spec, containers)
+            print('clean_testing_snapshot_completed=true')
+            print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
+            print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
         # Emit only the established value-free protocol markers, never runner logs.
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
@@ -1194,6 +1203,7 @@ def main():
 
 
 __LP_STORAGE_MAINTENANCE_LIBRARY__
+__LP_CLEAN_SNAPSHOT_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
@@ -1228,7 +1238,7 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_STORAGE_MAINTENANCE_LIBRARY__", STORAGE_MAINTENANCE_LIBRARY
-)
+).replace("__LP_CLEAN_SNAPSHOT_LIBRARY__", CLEAN_TESTING_SNAPSHOT_LIBRARY)
 
 
 def _testing_generation_hold_blocks_read(

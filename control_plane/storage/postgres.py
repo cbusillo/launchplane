@@ -88,6 +88,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.clean_testing_snapshot import CleanTestingSnapshot
     from control_plane.merge_train_wake import MergeTrainEventReceipt
     from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
     from control_plane.testing_verification import TestingVerification
@@ -13288,6 +13289,114 @@ class PostgresRecordStore(HumanSessionStore):
 
             yield checkpoint
 
+    def read_clean_testing_snapshot(
+        self, product: str, context: str
+    ) -> "CleanTestingSnapshot | None":
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+            snapshot_lane_key,
+        )
+
+        record = self.read_idempotency_record(
+            scope=CLEAN_SNAPSHOT_SCOPE,
+            route_path=CLEAN_SNAPSHOT_ROUTE,
+            idempotency_key=snapshot_lane_key(product, context),
+        )
+        if record is None:
+            return None
+        snapshot = CleanTestingSnapshot.model_validate(record.response_payload)
+        if (snapshot.product, snapshot.context) != (product, context):
+            raise ValueError("The published snapshot differs from its product lane.")
+        return snapshot
+
+    def write_clean_testing_snapshot(self, record: "CleanTestingSnapshot") -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._write_clean_testing_snapshot(session, record)
+            session.commit()
+
+    def _write_clean_testing_snapshot(
+        self, session: Session, record: "CleanTestingSnapshot"
+    ) -> None:
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+            snapshot_lane_key,
+        )
+
+        key = snapshot_lane_key(record.product, record.context)
+        payload = record.model_dump(mode="json")
+        self._lock_landing_authority(session, CLEAN_SNAPSHOT_SCOPE + ":" + key)
+        row = session.scalar(
+            self._idempotency_statement(
+                scope=CLEAN_SNAPSHOT_SCOPE,
+                route_path=CLEAN_SNAPSHOT_ROUTE,
+                idempotency_key=key,
+                for_update=True,
+            )
+        )
+        if row is not None:
+            previous = CleanTestingSnapshot.model_validate(
+                LaunchplaneIdempotencyRecord.model_validate(row.payload).response_payload
+            )
+            if previous.snapshot_id == record.snapshot_id:
+                if previous != record:
+                    raise ValueError("Published clean snapshots are immutable.")
+                return
+            if datetime.fromisoformat(
+                previous.captured_at.replace("Z", "+00:00")
+            ) >= datetime.fromisoformat(record.captured_at.replace("Z", "+00:00")):
+                raise ValueError("A late refresh cannot replace a newer clean snapshot.")
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_mutation_reservation_id(
+                scope=CLEAN_SNAPSHOT_SCOPE,
+                route_path=CLEAN_SNAPSHOT_ROUTE,
+                idempotency_key=key,
+            ),
+            scope=CLEAN_SNAPSHOT_SCOPE,
+            route_path=CLEAN_SNAPSHOT_ROUTE,
+            idempotency_key=key,
+            request_fingerprint=canonical_json_sha256(payload),
+            response_status_code=200,
+            response_trace_id=record.snapshot_id,
+            recorded_at=record.captured_at,
+            response_payload=payload,
+        )
+        capture_key = "capture:" + record.snapshot_id
+        immutable = session.scalar(
+            self._idempotency_statement(
+                scope=CLEAN_SNAPSHOT_SCOPE,
+                route_path=CLEAN_SNAPSHOT_ROUTE,
+                idempotency_key=capture_key,
+                for_update=True,
+            )
+        )
+        if immutable is not None:
+            if (
+                LaunchplaneIdempotencyRecord.model_validate(immutable.payload).response_payload
+                != payload
+            ):
+                raise ValueError("A clean capture receipt cannot be replaced.")
+        else:
+            session.merge(
+                self._idempotency_row(
+                    receipt.model_copy(
+                        update={
+                            "idempotency_key": capture_key,
+                            "record_id": build_launchplane_mutation_reservation_id(
+                                scope=CLEAN_SNAPSHOT_SCOPE,
+                                route_path=CLEAN_SNAPSHOT_ROUTE,
+                                idempotency_key=capture_key,
+                            ),
+                        }
+                    )
+                )
+            )
+        session.merge(self._idempotency_row(receipt))
+
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:
             row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
@@ -16091,6 +16200,11 @@ class PostgresRecordStore(HumanSessionStore):
                         payload["selection_restored"] = True
                         self._sync_idempotency_row(receipt_row, receipt)
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
+            from control_plane.clean_testing_snapshot import completed_operation_snapshot
+
+            snapshot = completed_operation_snapshot(self, record)
+            if snapshot is not None:
+                self._write_clean_testing_snapshot(session, snapshot)
             if (
                 record.instance == "testing"
                 and record.status in {"pass", "fail", "cancelled"}

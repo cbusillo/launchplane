@@ -150,6 +150,72 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    def test_clean_snapshot_is_captured_before_testing_can_serve_staff(self) -> None:
+        self.spec["generation"]["clean_snapshot_enabled"] = True
+        self.spec["generation"]["drill_storage_budget"] = {
+            "database_bytes": 1024,
+            "filestore_bytes": 1024,
+            "staging_bytes": 1024,
+            "reserve_bytes": 1024,
+        }
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        source = self.root / (self.gen.namespace + "-data") / "filestore" / self.database
+        source.mkdir(parents=True)
+        (source / "attachment").write_bytes(b"clean attachment")
+        original = self.command
+        popen = subprocess.Popen
+
+        def capture(arguments: list[str], **kwargs: Any) -> Any:
+            self.calls.append(arguments)
+            self.assertNotIn(["docker", "start", "web"], self.calls)
+            return popen([sys.executable, "-c", "print('clean database dump')"], **kwargs)
+
+        def snapshot_command(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[:2] == ["docker", "stop"]:
+                self.containers["web"]["State"]["Running"] = False
+            if arguments[0] == "cp":
+                import shutil
+
+                shutil.copytree(arguments[-2], arguments[-1])
+                self.calls.append(arguments)
+                return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
+            return original(arguments, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("subprocess.Popen", side_effect=capture),
+            patch.object(self, "command", side_effect=snapshot_command),
+        ):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertIn("clean_testing_snapshot_completed=true", output.splitlines())
+        self.assertIn(["docker", "start", "web"], self.calls)
+        snapshot = (
+            self.root
+            / ".local/state/launchplane-clean-testing-snapshots"
+            / self.spec["copy_binding_sha256"]
+        )
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+        (source / "attachment").write_bytes(b"staff changed testing")
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+        self.spec["copy_binding_sha256"] = "d" * 64
+        self.calls.clear()
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch(
+                "subprocess.Popen",
+                side_effect=lambda arguments, **kwargs: popen(
+                    [sys.executable, "-c", "raise SystemExit(1)"], **kwargs
+                ),
+            ),
+            patch.object(self, "command", side_effect=snapshot_command),
+        ):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertFalse((snapshot.parent / self.spec["copy_binding_sha256"]).exists())
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
         original = self.command
         marker = f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}"

@@ -315,6 +315,9 @@ def prepare_drill(
     """Build a read-only candidate; the caller revalidates it under authority locks."""
     require_drill_use_unprotected(store, product, context, now=now)
     profile = store.read_product_profile_record(product)
+    from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
+    snapshot_storage_budget(profile, context)
     if profile.driver_id != "odoo" or not profile.is_active:
         raise DrillSkipped("not_active_odoo")
     lane = next(
@@ -372,6 +375,7 @@ def prepare_drill(
             "request_sha256": canonical_json_sha256([key, database]),
             "source_binding_sha256": source_binding,
             "drill_storage_budget": lane.odoo_testing_drill_storage,
+            "clean_snapshot_enabled": profile.preview.clean_testing_snapshot,
         }
     )
     runtime = runtime.model_copy(
@@ -560,8 +564,11 @@ class OdooTestingDrillScheduler:
             for lane in profile.lanes
         ):
             return
-        # Spread recurring slots across the day without storing a second lane catalog.
         offset = int(prefix[:8], 16) % DRILL_INTERVAL_SECONDS
+        if profile.preview.clean_testing_snapshot:
+            offset = (
+                profile.preview.clean_snapshot_refresh_hour_utc * 3600 + int(prefix[:8], 16) % 3600
+            )
         key = f"{prefix}:{int((now - offset) // DRILL_INTERVAL_SECONDS)}"
         self.store.enqueue_odoo_testing_drill(profile.product, context, key, now)
 
