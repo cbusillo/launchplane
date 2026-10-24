@@ -42,6 +42,7 @@ from control_plane.dokploy.source import (
     DokployTargetDefinition,
 )
 from control_plane.odoo_preview_import_source import preview_fishbowl_clear_program
+from control_plane import odoo_preview_restore
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
@@ -637,6 +638,7 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     bootstrap_missing_database: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
@@ -863,6 +865,9 @@ def run_compose_post_deploy_update(
             target_definition.instance
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
+        preview_restore=run_destructive_restore
+        and runtime_key_safety_environment_class(target_definition.instance) == "preview",
+        preview_ssh_source_directory=preview_ssh_source_directory,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         website_settings_instance=target_definition.instance.strip().lower()
@@ -2724,6 +2729,8 @@ def _build_dokploy_data_workflow_script(
     readback_policy: IntegrationReadbackPolicy,
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
+    preview_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
@@ -2737,6 +2744,10 @@ def _build_dokploy_data_workflow_script(
     """
     if bootstrap_missing_database and workflow_mode != "maintenance":
         raise ValueError("Only a maintenance run can bootstrap a missing database.")
+    if preview_restore and workflow_mode != "restore":
+        raise ValueError("Preview restore requires the restore workflow.")
+    if preview_restore and not preview_ssh_source_directory:
+        raise ValueError("Preview restore requires its explicit SSH source directory.")
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
     quoted_database_name = shlex.quote(database_name)
@@ -2770,6 +2781,12 @@ def _build_dokploy_data_workflow_script(
     }
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
+    workflow_command = (
+        "python3 -u -I -c " + shlex.quote(odoo_preview_restore.preview_restore_program())
+        if preview_restore
+        else 'python3 -u /volumes/scripts/run_odoo_data_workflows.py "${workflow_arguments[@]}"'
+    )
+    preview_workflow = runtime_key_safety_environment_class(website_settings_instance) == "preview"
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     restore_failure_grep_arguments = " ".join(
@@ -2782,7 +2799,7 @@ set -euo pipefail
 compose_project={quoted_compose_app_name}
 database_name={quoted_database_name}
 filestore_root={quoted_filestore_path}
-workflow_ssh_dir=/tmp/platform-data-workflow-ssh
+workflow_ssh_dir={shlex.quote(str(odoo_preview_restore.PREVIEW_WORKFLOW_SSH_DIRECTORY))}
 workflow_arguments=({workflow_arguments})
 workflow_environment=()
 {workflow_environment_lines}
@@ -2922,11 +2939,28 @@ neutralize_copy_connections() {{
 {CONNECTION_ISOLATION_PROGRAM}PY
 }}
 
+cleanup_preview_capture() {{
+    if [ "{int(preview_workflow)}" != "1" ]; then
+        return 0
+    fi
+    docker exec -u root \
+        -e ODOO_DB_NAME="${{database_name}}" \
+        -e ODOO_DATA_WORKFLOW_LOCK_FILE="${{data_workflow_lock_path}}" \
+        "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_capture_cleanup_program())}
+}}
+
 exit_trap() {{
     local exit_status="$?"
     trap - EXIT
+    if ! cleanup_preview_capture; then
+        web_restart_blocked=1
+        exit_status=1
+    fi
     if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
         echo "odoo_restore_completed=false"
+        if [ "{int(preview_restore)}" = "1" ]; then
+            web_restart_blocked=1
+        fi
     fi
     if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
         if ! enforce_website_settings; then
@@ -2997,6 +3031,16 @@ SQL
 fi
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
+if [ "{int(preview_restore)}" = "1" ]; then
+    reader_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{script_runner_container_id}}")
+    web_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{web_container_id}}")
+    if [ "${{reader_binds}}" != {shlex.quote(preview_ssh_source_directory + "|/root/.ssh|false")} ] || [ -n "${{web_binds}}" ]; then
+        echo "Preview source mount does not match its dedicated read-only root-only binding." >&2
+        exit 1
+    fi
+    echo "odoo_preview_reader_mount_verified=true"
+    docker exec "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_source_process_program())}
+fi
 
 if [ "${{clear_stale_lock}}" = "1" ]; then
     echo "Clearing stale data workflow lock ${{data_workflow_lock_path}}"
@@ -3004,6 +3048,7 @@ if [ "${{clear_stale_lock}}" = "1" ]; then
 fi
 
 trap exit_trap EXIT
+cleanup_preview_capture
 
 web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
@@ -3097,7 +3142,7 @@ docker exec \
     -e DATA_WORKFLOW_SSH_KEY="$workflow_identity_key" \
     "${{workflow_environment[@]}}" \
     "${{script_runner_container_id}}" \
-    python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
+    {workflow_command} \
     2>&1 | tee "$workflow_output_file"
 workflow_pipeline_status=("${{PIPESTATUS[@]}}")
 workflow_exit_status=${{workflow_pipeline_status[0]}}
@@ -3157,6 +3202,7 @@ if [ "$neutralization_status" -ne 0 ] || [ "$readback_status" -ne 0 ]; then
     exit 1
 fi
 
+cleanup_preview_capture
 start_web_container
 if [ "${{restore_mode}}" = "1" ]; then
     restore_completed=1
