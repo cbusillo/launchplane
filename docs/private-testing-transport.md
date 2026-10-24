@@ -39,7 +39,7 @@ and access list. The application owns its HTTP paths and bearer checks; the edge
 preserves authorization and WebSocket headers. Provider readback retains the
 access list, certificate and complete route configuration. No DNS operation is performed.
 The NPMplus collection read validates every host ID and hostname claim before
-selection, retaining duplicate, wildcard and regex claims. Malformed claims
+selection, retaining duplicate claims across hosts, wildcards and regex claims. Malformed claims
 refuse the read. Configuration on unrelated hosts is not qualified as a
 Launchplane write payload. A selected host is read independently by ID and
 fully qualified, including its current names, loaded configuration, certificate,
