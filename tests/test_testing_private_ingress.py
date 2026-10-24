@@ -24,6 +24,7 @@ from control_plane.npmplus import (
     NpmplusCertificate,
     NpmplusClient,
     NpmplusProxyHost,
+    NpmplusProxyHostClaim,
 )
 from control_plane.provider_operations import (
     ProviderOperationLease,
@@ -603,8 +604,13 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.client.proxy_hosts = [
             _npmplus_proxy_host().model_copy(update={"domain_names": ("*.example.test",)})
         ]
-        with self.assertRaises(ValueError):
-            self.adapter().plan()
+        claims = tuple(
+            NpmplusProxyHostClaim(id=host.id, domain_names=host.domain_names)
+            for host in self.client.proxy_hosts
+        )
+        with patch.object(self.client, "list_proxy_hosts", return_value=claims):
+            with self.assertRaises(ValueError):
+                self.adapter().plan()
         self.client.proxy_hosts = []
         self.client.other_domains = ("bridge-testing.example.test",)
         with self.assertRaises(ValueError):
