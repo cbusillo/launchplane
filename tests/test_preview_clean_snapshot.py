@@ -21,6 +21,7 @@ from control_plane.dokploy.api import validate_dokploy_schedule_script
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
+from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 
 
 class PreviewCleanSnapshotTests(unittest.TestCase):
@@ -222,7 +223,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 output = b"1000"
             elif kwargs.get("input") in (
                 b"fixture-readback",
-                post_deploy.INTEGRATION_READBACK_PROGRAM.encode(),
+                INTEGRATION_READBACK_PROGRAM.encode(),
             ):
                 output = b"integration_readback_ok=true" if self.sanitized else b""
             elif kwargs.get("input"):
@@ -263,7 +264,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             instance_name="pr-23", policies=DokployTargetPolicies(), workflow_mode="restore"
         )
         self.run_script(
-            readback_program=post_deploy.INTEGRATION_READBACK_PROGRAM,
+            readback_program=INTEGRATION_READBACK_PROGRAM,
             readback_spec=policy.encoded_spec(),
         )
         self.assertIn(["docker", "start", "web"], self.calls)
