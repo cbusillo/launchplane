@@ -48,6 +48,10 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
 )
 from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostResult
+from control_plane.contracts.odoo_rehearsal_timing import (
+    RehearsalPhaseTiming,
+    measured_rehearsal_window,
+)
 
 REHEARSAL_HOST_FILENAME = "<rehearsal>"
 
@@ -347,6 +351,7 @@ def rehearsal_inputs(
                 "state",
                 "copies",
                 "elapsed_seconds",
+                "phase_timings",
                 "created_at",
                 "updated_at",
                 "credential_bindings_sha256",
@@ -359,6 +364,7 @@ def rehearsal_inputs(
                 "state",
                 "copies",
                 "elapsed_seconds",
+                "phase_timings",
                 "created_at",
                 "updated_at",
                 "credential_bindings_sha256",
@@ -607,6 +613,7 @@ class OdooRehearsalAdapter:
             and record.credential_bindings_sha256
             and not record.copies
             and not record.elapsed_seconds
+            and not record.phase_timings
             and result.get("prepare_not_started") is True
             and result.get("completed") is False
             and result.get("state") == "planned"
@@ -638,6 +645,7 @@ class OdooRehearsalAdapter:
             and not any((record.project_id, record.environment_id, record.compose_id))
             and not record.copies
             and not record.elapsed_seconds
+            and not record.phase_timings
             or self.request.action == "rebuild-final"
             and preserved_rehearsal_abandonment(record.model_dump(mode="json"))
             and (
@@ -672,6 +680,7 @@ class OdooRehearsalAdapter:
             or record.compose_id
             or record.copies
             or record.elapsed_seconds
+            or record.phase_timings
             or not record.credential_bindings_sha256
             or record.credential_bindings_sha256
             != rehearsal_credential_bindings(self.store, record.rehearsal_id)
@@ -1414,6 +1423,12 @@ class OdooRehearsalAdapter:
                 validation[key] != value for key, value in expected.items()
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        timing = result.get("phase_timing")
+        if isinstance(timing, dict) and (
+            timing["action"] != self.request.action
+            or timing["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result
 
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:
@@ -1440,6 +1455,16 @@ class OdooRehearsalAdapter:
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         validations = list(record.business_validations)
+        timings = list(record.phase_timings)
+        if result.get("phase_timing") is not None:
+            timing = RehearsalPhaseTiming.model_validate(result["phase_timing"])
+            prior_timing = next(
+                (item for item in timings if item.attempt_sha256 == timing.attempt_sha256), None
+            )
+            if prior_timing is not None and prior_timing != timing:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            if prior_timing is None:
+                timings.append(timing)
         if self.request.action == "validate-business":
             from control_plane.contracts.odoo_rehearsal_business_validation import (
                 BusinessValidationReceipt,
@@ -1462,6 +1487,7 @@ class OdooRehearsalAdapter:
                 "elapsed_seconds": result["elapsed_seconds"],
                 "updated_at": datetime.now(timezone.utc),
                 "business_validations": validations,
+                "phase_timings": timings,
                 **(
                     {"incomplete_retirement": None}
                     if self.request.action == "rebuild-final"
@@ -1504,6 +1530,16 @@ class OdooRehearsalAdapter:
             "shape_sha256": record.shape_sha256,
             "copies": [copy.model_dump(mode="json") for copy in record.copies],
             "elapsed_seconds": record.elapsed_seconds,
+            **(
+                {
+                    "phase_timings": [
+                        item.model_dump(mode="json") for item in record.phase_timings
+                    ],
+                    "measured_window": measured_rehearsal_window(record),
+                }
+                if record.phase_timings
+                else {}
+            ),
             **({"resources_preserved": True} if record.incomplete_retirement is None else {}),
             "public_route": False,
             "business_host_frozen": False,

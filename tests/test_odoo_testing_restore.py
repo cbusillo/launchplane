@@ -1470,6 +1470,31 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 else:
                     self.assertIn("registry", events)
                 self.assertIn("testing_copy_sanitized=true", output.getvalue())
+                from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
+                from datetime import datetime, timedelta
+
+                stamps = [
+                    line.removeprefix(REHEARSAL_TIMING_MARKER).split("=", 1)
+                    for line in output.getvalue().splitlines()
+                    if line.startswith(REHEARSAL_TIMING_MARKER)
+                ]
+                if instance == "rehearsal":
+                    self.assertTrue(stamps)
+                    self.assertTrue(
+                        all(
+                            datetime.fromisoformat(value).utcoffset() == timedelta(0)
+                            for _, value in stamps
+                        )
+                    )
+                    if not sanitize_only:
+                        boundaries = [key for key, _ in stamps]
+                        self.assertLess(
+                            boundaries.index("sql_sanitized"),
+                            boundaries.index("module_update_completed"),
+                        )
+                        self.assertEqual(boundaries[-1], "sql_sanitized")
+                else:
+                    self.assertFalse(stamps)
                 isolated()
             else:
                 self.assertNotIn("registry", events)

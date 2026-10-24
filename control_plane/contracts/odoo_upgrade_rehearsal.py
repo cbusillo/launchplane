@@ -18,6 +18,7 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.odoo_rehearsal_business_validation import (
     BusinessValidationReceipt,
 )
+from control_plane.contracts.odoo_rehearsal_timing import RehearsalPhaseTiming
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
@@ -217,6 +218,12 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     shape_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
+    phase_timings: tuple[RehearsalPhaseTiming, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    measured_window: dict[str, object] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     business_validations: tuple[BusinessValidationReceipt, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -290,13 +297,18 @@ class OdooUpgradeRehearsalRecord(BaseModel):
         default=(), exclude_if=lambda value: not value
     )
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
+    phase_timings: tuple[RehearsalPhaseTiming, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     created_at: datetime
     updated_at: datetime
 
     @property
     def binding_sha256(self) -> str:
         return canonical_json_sha256(
-            self.model_dump(mode="json", exclude={"elapsed_seconds", "incomplete_retirement"})
+            self.model_dump(
+                mode="json", exclude={"elapsed_seconds", "phase_timings", "incomplete_retirement"}
+            )
         )
 
 
@@ -421,6 +433,9 @@ class RehearsalHostResult(BaseModel):
     state: RehearsalState
     copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
+    phase_timing: RehearsalPhaseTiming | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     resources_preserved: Literal[True]
     public_route: Literal[False]
     business_host_frozen: Literal[False]
