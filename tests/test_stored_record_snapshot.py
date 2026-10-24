@@ -129,6 +129,35 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     profile.lanes[0].generic_web_extensions.schedules,
                 )
 
+    def test_runtime_secret_requirements_remain_readable_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        payload = product_profile_payload()
+        context = payload["lanes"][0]["context"]  # type: ignore[index]
+        payload["expected_config"] = {
+            "managed_secret_bindings": [
+                {
+                    "binding_key": "PRIVATE_BOT_TOKEN",
+                    "context": context,
+                    "external_provider": "discord_bot",
+                },
+                {"binding_key": "PRIVATE_DB_PASSWORD", "testing_local_credential": True},
+            ]
+        }
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        for version in (1, 2):
+            with self.subTest(format_version=version):
+                snapshot = self.store.export_stored_record_snapshot(format_version=version)
+                raw = next(
+                    row["payload"]
+                    for family, row in iter_snapshot_rows(snapshot)
+                    if family == "launchplane_product_profiles"
+                )
+                LaunchplaneProductProfileRecord.model_validate(raw)
+                self.assertNotIn("PRIVATE_", json.dumps(raw))
+
     def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
 

@@ -590,11 +590,17 @@ class ProductOwnerSecretInput(BaseModel):
     instructions: str = Field(default="", max_length=2000)
 
 
+RUNTIME_ENVIRONMENT_INTEGRATION = "runtime_environment"
+
+
 class ProductSecretConfigRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     binding_key: str
-    integration: str = "runtime_environment"
+    integration: str = Field(
+        default=RUNTIME_ENVIRONMENT_INTEGRATION,
+        json_schema_extra={"x-launchplane-snapshot-protocol": [RUNTIME_ENVIRONMENT_INTEGRATION]},
+    )
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
@@ -624,11 +630,11 @@ class ProductSecretConfigRequirement(BaseModel):
         self.context = self.context.strip()
         self.instance = self.instance.strip()
         if self.external_provider is not None and (
-            self.integration != "runtime_environment" or not self.context
+            self.integration != RUNTIME_ENVIRONMENT_INTEGRATION or not self.context
         ):
             raise ValueError("External provider declarations require one runtime context.")
         if self.testing_local_credential and (
-            self.integration != "runtime_environment"
+            self.integration != RUNTIME_ENVIRONMENT_INTEGRATION
             or self.owner_input is not None
             or self.external_provider is not None
         ):
