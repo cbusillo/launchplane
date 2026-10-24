@@ -267,7 +267,6 @@ def restore_preserved_snapshot(spec,root,containers,source_database,destination)
                 archive.extract(member,path=temporary,filter='data')
         docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+destination)
         docker('cp',str(Path(temporary)/source_database)+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+destination)
-    prepare_runner_storage(containers)
     stamp(spec,containers,destination)
 
 
@@ -788,8 +787,8 @@ def prepared_rebuild_runtime(spec,root,database):
     generation=spec['record']['abandoned_validations'][-1]['attempt_sha256']
     if not re.fullmatch(r'[a-f0-9]{64}',generation):
         raise RuntimeError('Rebuild generation is unverified')
-    receipt=root/('rebuild-prepared-'+generation+'.json')
-    marker=receipt.with_suffix('.started')
+    marker=root/rehearsal_effect_marker('rebuild-prepared',generation)
+    receipt=marker.with_suffix('.json')
     pending=receipt.with_suffix('.pending')
     expected={key:spec[key] for key in ('record_binding_sha256','resources_binding_sha256')}
     expected.update(intent_sha256=spec['record']['intent_sha256'],generation=generation)
@@ -852,12 +851,8 @@ def main():
     if action in {'retire-incomplete','abandon-validation'}:
         incomplete_retirement(spec,root)
         return
-    if action=='rebuild-final':
-        action+='-'+spec['attempt_sha256']
-    if action=='validate-business':
-        # Each original operation has its own effect marker and receipt. A
-        # later reviewed attempt cannot replay or adopt an earlier attempt.
-        action+='-'+spec['attempt_sha256']
+    if action in {'rebuild-final','validate-business'}:
+        action=rehearsal_effect_marker(action,spec['attempt_sha256']).removesuffix('.started')
     receipt=root/(action+'.json')
     spec['receipt_action']=action
     if spec['mode']=='observe':
@@ -927,6 +922,7 @@ def main():
                 for role in ('source','final_source'):
                     restore_preserved_snapshot(spec,root,containers,names[role],names[role])
                     sql(containers,'ALTER DATABASE "'+names[role]+'" SET default_transaction_read_only=on')
+                prepare_runner_storage(containers)
                 upgrade_final(spec,root,containers)
                 state='switched'; copies=list(record['copies'])
         else:
@@ -971,6 +967,7 @@ def main():
                 # copy only. No second read or fence touches the business host.
                 docker('stop',containers['web'][0])
                 restore_preserved_snapshot(spec,root,containers,names['source'],names['final_source'])
+                prepare_runner_storage(containers)
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=off')
                 copies.append(snapshot(spec,root,containers,names['final_source']))
                 spec['phase_elapsed']['final-capture-simulation']=time.monotonic()-started

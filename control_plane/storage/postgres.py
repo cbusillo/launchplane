@@ -12735,6 +12735,8 @@ class PostgresRecordStore(HumanSessionStore):
                     or replacement.abandoned_validations[:-1] != expected.abandoned_validations
                     or replacement.abandoned_validations[-1].original != original
                     or expected.incomplete_retirement is None
+                    or expected.incomplete_retirement.original_key_sha256
+                    != canonical_json_sha256({"operation_key": original.idempotency_key})
                     or replacement.abandoned_validations[-1].host_disposal
                     != expected.incomplete_retirement.host_disposal
                     or not replacement.abandoned_validations[
