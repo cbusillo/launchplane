@@ -1,4 +1,5 @@
 import { LaunchplaneApiError } from "./api";
+import { browserOperationSessionStorage } from "./browser-operation";
 import type { BrowserOperationOptions, BrowserOperationStorage } from "./browser-operation";
 import type { SubmitTestingRebuildData, TestingRebuildResponse, TestingRebuildOperationView, ResumeTestingRebuildData } from "./generated/openapi.ts";
 import type { SettleTestingRebuildData, TestingRebuildSettlementResponse } from "./generated/openapi.ts";
@@ -14,17 +15,24 @@ export interface TestingRebuildAttempt {
   resumeNeedsRead?: boolean;
 }
 
-export function saveTestingRebuildAttempt(product: string, attempt: TestingRebuildAttempt | null, storage: BrowserOperationStorage = sessionStorage) {
+export function saveTestingRebuildAttempt(product: string, attempt: TestingRebuildAttempt | null, storage: BrowserOperationStorage | null = browserOperationSessionStorage()): boolean {
   const key = `launchplane:testing-rebuild:${product}`;
   try {
-    if (attempt) storage.setItem(key, JSON.stringify(attempt));
+    if (!storage) return false;
+    const encoded = attempt ? JSON.stringify(attempt) : null;
+    if (encoded !== null) storage.setItem(key, encoded);
     else storage.removeItem(key);
-  } catch { /* The server still retains the operation and original key. */ }
+    return storage.getItem(key) === encoded;
+  } catch { return false; }
 }
 
-export function readTestingRebuildAttempt(product: string, storage: BrowserOperationStorage = sessionStorage): TestingRebuildAttempt | null {
+export function readTestingRebuildAttempt(product: string, storage: BrowserOperationStorage | null = browserOperationSessionStorage()): TestingRebuildAttempt | null {
+  const unavailable = "This browser's saved rebuild request could not be read. Allow storage and retry recovery before rebuilding.";
   try {
-    const attempt = JSON.parse(storage.getItem(`launchplane:testing-rebuild:${product}`) ?? "null") as TestingRebuildAttempt | null;
+    if (!storage) throw new Error(unavailable);
+    const encoded = storage.getItem(`launchplane:testing-rebuild:${product}`);
+    if (encoded === null) return null;
+    const attempt = JSON.parse(encoded) as TestingRebuildAttempt | null;
     if (attempt?.product === product && typeof attempt.key === "string" && attempt.key.trim()
       && attempt.key.length <= 256 && typeof attempt.payload?.artifact_id === "string" && attempt.payload.artifact_id
       && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(attempt.payload.source_git_ref)
@@ -36,18 +44,10 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && (attempt.dispatchStarted === undefined || typeof attempt.dispatchStarted === "boolean")
       && (attempt.readOnlyRecovery === undefined || typeof attempt.readOnlyRecovery === "boolean")
       && (attempt.resumeNeedsRead === undefined || typeof attempt.resumeNeedsRead === "boolean")) {
-      // Older saved denials did not distinguish a write refusal from a failed
-      // recovery/read. Preserve their key and allow only lookup, never a write.
-      const confirmedDenial = attempt.denied && attempt.dispatchStarted === true && !attempt.operationId;
-      if (!attempt.payload.original_scope?.trim() && !confirmedDenial) {
-        return { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: true };
-      }
-      return attempt.dispatchStarted === undefined
-        ? { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: !!attempt.denied }
-        : attempt;
+      return { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: !attempt.operationId || !!attempt.readOnlyRecovery };
     }
-  } catch { /* Unreadable browser state is not an operation handle. */ }
-  return null;
+  } catch { throw new Error(unavailable); }
+  throw new Error(unavailable);
 }
 
 export function testingRebuildIsTerminal(status: string): boolean {
@@ -95,25 +95,27 @@ interface TestingRebuildDependencies {
   read: (product: string, operationId: string, signal?: AbortSignal) => Promise<TestingRebuildResponse>;
   lookup: (product: string, payload: SubmitTestingRebuildData["body"], options: BrowserOperationOptions) => Promise<TestingRebuildResponse>;
   wait: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
-  persist: (attempt: TestingRebuildAttempt | null) => void;
+  persist: (attempt: TestingRebuildAttempt | null) => boolean;
   progress: (response: TestingRebuildResponse) => void;
 }
 
 export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependencies: TestingRebuildDependencies, signal?: AbortSignal): Promise<TestingRebuildResponse> {
   if (attempt.denied) throw new Error("This request was denied. It will not be submitted again.");
-  const previouslyDispatched = !!attempt.dispatchStarted;
+  const previouslyDispatched = !!attempt.dispatchStarted || !!attempt.readOnlyRecovery || !!attempt.operationId;
   const readingOriginal = !!attempt.operationId;
   attempt = { ...attempt, dispatchStarted: previouslyDispatched };
-  dependencies.persist(attempt);
   const onDispatch = () => {
-    attempt = { ...attempt, dispatchStarted: true };
-    dependencies.persist(attempt);
+    const dispatched = { ...attempt, dispatchStarted: true };
+    if (!dependencies.persist(dispatched)) throw new Error("This browser could not save the rebuild request, so it was not sent. Allow storage for this site, then rebuild.");
+    attempt = dispatched;
   };
   let response: TestingRebuildResponse;
   try {
+    const stored = dependencies.persist(attempt);
+    if (!previouslyDispatched && !stored) throw new Error("This browser could not save the rebuild request, so it was not sent. Allow storage for this site, then rebuild.");
     response = attempt.operationId
       ? await dependencies.read(attempt.product, attempt.operationId, signal)
-      : attempt.readOnlyRecovery
+      : previouslyDispatched
         ? await dependencies.lookup(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal })
         : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal, onDispatch });
   } catch (error) {
@@ -129,6 +131,8 @@ export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependen
       // These are explicit admission refusals before an operation is queued.
       // Keep uncertainty and key collisions; only a fresh inspection can start anew.
       dependencies.persist(null);
+    } else {
+      dependencies.persist({ ...attempt, readOnlyRecovery: true });
     }
     throw error;
   }

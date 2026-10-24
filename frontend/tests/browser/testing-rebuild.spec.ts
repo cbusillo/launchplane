@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -25,13 +25,13 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     const rebuildDenialMessage = outcome === "recovery-denied"
       ? "The retained request needs its original administrator." : "This request is denied.";
     const originalScope = "fixture-original-administrator";
-    const settling = outcome.startsWith("settlement-") || outcome === "replay-conflict-settlement";
+    const settling = outcome.startsWith("settlement-") || outcome === "replay-conflict-settlement" || outcome === "storage-clear";
     let settlements = 0;
     let polled = false;
     let reads = 0;
     let lookups = 0;
     let sessionUnavailable = false;
-    const heldOutcome = outcome.startsWith("held-resume");
+    const heldOutcome = outcome.startsWith("held-resume") || outcome === "storage-after-dispatch";
     const heldUpdatedAt = new Date().toISOString();
     const heldAttempt = 1;
     const resumes: Record<string, unknown>[] = [];
@@ -57,7 +57,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       if ((["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) && writes.length === 1) return route.abort();
       if (outcome === "replay-conflict-settlement") return route.fulfill({ status: 409, json: { trace_id: "replay-conflict", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed." } } });
       if (settling) return route.fulfill({ status: 403, json: { trace_id: "recovery-denial", error: { code: "authorization_denied", message: "Recovery was denied." } } });
-      if (["denied", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: rebuildDenialMessage } } });
+      if (["denied", "denied-reload", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: rebuildDenialMessage } } });
       if (outcome === "stale-build") return route.fulfill({ status: 409, json: { trace_id: "stale-trace", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed. Inspect again." } } });
       return route.fulfill({ json: receipt("pending") });
     });
@@ -79,6 +79,9 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       lookups++;
       expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       expect({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() }).toEqual(writes[0]);
+      if (outcome === "recovery-denied" && lookups === 1) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: rebuildDenialMessage } } });
+      if (outcome === "replay-conflict-settlement") return route.fulfill({ status: 409, json: { trace_id: "lookup-conflict", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed." } } });
+      if (settling) return route.fulfill({ status: 404, json: { trace_id: "not-observed", error: { code: "testing_rebuild_not_observed", message: "The original operation is not observed yet." } } });
       if (outcome === "lookup-not-observed" && lookups === 1) return route.fulfill({ status: 404, json: { trace_id: "not-observed", error: { code: "testing_rebuild_not_observed", message: "The original operation is not observed yet." } } });
       return route.fulfill({ json: receipt("pending") });
     });
@@ -99,9 +102,38 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       if (outcome === "held-resume-lost-reply") return route.abort();
       return route.fulfill({ json: receipt("pending") });
     });
+    if (outcome.startsWith("storage-")) await page.addInitScript(mode => {
+      const get = Storage.prototype.getItem;
+      const set = Storage.prototype.setItem;
+      const remove = Storage.prototype.removeItem;
+      let saves = 0;
+      Reflect.set(window, "rebuildStorageFailure", true);
+      Storage.prototype.getItem = function(key) {
+        if (key.startsWith("launchplane:testing-rebuild:") && mode === "storage-read" && Reflect.get(window, "rebuildStorageFailure")) throw new Error("Fixture storage read unavailable");
+        return get.call(this, key);
+      };
+      Storage.prototype.setItem = function(key, value) {
+        if (key.startsWith("launchplane:testing-rebuild:")) {
+          saves++;
+          if (Reflect.get(window, "rebuildStorageFailure") && (mode === "storage-initial" || mode === "storage-dispatch" && saves === 2 || mode === "storage-after-dispatch" && saves > 2)) throw new Error("Fixture storage save unavailable");
+        }
+        return set.call(this, key, value);
+      };
+      Storage.prototype.removeItem = function(key) {
+        if (key.startsWith("launchplane:testing-rebuild:") && mode === "storage-clear" && Reflect.get(window, "rebuildStorageFailure")) throw new Error("Fixture storage removal unavailable");
+        return remove.call(this, key);
+      };
+    }, outcome);
     await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
     const panel = page.getByRole("region", { name: "Rebuild testing at the same address" });
     await expect(panel).toBeVisible();
+    if (outcome === "storage-read") {
+      await expect(panel.getByRole("button", { name: "Retry recovery" })).toBeEnabled();
+      await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
+      expect(writes.length).toBe(0);
+      await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
+      await panel.getByRole("button", { name: "Retry recovery" }).click();
+    }
     if (outcome === "preflight-unavailable") {
       await expect(panel.getByRole("button", { name: "Refresh inspection" })).toBeEnabled();
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
@@ -122,14 +154,21 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-ready.png") });
     sessionUnavailable = ["session-unavailable", "session-unauthenticated"].includes(outcome);
     await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
+    if (["storage-initial", "storage-dispatch"].includes(outcome)) {
+      await expect(panel.getByRole("status")).toContainText("it was not sent");
+      expect(writes.length).toBe(0);
+      await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
+      await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
+      await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
+    }
     if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) {
-      await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
+      await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
       await page.reload();
-      await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
+      await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
       expect(writes.length).toBe(1);
-      await panel.getByRole("button", { name: "Recover this request" }).click();
-      await waitForState(() => writes.length).toBe(2);
-      expect(writes[1]).toEqual(writes[0]);
+      await panel.getByRole("button", { name: "Find the original rebuild" }).click();
+      await waitForState(() => lookups).toBe(1);
+      expect(writes.length).toBe(1);
       if (settling) {
         const settle = panel.getByRole("button", { name: "Settle this request", exact: true });
         await expect(settle).toBeEnabled();
@@ -152,9 +191,19 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
           expect((await readAttempt())?.operationId).toBe("native-original");
           await panel.getByRole("button", { name: "Resume watching this rebuild", exact: true }).click();
         }
+        if (outcome === "storage-clear") {
+          await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
+          expect((await readAttempt())?.key).toBe(writes[0].key);
+          await page.reload();
+          await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
+          await expect(settle).toBeEnabled();
+          await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
+          await settle.click();
+          expect(writes.length).toBe(1);
+        }
         await waitForState(readAttempt).toBe(null);
         await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
-        expect(writes.length).toBe(2);
+        expect(writes.length).toBe(1);
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-settled.png") });
         return;
       }
@@ -164,26 +213,27 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-read-only-recovery.png") });
         await page.reload();
         await panel.getByRole("button", { name: "Find the original rebuild" }).click();
-        await waitForState(() => lookups).toBe(1);
-        expect(writes.length).toBe(2);
-        if (outcome === "lookup-not-observed") {
-          await waitForState(async () => (await readAttempt())?.readOnlyRecovery).toBe(true);
-          await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
-          await panel.getByRole("button", { name: "Find the original rebuild" }).click();
-          await waitForState(() => lookups).toBe(2);
-          expect(writes.length).toBe(2);
-        }
+        await waitForState(() => lookups).toBe(2);
+        expect(writes.length).toBe(1);
       }
     }
     if (["stale-build", "session-unavailable", "session-unauthenticated"].includes(outcome)) {
+      if (outcome === "storage-after-dispatch") await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
       await waitForState(readAttempt).toBe(null);
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       expect(writes.length).toBe(outcome === "stale-build" ? 1 : 0);
       expect(polled).toBe(false);
-    } else if (outcome === "denied") {
-      await waitForState(async () => (await readAttempt())?.denied).toBe(true);
-      await page.reload();
-      await expect(panel.getByRole("button", { name: "Recover this request" })).toHaveCount(0);
+    } else if (["denied", "denied-reload"].includes(outcome)) {
+      await expect(panel.getByRole("button", { name: "Discard this denied request" })).toBeEnabled();
+      if (outcome === "denied-reload") {
+        await page.reload();
+        await expect(panel.getByRole("button", { name: "Discard this denied request" })).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
+        expect(writes.length).toBe(1);
+        await panel.getByRole("button", { name: "Settle this request" }).click();
+        await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
+        return;
+      }
       expect(writes.length).toBe(1);
       expect(polled).toBe(false);
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-denied.png") });
@@ -192,16 +242,21 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       expect(writes.length).toBe(1);
       expect(settlements).toBe(0);
     } else {
-      await waitForState(async () => (await readAttempt())?.operationId).toBe("native-original");
+      if (outcome !== "storage-after-dispatch") await waitForState(async () => (await readAttempt())?.operationId).toBe("native-original");
+      else await expect(panel.getByRole("button", { name: "Resume watching this rebuild" })).toBeVisible();
       await page.clock.runFor(2500);
       if (heldOutcome) {
         await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
-        await page.reload();
+        if (outcome !== "storage-after-dispatch") await page.reload();
+        else {
+          expect((await readAttempt())?.operationId).toBeUndefined();
+          await expect(panel.getByRole("alert")).toContainText("storage could not be updated");
+        }
         await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
         expect(resumes.length).toBe(0);
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-held.png") });
         await panel.getByRole("button", { name: "Resume this rebuild", exact: true }).click();
-        if (outcome !== "held-resume") {
+        if (["held-resume-denied", "held-resume-lost-reply"].includes(outcome)) {
           await waitForState(async () => (await readAttempt())?.resumeNeedsRead).toBe(true);
           await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeDisabled();
           expect(resumes.length).toBe(1);
@@ -220,6 +275,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         expect(writes.length).toBe(1);
         await page.reload();
       }
+      if (outcome === "storage-after-dispatch") await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
       await waitForState(readAttempt).toBe(null);
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       if (heldOutcome) expect(resumes.length).toBe(outcome === "held-resume-denied" ? 2 : 1);

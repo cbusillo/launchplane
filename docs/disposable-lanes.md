@@ -1552,6 +1552,18 @@ scope stay observation-only when their dispatch outcome is uncertain. They canno
 safely be assigned to the current actor. A confirmed first-submit denial still
 supports local discard, because its reply proves refusal before admission; a
 denial during recovery of an earlier uncertain dispatch never gains that disposition.
+That local exit applies only to the refusal observed on the current page. Every
+rehydrated request is uncertain, including saved denial or never-dispatched flags;
+without an operation ID, recovery only looks up the original request.
+
+The browser verifies the saved request by reading it back before its first POST,
+including immediately before dispatch. If either check fails, nothing is sent.
+An unreadable or malformed saved request blocks rebuilding and offers Retry
+recovery without erasing the stored value. After dispatch, the page retains the
+latest original request and observed operation in memory even when later storage
+writes fail. Watching, resuming and settlement use that retained identity. A
+failed storage removal after proved completion may leave an older recovery record
+on reload; it must be observed or settled again before another rebuild.
 
 **Settle this request** explicitly calls
 `POST /v1/products/{product}/testing-rebuild/settle` with the same key, inspected
