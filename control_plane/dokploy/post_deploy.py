@@ -212,6 +212,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "odoo_restore_completed",
         "clean_testing_snapshot_completed",
         "clean_preview_snapshot_restored",
+        "clean_snapshot_retirement_deferred",
         "odoo_restore_failure_logged",
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
@@ -1089,6 +1090,16 @@ def run_compose_post_deploy_update(
         and evidence.get("clean_preview_snapshot_restored") != "true"
     ):
         raise ValueError("Preview lacks its clean snapshot restore proof.")
+    if clean_preview_snapshot is not None:
+        actual = evidence.get("clean_preview_snapshot_id", "")
+        if re.fullmatch(r"[a-f0-9]{64}", actual) is None:
+            raise OdooPostDeployReadbackFailure(
+                "Preview lacks its actual clean snapshot identity.", evidence=evidence
+            )
+        evidence["clean_preview_snapshot_requested_id"] = clean_preview_snapshot.snapshot_id
+        evidence["clean_preview_snapshot_retained_attempt"] = str(
+            actual != clean_preview_snapshot.snapshot_id
+        ).lower()
     return evidence
 
 

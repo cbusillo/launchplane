@@ -73,6 +73,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.killed_during_restore = False
         self.database_witness = ""
         self.module_lock_available = False
+        self.ready_before_web = False
+        self.witness_probe_failure = False
         self.paused = False
         self.overlay = self.root / "runner-overlay"
         self.overlay.mkdir()
@@ -195,9 +197,27 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.paused = True
         elif arguments[:2] == ["docker", "unpause"]:
             self.paused = False
+        elif arguments[:2] == ["docker", "start"]:
+            self.ready_before_web = any(
+                json.loads(path.read_text()).get("completed")
+                for path in (self.source.parent / "preview-attempts").glob("*.json")
+            )
         elif arguments[:2] == ["docker", "exec"]:
-            if "psql " in " ".join(arguments):
-                output = b"1" if self.present else b"0"
+            if "dropdb " in " ".join(arguments):
+                self.present = False
+                self.database_witness = ""
+            elif "psql " in " ".join(arguments):
+                sql = kwargs.get("input", b"")
+                if b"pg_database" in sql:
+                    output = b"1" if self.present else b"0"
+                elif b"to_regclass" in sql:
+                    if self.witness_probe_failure:
+                        return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
+                    output = b"t"
+                elif b"SELECT value" in sql:
+                    output = self.database_witness.encode()
+                else:
+                    self.fail("Unexpected preview SQL probe")
             elif arguments[-2:] in (["id", "-u"], ["id", "-g"]):
                 output = b"1000"
             elif kwargs.get("input") == b"fixture-readback":
@@ -241,7 +261,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         )
         self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_service_schedule_uses_the_snapshot_without_resolving_an_upstream(self) -> None:
+    def service_schedule(self, snapshot: CleanTestingSnapshot) -> dict[str, str]:
         environment = {
             "DOCKER_IMAGE_REFERENCE": self.image,
             "ODOO_DB_NAME": self.database,
@@ -291,11 +311,106 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     context=self.snapshot.context, instance="pr-23", target_id="fixture-preview"
                 ),
                 env_file=None,
-                clean_preview_snapshot=self.snapshot,
+                clean_preview_snapshot=snapshot,
             )
+        return evidence
+
+    def test_service_schedule_uses_the_snapshot_without_resolving_an_upstream(self) -> None:
+        evidence = self.service_schedule(self.snapshot)
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.runner_failure = False
+        requested = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        evidence = self.service_schedule(requested)
+        self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
+        self.assertEqual(evidence["clean_preview_snapshot_requested_id"], requested.snapshot_id)
+        self.assertEqual(evidence["clean_preview_snapshot_retained_attempt"], "true")
+
+    def test_foreign_or_unreadable_database_witness_never_resets_data(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        self.database_witness = "foreign-copy"
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.witness_probe_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertTrue(self.present)
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+
+    def test_ready_data_without_a_witness_is_preserved(self) -> None:
+        self.run_script()
+        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment.write_bytes(b"Client edit")
+        self.database_witness = ""
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertEqual(attachment.read_bytes(), b"Client edit")
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+
+    def test_malformed_committed_attempt_defers_all_retirement(self) -> None:
+        library: dict[str, Any] = {}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        attempts = self.source.parent / "preview-attempts"
+        attempts.mkdir()
+        (attempts / ("c" * 64 + ".json")).write_text("{}")
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "b" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+        self.assertTrue(self.source.exists())
+
+    def test_ready_receipt_is_durable_before_web_is_released(self) -> None:
+        self.run_script()
+        self.assertTrue(self.ready_before_web)
+
+    def test_interrupted_obsolete_retirement_is_resumable_and_nonfatal(self) -> None:
+        library: dict[str, Any] = {}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        spec = {
+            "copy_binding_sha256": "b" * 64,
+            "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+        }
+
+        def interrupt(path: Path) -> None:
+            (path / "database.dump").unlink()
+            raise OSError("fixture interrupted deletion")
+
+        with patch("pathlib.Path.home", return_value=self.root):
+            with patch("shutil.rmtree", side_effect=interrupt):
+                library["retire_clean_snapshots"](spec)
+            library["retire_clean_snapshots"](spec)
+        self.assertFalse(self.source.exists())
+
+    def test_atomic_writer_temporary_file_does_not_block_snapshot_retirement(self) -> None:
+        library: dict[str, Any] = {}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        attempts = self.source.parent / "preview-attempts"
+        attempts.mkdir()
+        temporary = attempts / ".pending-fixture"
+        temporary.write_text("incomplete atomic metadata")
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "b" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+        self.assertFalse(self.source.exists())
+        self.assertTrue(temporary.exists())
 
     def test_module_update_does_not_hold_the_shared_source_lock(self) -> None:
         self.run_script()
@@ -371,21 +486,19 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.run_script()
         self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_copy_preserves_files_added_outside_its_snapshot(self) -> None:
+    def test_failed_unreleased_module_files_can_be_rebuilt_from_the_snapshot(self) -> None:
         self.runner_failure = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        extra = self.data / "filestore" / self.database / "client-edit"
-        extra.write_bytes(b"keep this")
+        extra = self.data / "filestore" / self.database / "failed-module-attachment"
+        extra.write_bytes(b"rebuild this from the PR module")
         self.runner_failure = False
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.assertEqual(extra.read_bytes(), b"keep this")
+        self.run_script()
+        self.assertFalse(extra.exists())
+        self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_readback_resumes_database_without_recloning_staff_edits(self) -> None:
-        self.sanitized = False
-        with self.assertRaises(RuntimeError):
-            self.run_script()
+    def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
+        self.run_script()
         attachment = self.data / "filestore" / self.database / "attachment"
         attachment.write_bytes(b"preview edit")
         self.calls.clear()
@@ -402,9 +515,15 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.run_script()
         self.killed_during_restore = False
         self.calls.clear()
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.run_script()
+        phases = [
+            call[-3]
+            for call in self.calls
+            if call[:2] == ["docker", "exec"] and call[-1:] == ["clean-snapshot"]
+        ]
+        self.assertEqual(phases, ["fresh"])
+        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_shared_guard_refuses_privilege_and_snapshot_mount_exposure(self) -> None:
         self.containers["script-runner"]["HostConfig"] = {"Privileged": True}
@@ -430,14 +549,14 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertNotIn(["docker", "stop", "web"], self.calls)
 
     def test_obsolete_snapshot_retirement_preserves_incomplete_reader(self) -> None:
-        library: dict[str, Any] = {}
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
-        root = self.source.parent
-        attempts = root / "preview-attempts"
-        attempts.mkdir()
-        attempt = attempts / "fixture.json"
-        payload: dict[str, Any] = {"snapshot": self.snapshot.model_dump(mode="json")}
-        attempt.write_text(json.dumps(payload))
+        attempts = self.source.parent / "preview-attempts"
+        attempt = next(attempts.glob("*.json"))
+        payload = json.loads(attempt.read_text())
         spec = {
             "copy_binding_sha256": "b" * 64,
             "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],

@@ -76,7 +76,7 @@ def sync_snapshot_directory(path):
 
 
 def write_snapshot_receipt(path, payload):
-    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+    with tempfile.NamedTemporaryFile(mode='w', prefix='.pending-', dir=path.parent, delete=False) as stream:
         temporary = stream.name
         json.dump(payload, stream, sort_keys=True)
         stream.flush()
@@ -93,26 +93,5 @@ def write_snapshot_receipt(path, payload):
             os.unlink(temporary)
 
 
-def filestore_has_another_copy(path, source):
-    if path.is_symlink() or not path.is_dir():
-        return False
-    for entry in path.rglob('*'):
-        relative = entry.relative_to(path)
-        original = source / relative
-        if entry.is_symlink() or not original.exists() or entry.is_dir() != original.is_dir():
-            return False
-        if entry.is_file():
-            if entry.stat().st_size > original.stat().st_size:
-                return False
-            with entry.open('rb') as copy, original.open('rb') as existing:
-                while True:
-                    chunk = copy.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    if chunk != existing.read(len(chunk)):
-                        return False
-        elif not entry.is_dir():
-            return False
-    return True
 """
 )

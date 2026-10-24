@@ -96,8 +96,21 @@ def snapshot_attempt_backings_retired(binding, inventory):
 
 def retire_clean_snapshots(spec):
     root = clean_snapshot_root(spec['copy_binding_sha256']).parent
+    try:
+        retire_clean_snapshot_bytes(spec, root)
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError, IndexError):
+        print('clean_snapshot_retirement_deferred=true')
+
+
+def retire_clean_snapshot_bytes(spec, root):
     with (root / 'snapshot.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        for tombstone in root.iterdir():
+            if not re.fullmatch(r'\.retiring-[a-f0-9]{64}', tombstone.name):
+                continue
+            if tombstone.is_symlink() or not tombstone.is_dir():
+                raise RuntimeError('Snapshot retirement custody is unavailable')
+            shutil.rmtree(tombstone)
         pinned = set()
         attempts = root / 'preview-attempts'
         inventory = None
@@ -106,10 +119,22 @@ def retire_clean_snapshots(spec):
             if attempts.is_symlink():
                 raise RuntimeError('Snapshot reader custody is aliased')
             for attempt in attempts.iterdir():
+                if attempt.name.startswith('.pending-'):
+                    continue
+                if not re.fullmatch(r'[a-f0-9]{64}\.json', attempt.name):
+                    raise RuntimeError('Snapshot reader custody is unavailable')
                 if attempt.is_symlink() or not attempt.is_file() or attempt.stat().st_size > 8192:
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 payload = json.loads(attempt.read_text())
-                binding = payload.get('binding', {})
+                if not isinstance(payload, dict) or not isinstance(payload.get('snapshot'), dict) or not isinstance(payload.get('binding'), dict) or not isinstance(payload.get('completed', False), bool):
+                    raise RuntimeError('Snapshot reader custody is unavailable')
+                binding = payload['binding']
+                expected_name = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest() + '.json'
+                snapshot_id = payload['snapshot'].get('snapshot_id', '')
+                if attempt.name != expected_name or not isinstance(snapshot_id, str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot_id):
+                    raise RuntimeError('Snapshot reader binding is unavailable')
+                if any(payload['snapshot'].get(key) != binding.get(key) for key in ('product', 'context', 'server_id')):
+                    raise RuntimeError('Snapshot reader source is unavailable')
                 if binding.get('volume_backings'):
                     if not inventory_read:
                         inventory_read = True
@@ -137,7 +162,14 @@ def retire_clean_snapshots(spec):
             path, receipt = verified_clean_snapshot(snapshot_id)
             if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
                 raise RuntimeError('Obsolete snapshot differs from its immutable service receipt')
-            shutil.rmtree(path)
+            tombstone = root / ('.retiring-' + snapshot_id)
+            os.rename(path, tombstone)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            shutil.rmtree(tombstone)
         descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(descriptor)

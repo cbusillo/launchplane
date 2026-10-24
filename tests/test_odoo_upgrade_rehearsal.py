@@ -2657,6 +2657,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual(path.read_bytes(), original)
 
+    def test_empty_warning_only_filestore_capture_is_not_an_archive(self) -> None:
+        import sys
+
+        _, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        warning = b"tar: .: file changed as we read it\n"
+        self.assertTrue(self.host["filestore_tar_warning_only"](1, warning, False))
+        with self.assertRaises(RuntimeError):
+            self.host["bounded_capture"](
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys;sys.stderr.write(" + repr(warning.decode()) + ");sys.exit(1)",
+                ],
+                root / "empty.tar",
+                1024,
+                filestore=True,
+            )
+
     def test_capture_failure_discards_output_and_preserves_exit_status(self) -> None:
         import sys
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT

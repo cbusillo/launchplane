@@ -99,6 +99,8 @@ def bounded_capture(arguments,path,bound,*,filestore=False):
     if status and not (filestore and filestore_tar_warning_only(status,errors,truncated)):
         diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,status))
         raise RehearsalCommandFailure(diagnostic)
+    if not path.stat().st_size:
+        raise RuntimeError('Incomplete source copy')
 
 
 def save(path,payload):

@@ -56,13 +56,14 @@ is cloned or copied into exclusively owned storage with the preview writer
 stopped and runner paused. It restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and
 connection-readback boundary before starting web. Existing preview databases
-and Client edits are preserved. A failed initial clone can resume using its
-private target-bound restore receipt and a preview-specific completion
-witness. The marker copied from testing cannot prove a preview restore. If a
-failed import left no database,
-filestore replacement requires proof that every remaining byte is also in the
-retained frozen source. Unknown files are preserved and execution refuses.
-Existing successfully deployed previews keep their own data on later builds.
+and Client edits are preserved. A failed initial clone carries an exact volume-generation-bound ownership
+receipt and a preview-specific SQL witness. An owned attempt that never opened
+to a user can restart from its verified source after a partial restore or failed
+module build. Ready metadata is fsynced before either gate or web is released.
+Ready copies, foreign witnesses, old receipts and ambiguous reads preserve their
+data. Later builds keep Client edits. The marker inherited from testing cannot
+prove a preview restore. Retry evidence records both the requested snapshot and
+the original snapshot retained by the attempt.
 
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. The #4057 capability provides filestore reflinks where the
@@ -97,3 +98,10 @@ Unknown reader evidence preserves copies. Reviewed headroom is checked before
 testing stops; insufficient capacity keeps the previous source usable.
 PostgreSQL restore and full filestore-copy headroom are also required for a new
 preview. Neither cleanup path removes testing originals, backups or unknown files.
+
+Obsolete snapshot retirement commits an atomic tombstone rename before deleting
+bytes, so an interrupted delete can finish on the next pass. Cleanup errors and
+malformed reader metadata defer retirement; capacity still controls refresh
+admission. Unknown capture partials remain preserved. Cleanup runs with an
+opted-in refresh; opting out or disabling drills requires a separate custody
+review for retained bytes rather than an automatic purge.
