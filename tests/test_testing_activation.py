@@ -160,19 +160,20 @@ class ActivationTests(unittest.TestCase):
     def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
         import asyncio
         from control_plane import http_error_evidence
-        from control_plane.contracts import canonical_json
+        from control_plane import npmplus
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import LaunchplaneAuthzPolicy
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
         from tests.support.http import request
+        from tests.test_npmplus import _Opener, _credentials
 
         private = "private-provider-diagnostic-sentinel"
 
         def fail_dependency() -> None:
-            try:
-                canonical_json.canonical_json_sha256({private: 0.5})
-            except ValueError as error:
-                raise RuntimeError(private) from error
+            opener = _Opener()
+            opener.host_details["certificate_id"] = private
+            opener.host_details["meta"] = {private: private}
+            npmplus.NpmplusClient(credentials=_credentials(), opener=opener).get_proxy_host(78)
 
         bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
         app = create_launchplane_fastapi_app(
@@ -206,9 +207,10 @@ class ActivationTests(unittest.TestCase):
         evidence = json.loads(logs.records[-1].getMessage())
         self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
         self.assertTrue(
-            any(site["module"] == canonical_json.__name__ for site in evidence["sites"]),
+            any(site["module"] == npmplus.__name__ for site in evidence["sites"]),
             evidence,
         )
+        self.assertTrue(evidence["validation"])
         self.assertTrue(
             all(type(site["line"]) is int and site["line"] > 0 for site in evidence["sites"])
         )

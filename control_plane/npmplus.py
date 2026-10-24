@@ -7,7 +7,9 @@ from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from control_plane.http_error_evidence import ProviderResponseValidationError
 
 
 type JsonPrimitive = str | int | float | bool | None
@@ -227,6 +229,13 @@ class NpmplusOtherHost(BaseModel):
     enabled: bool
 
 
+def _validate_response[Model: BaseModel](model: type[Model], value: object) -> Model:
+    try:
+        return model.model_validate(value)
+    except ValidationError as error:
+        raise ProviderResponseValidationError(error, model) from error
+
+
 @dataclass(frozen=True)
 class NpmplusCredentials:
     base_url: str
@@ -304,7 +313,7 @@ class NpmplusClient:
                 raise click.ClickException(
                     f"NPMplus proxy-host list entry {index} returned an invalid payload."
                 )
-            proxy_hosts.append(NpmplusProxyHostClaim.model_validate(host_payload))
+            proxy_hosts.append(_validate_response(NpmplusProxyHostClaim, host_payload))
         return tuple(proxy_hosts)
 
     def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
@@ -329,7 +338,7 @@ class NpmplusClient:
             )
         ):
             raise click.ClickException("NPMplus route is not a loaded public proxy host.")
-        host = NpmplusProxyHost.model_validate(payload)
+        host = _validate_response(NpmplusProxyHost, payload)
         if host.id != host_id:
             raise click.ClickException("NPMplus proxy host identity does not match the request.")
         return host
@@ -341,7 +350,7 @@ class NpmplusClient:
             if not isinstance(payload, list):
                 raise click.ClickException("NPMplus hostname claims are unavailable.")
             for item in payload:
-                host = NpmplusOtherHost.model_validate(item)
+                host = _validate_response(NpmplusOtherHost, item)
                 if host.enabled:
                     domains.extend(name.strip().lower() for name in host.domain_names)
         return tuple(domains)
@@ -350,7 +359,7 @@ class NpmplusClient:
         payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus certificate read returned an invalid payload.")
-        certificate = NpmplusCertificate.model_validate(payload)
+        certificate = _validate_response(NpmplusCertificate, payload)
         if certificate.id != certificate_id:
             raise click.ClickException("NPMplus certificate identity changed.")
         return certificate
@@ -359,7 +368,7 @@ class NpmplusClient:
         payload = self._request(method="GET", path=f"/api/nginx/access-lists/{access_list_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus access-list read returned an invalid payload.")
-        access_list = NpmplusAccessList.model_validate(payload)
+        access_list = _validate_response(NpmplusAccessList, payload)
         if access_list.id != access_list_id:
             raise click.ClickException("NPMplus access-list identity does not match the request.")
         return access_list
@@ -377,7 +386,7 @@ class NpmplusClient:
         )
         if not isinstance(response, dict):
             raise click.ClickException("NPMplus proxy-host create returned an invalid payload.")
-        return NpmplusProxyHost.model_validate(response)
+        return _validate_response(NpmplusProxyHost, response)
 
     def update_proxy_host(
         self, *, host_id: int, payload: NpmplusProxyHostPayload
@@ -389,7 +398,7 @@ class NpmplusClient:
         )
         if not isinstance(response, dict):
             raise click.ClickException("NPMplus proxy-host update returned an invalid payload.")
-        return NpmplusProxyHost.model_validate(response)
+        return _validate_response(NpmplusProxyHost, response)
 
     def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
         self._request(method="POST", path=f"/api/nginx/proxy-hosts/{host_id}/disable")
