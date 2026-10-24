@@ -2635,6 +2635,12 @@ export function productReviewForFixture(
     repository: "example/control-plane",
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
+    pull_request_title: latestDecision || scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    client_test_notes: latestDecision ? "" : {
+      "missing-notes": "",
+      "notes-unavailable": "",
+      "nothing-to-test": "Nothing for the Client to test: CI tests only.",
+    }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
     preview_generation_id: previewUrl ? "fixture-review-generation" : "",

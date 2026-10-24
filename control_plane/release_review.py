@@ -6,12 +6,13 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import NamedTuple, Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import click
 
+from control_plane.client_test_notes import owner_test_notes
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
@@ -149,6 +150,52 @@ def _read_release_github(*, path: str, token: str, product: str, trace_id: str) 
             if not retry:
                 raise
     raise AssertionError("Checklist read attempts exhausted without a result.")
+
+
+class PullRequestNotes(NamedTuple):
+    title: str
+    client_test_notes: str
+
+
+UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(title="", client_test_notes="")
+
+
+def read_pull_request_notes(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    trace_id: str,
+) -> PullRequestNotes:
+    path = f"/repos/{quote(profile.repository)}/pulls/{pull_request_number}"
+    try:
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
+            control_plane_root=control_plane_root,
+            context_name=profile.preview.context,
+            repository=profile.repository,
+        ) as token:
+            pull = (
+                _read_release_github(
+                    path=path, token=token, product=profile.product, trace_id=trace_id
+                )
+                if token
+                else None
+            )
+    except (click.ClickException, OSError, ValueError) as error:
+        _LOGGER.warning(
+            "product review pull request read failed product=%s trace_id=%s error_type=%s",
+            profile.product,
+            trace_id or "-",
+            type(error).__name__,
+        )
+        return UNREAD_PULL_REQUEST_NOTES
+    if not isinstance(pull, dict) or not isinstance(pull.get("title"), str):
+        return UNREAD_PULL_REQUEST_NOTES
+    return PullRequestNotes(
+        title=pull["title"], client_test_notes=owner_test_notes(str(pull.get("body") or ""))
+    )
 
 
 @dataclass(eq=False)
