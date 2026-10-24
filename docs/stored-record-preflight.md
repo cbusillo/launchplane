@@ -58,8 +58,10 @@ plaintext override or audit value is retained; free-form numeric values are
 pseudonymized too. The salt is discarded.
 
 Dictionary keys, absent fields, booleans, schema-defined numeric data, valid
-timestamps, schema enum/constant values, code action/driver names and required
-format markers such as `{number}` survive. Known code protocol fields can mark
+timestamps, schema enum/constant/default values, the `testing` and `prod` lane
+kinds, code action/driver names and required format markers such as `{number}`
+survive. Database prefixes, public DNS names and public addresses are replaced
+with pseudonyms in their valid format. Known code protocol fields can mark
 `x-launchplane-snapshot-protocol` in their schema. Arbitrary free text is never
 retained because it looks like protocol. Train run dictionaries use their
 producer schemas, and a valid repository/base-branch policy-key relationship

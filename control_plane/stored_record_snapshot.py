@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
+from ipaddress import ip_address
 import hmac
 import json
 import re
@@ -56,6 +57,12 @@ SNAPSHOT_RECORD_TYPES: tuple[tuple[Any, type[BaseModel]], ...] = (
     (LaunchplaneMergeTrainPolicyRow, MergeTrainPolicyRecord),
     (LaunchplaneMergeTrainRunRow, MergeTrainRunRecord),
 )
+
+
+LANE_KINDS = frozenset({"testing", "prod"})
+LANE_INSTANCE_FIELDS = frozenset({"instance", "template_instance"})
+PUBLIC_ADDRESS_FIELDS = frozenset({"addresses", "expected_addresses", "observed_addresses"})
+DATABASE_PREFIX = re.compile(r"[a-z][a-z0-9_]*")
 
 
 SnapshotAuthorization = Callable[
@@ -148,6 +155,8 @@ class _Scrubber:
             and re.fullmatch(r"[a-z_][a-z_.-]*", value)
         ):
             return value
+        if protocol and name in LANE_INSTANCE_FIELDS and value in LANE_KINDS:
+            return value
         if protocol and (name.endswith("_at") or name in {"started_at", "finished_at"}):
             try:
                 datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -177,6 +186,12 @@ class _Scrubber:
             if expression == value.strip():
                 expression = f"{(minute + 1) % 60} {hour} * * {weekday}"
             return expression
+        if protocol and name == "transport_database_prefix" and DATABASE_PREFIX.fullmatch(value):
+            return f"snapshot_{digest[:12]}"
+        if protocol and name == "public_name":
+            return f"snapshot-{digest[:12]}.invalid"
+        if protocol and name in PUBLIC_ADDRESS_FIELDS and _is_ip_address(value):
+            return ".".join(("8", *(str(int(digest[i : i + 2], 16)) for i in (0, 2, 4))))
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -253,7 +268,11 @@ class _Scrubber:
                 for item in value
             ]
         if isinstance(value, str):
-            if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
+            if (
+                value in schema.get("enum", [])
+                or ("const" in schema and value == schema["const"])
+                or value == schema.get("default")
+            ):
                 return value
             return self.string(
                 value, name, protocol=declared, maximum_length=schema.get("maxLength")
@@ -276,6 +295,14 @@ class _Scrubber:
                 pseudonym = self.number(str(value))
                 return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
+
+
+def _is_ip_address(value: str) -> bool:
+    try:
+        ip_address(value.strip())
+    except ValueError:
+        return False
+    return True
 
 
 def _statement_timeout_ms(remaining: int) -> int:

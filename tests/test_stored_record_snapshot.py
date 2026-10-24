@@ -129,34 +129,61 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     profile.lanes[0].generic_web_extensions.schedules,
                 )
 
-    def test_runtime_secret_requirements_remain_readable_after_scrubbing(self) -> None:
+    def test_valid_cross_field_profiles_remain_readable_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+        from tests.test_generic_web_preview_extensions import _driver_profile
+        from tests.test_public_dns_diagnostics import _dns_profile
 
-        payload = product_profile_payload()
-        context = payload["lanes"][0]["context"]  # type: ignore[index]
-        payload["expected_config"] = {
+        secrets = product_profile_payload("secret-requirements")
+        secrets["expected_config"] = {
             "managed_secret_bindings": [
                 {
                     "binding_key": "PRIVATE_BOT_TOKEN",
-                    "context": context,
+                    "context": "secret-requirements-testing",
                     "external_provider": "discord_bot",
                 },
                 {"binding_key": "PRIVATE_DB_PASSWORD", "testing_local_credential": True},
             ]
         }
-        self.store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(payload)
+        drill = product_profile_payload("testing-drill")
+        drill["lanes"][0]["odoo_testing_drill_enabled"] = True  # type: ignore[index]
+        transport = _driver_profile(driver_id="generic-web", declared_transport=True)
+        transport = transport.model_copy(
+            update={
+                "product": "declared-transport",
+                "preview": transport.preview.model_copy(
+                    update={"app_name_prefix": "sample-preview", "transport_database_prefix": "db"}
+                ),
+            }
         )
+        profiles = (
+            LaunchplaneProductProfileRecord.model_validate(secrets),
+            LaunchplaneProductProfileRecord.model_validate(drill),
+            LaunchplaneProductProfileRecord.model_validate(
+                {
+                    "schema_version": secrets["schema_version"],
+                    "product": "retired-site",
+                    "display_name": "Retired",
+                    "repository": "cbusillo/retired-site",
+                    "lifecycle_state": "retired",
+                    "classification": "out_of_scope",
+                    "updated_at": secrets["updated_at"],
+                    "source": "test",
+                }
+            ),
+            transport,
+            _dns_profile().model_copy(update={"product": "dns-expectations"}),
+        )
+        for profile in profiles:
+            self.store.write_product_profile_record(profile)
         for version in (1, 2):
-            with self.subTest(format_version=version):
-                snapshot = self.store.export_stored_record_snapshot(format_version=version)
-                raw = next(
-                    row["payload"]
-                    for family, row in iter_snapshot_rows(snapshot)
-                    if family == "launchplane_product_profiles"
-                )
-                LaunchplaneProductProfileRecord.model_validate(raw)
-                self.assertNotIn("PRIVATE_", json.dumps(raw))
+            snapshot = self.store.export_stored_record_snapshot(format_version=version)
+            for family, row in iter_snapshot_rows(snapshot):
+                if family != "launchplane_product_profiles":
+                    continue
+                with self.subTest(format_version=version, product=row["payload"]["product"]):
+                    LaunchplaneProductProfileRecord.model_validate(row["payload"])
+                    self.assertNotIn("PRIVATE_", json.dumps(row["payload"]))
 
     def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
