@@ -5931,11 +5931,12 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     for incident in store.list_public_ingress_incident_records(status="open")
                 )
             )
+            case.now += timedelta(seconds=1)
             success = record.model_copy(
                 update={
                     "record_id": failed.record_id,
                     "deploy": record.deploy.model_copy(
-                        update={"finished_at": (case.now + timedelta(seconds=1)).isoformat()}
+                        update={"finished_at": case.now.isoformat()}
                     ),
                 }
             )
