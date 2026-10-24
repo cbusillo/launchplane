@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import logging
 import re
 from typing import Literal
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from starlette.requests import Request
@@ -46,7 +48,11 @@ from control_plane.lane_runtime_verification import (
 )
 from control_plane.source_control_change import read_branch_revision
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.delivery_evidence import DeliveryEvidenceIndex, DeliveryEvidenceWork
+from control_plane.storage.delivery_evidence import (
+    DeliveryEvidenceIndex,
+    DeliveryEvidenceWork,
+    DeliveryFailureObservation,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
 from control_plane.workflows.ship import utc_now_timestamp
@@ -70,6 +76,12 @@ _NONTERMINAL_CODES = frozenset(
         "idempotency_key_reused",
     }
 )
+
+
+@dataclass(frozen=True)
+class DeliveryFailureReference:
+    trace_id: str
+    failed_at: str
 
 
 class RefusedProductionRequestReconciliation(BaseModel):
@@ -334,11 +346,18 @@ def _observe(
     retired: bool = False,
     refused: bool = False,
     expected_incident_sha256: str = "",
+    failure_reference: DeliveryFailureReference | None = None,
+    failure_event: bool = False,
 ) -> None:
     delivery_kind = "testing" if lane.instance == "testing" else "production"
     failure_code: PublicIngressFailureCode = (
         "testing_delivery_failed" if lane.instance == "testing" else "production_delivery_failed"
     )
+    target_url = f"provider://launchplane/{delivery_kind}-delivery/{reason}"
+    if failure_reference is not None:
+        target_url += "?" + urlencode(
+            {"trace": failure_reference.trace_id, "failed_at": failure_reference.failed_at}
+        )
     observation = PublicIngressObservationRecord(
         record_id=build_public_ingress_observation_id(
             product=profile.product,
@@ -362,13 +381,23 @@ def _observe(
         targets=(
             PublicIngressTargetObservation(
                 target="provider",
-                url=f"provider://launchplane/{delivery_kind}-delivery/{reason}",
+                url=target_url,
                 status="fail" if failed else "pass",
                 failure_code=failure_code if failed else None,
                 summary=summary,
             ),
         ),
     )
+    if failure_event and failure_reference is not None:
+        observation = observation.model_copy(
+            update={
+                "record_id": observation.record_id
+                + "-"
+                + _candidate_key(
+                    reason + "\0" + failure_reference.trace_id + "\0" + failure_reference.failed_at
+                )
+            }
+        )
     if refused:
         observation = observation.model_copy(
             update={
@@ -423,7 +452,7 @@ def _observe(
         notification_drivers=None,
         expected_incident_sha256=expected_incident_sha256,
         reconciliation_reason=PRODUCTION_REQUEST_REFUSED
-        if expected_incident_sha256
+        if retired and expected_incident_sha256
         else "monitoring_intent_changed",
     )
     if result.authority_changed:
@@ -444,6 +473,12 @@ def record_production_delivery_failure(
         return
     check_name = DELIVERY_CHECK_PREFIX + _candidate_key(candidate)
     safe_reason = reason if re.fullmatch(r"[a-z][a-z0-9_]{0,99}", reason) else "delivery_failed"
+    safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
+    failure_at = observed_at or utc_now_timestamp()
+    reference = DeliveryFailureReference(
+        trace_id=safe_trace,
+        failed_at=_canonical_time(failure_at),
+    )
     existing = store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -459,10 +494,19 @@ def record_production_delivery_failure(
             existing[0].material_fingerprint.route_authority.provider_check
             == "production-delivery/" + safe_reason
         )
-        and _delivery_failure_trace(existing[0].summary) == trace_id
     ):
-        return
-    safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
+        previous = store.read_public_ingress_observation_record(existing[0].latest_observation_id)
+        if (
+            _delivery_failure_reference(
+                DeliveryFailureObservation(
+                    summary=previous.summary,
+                    observed_at=previous.observed_at,
+                    target_url=previous.targets[0].url if previous.targets else "",
+                )
+            )
+            == reference
+        ):
+            return
     _observe(
         store,
         profile,
@@ -471,8 +515,12 @@ def record_production_delivery_failure(
         failed=True,
         summary=f"Production delivery blocked: {safe_reason}; trace: {safe_trace}. "
         "The previous runtime may still be healthy. Inspect the supported release path.",
-        observed_at=observed_at or utc_now_timestamp(),
+        observed_at=failure_at,
         reason=safe_reason,
+        failure_reference=reference
+        if safe_reason != ProductionChangeRequiresPromotion.code
+        else None,
+        failure_event=True,
     )
 
 
@@ -947,7 +995,7 @@ def _recover_delivery_failures(
         ):
             continue
         key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
-        failures = _delivery_failure_observations(store, incident)
+        failures = store.list_delivery_failure_observations(incident_id=incident.incident_id)
         failed_at, rollback_only = _delivery_failure_evidence(
             store, lane, incident, failures, index
         )
@@ -970,43 +1018,39 @@ def _recover_delivery_failures(
                 and record.instance == "prod"
             )
 
+        recovery_summary = ""
         if index.matching_success(
             lane.context,
             key,
             failed_at,
             verify_deployment,
+            finished_before=now,
         ):
-            _observe(
-                store,
-                profile,
-                lane,
-                check_name=incident.check_name,
-                failed=False,
-                summary="The matching production delivery succeeded.",
-                observed_at=now,
-            )
-        elif rollback_only and (
-            recovery := _later_passing_rollback(store, lane, failed_at, now, index)
-        ):
-            _observe(
-                store,
-                profile,
-                lane,
-                check_name=incident.check_name,
-                failed=False,
-                summary=f"The failed production rollback recovered through {recovery}.",
-                observed_at=now,
-            )
+            recovery_summary = "The matching production delivery succeeded."
         elif (
-            not _is_refusal_only_incident(store, incident)
-            and incident.latest_observed_at != now
-            and all(_time(f.observed_at) != _time(now) for f in failures)
+            profile.driver_id == "generic-web"
+            and rollback_only
+            and (recovery := _later_passing_rollback(store, lane, failed_at, now, index))
         ):
+            recovery_summary = f"The failed production rollback recovered through {recovery}."
+        if recovery_summary:
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=False,
+                summary=recovery_summary,
+                observed_at=now,
+                expected_incident_sha256=public_ingress_incident_record_sha256(incident),
+            )
+        elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
                 if incident.material_fingerprint
                 else "delivery_failed"
             )
+            previous = store.read_public_ingress_observation_record(incident.latest_observation_id)
             _observe(
                 store,
                 profile,
@@ -1016,6 +1060,15 @@ def _recover_delivery_failures(
                 summary=incident.summary,
                 observed_at=now,
                 reason=reason,
+                failure_reference=_delivery_failure_reference(
+                    DeliveryFailureObservation(
+                        summary=previous.summary,
+                        observed_at=previous.observed_at,
+                        target_url=previous.targets[0].url if previous.targets else "",
+                    )
+                )
+                if previous.targets and urlsplit(previous.targets[0].url).query
+                else None,
             )
 
 
@@ -1032,31 +1085,44 @@ def _delivery_failure_trace(summary: str) -> str:
     return match[1] if match else ""
 
 
-def _delivery_failure_observations(
-    store: Store, incident: PublicIngressIncidentRecord
-) -> tuple[PublicIngressObservationRecord, ...]:
-    failures: dict[str, PublicIngressObservationRecord] = {}
-    for observation in store.list_public_ingress_observation_records(
-        incident_id=incident.incident_id
-    ):
-        if observation.status != "fail":
-            continue
-        previous = failures.get(observation.summary)
-        if previous is None or _time(observation.observed_at) < _time(previous.observed_at):
-            failures[observation.summary] = observation
-    return tuple(failures.values())
+def _delivery_failure_reference(
+    observation: DeliveryFailureObservation,
+) -> DeliveryFailureReference:
+    parsed = urlsplit(observation.target_url)
+    if parsed.query:
+        metadata = parse_qs(parsed.query, keep_blank_values=True)
+        if (
+            parsed.scheme != "provider"
+            or parsed.netloc != "launchplane"
+            or not parsed.path.startswith("/production-delivery/")
+            or set(metadata) != {"trace", "failed_at"}
+            or any(len(values) != 1 for values in metadata.values())
+            or re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", metadata["trace"][0]) is None
+        ):
+            raise ValueError("Stored production delivery failure reference is invalid.")
+        return DeliveryFailureReference(
+            trace_id=metadata["trace"][0],
+            failed_at=_canonical_time(metadata["failed_at"][0]),
+        )
+    return DeliveryFailureReference(
+        trace_id=_delivery_failure_trace(observation.summary),
+        failed_at=_canonical_time(observation.observed_at),
+    )
 
 
 def _delivery_failure_evidence(
     store: Store,
     lane: ProductLaneProfile,
     incident: PublicIngressIncidentRecord,
-    failures: tuple[PublicIngressObservationRecord, ...],
+    failures: tuple[DeliveryFailureObservation, ...],
     index: DeliveryEvidenceIndex,
 ) -> tuple[str, bool]:
-    latest = max([_time(incident.opened_at)] + [_time(f.observed_at) for f in failures])
+    references = tuple(_delivery_failure_reference(failure) for failure in failures)
+    latest = max(
+        [_time(incident.opened_at)] + [_time(reference.failed_at) for reference in references]
+    )
     key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
-    traces = {_delivery_failure_trace(f.summary) for f in failures}
+    traces = {reference.trace_id for reference in references}
     record_ids = dict.fromkeys(
         [
             *traces,
@@ -1156,3 +1222,12 @@ def _monitor_availability(
 def _time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _canonical_time(value: str) -> str:
+    return (
+        _time(value)
+        .astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )

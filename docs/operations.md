@@ -2023,6 +2023,12 @@ deployment evidence records forward or rollback intent; legacy promotion-recover
 and drill deployments retain recognition by their rollback record ID suffix, and
 two-slot switch-backs by their recorded deploy mode. Unmarked legacy admin
 rollbacks and Odoo in-place rollbacks retain matching-artifact recovery only.
+New failure observations retain their source trace and actual failure time in
+the provider target URL query. This metadata does not change the incident's
+provider/path fingerprint; reminders copy the original reference. Recovery reads
+one compact entry per failure cause, comparing legacy timestamps as instants and
+retaining the latest canonical failure time for new evidence. Different failures
+at the same time retain distinct observations, while an exact replay is idempotent.
 Recovery uses the ordinary passing observation and preserves the original failure.
 Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
 rollback, or a rollback on another lane cannot resolve that failure.

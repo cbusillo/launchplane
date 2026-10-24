@@ -121,6 +121,13 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                 )
                 incidents = self.store.list_public_ingress_incident_records(status="open")
                 self.assertEqual(len(incidents), 2)
+                for incident in incidents:
+                    observation = self.store.read_public_ingress_observation_record(
+                        incident.latest_observation_id
+                    )
+                    self.store.write_public_ingress_observation_record(
+                        observation.model_copy(update={"summary": "Updated human-readable wording"})
+                    )
                 self.now += timedelta(seconds=10)
                 rollback = self.deploy("new-drill")
                 rollback = rollback.model_copy(
@@ -316,6 +323,159 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                             ).status,
                             "resolved",
                         )
+
+    def test_distinct_same_time_failures_survive_and_exact_replays_are_idempotent(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                traces = {"first-operation", "second-operation"}
+                for trace in sorted(traces):
+                    record_production_delivery_failure(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        candidate="image@candidate",
+                        reason="deployment_failed",
+                        trace_id=trace,
+                        observed_at=self.now.isoformat(),
+                    )
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                before = self.store.list_public_ingress_observation_records(
+                    incident_id=incident.incident_id
+                )
+                self.assertEqual(len(before), len(traces))
+                for trace in traces:
+                    self.assertTrue(any(trace in observation.summary for observation in before))
+                record_production_delivery_failure(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    candidate="image@candidate",
+                    reason="deployment_failed",
+                    trace_id="second-operation",
+                    observed_at=self.now.isoformat(),
+                )
+                self.assertEqual(
+                    self.store.list_public_ingress_observation_records(
+                        incident_id=incident.incident_id
+                    ),
+                    before,
+                )
+
+    def test_recovery_reads_compact_failures_and_does_not_treat_reminders_as_new_failures(
+        self,
+    ) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                self.deploy("target-rollback", failed=True)
+                self.monitor()
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                began = self.now
+                initial = self.store.read_public_ingress_observation_record(
+                    incident.latest_observation_id
+                )
+                self.store.write_public_ingress_observation_record(
+                    initial.model_copy(
+                        update={
+                            "targets": tuple(
+                                target.model_copy(update={"url": target.url.split("?", 1)[0]})
+                                for target in initial.targets
+                            )
+                        }
+                    )
+                )
+                _observe(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    check_name=incident.check_name,
+                    failed=True,
+                    summary=incident.summary,
+                    observed_at=(began + timedelta(minutes=1))
+                    .astimezone(timezone(timedelta(hours=-4)))
+                    .isoformat(),
+                    reason="deployment_failed",
+                )
+                for _ in range(20):
+                    self.now += timedelta(minutes=1)
+                    self.monitor()
+                self.now = began + timedelta(seconds=30)
+                self.deploy("passing-rollback")
+                self.now = began + timedelta(minutes=21)
+                with patch.object(
+                    self.store,
+                    "list_public_ingress_observation_records",
+                    side_effect=AssertionError("Recovery must not hydrate reminder history"),
+                ):
+                    self.monitor()
+                self.assertEqual(
+                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                    "resolved",
+                )
+
+    def test_malformed_structured_failure_evidence_cannot_fall_back_to_display_text(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                original = self.deploy("target-rollback", failed=True)
+                self.monitor()
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                observation = self.store.read_public_ingress_observation_record(
+                    incident.latest_observation_id
+                )
+                self.store.write_public_ingress_observation_record(
+                    observation.model_copy(
+                        update={
+                            "targets": tuple(
+                                target.model_copy(
+                                    update={"url": target.url + "&" + target.url.split("?", 1)[1]}
+                                )
+                                for target in observation.targets
+                            )
+                        }
+                    )
+                )
+                self.now += timedelta(seconds=1)
+                success = self.deploy("passing-rollback")
+                success.artifact_identity = original.artifact_identity
+                self.store.write_deployment_record(success)
+                with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+                    self.monitor()
+                self.assertEqual(
+                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                    "open",
+                )
+
+    def test_matching_success_checks_another_candidate_after_verification_rejects_one(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                began = self.now
+                self.now += timedelta(seconds=1)
+                first = self.deploy("first")
+                self.now += timedelta(seconds=1)
+                second = self.deploy("second")
+                second.artifact_identity = first.artifact_identity
+                self.store.write_deployment_record(second)
+                self.monitor()
+                seen: set[str] = set()
+                assert first.artifact_identity is not None
+
+                def verify(record_id: str) -> bool:
+                    seen.add(record_id)
+                    return len(seen) > 1
+
+                with self.store.delivery_evidence_index() as index:
+                    self.assertTrue(
+                        index.matching_success(
+                            self.lane.context,
+                            _candidate_key(first.artifact_identity.artifact_id),
+                            began.isoformat(),
+                            verify,
+                        )
+                    )
+                self.assertEqual(seen, {first.record_id, second.record_id})
 
     def test_large_history_is_paged_then_idle_and_late_updates_read_only_changed_sources(
         self,

@@ -5773,6 +5773,64 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             self.assertEqual(store.list_discussion_topics("site-b"), ())
             self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
 
+    def test_delivery_failure_aggregation_keeps_event_time_across_mixed_offset_reminders(
+        self,
+    ) -> None:
+        from control_plane.production_delivery_monitor import (
+            _canonical_time,
+            _delivery_failure_reference,
+            _observe,
+            record_production_delivery_failure,
+        )
+        from control_plane.storage.delivery_evidence import DeliveryFailureObservation
+        from tests.test_public_ingress_monitor import _profile
+
+        profile = _profile()
+        lane = profile.lanes[0]
+        began = datetime.now(timezone.utc)
+        with _store_for_fresh_head_database() as store:
+            store.write_product_profile_record(profile)
+            for moment in (began, began + timedelta(seconds=2)):
+                record_production_delivery_failure(
+                    store,
+                    profile,
+                    lane,
+                    candidate="fixture-artifact",
+                    reason="deployment_failed",
+                    trace_id="fixture-operation",
+                    observed_at=moment.isoformat(),
+                )
+            incident = store.list_public_ingress_incident_records(status="open")[0]
+            observation = store.read_public_ingress_observation_record(
+                incident.latest_observation_id
+            )
+            reference = _delivery_failure_reference(
+                DeliveryFailureObservation(
+                    summary=observation.summary,
+                    observed_at=observation.observed_at,
+                    target_url=observation.targets[0].url,
+                )
+            )
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=True,
+                summary=observation.summary,
+                reason="deployment_failed",
+                observed_at=(began + timedelta(minutes=1))
+                .astimezone(timezone(timedelta(hours=-4)))
+                .isoformat(),
+                failure_reference=reference,
+            )
+            compact = store.list_delivery_failure_observations(incident_id=incident.incident_id)
+            self.assertEqual(len(compact), 1)
+            self.assertEqual(
+                _canonical_time(compact[0].observed_at), _canonical_time(began.isoformat())
+            )
+            self.assertEqual(_delivery_failure_reference(compact[0]), reference)
+
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.postgres import LaunchplaneDeploymentRow

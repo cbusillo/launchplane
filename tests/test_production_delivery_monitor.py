@@ -820,6 +820,41 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertIn("launchplane_req_failure", str(sender.call_args))
         self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
+    def test_recovery_preserves_a_failure_arriving_during_its_commit(self) -> None:
+        self.reject()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=1)
+        self.deploy(self.head)
+        original = self.store.write_public_ingress_transition_with_outbox
+        raced = False
+
+        def race(**kwargs: Any) -> object:
+            nonlocal raced
+            if not raced and kwargs["observation"].status == "pass":
+                raced = True
+                with patch.object(
+                    self.store, "write_public_ingress_transition_with_outbox", original
+                ):
+                    record_production_delivery_failure(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        candidate="image@" + self.head,
+                        reason="deployment_failed",
+                        trace_id="concurrent-failure",
+                        observed_at=self.timestamp(),
+                    )
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "write_public_ingress_transition_with_outbox", side_effect=race
+        ):
+            self.monitor()
+        self.assertTrue(raced)
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
+        )
+
     def test_only_a_later_matching_release_clears_failure(self) -> None:
         self.reject()
         self.now += timedelta(minutes=1)

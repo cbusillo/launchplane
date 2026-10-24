@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
+    normalized_time,
     FILESYSTEM_TYPES,
     filesystem_index,
     source_changed,
@@ -4606,6 +4608,15 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        return self._read_model(
+            PublicIngressObservationRecord,
+            "launchplane_public_ingress_observations",
+            record_id,
+        )
+
     def list_public_ingress_observation_records(
         self,
         *,
@@ -4640,6 +4651,27 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        failures: dict[str, DeliveryFailureObservation] = {}
+        for observation in self._list_models(
+            PublicIngressObservationRecord, "launchplane_public_ingress_observations"
+        ):
+            if observation.incident_id != incident_id or observation.status != "fail":
+                continue
+            previous = failures.get(observation.summary)
+            observed_at = observation.observed_at
+            target_url = observation.targets[0].url if observation.targets else ""
+            if previous is not None:
+                if normalized_time(previous.observed_at) < normalized_time(observed_at):
+                    observed_at = previous.observed_at
+                target_url = max(target_url, previous.target_url)
+            failures[observation.summary] = DeliveryFailureObservation(
+                summary=observation.summary, observed_at=observed_at, target_url=target_url
+            )
+        return tuple(failures[summary] for summary in sorted(failures))
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
