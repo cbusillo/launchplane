@@ -23,9 +23,8 @@ existing admission checks.
 `preview.clean_testing_snapshot` opts a product into clean snapshots. It
 requires the testing lane's reviewed `odoo_testing_drill_storage` budget.
 Scheduled refresh remains separately enabled by `odoo_testing_drill_enabled`.
-For snapshot products, `preview.clean_snapshot_refresh_hour_utc` selects the
-nightly UTC hour; products are staggered inside that hour. The default is
-05:00 UTC. A missed slot can catch up when the scheduler resumes. The same
+Snapshot products are staggered inside the scheduler's nightly window.
+A missed slot can catch up when the scheduler resumes. The same
 existing worker executes the operation.
 
 Capture occurs after sanitization and readback, while testing web is stopped.

@@ -335,7 +335,7 @@ class TestingDrillTests(TestingDrillScenario):
             "post_deploy_readback_testing_copy_sanitized": "true",
             "post_deploy_readback_integration_readback_ok": "true",
             "post_deploy_readback_odoo_restore_completed": "true",
-            "post_deploy_readback_clean_testing_snapshot_completed": "false",
+            "post_deploy_readback_clean_testing_snapshot_completed": "true",
             "post_deploy_readback_clean_snapshot_database_sha256": "b" * 64,
             "post_deploy_readback_clean_snapshot_filestore_sha256": "c" * 64,
             "post_deploy_readback_clean_snapshot_server_id": "fixture-server",
@@ -359,18 +359,24 @@ class TestingDrillTests(TestingDrillScenario):
                 "result": result,
             }
         )
-        with self.assertRaises(ValueError):
-            self.store.complete_odoo_stable_target_replacement_operation_record(
-                record=completed,
-                lease_owner=operation.lease_owner,
+        for marker in (
+            "testing_copy_sanitized",
+            "integration_readback_ok",
+            "odoo_restore_completed",
+            "clean_testing_snapshot_completed",
+        ):
+            key = "post_deploy_readback_" + marker
+            result.post_deploy_override_evidence[key] = "false"
+            with self.subTest(marker=marker), self.assertRaises(ValueError):
+                self.store.complete_odoo_stable_target_replacement_operation_record(
+                    record=completed,
+                    lease_owner=operation.lease_owner,
+                )
+            self.assertEqual(self.operation().status, "running")
+            self.assertEqual(
+                self.store.read_clean_testing_snapshot(profile.product, self.context), previous
             )
-        self.assertEqual(self.operation().status, "running")
-        self.assertEqual(
-            self.store.read_clean_testing_snapshot(profile.product, self.context), previous
-        )
-        result.post_deploy_override_evidence[
-            "post_deploy_readback_clean_testing_snapshot_completed"
-        ] = "true"
+            result.post_deploy_override_evidence[key] = "true"
         self.assertTrue(
             self.store.complete_odoo_stable_target_replacement_operation_record(
                 record=completed,
@@ -382,20 +388,23 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertEqual(published.snapshot_id, generation_binding(current))
         self.assertEqual(self.operation().status, "pass")
 
-    def test_snapshot_refresh_slot_turns_over_in_the_products_configured_night_hour(self) -> None:
-        from control_plane.odoo_testing_drill import lane_key
+    def test_snapshot_refresh_slot_turns_over_in_the_nightly_window(self) -> None:
+        from control_plane.odoo_testing_drill import CLEAN_SNAPSHOT_REFRESH_HOUR_UTC
 
         profile = self.profile.model_copy(deep=True)
         profile.preview.clean_testing_snapshot = True
-        old_offset = int(lane_key(profile.product, self.context)[:8], 16) % DRILL_INTERVAL_SECONDS
-        hour = (old_offset // 3600 + 6) % 24
-        profile.preview.clean_snapshot_refresh_hour_utc = hour
+        hour = CLEAN_SNAPSHOT_REFRESH_HOUR_UTC
+        old_offset = ((hour + 6) % 24) * 3600
+        key = f"{old_offset:08x}" + "0" * 56
         now = (
             datetime.now(timezone.utc)
             .replace(hour=0, minute=0, second=0, microsecond=0)
             .timestamp()
         )
-        with patch.object(self.store, "enqueue_odoo_testing_drill") as enqueue:
+        with (
+            patch.object(self.store, "enqueue_odoo_testing_drill") as enqueue,
+            patch("control_plane.odoo_testing_drill.lane_key", return_value=key),
+        ):
             self.scheduler._advance_lane(profile, self.context, now + hour * 3600 - 1)
             first = enqueue.call_args.args[2]
             self.scheduler._advance_lane(profile, self.context, now + (hour + 1) * 3600)

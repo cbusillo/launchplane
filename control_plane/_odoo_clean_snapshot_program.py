@@ -10,14 +10,15 @@ import re
 import stat
 
 
-def clean_snapshot_root(snapshot_id):
+def clean_snapshot_root(snapshot_id, *, create=True):
     if not re.fullmatch(r'[a-f0-9]{64}', snapshot_id):
         raise RuntimeError('Invalid clean snapshot identity')
-    root = Path.home() / '.local/state/launchplane-clean-testing-snapshots'
+    root = Path.home() / CLEAN_SNAPSHOT_STATE_DIRECTORY
     if root.resolve() != root.absolute():
         raise RuntimeError('Clean snapshot custody is aliased')
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    if create:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
     return root / snapshot_id
 
 
@@ -74,10 +75,6 @@ def capture_clean_snapshot(spec, containers):
     if filestore.resolve() != filestore.absolute():
         raise RuntimeError('Clean snapshot source filestore is aliased')
     expected_tree = snapshot_tree_digest(filestore, budget['filestore_bytes'])
-    free = os.statvfs(destination.parent)
-    required = budget['database_bytes'] + budget['filestore_bytes'] + budget['reserve_bytes']
-    if free.f_bavail * free.f_frsize < required:
-        raise RuntimeError('Clean snapshot storage headroom is insufficient')
     with tempfile.TemporaryDirectory(prefix=snapshot_id + '-', dir=destination.parent) as temporary:
         path = Path(temporary)
         status, _, _ = capture_snapshot_file(
@@ -97,6 +94,7 @@ def capture_clean_snapshot(spec, containers):
             json.dump(receipt, output, sort_keys=True)
             output.flush()
             os.fsync(output.fileno())
+        sync_snapshot_directory(path)
         os.rename(path, destination)
         descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:

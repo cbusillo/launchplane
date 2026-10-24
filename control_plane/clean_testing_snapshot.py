@@ -44,8 +44,6 @@ class CleanTestingSnapshotStore(Protocol):
         self, product: str, context: str
     ) -> CleanTestingSnapshot | None: ...
 
-    def write_clean_testing_snapshot(self, record: CleanTestingSnapshot) -> None: ...
-
 
 def snapshot_lane_key(product: str, context: str) -> str:
     return canonical_json_sha256([product, context, "testing"])
@@ -59,8 +57,6 @@ def snapshot_storage_budget(
     lane = next(
         item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
     )
-    if lane.odoo_testing_drill_storage is None:
-        raise ValueError("Clean snapshots require reviewed testing storage headroom.")
     return lane.odoo_testing_drill_storage
 
 
@@ -79,28 +75,6 @@ def preview_snapshot(
     if (snapshot.product, snapshot.context) != (profile.product, profile.preview.context):
         raise ValueError("The clean snapshot belongs to another product or context.")
     return snapshot
-
-
-def publish_clean_testing_snapshot(
-    store: CleanTestingSnapshotStore,
-    *,
-    product: str,
-    context: str,
-    snapshot_id: str,
-    server_id: str,
-    evidence: dict[str, str],
-    captured_at: str,
-) -> CleanTestingSnapshot:
-    record = clean_snapshot_from_evidence(
-        product=product,
-        context=context,
-        snapshot_id=snapshot_id,
-        server_id=server_id,
-        evidence=evidence,
-        captured_at=captured_at,
-    )
-    store.write_clean_testing_snapshot(record)
-    return record
 
 
 def clean_snapshot_from_evidence(

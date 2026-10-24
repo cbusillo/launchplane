@@ -1,4 +1,8 @@
-SNAPSHOT_FILES_LIBRARY = r"""
+CLEAN_SNAPSHOT_STATE_DIRECTORY = ".local/state/launchplane-clean-testing-snapshots"
+
+SNAPSHOT_FILES_LIBRARY = (
+    f"CLEAN_SNAPSHOT_STATE_DIRECTORY = {CLEAN_SNAPSHOT_STATE_DIRECTORY!r}\n"
+    + r"""
 import hashlib
 import os
 import selectors
@@ -6,8 +10,11 @@ import subprocess
 
 
 def snapshot_file_digest(path):
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
@@ -37,7 +44,7 @@ def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
             output.flush()
             os.fsync(output.fileno())
         status = process.wait(timeout=30)
-        if not size:
+        if not size and not status:
             raise RuntimeError('Incomplete source copy')
         return status, errors, error_bytes > len(errors)
     finally:
@@ -50,4 +57,19 @@ def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+
+
+def sync_snapshot_directory(path):
+    for entry in path.rglob('*'):
+        if entry.is_file():
+            with entry.open('rb') as stream:
+                os.fsync(stream.fileno())
+    directories = [entry for entry in path.rglob('*') if entry.is_dir()]
+    for directory in sorted(directories, key=lambda entry: len(entry.parts), reverse=True) + [path]:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 """
+)

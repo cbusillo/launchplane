@@ -5,6 +5,8 @@ import json
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane.odoo_testing_restore import TESTING_COPY_RUNNER
+from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
+from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 
 
 def build_preview_clean_snapshot_script(
@@ -15,6 +17,7 @@ def build_preview_clean_snapshot_script(
     database_name: str,
     image_reference: str,
     workflow_environment: dict[str, str],
+    runtime_environment: dict[str, str],
     readback_spec: str,
     readback_program: str,
     web_gate_path: str,
@@ -35,6 +38,16 @@ def build_preview_clean_snapshot_script(
         "readback_program": readback_program,
         "web_gate_path": web_gate_path,
         "runner": "expected_copy_instance = 'preview'\n" + TESTING_COPY_RUNNER,
+        "generation": {"instance": "preview", "namespace": compose_project},
+        "preview_volumes": {
+            "data": runtime_environment.get("ODOO_DATA_VOLUME", ""),
+            "database": runtime_environment.get("ODOO_DB_VOLUME", ""),
+            "logs": runtime_environment.get("ODOO_LOG_VOLUME", ""),
+        },
+        "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+        "expected_overrides_payload": runtime_environment.get(
+            "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""
+        ),
     }
     encoded = base64.b64encode(gzip.compress(json.dumps(spec).encode(), mtime=0)).decode()
     program = base64.b64encode(
@@ -51,6 +64,7 @@ def build_preview_clean_snapshot_script(
 
 PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
     CLEAN_TESTING_SNAPSHOT_LIBRARY
+    + COPY_RUNTIME_INSPECTION_LIBRARY
     + r"""
 import base64
 import shutil
@@ -70,41 +84,11 @@ def docker(*arguments, stdin=None):
     return command(['docker', *arguments], stdin=stdin)
 
 
-def preview_snapshot_containers():
-    project = spec['compose_project']
-    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', project):
-        raise RuntimeError('Invalid preview compose identity')
-    containers = {}
-    identifiers = docker('ps', '--all', '--filter', 'label=com.docker.compose.project=' + project,
-        '--format', '{{.ID}}').decode().splitlines()
-    for identifier in identifiers:
-        rows = json.loads(docker('inspect', identifier))
-        if len(rows) != 1:
-            raise RuntimeError('Preview container inspection is ambiguous')
-        row = rows[0]
-        labels = row['Config'].get('Labels') or {}
-        if labels.get('com.docker.compose.project') != project:
-            raise RuntimeError('Preview container changed ownership')
-        role = labels.get('com.docker.compose.service')
-        if role not in {'database', 'web', 'script-runner'}:
-            continue
-        if role in containers:
-            raise RuntimeError('Preview service identity is ambiguous')
-        if any(mount.get('Type') != 'volume' for mount in row.get('Mounts', [])):
-            raise RuntimeError('Snapshot previews cannot hold host mounts')
-        if role != 'database':
-            environment = dict(item.split('=', 1) for item in row['Config'].get('Env', []) if '=' in item)
-            if (environment.get('PLATFORM_INSTANCE') != 'preview'
-                or environment.get('ODOO_DB_NAME') != spec['database_name']
-                or environment.get('ODOO_DB_HOST') != 'database'
-                or any(key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) and value
-                    for key, value in environment.items())
-                or row['Config'].get('Image') != spec['image_reference']):
-                raise RuntimeError('Snapshot preview runtime no longer matches its issued intent')
-        containers[role] = (identifier, row)
-    if set(containers) != {'database', 'web', 'script-runner'}:
-        raise RuntimeError('Preview services are incomplete')
-    return containers
+def one_inspection(identifier):
+    rows = json.loads(docker('inspect', identifier))
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError('Preview inspection is ambiguous')
+    return rows[0]
 
 
 def restore_preview_snapshot():
@@ -112,7 +96,7 @@ def restore_preview_snapshot():
     path, receipt = verified_clean_snapshot(snapshot['snapshot_id'])
     if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
         raise RuntimeError('The clean snapshot differs from its service receipt')
-    containers = preview_snapshot_containers()
+    containers = inspect_copy_runtime(spec, expected_instance='preview')
     database = spec['database_name']
     if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}', database):
         raise RuntimeError('Invalid preview database identity')

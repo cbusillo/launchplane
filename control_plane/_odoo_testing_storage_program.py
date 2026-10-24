@@ -64,6 +64,11 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if not upper:
             raise RuntimeError('Database staging backing is unavailable')
         demand(upper, database_staging_bytes)
+    if gen.get('clean_snapshot_enabled'):
+        snapshot_path = clean_snapshot_root(spec['copy_binding_sha256'], create=False).parent
+        while not snapshot_path.exists():
+            snapshot_path = snapshot_path.parent
+        demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
     return capacity
 """.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))

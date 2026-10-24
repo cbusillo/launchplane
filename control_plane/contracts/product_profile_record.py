@@ -35,7 +35,6 @@ FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
     {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
 )
 TRANSPORT_DATABASE_PREFIX_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
-CLEAN_SNAPSHOT_REFRESH_HOUR_UTC = 5
 PROMOTION_WORKFLOW_INPUTS = (
     "dry_run",
     "bump",
@@ -404,13 +403,6 @@ class ProductPreviewProfile(BaseModel):
     clean_testing_snapshot: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-    clean_snapshot_refresh_hour_utc: int = Field(
-        default=CLEAN_SNAPSHOT_REFRESH_HOUR_UTC,
-        ge=0,
-        le=23,
-        exclude_if=lambda value: value == CLEAN_SNAPSHOT_REFRESH_HOUR_UTC,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     context: str = ""

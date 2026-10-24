@@ -63,6 +63,7 @@ from control_plane.lane_usage import (
 )
 
 DRILL_INTERVAL_SECONDS = 24 * 60 * 60
+CLEAN_SNAPSHOT_REFRESH_HOUR_UTC = 5
 DRILL_TIMEOUT_SECONDS = 2 * 60 * 60
 DRILL_POLL_SECONDS = 30
 DRILL_ALERT_RETRY_SECONDS = 300
@@ -315,9 +316,6 @@ def prepare_drill(
     """Build a read-only candidate; the caller revalidates it under authority locks."""
     require_drill_use_unprotected(store, product, context, now=now)
     profile = store.read_product_profile_record(product)
-    from control_plane.clean_testing_snapshot import snapshot_storage_budget
-
-    snapshot_storage_budget(profile, context)
     if profile.driver_id != "odoo" or not profile.is_active:
         raise DrillSkipped("not_active_odoo")
     lane = next(
@@ -566,9 +564,7 @@ class OdooTestingDrillScheduler:
             return
         offset = int(prefix[:8], 16) % DRILL_INTERVAL_SECONDS
         if profile.preview.clean_testing_snapshot:
-            offset = (
-                profile.preview.clean_snapshot_refresh_hour_utc * 3600 + int(prefix[:8], 16) % 3600
-            )
+            offset = CLEAN_SNAPSHOT_REFRESH_HOUR_UTC * 3600 + int(prefix[:8], 16) % 3600
         key = f"{prefix}:{int((now - offset) // DRILL_INTERVAL_SECONDS)}"
         self.store.enqueue_odoo_testing_drill(profile.product, context, key, now)
 

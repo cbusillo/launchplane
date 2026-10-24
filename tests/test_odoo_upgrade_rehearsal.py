@@ -2664,22 +2664,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
-        (root / "verify.started").touch()
-        with self.assertRaises(self.host["RehearsalCommandFailure"]):
-            with self.host["command_failure_scope"](spec, root):
-                self.host["bounded_capture"](
-                    [
-                        sys.executable,
-                        "-c",
-                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
-                    ],
-                    root / "partial.dump",
-                    1024,
-                )
-        diagnostic = self.host["read_command_failure"](spec, root)
-        self.assertEqual(diagnostic["exit_status"], 7)
-        self.assertEqual(diagnostic["error_text"], "")
-        self.assertNotIn("private capture bytes", str(diagnostic))
+        for name, output in (("verbose", "private capture bytes"), ("quiet", "")):
+            with self.subTest(name=name):
+                capture_root = root / name
+                capture_root.mkdir()
+                (capture_root / "verify.started").touch()
+                with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                    with self.host["command_failure_scope"](spec, capture_root):
+                        self.host["bounded_capture"](
+                            [
+                                sys.executable,
+                                "-c",
+                                f"import sys;sys.stdout.write({output!r});sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
+                            ],
+                            capture_root / "partial.dump",
+                            1024,
+                        )
+                diagnostic = self.host["read_command_failure"](spec, capture_root)
+                self.assertEqual(diagnostic["exit_status"], 7)
+                self.assertEqual(diagnostic["error_text"], "")
+                self.assertNotIn("private capture bytes", str(diagnostic))
 
     @staticmethod
     def attachment_mismatch_fixture() -> dict[str, Any]:
