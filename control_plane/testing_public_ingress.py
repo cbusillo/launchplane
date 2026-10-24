@@ -402,12 +402,9 @@ class TestingPublicIngressAdapter:
                 )
                 if name.startswith("~") or matches:
                     current = self.client.get_proxy_host(h.id, public_only=True)
-                    if (
-                        current.id != h.id
-                        or set(current.domain_names) != set(h.domain_names)
-                        or _host_payload(current)
-                        != desired.model_dump(mode="json", exclude={"meta"})
-                    ):
+                    if set(current.domain_names) != set(h.domain_names) or _host_payload(
+                        current
+                    ) != desired.model_dump(mode="json", exclude={"meta"}):
                         raise ValueError("The testing hostname already has foreign edge authority.")
         for name in self.client.list_other_host_domains():
             if (
@@ -542,8 +539,7 @@ class TestingPublicIngressAdapter:
         endpoint = self.store.read_edge_endpoint_record(binding.ingress.endpoint_key)
         current = self.client.get_proxy_host(matches[0].id, public_only=True)
         if (
-            current.id != matches[0].id
-            or current.domain_names != matches[0].domain_names
+            current.domain_names != matches[0].domain_names
             or not current.advanced_config.startswith(_marker(self.request.reviewed_plan_sha256))
             or not current.enabled
             or not current.ssl_forced
@@ -639,9 +635,7 @@ class TestingPublicIngressAdapter:
             else:
                 raise ValueError("Testing edge authority is ambiguous.")
             actual = self.client.get_proxy_host(selected_id, public_only=True)
-            if actual.id != selected_id or _host_payload(actual) != desired.model_dump(
-                mode="json", exclude={"meta"}
-            ):
+            if _host_payload(actual) != desired.model_dump(mode="json", exclude={"meta"}):
                 raise ValueError("The provider did not preserve the exact testing route.")
             result_host.append(actual)
 

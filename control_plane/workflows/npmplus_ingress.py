@@ -249,18 +249,13 @@ def apply_npmplus_ingress_route(
         expected_host_id=request.expected_host_id,
         require_exact_expected_host_domains=request.require_exact_expected_host_domains,
     )
-    existing_host = client.get_proxy_host(claim.id) if claim is not None else None
-    if (
-        claim is not None
-        and existing_host is not None
-        and (
-            existing_host.id != claim.id
-            or set(existing_host.domain_names) != set(claim.domain_names)
-        )
-    ):
-        raise click.ClickException(
-            "The selected NPMplus hostname claim changed before qualification."
-        )
+    existing_host = None
+    if claim is not None:
+        existing_host = client.get_proxy_host(claim.id)
+        if set(existing_host.domain_names) != set(claim.domain_names):
+            raise click.ClickException(
+                "The selected NPMplus hostname claim changed before qualification."
+            )
     desired_payload = _inherit_existing_npmplus_fields(
         route=request.route,
         desired_payload=desired_payload,

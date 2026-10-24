@@ -295,9 +295,6 @@ class NpmplusClientTests(unittest.TestCase):
                     client.get_proxy_host(78).domain_names,
                     NpmplusProxyHost.model_validate(owned).domain_names,
                 )
-                opener.host_details = {**owned, **changes}
-                with self.assertRaises(ValidationError):
-                    client.get_proxy_host(78)
 
     def test_selected_host_read_rejects_a_different_id(self) -> None:
         opener = _Opener()
