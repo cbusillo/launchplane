@@ -948,6 +948,149 @@ class ApplicationFlowTests(unittest.TestCase):
             original_intent={"testing_activation": self.planned.model_dump(mode="json")},
         )
 
+    def prepare_external_discord(self) -> None:
+        from control_plane.contracts.testing_application import TestingApplicationExternalCredential
+
+        profile = self.store.read_product_profile_record(self.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD",
+                context=self.context,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        version = self.store.read_secret_version("testing-version")
+        ciphertext, key_id = secrets._encrypt_secret_value("MTIz.fixture.signature")
+        self.store.write_secret_version(
+            version.model_copy(
+                update={"ciphertext": ciphertext, "key_id": key_id, "value_origin": None}
+            )
+        )
+        self.specification = self.specification.model_copy(
+            update={
+                "local_credentials": (),
+                "external_credentials": (
+                    TestingApplicationExternalCredential(
+                        binding_key="DB_PASSWORD", guild_ids=("10",)
+                    ),
+                ),
+            }
+        )
+        self.prepare()
+        self.adapter.authorize_external = self.store.list_product_profile_records
+
+    def test_external_admission_persists_once_across_original_restart(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+
+        self.prepare_external_discord()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=ApplicationCredentialTests().discord_response,
+        ) as discord:
+            with patch.object(
+                self.adapter, "preflight_application_route", side_effect=KeyboardInterrupt
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.activate()
+            admitted = self.adapter.current()
+            self.assertTrue(admitted.external_capabilities)
+            self.assertFalse(admitted.project_id)
+            self.assertEqual(admitted.phase, "prepared")
+            self.assertEqual(admitted.plan_sha256, self.planned.plan_sha256)
+            reads = discord.call_count
+            self.assertGreater(reads, 0)
+            preflight = self.adapter.preflight_application_route
+
+            def inspect(record: TestingActivationRecord) -> Any:
+                proof = record.external_capabilities[0]
+                for proofs in (
+                    (),
+                    (proof.model_copy(update={"version_id": "foreign-version"}),),
+                    (proof, proof),
+                ):
+                    with self.subTest(proofs=proofs), self.assertRaises(ValueError):
+                        self.adapter.save(record, external_capabilities=proofs)
+                    self.assertEqual(self.adapter.current(), record)
+                return preflight(record)
+
+            with patch.object(self.adapter, "preflight_application_route", side_effect=inspect):
+                result = self.activate()
+            self.assertEqual(result.status, "completed", result)
+            self.assertEqual(
+                self.adapter.current().external_capabilities, admitted.external_capabilities
+            )
+            self.assertEqual(discord.call_count, reads)
+
+    def test_released_external_admission_reobserves_under_same_key(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare_external_discord()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=ApplicationCredentialTests().discord_response,
+        ) as discord:
+            with patch.object(
+                self.adapter,
+                "preflight_application_route",
+                side_effect=TestingActivationRefusal("Fixture pre-effect refusal"),
+            ):
+                with self.assertRaises(TestingActivationRefusal):
+                    self.activate()
+            self.assertFalse(self.adapter.current().external_capabilities)
+            reads = discord.call_count
+            self.assertGreater(reads, 0)
+            result = self.activate()
+            self.assertEqual(result.status, "completed", result)
+            self.assertGreater(discord.call_count, reads)
+            self.assertTrue(self.adapter.current().external_capabilities)
+            self.assertEqual(self.adapter.current().plan_sha256, self.planned.plan_sha256)
+
+    def test_external_admission_refuses_foreign_or_combined_progress(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+        from control_plane.testing_external_capabilities import observe_activation_discord
+
+        self.prepare_external_discord()
+
+        def observe(*args: Any, **kwargs: Any) -> Any:
+            proof = observe_activation_discord(*args, **kwargs)
+            record = self.adapter.current()
+            for changes in (
+                {"external_capabilities": (proof,), "phase": "create_project"},
+                {"external_capabilities": (proof,), "project_id": "foreign-project"},
+                {
+                    "external_capabilities": (
+                        proof.model_copy(update={"activation_plan_sha256": "f" * 64}),
+                    )
+                },
+                {"external_capabilities": (proof.model_copy(update={"binding_key": "OTHER"}),)},
+                {"external_capabilities": (proof.model_copy(update={"guild_ids": ("20",)}),)},
+                {"external_capabilities": (proof, proof)},
+            ):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    self.adapter.save(record, **changes)
+                self.assertEqual(self.adapter.current(), record)
+            late = self.adapter.save(record, phase="create_project")
+            with self.assertRaises(ValueError):
+                self.adapter.save(late, external_capabilities=(proof,))
+            self.assertEqual(self.adapter.current(), late)
+            raise KeyboardInterrupt
+
+        with (
+            patch(
+                "control_plane.discord_external_resources.request_public_http",
+                side_effect=ApplicationCredentialTests().discord_response,
+            ),
+            patch(
+                "control_plane.testing_external_capabilities.observe_activation_discord",
+                side_effect=observe,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.activate()
+
     def inspect_current_private_runtime(self) -> Any:
         from control_plane.testing_application_runtime import inspect_application_runtime
         from control_plane.testing_activation import preparation_resources

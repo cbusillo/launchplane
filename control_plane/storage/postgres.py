@@ -13983,6 +13983,41 @@ class PostgresRecordStore(HumanSessionStore):
                     "published_route_binding",
                     "failure",
                 }
+                if previous.external_capabilities != record.external_capabilities:
+                    specification = record.request.application
+                    if (
+                        not application
+                        or specification is None
+                        or len(specification.external_credentials) != 1
+                        or previous.external_capabilities
+                        or len(record.external_capabilities) != 1
+                        or previous.phase != "prepared"
+                        or previous.published
+                        or previous.failure is not None
+                        or previous.project_id
+                        or previous.environment_id
+                        or previous.target_id
+                        or previous.app_name
+                        or previous.state_recipient
+                        or previous.application_readiness is not None
+                        or previous.predecessor is not None
+                        or bundle is not None
+                        or reservation.provider_effect_started_at
+                        or previous.model_dump(exclude={"external_capabilities"})
+                        != record.model_dump(exclude={"external_capabilities"})
+                    ):
+                        raise ValueError(
+                            "External capability admission is append-once before effects."
+                        )
+                    proof = record.external_capabilities[0]
+                    reviewed = specification.external_credentials[0]
+                    if (
+                        proof.activation_plan_sha256 != record.plan_sha256
+                        or proof.binding_key != reviewed.binding_key
+                        or not set(proof.guild_ids).issubset(reviewed.guild_ids)
+                    ):
+                        raise ValueError("External capability evidence belongs to another review.")
+                    mutable.add("external_capabilities")
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
                 if previous.predecessor is not None and previous.predecessor != record.predecessor:
