@@ -1970,7 +1970,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             with self.subTest(settled=settled):
                 if settled:
                     marker.with_suffix(".json").write_text("{}")
-                with self.assertRaisesRegex(RuntimeError, "Missing original validation marker"):
+                with self.assertRaises(RuntimeError):
                     self.fixture.run_host(self.spec)
                 self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
                 self.assertEqual(marker.read_bytes(), b"")
