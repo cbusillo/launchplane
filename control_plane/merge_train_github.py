@@ -4711,6 +4711,7 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=base_branch,
                 owner_review_required=owner_review_required,
                 config_comparison=config_comparison,
+                source_screening=True,
                 owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
                 if owner_review_required
                 else None,
@@ -5233,6 +5234,7 @@ def _required_checks_observation(
     repository_path: str,
     encoded_head_sha: str,
     base_branch: str,
+    source_screening: bool = False,
     owner_review_required: bool = False,
     owner_review_app_id: int | None = None,
     config_comparison: "_ConfigComparison | None" = None,
@@ -5254,11 +5256,30 @@ def _required_checks_observation(
         encoded_head_sha=encoded_head_sha,
         required_checks=filtered_requirements,
     )
+    focused_source = False
+    raw_checks = check_runs_payload.get("check_runs")
+    raw_statuses = status_payload.get("statuses")
+    if source_screening and isinstance(raw_checks, list) and isinstance(raw_statuses, list):
+        observed_names = {
+            str(check.get("name", "")).casefold() for check in raw_checks if isinstance(check, dict)
+        }
+        status_names = {
+            str(status.get("context", "")).casefold()
+            for status in raw_statuses
+            if isinstance(status, dict)
+        }
+        if "pr-ci-gate" in observed_names and "ci-gate" not in observed_names | status_names:
+            focused_source = True
+            filtered_requirements = tuple(
+                ("pr-ci-gate" if name.casefold() == "ci-gate" else name, app_id)
+                for name, app_id in filtered_requirements
+            )
     required_status, missing = (
         _required_check_evidence_status(
             required_checks=filtered_requirements,
             status_payload=status_payload,
             check_runs_payload=check_runs_payload,
+            require_successful_runs=focused_source,
         )
         if filtered_requirements
         else ("pass" if config_comparison else "unknown", ())

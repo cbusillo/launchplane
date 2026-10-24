@@ -109,9 +109,10 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
         self.assertTrue(self.proof(ref="refs/heads/main"))
         self.assertFalse(self.proof())
 
-    def test_base_creation_reset_and_all_no_op_can_reuse_the_tested_commit(self) -> None:
+    def test_train_base_creation_reset_and_no_op_still_require_full_candidate_ci(self) -> None:
         self.responses[self.current_checks] = {"check_runs": [self.gate()]}
-        self.assertTrue(self.proof())
+        self.assertFalse(self.proof())
+        self.assertTrue(self.proof(ref="refs/heads/main"))
 
     def test_pr_or_fork_check_cannot_stand_in_for_main_commit_proof(self) -> None:
         self.responses[self.current_checks] = {"check_runs": [self.gate()]}

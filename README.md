@@ -45,7 +45,9 @@ uv run --extra dev python -m unittest tests.test_module_name
 Replace `tests.test_module_name` with the module for the changed behavior.
 During the [Q326 trial](docs/style/testing.md#local-test-loop), routine changes
 use focused local tests plus lint, type checks, and IDE inspection; the full
-sharded suite runs only in CI and must pass before `gh-pr.py ready` and merge.
+sharded suite runs only in CI. Under the approved Q778 pilot, supported ordinary
+PRs run affected whole test modules; `gh-pr.py ready` requires green current-head
+PR checks and merging requires the full suite on the exact train candidate.
 The approved Q375 refinement keeps safety classifications and adds whole
 modules for touched safety areas to local focused tests; testing style owns
 the selection rules.
