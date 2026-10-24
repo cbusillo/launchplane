@@ -466,6 +466,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 source_settings["ODOO_UPSTREAM_DB_NAME"],
             ],
         )
+        transfer = next(call for call in self.calls if call[0] == "rsync")
+        self.assertEqual(
+            set(transfer[1 : transfer.index("-e")]),
+            {"-a", "--no-links", "--no-devices", "--no-specials"},
+        )
         self.assertEqual(len([call for call in self.calls if call[0] == "ssh"]), 1)
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
@@ -509,6 +514,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 source["ODOO_UPSTREAM_DB_NAME"],
             ],
         )
+
+    def test_root_source_cannot_capture_a_filesystem_root_as_filestore(self) -> None:
+        self.spec["source"].update(ODOO_UPSTREAM_USER="root", ODOO_UPSTREAM_FILESTORE_PATH="///./")
+        status, _ = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
 
     def test_database_mount_at_another_path_refuses_before_source_capture(self) -> None:
         self.containers["database"]["Mounts"][0]["Destination"] = "/other-database"

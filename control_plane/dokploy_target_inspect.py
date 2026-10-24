@@ -456,6 +456,7 @@ def inspect_dokploy_target(
             "deploy_timeout_seconds": target_record.deploy_timeout_seconds,
             "source_label": target_record.source_label,
             "updated_at": target_record.updated_at,
+            "env_keys": sorted(target_record.env),
         }
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}

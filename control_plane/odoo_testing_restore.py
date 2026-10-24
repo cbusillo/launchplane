@@ -1082,7 +1082,7 @@ def restore_main():
                 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
                     raise RuntimeError("Unsupported restore source coordinate")
             path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
-            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
+            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path) or (source["ODOO_UPSTREAM_USER"] == "root" and len(Path(path).parts) == 1):
                 raise RuntimeError("Unsupported restore source filestore")
             destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
             ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
