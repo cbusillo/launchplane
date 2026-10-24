@@ -2448,10 +2448,9 @@ def _execute_target_replacement_with_checkpoint(
             else f"Continue observing the original testing effects after {type(error).__name__}."
         )
         if rebuild_pending:
-            if error.__cause__ is not None:
-                log_handled_error_cause(
-                    error.__cause__, operation.runner_trace_id, operation_id=operation.operation_id
-                )
+            log_handled_error_cause(
+                error, operation.runner_trace_id, operation_id=operation.operation_id
+            )
             logging.warning(
                 "Native testing rebuild %s remains pending: %s",
                 operation.operation_id,

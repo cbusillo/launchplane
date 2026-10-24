@@ -416,6 +416,12 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         await self.resume_and_complete_original_worker()
 
     async def test_pending_worker_logs_nested_source_sites_without_private_error_data(self) -> None:
+        await self.assert_pending_worker_source_sites(nested=True)
+
+    async def test_pending_worker_logs_error_without_cause(self) -> None:
+        await self.assert_pending_worker_source_sites(nested=False)
+
+    async def assert_pending_worker_source_sites(self, *, nested: bool) -> None:
         import json
         from datetime import timedelta
         from control_plane import http_error_evidence
@@ -436,13 +442,13 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         private = "private-provider-diagnostic-sentinel"
 
         def observe(**_kwargs: Any) -> None:
+            if not nested:
+                raise service.NativeTestingRebuildPending(private)
             try:
                 canonical_json.canonical_json_sha256({private: 0.5})
             except ValueError as error:
                 error.args = (private,)
-                raise service.NativeTestingRebuildPending(
-                    "Original observation remains pending"
-                ) from error
+                raise service.NativeTestingRebuildPending("Original observation remains pending")
 
         with (
             patch.object(worker, "execute_native_testing_rebuild", side_effect=observe),
@@ -460,10 +466,11 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
             )
         evidence = json.loads(logs.records[-1].getMessage())
         self.assertEqual(evidence["operation_id"], claimed.operation_id)
-        self.assertTrue(
-            any(site["module"] == canonical_json.__name__ for site in evidence["sites"]),
-            evidence,
-        )
+        if nested:
+            self.assertTrue(
+                any(site["module"] == canonical_json.__name__ for site in evidence["sites"]),
+                evidence,
+            )
         self.assertNotIn(private, str(logs.output))
         current = self.store.read_odoo_stable_target_replacement_operation_record(
             claimed.operation_id

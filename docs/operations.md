@@ -131,6 +131,8 @@ stderr and does not stop the service.
 
 Pending native testing rebuilds log bounded source module/line locations from
 their observation's exception chain, correlated with the original operation ID.
+Each exception contributes its innermost source location so deeper causes cannot
+displace the observation's own raise site.
 The same logger retains nested causes for handled HTTP errors. It omits exception
 text, payloads and local variables; these locations explain the waiting checkpoint
 without changing the operation's status, original key or recovery fences.
