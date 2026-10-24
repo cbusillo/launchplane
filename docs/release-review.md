@@ -244,9 +244,13 @@ checked-in destination catalog.
 
 The publisher reconciles an invitation only if the current Client's saved
 acceptance names the exact candidate now in production and its saved release
-run has passed. Equal versions alone, held
-approval, a running/stopped release, and missing evidence cannot complete an
-invitation. The existing invitation is marked released without another mention,
+run has finished: it passed, or it stopped on a failed or cancelled step with
+nothing still running or awaiting reconciliation. A stopped run settles with a
+line saying the release is live and which later check did not complete, and that
+nothing is needed from the Client. A stopped release that never reached
+production keeps its request open, since the Client can Accept again. Equal
+versions alone, held approval, a running release, and missing evidence cannot
+complete an invitation. The existing invitation is marked settled without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
 Completed or replaced comments and their preserved receipts are excluded from
