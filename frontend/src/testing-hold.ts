@@ -41,10 +41,16 @@ export function testingHoldPlanFromResponse(response: { result: unknown }, scope
   const result = scopedResult(response, scope);
   const before = checkedHold(result.before);
   if (result.action !== "clear" || result.changed !== true || result.applied !== false ||
-      before.purpose === "isolation_staging" || typeof result.plan_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(result.plan_sha256)) {
-    throw new Error("Launchplane did not return an ordinary testing hold lift to review.");
+      typeof result.plan_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(result.plan_sha256)) {
+    throw new Error("Launchplane did not return a testing hold lift to review.");
   }
   return { before, plan_sha256: result.plan_sha256 };
+}
+export function testingHoldLiftRequest(scope: TestingHoldScope, hold: TestingHold, reason: string): TestingHoldRequest {
+  return { ...scope, mode: "dry-run", hold: false, reason, ...(hold.purpose === "isolation_staging" ? { purpose: hold.purpose } : {}) };
+}
+export function liftRequestsReconcile(request: Pick<TestingHoldRequest, "purpose">): boolean {
+  return request.purpose !== "isolation_staging";
 }
 export function testingHoldIssueLink(hold: TestingHold): string | null {
   // Display a link as recorded in the reason; it grants no authority over the hold.
@@ -59,7 +65,7 @@ export function restoredTestingHoldRequest(raw: string | null, scope: TestingHol
     const request = object(JSON.parse(raw ?? "null"));
     if (request.product === scope.product && request.context === scope.context && request.instance === "testing" && scope.instance === "testing" &&
         request.mode === "apply" && request.hold === false && !request.rehearsal && !request.activation_plan_sha256 &&
-        (request.purpose === undefined || request.purpose === "staff_testing") &&
+        (request.purpose === undefined || request.purpose === "staff_testing" || request.purpose === "isolation_staging") &&
         typeof request.reason === "string" && request.reason.trim() && typeof request.reviewed_plan_sha256 === "string" && /^[a-f0-9]{64}$/.test(request.reviewed_plan_sha256)) {
       return request as TestingHoldRequest;
     }
