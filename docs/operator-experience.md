@@ -276,6 +276,8 @@ Topology reasons name the contributing configuration, route or runtime evidence;
 private-only lanes without route bindings use placement and runtime evidence.
 These explanations wrap fully rather than hiding behind a badge
 or ellipsis. A stale topology explanation does not relabel passing health.
+A testing lane under a testing hold says its deploys are held and for which
+purpose, in the directory and the workspace; the hold does not change its tone.
 Shared evidence badges wrap their full state label within the available width,
 including each lane's column in the narrow product directory.
 Combined lane and product evidence expire when their topology expires, even if

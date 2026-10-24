@@ -17,6 +17,7 @@ from control_plane.contracts.deployment_record import (
     DeploymentRecord,
     previous_passing_deployment,
 )
+from control_plane.contracts.dokploy_target_record import TestingHoldPurpose
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
@@ -37,6 +38,11 @@ from control_plane.contracts.runtime_dependency_health import (
     runtime_dependency_coverage_current,
 )
 from control_plane.runtime_dependency_health import derive_runtime_dependencies
+from control_plane.testing_lane_hold import (
+    TESTING_HOLD_INSTANCE,
+    TestingHoldReader,
+    read_staff_testing_hold,
+)
 from control_plane.contracts.product_incident_read_model import (
     ProductIncidentEnvironmentScope,
     ProductIncidentSummary,
@@ -474,6 +480,11 @@ class ProductEnvironmentSummary(BaseModel):
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     trust_state: FreshnessStatus
     provenance: DataProvenance
+    deploy_hold: TestingHoldPurpose | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     warnings: tuple[str, ...] = ()
     available_actions: tuple[ProductActionAvailability, ...] = ()
 
@@ -2214,6 +2225,7 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
+        deploy_hold=_testing_deploy_hold(record_store=record_store, lane=lane),
         warnings=(
             *integration_credential_warnings(lane_summary, record_store=record_store),
             *(warning.detail for warning in topology.warnings if warning.severity != "info"),
@@ -2246,6 +2258,15 @@ def _read_product_lane_summary(
         if driver.descriptor.product == profile.product or driver.driver_id == profile.driver_id:
             return driver.lane_summary
     return None
+
+
+def _testing_deploy_hold(
+    *, record_store: object, lane: ProductLaneProfile
+) -> TestingHoldPurpose | None:
+    if lane.instance != TESTING_HOLD_INSTANCE or not isinstance(record_store, TestingHoldReader):
+        return None
+    hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+    return hold.purpose if hold is not None else None
 
 
 def _missing_lane_provenance(lane: ProductLaneProfile) -> DataProvenance:
