@@ -458,23 +458,27 @@ class DeliveryEvidenceIndex:
         self,
         context: str,
         *,
-        passed: bool,
+        passed: bool | None = None,
         key: str = "",
         finished_before: str = "",
         finished_after: str = "",
+        finished_since: str = "",
     ) -> Iterator[str]:
         query = select(sources.c.source_id).where(
             sources.c.kind == "deployment",
             sources.c.context == context,
             sources.c.instance == "prod",
-            sources.c.passed.is_(passed),
         )
+        if passed is not None:
+            query = query.where(sources.c.passed.is_(passed))
         if key:
             query = query.where(or_(sources.c.artifact_key == key, sources.c.source_key == key))
         if finished_before:
             query = query.where(sources.c.finished_at <= normalized_time(finished_before))
         if finished_after:
             query = query.where(sources.c.finished_at > normalized_time(finished_after))
+        if finished_since:
+            query = query.where(sources.c.finished_at >= normalized_time(finished_since))
         with self.engine.connect() as connection:
             yield from connection.execute(
                 query.order_by(sources.c.finished_at.desc()).execution_options(yield_per=100)

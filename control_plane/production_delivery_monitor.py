@@ -14,7 +14,12 @@ from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
 from control_plane.build_provenance import BuildProvenanceTransport
-from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
+from control_plane.contracts.deployment_record import (
+    DEPLOYMENT_OPERATION_EVIDENCE_KEY,
+    DeploymentRecord,
+    deployment_operation_evidence,
+    deployment_record_passed,
+)
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -454,6 +459,7 @@ def record_production_delivery_failure(
             existing[0].material_fingerprint.route_authority.provider_check
             == "production-delivery/" + safe_reason
         )
+        and _delivery_failure_trace(existing[0].summary) == trace_id
     ):
         return
     safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
@@ -941,8 +947,12 @@ def _recover_delivery_failures(
         ):
             continue
         key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
+        failures = _delivery_failure_observations(store, incident)
+        failed_at, rollback_only = _delivery_failure_evidence(
+            store, lane, incident, failures, index
+        )
 
-        def verify_file(record_id: str) -> bool:
+        def verify_deployment(record_id: str) -> bool:
             try:
                 record = store.read_deployment_record(record_id)
             except FileNotFoundError:
@@ -952,16 +962,19 @@ def _recover_delivery_failures(
                 keys.add(_candidate_key(record.artifact_identity.artifact_id))
             return bool(
                 deployment_record_passed(record)
+                and record.failure is None
                 and key in keys
                 and record.deploy.finished_at
-                and _time(record.deploy.finished_at) > _time(incident.opened_at)
+                and _time(failed_at) < _time(record.deploy.finished_at) <= _time(now)
+                and record.context == lane.context
+                and record.instance == "prod"
             )
 
         if index.matching_success(
             lane.context,
             key,
-            incident.opened_at,
-            verify_file if isinstance(store, FilesystemRecordStore) else None,
+            failed_at,
+            verify_deployment,
         ):
             _observe(
                 store,
@@ -972,7 +985,9 @@ def _recover_delivery_failures(
                 summary="The matching production delivery succeeded.",
                 observed_at=now,
             )
-        elif recovery := _later_passing_rollback(store, lane, incident, now, index):
+        elif rollback_only and (
+            recovery := _later_passing_rollback(store, lane, failed_at, now, index)
+        ):
             _observe(
                 store,
                 profile,
@@ -982,7 +997,11 @@ def _recover_delivery_failures(
                 summary=f"The failed production rollback recovered through {recovery}.",
                 observed_at=now,
             )
-        elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
+        elif (
+            not _is_refusal_only_incident(store, incident)
+            and incident.latest_observed_at != now
+            and all(_time(f.observed_at) != _time(now) for f in failures)
+        ):
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
                 if incident.material_fingerprint
@@ -1001,69 +1020,96 @@ def _recover_delivery_failures(
 
 
 def _is_rollback_deployment(record: DeploymentRecord) -> bool:
-    operation = record.runtime_source.get("deployment_operation")
-    if operation is not None:
-        return operation == "rollback"
+    if DEPLOYMENT_OPERATION_EVIDENCE_KEY in record.runtime_source:
+        return record.runtime_source.items() >= deployment_operation_evidence(rollback=True).items()
     return record.deploy.deploy_mode == "atomic-switch-back" or record.record_id.endswith(
         "-rollback"
     )
 
 
-def _later_passing_rollback(
+def _delivery_failure_trace(summary: str) -> str:
+    match = re.search(r"; trace: ([A-Za-z0-9_:\-.]{1,200})\. ", summary)
+    return match[1] if match else ""
+
+
+def _delivery_failure_observations(
+    store: Store, incident: PublicIngressIncidentRecord
+) -> tuple[PublicIngressObservationRecord, ...]:
+    failures: dict[str, PublicIngressObservationRecord] = {}
+    for observation in store.list_public_ingress_observation_records(
+        incident_id=incident.incident_id
+    ):
+        if observation.status != "fail":
+            continue
+        previous = failures.get(observation.summary)
+        if previous is None or _time(observation.observed_at) < _time(previous.observed_at):
+            failures[observation.summary] = observation
+    return tuple(failures.values())
+
+
+def _delivery_failure_evidence(
     store: Store,
     lane: ProductLaneProfile,
     incident: PublicIngressIncidentRecord,
-    now: str,
+    failures: tuple[PublicIngressObservationRecord, ...],
     index: DeliveryEvidenceIndex,
-) -> str:
+) -> tuple[str, bool]:
+    latest = max([_time(incident.opened_at)] + [_time(f.observed_at) for f in failures])
     key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
-
-    def read_candidate(record_id: str) -> DeploymentRecord | None:
+    traces = {_delivery_failure_trace(f.summary) for f in failures}
+    record_ids = dict.fromkeys(
+        [
+            *traces,
+            *index.deployment_candidates(lane.context, key=key, finished_since=incident.opened_at),
+        ]
+    )
+    rollback_only = bool(failures)
+    for record_id in record_ids:
         try:
             record = store.read_deployment_record(record_id)
         except FileNotFoundError:
-            return None
-        if record.context != lane.context or record.instance != "prod":
-            return None
-        return record if _is_rollback_deployment(record) else None
-
-    failed_rollback = False
-    for record_id in index.deployment_candidates(
-        lane.context, passed=False, key=key, finished_before=incident.opened_at
-    ):
-        record = read_candidate(record_id)
-        if record is None or not record.deploy.finished_at:
+            if record_id in traces:
+                rollback_only = False
             continue
         keys = {_candidate_key(record.source_git_ref)}
         if record.artifact_identity:
             keys.add(_candidate_key(record.artifact_identity.artifact_id))
-        if (
-            key in keys
-            and _time(record.deploy.finished_at) == _time(incident.opened_at)
-            and (
-                record.failure is not None
-                or "fail"
-                in {
-                    record.deploy.status,
-                    record.post_deploy_update.status,
-                    record.destination_health.status,
-                }
-            )
-        ):
-            failed_rollback = True
-            break
-    if not failed_rollback:
-        return ""
+        failed = record.failure is not None or "fail" in {
+            record.deploy.status,
+            record.post_deploy_update.status,
+            record.destination_health.status,
+        }
+        matches = record.context == lane.context and record.instance == "prod" and key in keys
+        if record_id in traces and not (matches and failed and record.deploy.finished_at):
+            rollback_only = False
+        if matches and failed and record.deploy.finished_at:
+            latest = max(latest, _time(record.deploy.finished_at))
+            rollback_only = rollback_only and _is_rollback_deployment(record)
+    return latest.isoformat(), rollback_only
+
+
+def _later_passing_rollback(
+    store: Store,
+    lane: ProductLaneProfile,
+    failed_at: str,
+    now: str,
+    index: DeliveryEvidenceIndex,
+) -> str:
     for record_id in index.deployment_candidates(
-        lane.context, passed=True, finished_after=incident.opened_at, finished_before=now
+        lane.context, passed=True, finished_after=failed_at, finished_before=now
     ):
-        record = read_candidate(record_id)
+        try:
+            record = store.read_deployment_record(record_id)
+        except FileNotFoundError:
+            continue
         if (
-            record is not None
+            record.context == lane.context
+            and record.instance == "prod"
+            and _is_rollback_deployment(record)
             and record.failure is None
             and deployment_record_passed(record)
             and record.deploy.finished_at
-            and _time(incident.opened_at) < _time(record.deploy.finished_at) <= _time(now)
+            and _time(failed_at) < _time(record.deploy.finished_at) <= _time(now)
         ):
             return record.record_id
     return ""

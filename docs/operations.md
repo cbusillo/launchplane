@@ -2014,11 +2014,15 @@ notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
 An artifact's later successful production delivery resolves its delivery incident.
-A failed rollback deployment also recovers when a later rollback on the same
-production lane passes, even when its target artifact differs. The original failed
-deployment must match the incident's artifact or source and opening time. New
-generic-web deployment evidence records whether the operation is a forward deploy
-or rollback; older records retain recognition by their rollback record ID suffix.
+A failed generic-web rollback deployment also recovers when a later rollback on
+the same production lane passes, even when its target artifact differs. Every
+failure retained in the incident must identify a failed rollback deployment for
+that artifact or source. Recovery must follow the newest failure, including
+failures merged into the incident between monitor passes. New generic-web
+deployment evidence records forward or rollback intent; legacy promotion-recovery
+and drill deployments retain recognition by their rollback record ID suffix, and
+two-slot switch-backs by their recorded deploy mode. Unmarked legacy admin
+rollbacks and Odoo in-place rollbacks retain matching-artifact recovery only.
 Recovery uses the ordinary passing observation and preserves the original failure.
 Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
 rollback, or a rollback on another lane cannot resolve that failure.
