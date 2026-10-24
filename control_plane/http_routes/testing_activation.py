@@ -79,6 +79,25 @@ def register_testing_activation_routes(
                 dependencies, record_store, identity
             )
         try:
+            if body.mode == "inspect":
+                from control_plane.testing_activation_inspection import (
+                    inspect_application_activation,
+                )
+
+                observed = await run_in_worker_thread(
+                    lambda: inspect_application_activation(
+                        root=root,
+                        store=record_store,
+                        product=product,
+                        request=body,
+                        actor=actor(identity),
+                        scope=scope,
+                        idempotency_key=idempotency_key.strip(),
+                    )
+                )
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=observed.model_dump(mode="json")
+                )
             if body.mode == "receipt":
                 row = record_store.read_idempotency_record(
                     scope=scope,

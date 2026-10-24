@@ -1,6 +1,7 @@
 """The supported client retains its review and caller across retries and refusals."""
 
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
@@ -18,9 +19,13 @@ from control_plane.contracts.testing_activation import (
     TestingActivationResult,
     TestingActivationRefusedResult,
 )
+from control_plane.testing_activation_inspection import TestingActivationInspection
 
 
 class ActivationClientTests(unittest.TestCase):
+    def test_inspection_reads_the_original_key_and_saves_only_diagnostic_evidence(self) -> None:
+        self.exercise_review_and_replay(refused=False, inspection=True)
+
     def test_review_binding_and_replay_preserve_evidence_with_fresh_trace(self) -> None:
         self.exercise_review_and_replay(refused=False)
 
@@ -34,7 +39,7 @@ class ActivationClientTests(unittest.TestCase):
         self.exercise_review_and_replay(refused=False, external_refusal=True, invalid_trace=True)
 
     def test_original_activation_key_survives_read_transport_and_http_failures(self) -> None:
-        for mode in ("receipt", "readback"):
+        for mode in ("receipt", "readback", "inspect"):
             for failure in (
                 urllib.error.URLError("private-read-fixture"),
                 ValueError("private-response-fixture"),
@@ -55,6 +60,7 @@ class ActivationClientTests(unittest.TestCase):
         invalid_trace: bool = False,
         read_error: Exception | None = None,
         read_mode: str = "receipt",
+        inspection: bool = False,
     ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
@@ -77,7 +83,9 @@ class ActivationClientTests(unittest.TestCase):
             image_reference="example@sha256:" + "a" * 64,
             host_ports=(19212, 19213),
         )
-        result = (
+        result: (
+            TestingActivationRefusedResult | TestingActivationResult | TestingActivationInspection
+        ) = (
             TestingActivationRefusedResult(
                 **plan.model_dump(), reason="candidate_deployment_failed"
             )
@@ -92,6 +100,19 @@ class ActivationClientTests(unittest.TestCase):
             if refused
             else ("dry-run", "apply", "apply")
         )
+        if inspection:
+            result = TestingActivationInspection(
+                product=plan.product,
+                context=plan.context,
+                state="completed",
+                plan_sha256=plan.plan_sha256,
+                activation_phase="refused",
+                predecessor_recorded=True,
+                external_capability_count=1,
+                programs=(),
+                inspected_at=datetime(2026, 10, 15, tzinfo=timezone.utc),
+            )
+            modes = ("dry-run", "inspect")
         post = Mock(
             side_effect=[
                 {
@@ -181,7 +202,9 @@ class ActivationClientTests(unittest.TestCase):
                 if mode == "apply":
                     args.extend(["--reviewed-dry-run", "--idempotency-key", "original-activation"])
                     apply_args = args
-                elif mode == "receipt" or (read_error is not None and mode == "readback"):
+                elif mode in {"receipt", "inspect"} or (
+                    read_error is not None and mode == "readback"
+                ):
                     args.extend(["--idempotency-key", "original-activation"])
                 output = io.StringIO()
                 with (
@@ -225,6 +248,16 @@ class ActivationClientTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(evidence.read_text())["result"], plan.model_dump(mode="json")
             )
+            if inspection:
+                self.assertEqual(post.call_args.kwargs["idempotency_key"], "original-activation")
+                self.assertEqual(post.call_args.kwargs["body"]["mode"], "inspect")
+                self.assertEqual(
+                    json.loads(evidence.with_name(evidence.name + ".inspect.json").read_text())[
+                        "result"
+                    ],
+                    result.model_dump(mode="json"),
+                )
+                return
             self.assertEqual(
                 post.call_args_list[1].kwargs["body"]["reviewed_plan_sha256"], plan.plan_sha256
             )

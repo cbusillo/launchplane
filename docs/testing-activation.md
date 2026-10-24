@@ -331,6 +331,17 @@ review a new independent preparation and activation key to continue. Corrected
 configuration and staff-use records stay unchanged. Recorded staff use pauses
 both forward changes and route recovery, including an already selected inverse,
 until an explicit reviewed clear. Its expiry does not clear that protection.
+Use `scripts/activate-generic-web-testing.py inspect` with the identical original
+request and activation key to inspect an application's stored reservation and
+capability history, including a completed negative original. The read binds its
+preparation and stored recipient namespace, and reports the checkpoint, phase,
+recorded predecessor and external-proof count plus bounded capability/readback
+program provenance, history and result markers. It returns no scripts, raw logs,
+environment or credential values and starts no program or recovery. Missing or
+unavailable evidence stays unknown. `qualification: not_evaluated` grants no
+retry, separation or health credit; the generic refusal does not identify its
+underlying exception. Preserve the original receipt and choose a fresh evidence
+path for each inspection.
 Public readiness observation and
 publication freshness use the same database clock.
 

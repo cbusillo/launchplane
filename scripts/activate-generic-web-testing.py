@@ -20,6 +20,7 @@ from control_plane.contracts.testing_activation import (
 from control_plane.discord_identity import DiscordIdentityResult
 from control_plane.operator_error_evidence import public_error_reference
 from control_plane.testing_activation import ROUTE
+from control_plane.testing_activation_inspection import TestingActivationInspection
 
 
 def save(path: Path, payload: object) -> None:
@@ -54,7 +55,7 @@ def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt"))
+    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt", "inspect"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--request-file", type=Path, required=True)
@@ -95,7 +96,7 @@ def main() -> int:
             body["reviewed_plan_sha256"] = TestingActivationPlan.model_validate(
                 evidence["result"]
             ).plan_sha256
-        if args.mode == "receipt" and not args.idempotency_key.strip():
+        if args.mode in {"receipt", "inspect"} and not args.idempotency_key.strip():
             raise ValueError("Receipt read requires the original activation key.")
         if args.mode == "dry-run" and args.evidence_file.exists():
             raise ValueError("Preserve the saved review; choose a fresh evidence path.")
@@ -109,14 +110,16 @@ def main() -> int:
             timeout=900,
             **(
                 {"idempotency_key": args.idempotency_key}
-                if submitted or args.mode == "receipt"
+                if submitted or args.mode in {"receipt", "inspect"}
                 else {}
             ),
         )
         if response["status"] != "accepted":
             raise ValueError("Activation was not accepted.")
         result_model = (
-            TestingActivationRefusedResult
+            TestingActivationInspection
+            if args.mode == "inspect"
+            else TestingActivationRefusedResult
             if response["result"].get("outcome") == "refused"
             else TestingActivationPlan
             if args.mode == "dry-run"
