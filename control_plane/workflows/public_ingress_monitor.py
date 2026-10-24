@@ -365,6 +365,10 @@ class PublicIngressMonitorResult(BaseModel):
     delivery_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = ()
 
 
+class PublicIngressIncidentChanged(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class _StoredMonitorTransition:
     observation: PublicIngressObservationRecord
@@ -1146,7 +1150,9 @@ def _store_monitor_observation(
             expected_incident_sha256
             and plan.expected_open_incident_sha256 != expected_incident_sha256
         ):
-            raise ValueError("Incident changed during reconciliation; read its evidence again.")
+            raise PublicIngressIncidentChanged(
+                "Incident changed during reconciliation; read its evidence again."
+            )
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,

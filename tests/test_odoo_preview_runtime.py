@@ -14,6 +14,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetIntegrati
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -1619,6 +1620,99 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_refresh_creates_updates_deploys_and_smokes_compose(self) -> None:
         self._assert_refresh_readback_allowances(())
 
+    def test_source_free_preview_does_not_restore_copied_template_upstream_settings(self) -> None:
+        self._assert_refresh_readback_allowances(
+            (),
+            source_environment={
+                "ODOO_UPSTREAM_HOST": "source.example.test",
+                "ODOO_UPSTREAM_USER": "root",
+            },
+        )
+
+    def test_preview_with_upstream_source_restores_before_serving(self) -> None:
+        self._assert_refresh_readback_allowances(
+            (),
+            source_environment={
+                "ODOO_UPSTREAM_HOST": "source.example.test",
+                "ODOO_UPSTREAM_USER": "upstream-reader",
+                "ODOO_UPSTREAM_DB_NAME": "source",
+                "ODOO_UPSTREAM_DB_USER": "upstream-reader",
+                "ODOO_UPSTREAM_FILESTORE_PATH": "/",
+                "DATA_WORKFLOW_SSH_DIR": "/var/lib/source-reader",
+                "BOOTSTRAP": "true",
+                "NO_SANITIZE": "true",
+                "ENV_OVERRIDE_DISABLE_CRON": "false",
+            },
+            restore_upstream=True,
+        )
+
+    def test_preview_refuses_incomplete_or_root_upstream_before_provider_effects(self) -> None:
+        source = {
+            "ODOO_UPSTREAM_HOST": "source.example.test",
+            "ODOO_UPSTREAM_USER": "upstream-reader",
+            "ODOO_UPSTREAM_DB_NAME": "source",
+            "ODOO_UPSTREAM_DB_USER": "upstream-reader",
+            "ODOO_UPSTREAM_FILESTORE_PATH": "/",
+            "DATA_WORKFLOW_SSH_DIR": "/var/lib/source-reader",
+        }
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for override in (
+            {"ODOO_UPSTREAM_HOST": ""},
+            {"ODOO_UPSTREAM_USER": "root"},
+            {"DATA_WORKFLOW_SSH_DIR": ""},
+            {"DATA_WORKFLOW_SSH_DIR": "/root/.ssh/"},
+            {"DATA_WORKFLOW_SSH_DIR": "/home/ubuntu/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "/root//.ssh/."},
+            {"DATA_WORKFLOW_SSH_DIR": "/var/lib/reader/../../root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//"},
+            {"DATA_WORKFLOW_SSH_DIR": "/home"},
+        ):
+            with (
+                self.subTest(override=override),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload"
+                ) as fetch,
+            ):
+                result = execute_odoo_preview_dokploy_apply(
+                    control_plane_root=ANY,
+                    restore_upstream=True,
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=dry_run,
+                        manifest=artifact_manifest_v2(),
+                        environment_values={**_environment_values(), **source, **override},
+                    ),
+                )
+                self.assertEqual(result.status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                fetch.assert_not_called()
+
+        for directory in (
+            "/var/lib/source-reader/",
+            "//var/lib/source-reader",
+            "/var/lib/./source-reader",
+            "/var/lib/source-reader ",
+        ):
+            with self.subTest(directory=directory):
+                request = OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    manifest=artifact_manifest_v2(),
+                    environment_values={**source, "DATA_WORKFLOW_SSH_DIR": directory},
+                )
+                rendered = _preview_refresh_environment_values(
+                    request=request, restore_upstream=True
+                )
+                self.assertEqual(rendered["DATA_WORKFLOW_SSH_DIR"], source["DATA_WORKFLOW_SSH_DIR"])
+
     def test_explicit_read_only_source_allowance_reaches_post_deploy_readback(self) -> None:
         self._assert_refresh_readback_allowances(
             (
@@ -1654,6 +1748,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         allowances: tuple[DokployTargetIntegrationAllowance, ...],
         *,
         previous_source: str = "",
+        source_environment: dict[str, str] | None = None,
+        restore_upstream: bool = False,
     ) -> str:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1706,6 +1802,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ) as sync_source,
             patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.render_odoo_raw_compose_file",
+                wraps=dokploy_compose.render_odoo_raw_compose_file,
+            ) as render_compose,
+            patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,
             patch(
@@ -1725,7 +1825,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
                 "run_compose_post_deploy_update",
-                return_value=_module_update_evidence(),
+                return_value={**_module_update_evidence(), "upstream_restore_requested": "true"},
             ) as module_update,
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -1733,12 +1833,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
+                restore_upstream=restore_upstream,
                 integration_allowances=allowances,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     manifest=manifest,
                     environment_values={
                         **_environment_values(),
+                        **(source_environment or {}),
                         dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
                         dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
                         "ODOO_ADDONS_PATH": (
@@ -1749,6 +1851,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.module_install_update_evidence.get("upstream_restore_requested"),
+            str(restore_upstream).lower(),
+        )
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertTrue(result.created_compose)
         self.assertEqual(
@@ -1763,6 +1869,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
         self.assertEqual(create_payload["serverId"], "server-nonprod")
         sync_source.assert_called_once()
+        self.assertEqual(render_compose.call_args.kwargs["mount_workflow_ssh"], restore_upstream)
         _, sync_kwargs = sync_source.call_args
         self.assertNotIn("ODOO_WEB_HOST_PORT", sync_kwargs["compose_file"])
         self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", sync_kwargs["compose_file"])
@@ -1800,6 +1907,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
+        self.assertEqual(
+            module_update.call_args.kwargs.get("run_destructive_restore", False),
+            restore_upstream,
+        )
+        self.assertEqual(
+            module_update.call_args.kwargs["preview_ssh_source_directory"],
+            env_map.get("DATA_WORKFLOW_SSH_DIR", "") if restore_upstream else "",
+        )
         # Only an explicitly selected read-only source can reach this readback.
         preview_target = module_update.call_args.kwargs["target_definition"]
         self.assertEqual(preview_target.instance, "pr-45")
@@ -1809,15 +1924,26 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             bool(previous_source) and not allowances,
         )
 
+        for key, value in {
+            dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
+            dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
+            **(
+                {"BOOTSTRAP": "false", "NO_SANITIZE": "false", "ENV_OVERRIDE_DISABLE_CRON": "true"}
+                if restore_upstream
+                else {}
+            ),
+        }.items():
+            self.assertEqual(
+                module_update.call_args.kwargs["workflow_environment_overrides"][key], value
+            )
+        self.assertEqual(result.module_install_update_status, "pass")
         self.assertEqual(
-            module_update.call_args.kwargs["workflow_environment_overrides"],
+            result.module_install_update_evidence,
             {
-                dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
-                dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
+                **_module_update_evidence(),
+                "upstream_restore_requested": str(restore_upstream).lower(),
             },
         )
-        self.assertEqual(result.module_install_update_status, "pass")
-        self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
         self.assertIn("module_install_update", [step.name for step in result.steps])
         smoke_check.assert_called_once()
         return env_map.get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")

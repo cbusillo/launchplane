@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import click
 
+from control_plane.production_delivery_monitor import _is_rollback_deployment
 from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
@@ -622,6 +623,24 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_refused_deployment_retains_rollback_intent_before_provider_effect(self) -> None:
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                store = _GenericWebDeployStore(_profile())
+                result = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request().model_copy(
+                        update={"deploy_reference": "ghcr.io/other/image:wrong"}
+                    ),
+                    deploy_provider=_FakeGenericWebDeployProvider(),
+                    deployment_record_id="explicit-operation-rollback",
+                    rollback=rollback,
+                )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertEqual(_is_rollback_deployment(store.deployments[0]), rollback)
+
     def test_application_runtime_wait_uses_only_budget_remaining_after_provider_job(self) -> None:
         from dataclasses import replace
 
@@ -838,6 +857,8 @@ class GenericWebDeployTests(unittest.TestCase):
                     ):
                         self.assertEqual(deploy(old, 3, rollback=True).deploy_status, "pass")
                         self.assertEqual(deploy(new, 4).deploy_status, "pass")
+                self.assertTrue(_is_rollback_deployment(store.read_deployment_record("deploy-3")))
+                self.assertFalse(_is_rollback_deployment(store.read_deployment_record("deploy-4")))
                 self.assertEqual(
                     [identity.source_git_ref for identity in provider.runtime_identities],
                     [old, new, old, new],

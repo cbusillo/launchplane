@@ -55,6 +55,7 @@ from pathlib import Path
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
     install_triggers,
     metadata as delivery_evidence_metadata,
     register_source_events,
@@ -30670,6 +30671,42 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
         return records
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        row = LaunchplanePublicIngressObservationRow
+        summary = row.payload["summary"].as_string()
+        observed = (
+            func.julianday(row.observed_at)
+            if self.database_dialect_name == "sqlite"
+            else sql_cast(row.observed_at, DateTime(timezone=True))
+        )
+        ranked = (
+            select(
+                summary.label("summary"),
+                row.observed_at,
+                func.max(row.payload["targets"][0]["url"].as_string())
+                .over(partition_by=summary)
+                .label("target_url"),
+                func.row_number()
+                .over(partition_by=summary, order_by=(observed, row.record_id))
+                .label("position"),
+            )
+            .where(row.incident_id == incident_id, row.status == "fail")
+            .subquery()
+        )
+        with self._session_factory() as session:
+            return tuple(
+                DeliveryFailureObservation(
+                    summary=summary, observed_at=observed_at, target_url=url or ""
+                )
+                for summary, observed_at, url in session.execute(
+                    select(ranked.c.summary, ranked.c.observed_at, ranked.c.target_url)
+                    .where(ranked.c.position == 1)
+                    .order_by(ranked.c.summary)
+                )
+            )
 
     def list_public_ingress_history_records(
         self,

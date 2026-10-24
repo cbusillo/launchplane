@@ -7,7 +7,7 @@ import time
 from contextlib import AbstractContextManager, nullcontext
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -1132,6 +1132,8 @@ def execute_odoo_preview_dokploy_apply(
     propagate_domain_lookup_error: bool = False,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
+    restore_upstream: bool = False,
+    preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
@@ -1180,6 +1182,8 @@ def execute_odoo_preview_dokploy_apply(
         expected_runtime_identity=expected_runtime_identity,
         integration_allowances=integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
+        restore_upstream=restore_upstream,
+        preserve_existing_data=preserve_existing_data,
         provider_mutation_guard=provider_mutation_guard,
     )
 
@@ -1547,10 +1551,34 @@ def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tupl
 
 
 def _preview_refresh_environment_values(
-    *, request: OdooPreviewDokployApplyRequest
+    *, request: OdooPreviewDokployApplyRequest, restore_upstream: bool = False
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
     environment_values["PLATFORM_INSTANCE"] = "preview"
+    if restore_upstream:
+        environment_values.update(
+            dokploy_post_deploy.resolve_upstream_restore_workflow_environment(
+                desired_env_map=environment_values
+            )
+        )
+        source_directory = environment_values.get("DATA_WORKFLOW_SSH_DIR", "").strip()
+        ssh_directory = PurePosixPath("/" + source_directory.lstrip("/"))
+        if (
+            environment_values["ODOO_UPSTREAM_USER"] == "root"
+            or not source_directory.startswith("/")
+            or ".." in ssh_directory.parts
+            or ssh_directory == PurePosixPath("/")
+            or ssh_directory.is_relative_to("/root")
+            or ssh_directory.is_relative_to("/home/ubuntu")
+            or ssh_directory in PurePosixPath("/home/ubuntu").parents
+        ):
+            raise click.ClickException(
+                "Preview upstream restore requires a non-root reader and a dedicated SSH directory."
+            )
+        environment_values.update(
+            {"BOOTSTRAP": "false", "NO_SANITIZE": "false", "ENV_OVERRIDE_DISABLE_CRON": "true"}
+        )
+        environment_values["DATA_WORKFLOW_SSH_DIR"] = str(ssh_directory)
     addons_path = merge_required_odoo_addons_path(environment_values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         environment_values["ODOO_ADDONS_PATH"] = addons_path
@@ -1578,6 +1606,8 @@ def _execute_refresh(
     expected_runtime_identity: RuntimeIdentity | None,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
+    restore_upstream: bool = False,
+    preserve_existing_data: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     database_url: str | None = None,
 ) -> OdooPreviewDokployApplyResult:
@@ -1600,6 +1630,16 @@ def _execute_refresh(
         provider_effect_attempted = True
 
     try:
+        if preserve_existing_data and restore_upstream:
+            raise click.ClickException(
+                "A retained preview copy cannot request a destructive restore."
+            )
+        environment_values = _preview_refresh_environment_values(
+            request=request, restore_upstream=restore_upstream
+        )
+        if restore_upstream or preserve_existing_data:
+            environment_values["ODOO_MAX_CRON_THREADS"] = "0"
+            environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
         if qualify_existing_refresh and creating_compose:
             raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
@@ -1637,12 +1677,13 @@ def _execute_refresh(
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
-            mount_workflow_ssh=not qualify_existing_refresh,
+            mount_workflow_ssh=restore_upstream,
+            protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_refresh:
+            if qualify_existing_refresh or preserve_existing_data:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(
@@ -1669,7 +1710,6 @@ def _execute_refresh(
             )
         steps.append(_step("compose_update_raw_source", compose_id))
 
-        environment_values = _preview_refresh_environment_values(request=request)
         previous_source = dokploy_api.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         ).get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")
@@ -1765,6 +1805,13 @@ def _execute_refresh(
             for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS
             if request.environment_values.get(key, "").strip()
         }
+        if restore_upstream:
+            runtime_override_environment.update(
+                {
+                    key: environment_values[key]
+                    for key in ("BOOTSTRAP", "NO_SANITIZE", "ENV_OVERRIDE_DISABLE_CRON")
+                }
+            )
         module_install_update_evidence = dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
             token=token,
@@ -1778,12 +1825,17 @@ def _execute_refresh(
             ),
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
-            bootstrap_missing_database=True,
+            run_destructive_restore=restore_upstream,
+            preview_ssh_source_directory=environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
+            if restore_upstream
+            else "",
+            bootstrap_missing_database=not preserve_existing_data,
             clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,
             provider_mutation_guard=provider_mutation_guard,
             deployment_title=provider_operation_title,
         )
+        module_install_update_evidence["upstream_restore_requested"] = str(restore_upstream).lower()
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             module_install_update_evidence
         )

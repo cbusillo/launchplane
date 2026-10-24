@@ -501,6 +501,13 @@ def execute_odoo_preview_apply_result(
             "smoke_check": service_dry_run_plan.operation == "refresh",
         }
     )
+    upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
+    retained_copy = upstream_source and preview_has_completed_restore(
+        record_store=record_store,
+        profile=profile,
+        plan=service_dry_run_plan,
+        pr_number=issued_plan.plan_request.pr_number,
+    )
     driver_result = execute_odoo_preview_dokploy_apply(
         record_store=record_store,
         preview_context=profile.preview.context,
@@ -514,9 +521,90 @@ def execute_odoo_preview_apply_result(
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
+        restore_upstream=upstream_source and not retained_copy,
+        preserve_existing_data=retained_copy,
         provider_mutation_guard=provider_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
+
+
+def preview_uses_upstream_restore(
+    profile: LaunchplaneProductProfileRecord, environment: dict[str, str]
+) -> bool:
+    return profile.preview.data_transport_mode == "driver" and any(
+        key.startswith("ODOO_UPSTREAM_") and value.strip() for key, value in environment.items()
+    )
+
+
+def preview_has_completed_restore(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    plan: OdooPreviewDokployDryRunPlan,
+    pr_number: int,
+) -> bool:
+    store = cast(Any, record_store)
+    preview = find_preview_record(
+        record_store=store,
+        context_name=profile.preview.context,
+        anchor_repo=_odoo_preview_anchor_repo(profile.repository),
+        anchor_pr_number=pr_number,
+    )
+    if preview is None or preview.state == "destroyed":
+        return False
+    read_operation = getattr(store, "read_idempotency_record_by_id", None)
+    if callable(read_operation):
+        for generation in store.list_preview_generation_records(preview_id=preview.preview_id):
+            identity = generation.runtime_identity
+            if (
+                generation.state not in {"ready", "superseded"}
+                or generation.preview_id != preview.preview_id
+                or identity is None
+                or identity.product != profile.product
+                or identity.environment_kind != "preview"
+                or identity.preview_id != preview.preview_id
+                or identity.preview_generation_id != generation.generation_id
+                or identity.context != profile.preview.context
+                or identity.instance != plan.compose_name
+            ):
+                continue
+            operation = read_operation(identity.deployment_record_id)
+            if (
+                operation is None
+                or operation.state != "completed"
+                or operation.route_path != ODOO_PREVIEW_APPLY_ROUTE
+                or operation.response_status_code not in {200, 202}
+            ):
+                continue
+            payload = operation.response_payload
+            records = payload.get("records", {})
+            if (
+                not isinstance(records, dict)
+                or records.get("preview_id") != preview.preview_id
+                or records.get("generation_id") != generation.generation_id
+            ):
+                continue
+            try:
+                result = OdooPreviewDokployApplyResult.model_validate(payload.get("result"))
+            except ValueError:
+                continue
+            if (
+                result.status == "pass"
+                and result.operation == "refresh"
+                and result.product == profile.product
+                and result.repository == profile.repository
+                and result.preview_slug == plan.preview_slug
+                and result.compose_id == plan.compose_ref
+                and result.compose_name == plan.compose_name
+                and result.module_install_update_status == "pass"
+                and result.module_install_update_evidence.get("upstream_restore_requested")
+                == "true"
+                and result.module_install_update_evidence.get("odoo_restore_completed") == "true"
+            ):
+                return True
+    raise click.ClickException(
+        "Existing preview has no matching completed upstream restore; preserve its data and inspect its original operation."
+    )
 
 
 def observe_odoo_preview_apply_result(

@@ -47,23 +47,35 @@ def _failure(cause: Exception) -> click.ClickException:
 def _record(
     *, number: int = 7, event: MergeTrainPrFeedbackEvent = "completed", recorded_at: str = _TIME
 ) -> MergeTrainPrFeedbackRecord:
-    return build_merge_train_pr_feedback_record(
-        request=MergeTrainPrFeedbackEnvelope(
-            repository="cbusillo/alpha",
-            pull_request_number=number,
-            event=event,
-            controller_action="batch_landed",
-            message="Saved terminal landing evidence.",
-        ),
-        policy_key="test",
-        policy_sha256="digest",
-        token="test-token",
-        recorded_at=recorded_at,
-        response_trace_id=f"record-{number}-{event}",
-    )
+    with patch(
+        "control_plane.merge_train_pr_feedback.reconcile_completed_change",
+        return_value={"ok": True, "issues": []},
+    ):
+        return build_merge_train_pr_feedback_record(
+            request=MergeTrainPrFeedbackEnvelope(
+                repository="cbusillo/alpha",
+                pull_request_number=number,
+                event=event,
+                controller_action="batch_landed",
+                message="Saved terminal landing evidence.",
+            ),
+            policy_key="test",
+            policy_sha256="digest",
+            token="test-token",
+            recorded_at=recorded_at,
+            response_trace_id=f"record-{number}-{event}",
+        )
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def setUp(self) -> None:
+        planning = patch(
+            "control_plane.merge_train_pr_feedback.reconcile_completed_change",
+            return_value={"ok": True, "issues": []},
+        )
+        planning.start()
+        self.addCleanup(planning.stop)
+
     def test_retry_and_new_status_serialize_one_managed_comment(self) -> None:
         policy = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
