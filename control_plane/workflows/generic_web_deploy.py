@@ -37,6 +37,7 @@ from control_plane.contracts.deploy_reference import (
 from control_plane.contracts.deployment_record import (
     DeploymentRecord,
     IntegrationKeyReadbackEvidence,
+    deployment_operation_evidence,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -737,6 +738,8 @@ def _execute_generic_web_deploy_unserialized(
             post_deploy_update = PostDeployUpdateEvidence(
                 evidence=prior_attempt.post_deploy_update.evidence
             )
+
+    verified_build_evidence.update(deployment_operation_evidence(rollback=rollback))
 
     try:
         fallback_request = _fallback_ship_request(

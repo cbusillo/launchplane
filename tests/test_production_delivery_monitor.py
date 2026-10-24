@@ -820,6 +820,68 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertIn("launchplane_req_failure", str(sender.call_args))
         self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
+    def test_recovery_preserves_a_failure_arriving_during_its_commit(self) -> None:
+        self.reject()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=1)
+        self.deploy(self.head)
+        original = self.store.write_public_ingress_transition_with_outbox
+        raced = False
+
+        def race(**kwargs: Any) -> object:
+            nonlocal raced
+            if not raced and kwargs["observation"].status == "pass":
+                raced = True
+                with patch.object(
+                    self.store, "write_public_ingress_transition_with_outbox", original
+                ):
+                    record_production_delivery_failure(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        candidate="image@" + self.head,
+                        reason="deployment_failed",
+                        trace_id="concurrent-failure",
+                        observed_at=self.timestamp(),
+                    )
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "write_public_ingress_transition_with_outbox", side_effect=race
+        ):
+            self.monitor()
+        self.assertTrue(raced)
+        self.assertEqual(
+            {
+                item.incident_id
+                for item in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {incident.incident_id},
+        )
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
+        )
+
+    def test_monitor_read_outage_keeps_one_failure_until_the_read_recovers(self) -> None:
+        self.transport.get_json.side_effect = RuntimeError("source unavailable")
+        with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+            self.monitor()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        original = self.store.list_public_ingress_observation_records(
+            incident_id=incident.incident_id
+        )
+        self.now += timedelta(hours=1)
+        with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+            self.monitor()
+        self.assertEqual(
+            self.store.list_public_ingress_observation_records(incident_id=incident.incident_id),
+            original,
+        )
+        self.transport.get_json.side_effect = self.read_source
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
+
     def test_only_a_later_matching_release_clears_failure(self) -> None:
         self.reject()
         self.now += timedelta(minutes=1)

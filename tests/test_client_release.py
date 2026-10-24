@@ -1,6 +1,6 @@
 import unittest
 from contextlib import ExitStack, nullcontext
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import click
 from pathlib import Path
@@ -138,6 +138,52 @@ def _backup_binding(store: object, request: object) -> object:
 
 
 class ClientReleaseTests(unittest.TestCase):
+    def test_failures_before_different_steps_are_not_hidden_by_intermediate_delivery(self) -> None:
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        began = datetime.now(UTC)
+        with (
+            patch("control_plane.client_release._queue_backup", side_effect=RuntimeError),
+            patch(
+                "control_plane.production_delivery_monitor.utc_now_timestamp",
+                return_value=began.isoformat(),
+            ),
+            self.assertLogs("control_plane.client_release", level="ERROR"),
+        ):
+            self.assertEqual(self.advance(), ())
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        (backup,) = self.advance()
+        self.finish(backup)
+        (promotion,) = self.advance()
+        self.finish(promotion)
+        self.set_prod(accepted.checklist.candidate.artifact_id)
+        deployed = _deployment("intermediate-delivery", accepted.checklist.candidate.artifact_id)
+        deployed.deploy.finished_at = (began + timedelta(seconds=1)).isoformat()
+        self.store.write_deployment_record(deployed)
+        with (
+            patch("control_plane.client_release._queue_rollback", side_effect=RuntimeError),
+            patch(
+                "control_plane.production_delivery_monitor.utc_now_timestamp",
+                return_value=(began + timedelta(seconds=2)).isoformat(),
+            ),
+            self.assertLogs("control_plane.client_release", level="ERROR"),
+        ):
+            self.assertEqual(self.advance(), ())
+        profile = self.store.read_product_profile_record(PRODUCT)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"production_use": "prelaunch"})
+        )
+        monitor_production_delivery_once(
+            self.store,
+            observed_at=(began + timedelta(seconds=3)).isoformat(),
+        )
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).status,
+            "open",
+        )
+
     def test_failure_before_step_creation_creates_delivery_attention(self) -> None:
         self.switch("promote")
         accepted = self.accept()
