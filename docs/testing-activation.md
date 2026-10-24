@@ -336,8 +336,12 @@ request and activation key to inspect an application's stored reservation and
 capability history, including a completed negative original. The read binds its
 preparation and stored recipient namespace, and reports the checkpoint, phase,
 recorded predecessor and external-proof count plus bounded capability/readback
-program provenance, history and result markers. It returns no scripts, raw logs,
-environment or credential values and starts no program or recovery. Missing or
+program provenance, history and result markers. For a reconciliation-required mount
+checkpoint, it also invokes the original's existing read-only observer, including
+its fixed physical reader. The closed observation outcome and numeric error sites
+are logged under the inspection trace. It returns no scripts, raw logs,
+environment or credential values, triggers no recorded schedule and reacquires no
+operation lease, retry or recovery writer. Missing or
 unavailable evidence stays unknown. `qualification: not_evaluated` grants no
 retry, separation or health credit; the generic refusal does not identify its
 underlying exception. Preserve the original receipt and choose a fresh evidence
