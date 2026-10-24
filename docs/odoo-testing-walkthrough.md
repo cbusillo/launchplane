@@ -64,6 +64,7 @@ new record, account, policy change or alternate identity:
 
 | Code | Refused prerequisite and next read |
 | --- | --- |
+| `testing_task_prerequisite_not_reached` | A read-only checkpoint was skipped because an earlier prerequisite did not pass. No observation of this checkpoint was attempted; inspect the earlier failure. |
 | `testing_task_identity_unavailable` | Active product, exact testing context, runtime selection or exclusive HTTPS origin. Read the product profile and testing environment identity. |
 | `testing_task_generation_missing` | No current fresh testing generation was returned. A healthy deployment or connection-isolation pass cannot supply this copy witness. |
 | `testing_task_generation_incomplete` | The current qualified generation has no completion record. Follow its original supported operation and retain any unknown outcome. |
@@ -88,6 +89,15 @@ new record, account, policy change or alternate identity:
 Native predicate errors from execution append `_refused` or `_unavailable` to
 the predicate; path-check carries that distinction in its `blocked` or `unknown`
 state. A predicate names the observation, never permission to repair or repeat an effect.
+
+The read-only provision path check can inspect generation completion and the
+existing physical-copy predicates while an `isolation_staging` hold remains set.
+It uses the generation reader's resource-qualification checks, including managed
+credential separation. The use checkpoint still reports the protective hold;
+a `staff_testing` hold still blocks generation qualification. Account planning,
+provisioning and browser execution retain their ordinary hold checks. A completed
+generation observation does not qualify a hold lift, inherited credentials or an
+upstream source's capability, and a skipped checkpoint is not an observed failure.
 
 Each checkpoint code identifies the checkpoint that could not complete, including
 unreadable dependencies or unexpected failures inside that checkpoint. It

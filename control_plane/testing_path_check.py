@@ -38,6 +38,7 @@ from control_plane.testing_replacement_bootstrap import (
 )
 
 _WALKTHROUGH_DESCRIPTIONS = {
+    WalkthroughPrerequisite.NOT_REACHED: "This read was not reached because an earlier prerequisite did not pass.",
     WalkthroughPrerequisite.IDENTITY: "Verify the testing runtime identity and its separate HTTPS origin.",
     WalkthroughPrerequisite.GENERATION: "Verify the current generation still owns its independent target and resources.",
     WalkthroughPrerequisite.GENERATION_MISSING: "Create a fresh sanitized testing generation before provisioning a task account.",

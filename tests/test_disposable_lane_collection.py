@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -120,6 +121,95 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                 context=self.generation.context,
                 instance="testing",
             )
+
+    def test_read_only_prerequisites_expose_copy_blocker_under_isolation_hold(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+        from control_plane.odoo_walkthrough import (
+            WalkthroughPrerequisite,
+            WalkthroughPrerequisiteError,
+            plan_walkthrough,
+            read_walkthrough_prerequisites,
+        )
+        from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.odoo_runtime_reads import OdooRuntimeSelection
+
+        before = self.target.model_dump(mode="json")
+        with patch(
+            "control_plane.odoo_walkthrough.read_drill_recent_signins",
+            side_effect=NativeProgramFailed(
+                "private receiver detail",
+                predicate=ReadbackPredicate.RUNNER_RUNNING,
+                kind="refused",
+            ),
+        ) as inspection:
+            checks = {
+                checkpoint: (code, state)
+                for checkpoint, code, state in read_walkthrough_prerequisites(
+                    self.store,
+                    Path("/fixture"),
+                    self.generation.product,
+                    self.generation.context,
+                )
+            }
+        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION][1], "clear")
+        self.assertEqual(
+            checks[WalkthroughPrerequisite.PHYSICAL_COPY],
+            (ReadbackPredicate.RUNNER_RUNNING, "blocked"),
+        )
+        self.assertEqual(checks[WalkthroughPrerequisite.USE][1], "blocked")
+        inspection.assert_called_once()
+        self.assertEqual(self.target.model_dump(mode="json"), before)
+        with self.assertRaises(ValueError):
+            read_current_testing_generation(
+                self.store,
+                product=self.generation.product,
+                context=self.generation.context,
+                instance="testing",
+            )
+        selection = OdooRuntimeSelection(
+            RuntimeIdentity(
+                product=self.generation.product,
+                context=self.generation.context,
+                instance="testing",
+                deployment_record_id="fixture-deployment",
+                artifact_id="fixture-artifact",
+                source_git_ref="a" * 40,
+            ),
+            "https://" + self.generation.domain_host,
+        )
+        with (
+            patch("control_plane.odoo_walkthrough.select_stable_runtime", return_value=selection),
+            self.assertRaises(WalkthroughPrerequisiteError) as refused,
+        ):
+            plan_walkthrough(
+                self.store,
+                Path("/fixture"),
+                OdooWalkthroughRequest(
+                    product=self.generation.product,
+                    context=self.generation.context,
+                    task_id="a" * 32,
+                    operation="provision",
+                ),
+                "fixture-actor",
+            )
+        self.assertEqual(refused.exception.code, WalkthroughPrerequisite.GENERATION)
+        hold = self.target.policies.staff_testing_hold
+        assert hold is not None
+        hold.purpose = "staff_testing"
+        with patch("control_plane.odoo_walkthrough.read_drill_recent_signins") as inspection:
+            staff_checks = {
+                checkpoint: state
+                for checkpoint, code, state in read_walkthrough_prerequisites(
+                    self.store,
+                    Path("/fixture"),
+                    self.generation.product,
+                    self.generation.context,
+                )
+            }
+        self.assertEqual(staff_checks[WalkthroughPrerequisite.GENERATION], "blocked")
+        inspection.assert_not_called()
 
     def test_staff_hold_blocks_collection_and_qualification_reader(self) -> None:
         hold = self.target.policies.staff_testing_hold
