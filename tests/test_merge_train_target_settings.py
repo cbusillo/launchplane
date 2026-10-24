@@ -87,6 +87,7 @@ class TargetSettingsTests(unittest.TestCase):
                         update={
                             "required_checks_status": "unknown",
                             "required_checks_observation_error": error,
+                            "is_draft": pull_request.number == 2,
                         }
                     )
                     for pull_request in self.train.snapshot.pull_requests
@@ -94,9 +95,16 @@ class TargetSettingsTests(unittest.TestCase):
             }
         )
 
-        self.assert_blocked_on_the_setting(self.run_pass(), [1, 2])
+        self.assert_blocked_on_the_setting(self.run_pass(), [1])
 
     def test_batch_observation_without_required_checks_keeps_the_batch_and_blocks(self) -> None:
+        self.write_observed_candidate()
+
+        self.assert_blocked_on_the_setting(self.run_pass(), [1, 2])
+        self.client.close_batch_pull_request.assert_not_called()
+        self.assertTrue(self.store.list_merge_train_batch_candidate_records(status="active"))
+
+    def write_observed_candidate(self) -> None:
         record = self.train._plan_from_queue()
         candidate = record.candidate.model_copy(
             update={
@@ -113,9 +121,15 @@ class TargetSettingsTests(unittest.TestCase):
         self.client.read_merge_train_snapshot.return_value = self.train.snapshot
         self.client.observe_batch_candidate_checks.side_effect = _unprotected_branch_error()
 
-        self.assert_blocked_on_the_setting(self.run_pass(), [1, 2])
-        self.client.close_batch_pull_request.assert_not_called()
-        self.assertTrue(self.store.list_merge_train_batch_candidate_records(status="active"))
+    def test_unexplained_missing_checks_error_still_records_reconciliation(self) -> None:
+        self.client.target_setting_gaps.return_value = ()
+        self.write_observed_candidate()
+
+        with self.assertRaises(MergeTrainGitHubPolicyUnavailableError):
+            self.run_pass()
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.assertEqual(state.reconciliation_status, "required")
+        self.assertFalse(state.lease_owner)
 
 
 if __name__ == "__main__":

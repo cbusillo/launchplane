@@ -353,7 +353,7 @@ def run_stall_monitor_pass(
                             }
                         }
                     )
-                    recovered = any(
+                    recovered = not setting_gaps and any(
                         r.candidate.status == "failed"
                         and r.candidate.required_checks_status == "fail"
                         and r.candidate.candidate_sha

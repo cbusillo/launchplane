@@ -142,7 +142,7 @@ class PrivilegedOperationPlanningStoreError(TypeError):
     pass
 
 
-class PrivilegedOperationPlanRefusedError(PrivilegedOperationPlannerError):
+class MergeTrainTargetNotReadyError(PrivilegedOperationPlannerError):
     pass
 
 
@@ -561,7 +561,7 @@ def plan_managed_merge_train_policy_import(
         for gap in merge_train_target_setting_gaps(candidate_policies[policy_key])
     )
     if setting_gaps:
-        raise PrivilegedOperationPlanRefusedError(
+        raise MergeTrainTargetNotReadyError(
             "The merge train cannot land on this target yet. " + " ".join(setting_gaps)
         )
     preparation_context = request.preparation_context

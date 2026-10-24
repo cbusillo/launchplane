@@ -61,6 +61,7 @@ from control_plane.merge_train import (
     apply_merge_train_block_intent,
     MergeTrainDryRunResult,
     MergeTrainDryRunSnapshot,
+    MergeTrainPullRequestSnapshot,
     MergeTrainQueueEntry,
     MergeTrainStackDiscoveryResult,
     build_merge_train_dry_run_result,
@@ -596,111 +597,134 @@ def _execute_merge_train_controller_with_client(
         )
         lease = MergeTrainControllerLeaseContext(record=controller_state)
     try:
-        result = _resume_merge_train_controller_state(
-            request=request,
-            policy_sha256=policy_sha256,
-            repository_policy=repository_policy,
-            trace_id=trace_id,
-            recorded_at=recorded_at,
-            github_client=github_client,
-            candidate_store=candidate_store,
-            landing_store=landing_store,
-            stack_collapse_store=stack_collapse_store,
-            admission_store=admission_store,
-            lease=lease,
-        )
-        if result is not None and not request.mutate:
-            history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
-                repository=request.repository, base_branch=request.base_branch
+        try:
+            result = _resume_merge_train_controller_state(
+                request=request,
+                policy_sha256=policy_sha256,
+                repository_policy=repository_policy,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+                github_client=github_client,
+                candidate_store=candidate_store,
+                landing_store=landing_store,
+                stack_collapse_store=stack_collapse_store,
+                admission_store=admission_store,
+                lease=lease,
             )
-            # Completed landing cleanup resumes from its exact stored proof;
-            # it does not perform fresh queue discovery.
-            if history and lease.record.active_action == "land_batch":
-                landing = _merge_train_landing_record_by_id(
-                    record_store=landing_store,
-                    repository=request.repository,
-                    base_branch=request.base_branch,
-                    record_id=lease.record.active_record_id,
+            if result is not None and not request.mutate:
+                history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+                    repository=request.repository, base_branch=request.base_branch
                 )
-                if (
-                    landing is not None
-                    and latest_completed_merge_train_batch_landing_plan_record(
+                # Completed landing cleanup resumes from its exact stored proof;
+                # it does not perform fresh queue discovery.
+                if history and lease.record.active_action == "land_batch":
+                    landing = _merge_train_landing_record_by_id(
                         record_store=landing_store,
                         repository=request.repository,
                         base_branch=request.base_branch,
-                        batch_id=landing.landing_plan.batch_id,
-                        candidate_sha=landing.landing_plan.candidate_sha,
-                        policy_sha256=landing.landing_plan.policy_sha256,
-                        include_lineage_retirements=True,
+                        record_id=lease.record.active_record_id,
                     )
-                    is not None
-                ):
-                    history = ()
-            if history:
-                snapshot = github_client.read_merge_train_snapshot(
-                    repository=request.repository, base_branch=request.base_branch
+                    if (
+                        landing is not None
+                        and latest_completed_merge_train_batch_landing_plan_record(
+                            record_store=landing_store,
+                            repository=request.repository,
+                            base_branch=request.base_branch,
+                            batch_id=landing.landing_plan.batch_id,
+                            candidate_sha=landing.landing_plan.candidate_sha,
+                            policy_sha256=landing.landing_plan.policy_sha256,
+                            include_lineage_retirements=True,
+                        )
+                        is not None
+                    ):
+                        history = ()
+                if history:
+                    snapshot = github_client.read_merge_train_snapshot(
+                        repository=request.repository, base_branch=request.base_branch
+                    )
+                    review_recovery = original_review_recovery_records(
+                        records=history, snapshot=snapshot, ancestry=github_client
+                    )
+                    if review_recovery:
+                        prior_details = result.get("details")
+                        if isinstance(prior_details, dict) and prior_details.get("code"):
+                            result["details"] = {
+                                **prior_details,
+                                "original_review_recovery": original_review_recovery_details(
+                                    review_recovery
+                                ),
+                            }
+                        else:
+                            result["details"] = original_review_recovery_details(review_recovery)
+            if result is None:
+                active_landing_record = latest_merge_train_batch_landing_plan_record(
+                    record_store=landing_store,
+                    repository=request.repository,
+                    base_branch=request.base_branch,
                 )
-                review_recovery = original_review_recovery_records(
-                    records=history, snapshot=snapshot, ancestry=github_client
-                )
-                if review_recovery:
-                    prior_details = result.get("details")
-                    if isinstance(prior_details, dict) and prior_details.get("code"):
-                        result["details"] = {
-                            **prior_details,
-                            "original_review_recovery": original_review_recovery_details(
-                                review_recovery
-                            ),
-                        }
-                    else:
-                        result["details"] = original_review_recovery_details(review_recovery)
-        if result is None:
-            active_landing_record = latest_merge_train_batch_landing_plan_record(
-                record_store=landing_store,
-                repository=request.repository,
-                base_branch=request.base_branch,
-            )
-            if active_landing_record is not None:
-                result = _advance_active_landing_record(
+                if active_landing_record is not None:
+                    result = _advance_active_landing_record(
+                        request=request,
+                        policy_sha256=policy_sha256,
+                        repository_policy=repository_policy,
+                        trace_id=trace_id,
+                        recorded_at=recorded_at,
+                        github_client=github_client,
+                        candidate_store=candidate_store,
+                        landing_store=landing_store,
+                        stack_collapse_store=stack_collapse_store,
+                        admission_store=admission_store,
+                        admission_evaluator=admission_evaluator,
+                        active_landing_record=active_landing_record,
+                        lease=lease,
+                    )
+                else:
+                    result = _advance_without_active_landing(
+                        request=request,
+                        policy=policy,
+                        policy_sha256=policy_sha256,
+                        repository_policy=repository_policy,
+                        transport=transport,
+                        github_client=github_client,
+                        trace_id=trace_id,
+                        recorded_at=recorded_at,
+                        candidate_store=candidate_store,
+                        landing_store=landing_store,
+                        stack_collapse_store=stack_collapse_store,
+                        lease=lease,
+                        release_hold_reader=release_hold_reader,
+                    )
+        except MergeTrainGitHubPolicyUnavailableError:
+            converted = (
+                _target_not_ready_result(
                     request=request,
-                    policy_sha256=policy_sha256,
                     repository_policy=repository_policy,
-                    trace_id=trace_id,
-                    recorded_at=recorded_at,
                     github_client=github_client,
-                    candidate_store=candidate_store,
-                    landing_store=landing_store,
-                    stack_collapse_store=stack_collapse_store,
-                    admission_store=admission_store,
-                    admission_evaluator=admission_evaluator,
-                    active_landing_record=active_landing_record,
-                    lease=lease,
+                    ready_pull_request_numbers=_active_candidate_pull_request_numbers(
+                        candidate_store=candidate_store, request=request
+                    ),
                 )
-            else:
-                result = _advance_without_active_landing(
-                    request=request,
-                    policy=policy,
-                    policy_sha256=policy_sha256,
-                    repository_policy=repository_policy,
-                    transport=transport,
-                    github_client=github_client,
-                    trace_id=trace_id,
-                    recorded_at=recorded_at,
-                    candidate_store=candidate_store,
-                    landing_store=landing_store,
-                    stack_collapse_store=stack_collapse_store,
-                    lease=lease,
-                    release_hold_reader=release_hold_reader,
-                )
-        result = (
-            _target_not_ready_result(
-                request=request,
-                repository_policy=repository_policy,
-                github_client=github_client,
-                ready_pull_request_numbers=_missing_check_pull_request_numbers(result),
+                if lease.record.active_action in _OBSERVATION_ACTIVE_ACTIONS
+                else None
             )
-            or result
-        )
+            if converted is None:
+                raise
+            result = converted
+        else:
+            result = (
+                _target_not_ready_result(
+                    request=request,
+                    repository_policy=repository_policy,
+                    github_client=github_client,
+                    ready_pull_request_numbers=_ready_pull_requests_missing_checks(
+                        result=result,
+                        github_client=github_client,
+                        request=request,
+                        repository_policy=repository_policy,
+                    ),
+                )
+                or result
+            )
         lease.record_result(
             result,
             pass_started_at=recorded_at,
@@ -711,27 +735,6 @@ def _execute_merge_train_controller_with_client(
         )
     except MergeTrainControllerLeaseLostError:
         raise
-    except MergeTrainGitHubPolicyUnavailableError:
-        if lease.record.active_action not in _OBSERVATION_ACTIVE_ACTIONS:
-            raise
-        result = _target_not_ready_result(
-            request=request,
-            repository_policy=repository_policy,
-            github_client=github_client,
-            ready_pull_request_numbers=_active_candidate_pull_request_numbers(
-                candidate_store=candidate_store, request=request
-            ),
-        )
-        if result is None:
-            raise
-        lease.record_result(
-            result,
-            pass_started_at=recorded_at,
-            trace_id=trace_id,
-            reconciliation_required=False,
-            policy_key=repository_policy.policy_key,
-            policy_sha256=policy_sha256,
-        )
     except Exception as error:
         try:
             lease.record_result(
@@ -841,20 +844,48 @@ def _target_not_ready_result(
     }
 
 
-def _missing_check_pull_request_numbers(result: dict[str, object]) -> list[int] | None:
+def _ready_pull_requests_missing_checks(
+    *,
+    result: dict[str, object],
+    github_client: GitHubMergeTrainClient,
+    request: MergeTrainControllerRunOnceEnvelope,
+    repository_policy: MergeTrainRepositoryPolicy,
+) -> list[int] | None:
     if result.get("controller_action") not in {"idle", "wait_for_checks"}:
         return None
     dry_run_result = result.get("dry_run_result")
     queue = dry_run_result.get("queue") if isinstance(dry_run_result, dict) else None
-    numbers = [
-        entry["number"]
-        for entry in queue or ()
-        if isinstance(entry, dict)
+    if not any(
+        isinstance(entry, dict)
         and is_missing_required_checks_evidence(
             str(entry.get("required_checks_observation_error") or "")
         )
-    ]
-    return numbers or None
+        for entry in queue or ()
+    ):
+        return None
+    snapshot = github_client.read_merge_train_snapshot(
+        repository=request.repository, base_branch=request.base_branch
+    )
+    return [
+        pull_request.number
+        for pull_request in snapshot.pull_requests
+        if _asked_to_join_train(pull_request, repository_policy)
+        and is_missing_required_checks_evidence(pull_request.required_checks_observation_error)
+    ] or None
+
+
+def _asked_to_join_train(
+    pull_request: MergeTrainPullRequestSnapshot, repository_policy: MergeTrainRepositoryPolicy
+) -> bool:
+    labels = {label.casefold() for label in pull_request.labels}
+    return (
+        not pull_request.is_draft
+        and repository_policy.blocked_label.casefold() not in labels
+        and (
+            pull_request.ready_handoff is not None
+            or repository_policy.enqueue_label.casefold() in labels
+        )
+    )
 
 
 def _active_candidate_pull_request_numbers(

@@ -66,7 +66,7 @@ from control_plane.durable_operation_authorization import (
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
-    PrivilegedOperationPlanRefusedError,
+    MergeTrainTargetNotReadyError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
 )
@@ -807,11 +807,11 @@ def register_privileged_operation_routes(
                 request=envelope.request,
                 expires_in_seconds=envelope.expires_in_seconds,
             )
-        except PrivilegedOperationPlanRefusedError as error:
+        except MergeTrainTargetNotReadyError as error:
             raise dependencies.common.http_error(
                 status_code=422,
                 trace_id=trace_id,
-                code="privileged_operation_plan_refused",
+                code="merge_train_target_not_ready",
                 message=str(error),
             ) from error
         except (
@@ -1403,11 +1403,11 @@ def register_privileged_operation_routes(
                 request=envelope.request,
                 expires_in_seconds=envelope.expires_in_seconds,
             )
-        except PrivilegedOperationPlanRefusedError as error:
+        except MergeTrainTargetNotReadyError as error:
             raise dependencies.common.http_error(
                 status_code=422,
                 trace_id=trace_id,
-                code="privileged_operation_plan_refused",
+                code="merge_train_target_not_ready",
                 message=str(error),
             ) from error
         except (

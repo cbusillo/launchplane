@@ -75,7 +75,7 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.privileged_operation_registry import (
     MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
-    PrivilegedOperationPlanRefusedError,
+    MergeTrainTargetNotReadyError,
     PrivilegedOperationPlannerError,
     RegisteredPrivilegedOperationDescriptor,
     list_privileged_operation_descriptors,
@@ -920,7 +920,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             candidate_record = build_test_merge_train_policy_record(
                 repository="cbusillo/codex-skills", record_id="merge-train-policy-candidate"
             )
-            with self.assertRaises(PrivilegedOperationPlanRefusedError) as refusal:
+            with self.assertRaises(MergeTrainTargetNotReadyError) as refusal:
                 plan_managed_merge_train_policy_import(
                     store,
                     ManagedMergeTrainPolicyImportProposalInput(

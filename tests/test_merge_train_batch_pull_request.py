@@ -65,6 +65,7 @@ class _BatchProvider:
         self.before_merge: Callable[[], None] = lambda: None
         self.requires_conversation_resolution = False
         self.batch_threads: tuple[tuple[bool, str], ...] = ()
+        self.batch_comments: list[dict[str, object]] = []
 
     @property
     def merge_calls(self) -> list[tuple[str, str, dict[str, object] | None]]:
@@ -122,8 +123,11 @@ class _BatchProvider:
             return self.pull_request(self.number)
         if method == "GET" and "/pulls/" in path:
             return self.pull_request(int(path.rsplit("/", maxsplit=1)[1]))
+        if method == "GET" and f"/issues/{self.number}/comments?" in path:
+            return list(self.batch_comments)
         if method == "POST" and path.endswith(f"/issues/{self.number}/comments"):
             assert body is not None
+            self.batch_comments.append(body)
             return {"html_url": f"https://github.com/{self.repository_name}/pull/{self.number}"}
         if method == "PATCH" and path.endswith(f"/pulls/{self.number}"):
             assert body == {"state": "closed"}
@@ -608,6 +612,27 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         assert comments[0] is not None
         self.assertIn(_CLOSE_REASON, str(comments[0]["body"]))
         self.assertTrue(all(self.provider.pull_request(n)["state"] == "open" for n in (1, 2)))
+
+    def test_interrupted_retirement_does_not_repeat_its_reason(self) -> None:
+        original = self.provider.request
+
+        def refuse_close(
+            *, method: str, path: str, body: dict[str, object] | None = None
+        ) -> object:
+            if method == "PATCH":
+                raise MergeTrainGitHubError("unavailable", status_code=502)
+            return original(method=method, path=path, body=body)
+
+        with patch.object(self.provider, "request", side_effect=refuse_close):
+            with self.assertRaises(MergeTrainGitHubError):
+                self.client.close_batch_pull_request(
+                    candidate=self.provider.candidate, reason=_CLOSE_REASON
+                )
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
+        self.assertTrue(self.provider.closed)
+        self.assertEqual(len(self.provider.batch_comments), 1)
 
     def test_retirement_does_not_dispose_of_an_unrecorded_merge(self) -> None:
         self.provider.merged = True

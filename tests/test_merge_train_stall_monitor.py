@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
 )
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_github import MergeTrainGitHubPolicyUnavailableError
 from control_plane.contracts.merge_train_stall import (
     MergeTrainStallObservation,
     MergeTrainStallRecord,
@@ -194,10 +195,27 @@ class StallMonitorTests(TestCase):
         policy = _policy_record(
             (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )
+        failed = build_merge_train_batch_candidate(
+            dry_run_result=build_merge_train_dry_run_result(
+                policy=policy.policy, snapshot=snapshot, batch_landing=True
+            ),
+            base_sha=snapshot.base_sha,
+            policy_sha256=policy.policy_sha256,
+            created_at=_time(0),
+        ).model_copy(
+            update={
+                "status": "failed",
+                "required_checks_status": "fail",
+                "candidate_sha": "candidate-sha",
+            }
+        )
         client, reporter = Mock(), Mock()
         client.target_setting_gaps.return_value = ("Require status checks on main.",)
         client.read_merge_train_snapshot.return_value = snapshot.model_copy(
             update={"pull_requests": ()}
+        )
+        client.observe_batch_candidate_checks.side_effect = MergeTrainGitHubPolicyUnavailableError(
+            "no required checks"
         )
         reporter.publish.return_value = 91
         with (
@@ -221,6 +239,11 @@ class StallMonitorTests(TestCase):
         ):
             root = Path(directory)
             store = FilesystemRecordStore(root)
+            store.write_merge_train_batch_candidate_record(
+                build_merge_train_batch_candidate_record(
+                    candidate=failed, source="test", updated_at=_time(0)
+                )
+            )
             run_stall_monitor_pass(
                 store=store, root=root, now=lambda: _time(0), reporter_factory=lambda **_: reporter
             )
@@ -228,6 +251,8 @@ class StallMonitorTests(TestCase):
             self.assertIn("Require status checks on main.", reporter.publish.call_args.args[1])
             reporter.notify.assert_called_once()
             client.target_setting_gaps.return_value = ()
+            client.observe_batch_candidate_checks.side_effect = None
+            client.observe_batch_candidate_checks.return_value = failed
             run_stall_monitor_pass(
                 store=store,
                 root=root,
