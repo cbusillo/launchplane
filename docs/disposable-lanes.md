@@ -1158,8 +1158,12 @@ transport. This checks credential installation, not an interactive browser
 sign-in or Client acceptance.
 
 A terminal original build before restore dispatch, or a terminal restore, may
-be marked abandoned while keeping its candidate and custody records. A failed
-setup with explicit undispatched evidence can therefore resume its original
+be marked abandoned while keeping its candidate and custody records. If interrupted
+after that commit, the same operation copies its persisted abandonment receipt
+into the failed rebuild checkpoint without repeating provider work, changing
+serving authority or retiring either copy.
+
+A failed setup with explicit undispatched evidence can resume its original
 setup or retain the private copy without starting a job. This action does not
 stop or remove either copy. Once restore dispatch started, running, absent and
 ambiguous provider jobs cannot be abandoned or redispatched. Older records
