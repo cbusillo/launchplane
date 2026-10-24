@@ -135,6 +135,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
 - [preview-settings.md](preview-settings.md) — reviewed private-file saves of one preview runtime override.
+- [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
 - [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider

@@ -1640,7 +1640,11 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 elif changed == "lineage":
                     (native.root / "capture.json").write_text("{}")
                 elif changed == "pending":
-                    (native.root / "capture.pending").touch()
+                    with patch("os.replace", side_effect=OSError("fixture interrupted save")):
+                        with self.assertRaises(OSError):
+                            native.fixture.host["save"](
+                                native.root / "capture.json", {"state": "unsettled"}
+                            )
                 elif changed == "final":
                     for role in ("web", "script-runner"):
                         config = native.fixture.fixture.containers[role]["Config"]
@@ -1994,7 +1998,13 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                     "outcome": marker.name.removesuffix(".started") + ".outcome.json",
                     "pending": marker.name.removesuffix(".started") + ".outcome.pending",
                 }.get(changed, "unused")
-                if changed in {"other-effect", "outcome", "pending"}:
+                if changed == "pending":
+                    with patch("os.replace", side_effect=OSError("fixture interrupted save")):
+                        with self.assertRaises(OSError):
+                            self.fixture.host["save"](
+                                extra.with_suffix(".json"), {"state": "unsettled"}
+                            )
+                elif changed in {"other-effect", "outcome"}:
                     extra.touch()
                 elif changed == "corrupt":
                     snapshot.write_bytes(b"changed")

@@ -9,6 +9,7 @@ import click
 from unittest.mock import Mock, patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane import odoo_preview_apply_http as preview_http
 from control_plane.contracts.artifact_identity import ArtifactBuildFlags
 
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
@@ -127,6 +128,68 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_qualified_snapshot_preview_refresh_needs_no_first_snapshot(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.clean_testing_snapshot = True
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(envelope)
+        store = Mock(spec=["read_clean_testing_snapshot"])
+        store.read_clean_testing_snapshot.side_effect = AssertionError(
+            "A retained preview needs no source lookup"
+        )
+        environment = preview_http._OdooPreviewServiceEnvironment(values={})
+        with (
+            patch.object(preview_http, "build_odoo_preview_apply_inputs", return_value=issued),
+            patch.object(preview_http, "preview_has_completed_restore", return_value=True),
+            patch.object(
+                preview_http, "_odoo_preview_service_environment", return_value=environment
+            ),
+        ):
+            plan = preview_http._build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=store,
+                profile=profile,
+                request=issued.plan_request,
+                database_url=None,
+            )
+        self.assertIsNone(plan.dry_run_plan.clean_snapshot)
+
+    def test_apply_reproves_retained_copy_even_when_snapshot_descriptor_is_absent(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.clean_testing_snapshot = True
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(envelope)
+        with (
+            patch.object(preview_http, "refresh_odoo_preview_issued_plan", return_value=envelope),
+            patch.object(
+                preview_http,
+                "_odoo_preview_service_environment",
+                return_value=preview_http._OdooPreviewServiceEnvironment(values={}),
+            ),
+            patch("control_plane.lane_movement.require_forward_preview_build"),
+            patch.object(
+                preview_http, "preview_has_completed_restore", return_value=True
+            ) as retained,
+            patch.object(
+                preview_http,
+                "execute_odoo_preview_dokploy_apply",
+                return_value=Mock(model_dump=Mock(return_value={"status": "pass"})),
+            ) as execute,
+        ):
+            preview_http.execute_odoo_preview_apply_result(
+                control_plane_root_path=Path("."),
+                record_store=Mock(),
+                profile=profile,
+                request=envelope,
+                issued_plan=issued,
+                database_url=None,
+                deployment_record_id="fixture-retained-operation",
+            )
+        retained.assert_called_once()
+        self.assertTrue(execute.call_args.kwargs["preserve_existing_data"])
+        self.assertFalse(execute.call_args.kwargs["restore_upstream"])
+        self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
+
     def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
         self,
     ) -> None:
@@ -205,6 +268,10 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             store.read_idempotency_record_by_id.return_value = None
             with self.assertRaises(click.ClickException):
                 retained()
+            profile.preview.clean_testing_snapshot = True
+            store.read_idempotency_record_by_id.return_value = operation
+            operation.response_payload["result"] = {**result, "module_install_update_evidence": {}}
+            self.assertTrue(retained())
 
     def test_driver_selects_upstream_restore_only_when_it_has_an_upstream_source(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
@@ -459,6 +526,8 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         site_odoo_version: str = "",
         preview_payload: str = "",
         website_bootstrap: bool = False,
+        snapshot_enabled: bool = False,
+        template_extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -484,7 +553,8 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                         )
                     }
                 )
-            store.write_product_profile_record(profile)
+            if snapshot_enabled:
+                profile.preview.clean_testing_snapshot = True
             if website_bootstrap:
                 store.write_odoo_instance_override_record(
                     OdooInstanceOverrideRecord(
@@ -514,7 +584,11 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                         scope="instance",
                         context="cm",
                         instance="testing",
-                        env={"ODOO_DB_USER": "odoo", "ODOO_VERSION": site_odoo_version},
+                        env={
+                            "ODOO_DB_USER": "odoo",
+                            "ODOO_VERSION": site_odoo_version,
+                            **(template_extra or {}),
+                        },
                         updated_at="2026-05-09T12:30:00Z",
                         source_label="test",
                     )
@@ -543,6 +617,30 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                     manifest=manifest,
                     database_url=database_url,
                 ).values
+
+    def test_snapshot_preview_never_receives_template_source_connections(self) -> None:
+        from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+
+        imported_key = config_parameter_runtime_key("fishbowl.password")
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            site_odoo_version="19.0",
+            snapshot_enabled=True,
+            template_extra={
+                "ODOO_UPSTREAM_HOST": "production.invalid",
+                "ODOO_UPSTREAM_PASSWORD": "source-secret",
+                "DATA_WORKFLOW_SSH_DIR": "/private-reader",
+                "OPENUPGRADE_ENABLED": "true",
+                imported_key: "import-secret",
+            },
+        )
+        self.assertFalse(
+            any(key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_")) for key in values)
+        )
+        self.assertNotIn(imported_key, values)
+        self.assertEqual(values["BOOTSTRAP"], "false")
+        self.assertEqual(values["OPENUPGRADE_ENABLED"], "false")
+        self.assertEqual(values["ODOO_MAX_CRON_THREADS"], "0")
 
     def test_artifact_odoo_version_supplies_a_declared_key_the_site_lacks(self) -> None:
         values = self._service_environment(manifest_odoo_version="19.0")
