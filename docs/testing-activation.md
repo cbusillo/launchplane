@@ -487,6 +487,11 @@ route cutover and changed authority; provider or unexpected exception text
 remains private. The testing-hold continuation preserves those same categories.
 Keep the request trace
 and original allocation/key while addressing that check, then plan again.
+Handled dependency failures retain a trace-bound `request_dependency_failure`
+event in the service logs. It contains at most eight trusted Launchplane source
+module/line locations from the caught traceback, without exception text,
+source text, frame locals, request payloads or headers. Use the supported
+service-log reader to identify the failing check before another forward action.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
