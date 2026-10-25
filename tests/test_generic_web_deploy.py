@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from dataclasses import replace
+import json
 from pathlib import Path
 from typing import cast
 import unittest
@@ -623,6 +625,83 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_failed_candidate_task_evidence_survives_runtime_history_churn(self) -> None:
+        from control_plane.dokploy.application_runtime import ApplicationTaskObservation
+
+        store = _GenericWebDeployStore(_profile())
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="done",
+                deployment_id="provider-job",
+                started_at="2026-10-20T03:08:20Z",
+                finished_at="2026-10-20T03:08:25Z",
+            )
+        )
+        execute = provider.execute_artifact_deploy
+        record_id = "failed-candidate"
+
+        def fail_candidate(**kwargs: object) -> None:
+            execute(**kwargs)  # type: ignore[arg-type]
+            assert provider.application_runtime is not None
+            runtime = provider.application_runtime
+            provider.application_runtime = replace(
+                runtime,
+                rollout_state="rollback_completed",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                tasks=(
+                    ApplicationTaskObservation(
+                        image=runtime.service_image,
+                        deployment_record_id=record_id,
+                        state="failed",
+                        task_id="candidate-task",
+                        desired_state="shutdown",
+                        container_id_present=True,
+                        error="task: non-zero exit (23)",
+                        exit_code=23,
+                    ),
+                ),
+            )
+
+        def observe_then_churn(**_kwargs: object) -> ApplicationRuntimeObservation:
+            assert provider.application_runtime is not None
+            observed = provider.application_runtime
+            provider.application_runtime = replace(observed, tasks=())
+            return observed
+
+        with (
+            patch.object(provider, "execute_artifact_deploy", side_effect=fail_candidate),
+            patch.object(
+                provider, "observe_testing_application_runtime", side_effect=observe_then_churn
+            ),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                deploy_provider=provider,
+                deployment_record_id=record_id,
+            )
+        saved = store.deployments[0]
+        from control_plane.workflows.generic_web_deploy_provider import (
+            APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY,
+        )
+
+        evidence = json.loads(
+            saved.post_deploy_update.evidence[APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY]
+        )
+        self.assertNotIn("environment_keys", str(evidence))
+        self.assertNotIn("containers", evidence)
+        self.assertEqual(evidence["tasks"][0]["deployment_record_id"], record_id)
+        self.assertEqual(evidence["tasks"][0]["task_id"], "candidate-task")
+        self.assertEqual(evidence["tasks"][0]["exit_code"], 23)
+        self.assertIn("non-zero exit", evidence["tasks"][0]["error"])
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertTrue(result.provider_failure_proved)
+        self.assertFalse(store.inventories)
+
     def test_refused_deployment_retains_rollback_intent_before_provider_effect(self) -> None:
         for rollback in (False, True):
             with self.subTest(rollback=rollback):
