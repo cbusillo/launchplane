@@ -1649,24 +1649,19 @@ records remain the source of truth for active public-ingress state.
 
 ## Every Code Feedback Resume Evidence
 
-Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md); Codex Lab runs
-agent work. The Every Code records below stay only until their readers move
-(cbusillo/launchplane#1313). Do not extend them.
+Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md). Historical
+records remain readable; do not extend them.
 
-The independent [feedback continuation foundation](every-code-feedback-resume.md)
-stores immutable acceptance, terminal intent, operation, explicit PR closure,
-startup/handoff receipt and recovery evidence in separate SQL tables. Their
+Separate SQL tables retain immutable acceptance, terminal intent, operation,
+explicit PR closure, startup/handoff receipt and recovery evidence. Their
 typed contracts reject malformed immutable identities, inconsistent digests and
 renewed eligibility deadlines. Changed replay conflicts rather than overwriting
 the earlier record. These records remain isolated from the existing feedback
 queue and are not wired into live lifecycle transitions.
 
-The legacy feedback path's repository-login/local-planning trust is not inherited
-by the new request action. Neither a legacy feedback row nor an ordinary worker
-status or rerun intent establishes feedback-resume authority. Persisted receipt
-fixtures and recovery observations do not authorize execution or admin
-resolution; those service-owned transitions remain separately implemented and
-gated as described in the linked contract.
+Persisted receipts and recovery observations do not authorize execution or admin
+resolution. The unwired launch and provider-verification helpers are removed;
+the retained record models and storage checks preserve historical evidence.
 
 ## Every Code Notification Records
 

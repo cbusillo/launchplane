@@ -164,6 +164,3 @@ not describe runtime authority until it is implemented, deployed, and activated.
   code-quality guardrails.
 - [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
   provenance, and retirement verification.
-- [every-code-feedback-resume.md](every-code-feedback-resume.md) — feedback
-  continuation contracts and evidence foundation; not connected to production,
-  and its plan (#2328) is closed.
