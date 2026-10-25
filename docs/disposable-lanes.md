@@ -590,7 +590,7 @@ resources remain holds even after a report expires. Missing positive preview
 observations alone do not block teardown; reviewed-plan, target ownership,
 executor fences and provider-resource guards still apply before every effect.
 Odoo teardown inspects its generated storage once outside the mutation lock,
-then rechecks placement, environment and raw compose binding inside the lock
+then rechecks placement, volume environment and raw compose binding inside the lock
 before each deletion. Missing owned resources can converge; foreign volume
 declarations, shared consumers and incomplete inventories remain held.
 

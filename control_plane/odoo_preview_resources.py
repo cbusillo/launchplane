@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 import click
 import yaml
 
-from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy import api, post_deploy, source
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimeOperation
 from control_plane.contracts.disposable_lane import (
     ODOO_PREVIEW_RESOURCES_OK_MARKER,
@@ -166,9 +166,22 @@ def _preview_resource_binding(
         or any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
     ):
         raise click.ClickException("Existing preview storage changed or is unavailable.")
-    fields = ("composeId", "serverId", "appName", "sourceType", "composePath", "composeFile")
+    fields = (
+        "composeId",
+        "serverId",
+        "appName",
+        "sourceType",
+        "composePath",
+        "composeFile",
+        "composeType",
+        "randomize",
+        "isolatedDeployment",
+    )
     value = {key: payload.get(key) for key in fields}
     value["volumes"] = volumes
+    value["compose_environment"] = {
+        key: value for key, value in current.items() if key.startswith("COMPOSE_")
+    }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -179,15 +192,32 @@ def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
         actual = yaml.safe_load(str(payload.get("composeFile") or ""))
     except yaml.YAMLError:
         raise click.ClickException("Preview destruction source is invalid.") from None
-    expected = yaml.safe_load(
-        compose.render_odoo_raw_compose_file(
-            image_reference="inspection", hold_web_until_integration_readback=True
-        )
-    )
+    declarations = actual.get("volumes") if isinstance(actual, dict) else None
+    allowed_names = {"${" + key + ":?missing}" for key in RESOURCE_KEYS}
+    explicit_names: set[str] = set()
+    if not isinstance(declarations, dict) or not declarations:
+        raise click.ClickException("Preview destruction storage declarations are unavailable.")
+    for declaration in declarations.values():
+        if declaration in (None, {}):
+            continue
+        if (
+            not isinstance(declaration, dict)
+            or set(declaration) != {"name"}
+            or not isinstance(declaration["name"], str)
+            or declaration["name"] not in allowed_names
+            or declaration["name"] in explicit_names
+        ):
+            raise click.ClickException(
+                "Preview destruction storage declarations are unsafe or unsupported."
+            )
+        explicit_names.add(declaration["name"])
     if (
         not isinstance(actual, dict)
         or "include" in actual
-        or actual.get("volumes") != expected["volumes"]
+        or any(
+            key.startswith("COMPOSE_")
+            for key in api.parse_dokploy_env_text(str(payload.get("env") or ""))
+        )
         or not isinstance(actual.get("services"), dict)
         or any(
             not isinstance(service, dict) or "extends" in service

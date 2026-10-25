@@ -398,10 +398,23 @@ class PreviewResourceCollectorTests(unittest.TestCase):
         self.assertEqual(set(declared_names), set(environment.values()) | implicit_names)
         binding = _preview_resource_binding(payload, compose_id="preview", environment=environment)
         parsed = yaml.safe_load(raw)
+        legacy = {
+            **parsed,
+            "volumes": {key: value for key, value in parsed["volumes"].items() if value},
+        }
+        _require_preview_destroy_source({**payload, "composeFile": yaml.safe_dump(legacy)})
+        with self.assertRaises(click.ClickException):
+            _require_preview_destroy_source(
+                {**payload, "env": payload["env"] + "\nCOMPOSE_FILE=other.yml"}
+            )
         mutations = [
             {"serverId": "other"},
             {"appName": "other"},
             {"sourceType": "git"},
+            {"composeType": "stack"},
+            {"randomize": True},
+            {"isolatedDeployment": True},
+            {"env": payload["env"] + "\nCOMPOSE_FILE=other.yml"},
             {"composePath": "other.yml"},
             {"composeFile": raw + "\n"},
             {"env": ""},

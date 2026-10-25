@@ -2894,6 +2894,55 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             any(call.kwargs.get("method") == "POST" for call in provider.call_args_list)
         )
 
+    def test_destroy_missing_lookup_requires_complete_independent_absence(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
+        present = [
+            {
+                "environments": [
+                    {
+                        "environmentId": "fixture",
+                        "composes": [{"composeId": plan.compose_ref, "name": plan.compose_name}],
+                    }
+                ]
+            }
+        ]
+        for inventory, search in ((present, []), ([], {"total": 1, "items": []}), ([{}], [])):
+            with self.subTest(inventory=inventory, search=search):
+
+                def provider(**kwargs: object) -> object:
+                    return inventory if kwargs["path"] == "/api/project.all" else search
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                        side_effect=provider,
+                    ) as calls,
+                ):
+                    result = execute_odoo_preview_dokploy_apply(
+                        control_plane_root=Path("."),
+                        record_store=preview_target_inventory(),
+                        preview_context="fixture-preview",
+                        request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+                    )
+                self.assertEqual(result.status, "blocked")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertFalse(
+                    any(call.kwargs.get("method") == "POST" for call in calls.call_args_list)
+                )
+
     def test_apply_destroy_treats_missing_compose_without_domains_as_clean(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
