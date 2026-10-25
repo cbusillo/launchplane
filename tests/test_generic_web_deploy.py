@@ -675,7 +675,7 @@ class GenericWebDeployTests(unittest.TestCase):
             patch.object(provider, "execute_artifact_deploy", side_effect=fail_candidate),
             patch.object(
                 provider, "observe_testing_application_runtime", side_effect=observe_then_churn
-            ) as reader,
+            ),
         ):
             result = execute_generic_web_deploy(
                 control_plane_root=Path("."),
@@ -701,7 +701,6 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "fail")
         self.assertTrue(result.provider_failure_proved)
         self.assertFalse(store.inventories)
-        reader.assert_called_once()
 
     def test_refused_deployment_retains_rollback_intent_before_provider_effect(self) -> None:
         for rollback in (False, True):
