@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -7902,6 +7903,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         )
 
     def test_pure_dependabot_without_build_requests_no_client_review(self) -> None:
+        seed_dependency_policy(self.store, repository=REPOSITORY)
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
@@ -7910,9 +7912,9 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.github.pull_request.update(
             {
                 "body": "Bumps a dependency.",
-                "user": {"login": "dependabot[bot]", "type": "Bot"},
+                "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                 "head": {"sha": PR_HEAD, "repo": {"full_name": REPOSITORY}},
-                "base": {"sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
+                "base": {"ref": "main", "sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
             }
         )
         read = self.github.get_json

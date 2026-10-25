@@ -1,3 +1,7 @@
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainDependencyBotPolicy,
+    MergeTrainRepositoryPolicy,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
@@ -119,3 +123,44 @@ repository_id = 123
 private_key_context = "example_context"
 {scheduler_table}
 """
+
+
+def dependency_bot_policy(
+    github_user_id: int = 49699333, *, metadata_format: str = "dependabot_trailer"
+) -> "MergeTrainDependencyBotPolicy":
+    return MergeTrainDependencyBotPolicy.model_validate(
+        {
+            "github_user_id": github_user_id,
+            "metadata_format": metadata_format,
+            "allowed_update_types": ["patch", "minor", "digest"],
+        }
+    )
+
+
+def dependency_repository_policy(
+    github_user_id: int = 49699333,
+    *,
+    metadata_format: str = "dependabot_trailer",
+    repository: str = "cbusillo/sellyouroutboard",
+) -> MergeTrainRepositoryPolicy:
+    policy = build_test_merge_train_policy(
+        repository=repository, trusted_automation_github_user_ids=(github_user_id,)
+    ).policies[0]
+    policy.enqueue.dependency_update_bots = (
+        dependency_bot_policy(github_user_id, metadata_format=metadata_format),
+    )
+    return policy
+
+
+def seed_dependency_policy(
+    store: object, *, repository: str, github_user_id: int = 49699333
+) -> None:
+    from typing import Any, cast
+
+    record = build_test_merge_train_policy_record(repository=repository)
+    policy = record.model_dump(mode="json")
+    policy["policy"]["policies"][0] = dependency_repository_policy(
+        github_user_id, repository=repository
+    ).model_dump(mode="json")
+    policy["policy_sha256"] = ""
+    cast(Any, store).write_merge_train_policy_record(MergeTrainPolicyRecord.model_validate(policy))

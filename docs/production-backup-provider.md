@@ -16,8 +16,9 @@ authorization rule with durable provenance, and `Idempotency-Key`. The service
 resolves current typed authority and stores the exact binding in a durable
 operation. The same caller/key and request reuses that operation even after
 authority changes; changed requests conflict. New captures resolve current
-authority. Backup record IDs cannot be reused for another capture, including
-after an operation finishes.
+authority. Backup record IDs cannot be reused for another capture. Reviewed
+continuation of a proven pre-capture failure preserves the original operation;
+see [release review](release-review.md).
 
 The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
 browser session through the CSRF-checked browser-mutation dependency; terminal
@@ -74,9 +75,8 @@ The Compose grace remains protection for ordinary shutdown. Roll out new shutdow
 behavior while no capture is running: existing containers retain their old
 stop timeout until replaced. A forced kill or host loss still produces
 `backup_effect_outcome_unknown`; the status read explains that the release is
-stopped and the capture is not automatically retried. This does not resume an
-already stopped release; the Client's fresh explicit Accept starts a new gated
-run as described in [release review](release-review.md).
+stopped and the capture is not automatically retried. [Release review](release-review.md)
+owns supported continuation and reconciliation of the original accepted run.
 
 A database advisory lock covers capture and retention for the configured host,
 guest kind and guest ID, across backup record IDs and worker replicas. A second

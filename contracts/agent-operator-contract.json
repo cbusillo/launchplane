@@ -75,6 +75,33 @@
         ]
       },
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "continue_backup_v1_products__product__releases__decision_record_id__backup_continuation_post",
+        "path": "/v1/products/{product}/releases/{decision_record_id}/backup-continuation",
+        "purpose": "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_digest"
+        ],
+        "schema_fingerprint_sha256": "58db8a0b3f3df37db61c4601e028c49feebe958c318d45a43a250598dfdd4382",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1164,8 +1191,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "cda994b2eb50783144fea0c7dbdff90f8e297a66"
+    "source_commit_sha": "9daa832438244046691d09bef08127881ab64962"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9a15ae89f47fdbe35c3ab935a05e9aad9e8f381b6fe40c3d67fe110741cbfabb"
+  "semantic_digest_sha256": "f736184328466904238affe51ddffaeec5e572580857dd02b2de0b9fe86944e9"
 }
