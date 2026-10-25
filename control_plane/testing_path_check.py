@@ -81,9 +81,8 @@ def read_testing_prerequisites(
     context = lane.context
     steps: list[PathCheckStep] = []
 
-    def check(step_id: str, code: str, description: str, read: Callable[[], object]) -> None:
+    def check(step_id: str, step_code: str, description: str, read: Callable[[], object]) -> None:
         step_state: Literal["clear", "blocked", "unknown"] = "clear"
-        step_code = code
         try:
             read()
         except TestingPathHoldActive:
