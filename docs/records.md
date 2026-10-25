@@ -3019,7 +3019,7 @@ credential, runtime grant, or stored record is changed by this code retirement.
 ## Every Code Work Request Record
 
 Status: retired with Every Code; see the note under Every Code Feedback Resume
-Evidence. The local Mac worker below no longer runs agent work.
+Evidence. The local worker execution commands are removed.
 
 See [agent-context-boundary.md](agent-context-boundary.md) for the agent-facing
 rules that compose these records into public-safe context and scoped intent
@@ -3054,10 +3054,6 @@ preflights.
   before any requeue. Recovery locks and compares the exact stale snapshot, so a
   concurrent heartbeat or status transition wins cleanly instead of being
   overwritten by a stale recovery decision.
-- Service-backed workers invoke the same recovery route during their polling
-  loop. Filesystem-backed workers serialize claim, heartbeat, status, and
-  recovery transitions with per-request process locks and publish JSON records
-  through atomic replacement.
 - Requests that were already active before lease fields existed migrate with an
   expired lease and an exhausted safe-retry attempt. Their first recovery marks
   them `blocked` for manual review instead of risking duplicate execution.

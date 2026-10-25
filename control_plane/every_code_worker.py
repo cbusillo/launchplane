@@ -39,7 +39,6 @@ class EveryCodeWorkerApiStore:
         path: str,
         *,
         body: dict[str, object] | None = None,
-        idempotency_key: str = "",
     ) -> dict[str, object]:
         base_url = self.service_url.strip().rstrip("/")
         url = f"{base_url}{path}"
@@ -51,8 +50,6 @@ class EveryCodeWorkerApiStore:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
         request = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:

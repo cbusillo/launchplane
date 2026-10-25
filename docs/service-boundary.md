@@ -1107,21 +1107,10 @@ The `/v1/manager-preview-approval/github-webhook` URL and its
 for signed trusted-maintenance evidence. Manager approval itself is retired; the
 webhook records no approval and the manager reconcile route is deleted.
 
-The Every Code worker read, native claim, and status routes also accept a
-dedicated local-worker bearer token. Configure
-`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on the Launchplane service and on the Mac
-worker host, then run the worker with
-`uv run launchplane every-code start --service-url https://...`. That token is
-scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
-readiness routes, plus read-only `GET /v1/product-profiles` for preview
-readiness projection. The worker can create service-owned PR feedback records
-only for Launchplane-derived worker signals such as failed-check routing, while
-human PR feedback still enters through the signed webhook path and trusted-actor
-gate. It cannot create webhook requests, write product records, or access other
-Launchplane service routes. This keeps remote DB credentials on the Launchplane
-host while still allowing visible local Code/tmux work sessions to claim, rerun
-terminal requests, reconcile preview state, route failed checks, and report
-progress.
+The historical work-request reads and engineering-review routes retain the
+existing `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` bearer identity. The retired local
+worker runner and session launch commands are removed; the credential name
+does not select an executable or grant new authority.
 
 Engineering-review worker routes reuse that bearer secret but do not trust
 caller-supplied host or runtime strings. The service derives the worker identity
@@ -1130,13 +1119,6 @@ from `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID` and
 DB-backed review authority and each claimed run to match both values before a
 scoped review credential is decrypted or returned.
 
-The local worker uses a separate GitHub token for public claim comments. Provide
-`LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN` on the worker host, and set
-`LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the Director expects a specific
-automation account. Before creating the `<!-- every-code-claim -->` issue
-comment, the worker resolves `gh api user --jq .login` with that token and
-blocks the work request if the actor does not match. Claim comments never fall
-back to the host's ambient `gh` login.
 
 Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not

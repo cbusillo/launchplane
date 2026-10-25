@@ -162,5 +162,5 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and
   code-quality guardrails.
-- [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
-  provenance, and retirement verification.
+- [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
+  and retained engineering-review transport.

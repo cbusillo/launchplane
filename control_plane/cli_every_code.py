@@ -16,7 +16,7 @@ def register_every_code_commands(main: click.Group) -> None:
     main.add_command(every_code)
 
 
-@click.group("every-code")
+@click.group("every-code", help="Run advisory engineering review for retained work requests.")
 def every_code() -> None:
     pass
 

@@ -18,10 +18,10 @@ No missing record or closure evidence authorizes workspace or data deletion.
 
 ## Remote session contract
 
-The current Codex Lab session client maps this provenance into the Discord Blue
+The historical Codex Lab session client used the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
 It connects to `/agent-session/connect`; Launchplane does not implement the
-WebSocket client. The worker executable cutover alone does not establish DUI
+WebSocket client. The removed worker executable does not establish current DUI
 connectivity.
 
 
