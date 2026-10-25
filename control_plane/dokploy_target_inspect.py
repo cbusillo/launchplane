@@ -555,7 +555,20 @@ def summarize_dokploy_target_payload(
         "environment": _environment_summary(payload),
         "env": _env_summary(payload),
     }
+    if target_type == "application":
+        summary["endpoint"] = _application_endpoint_summary(payload)
     return {key: value for key, value in summary.items() if _present(value)}
+
+
+def _application_endpoint_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    endpoint = payload.get("endpointSpecSwarm")
+    mode = "unknown"
+    if "endpointSpecSwarm" in payload and endpoint in (None, {}):
+        mode = "provider_default"
+    elif isinstance(endpoint, Mapping) and endpoint.get("Mode") in ("vip", "dnsrr"):
+        mode = str(endpoint["Mode"])
+    ports = payload.get("ports")
+    return {"mode": mode, "port_count": len(ports) if isinstance(ports, list) else None}
 
 
 def _environment_summary(payload: Mapping[str, object]) -> dict[str, object]:
