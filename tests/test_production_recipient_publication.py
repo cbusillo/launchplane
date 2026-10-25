@@ -18,6 +18,8 @@ from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
     rollback_publication,
+    require_owned_publication_rows,
+    RecipientOwnedAuthorityChanged,
 )
 from tests.test_production_backup_authority import _source_target, _destination_target, _policy
 from tests import test_production_recipient as preparation_tests
@@ -161,6 +163,27 @@ class RecipientPublicationTests(unittest.TestCase):
         return commit_publication(
             self.store, self.record, self.publication, validate_release=lambda: None
         )
+
+    def test_read_only_inventory_bookkeeping_does_not_weaken_publication_mutation_guards(
+        self,
+    ) -> None:
+        from datetime import datetime, timedelta
+
+        record = self.publish()
+        inventory = self.store.read_environment_inventory(
+            context_name=record.context, instance_name="prod"
+        )
+        stamp = (datetime.fromisoformat(inventory.updated_at) + timedelta(seconds=1)).isoformat()
+        self.store.write_environment_inventory(inventory.model_copy(update={"updated_at": stamp}))
+        with self.assertRaises(RecipientOwnedAuthorityChanged):
+            require_owned_publication_rows(self.store, record)
+        require_owned_publication_rows(self.store, record, inventory_timestamp_required=False)
+        foreign = "a" * 40 if inventory.source_git_ref != "a" * 40 else "b" * 40
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"updated_at": stamp, "source_git_ref": foreign})
+        )
+        with self.assertRaises(RecipientOwnedAuthorityChanged):
+            require_owned_publication_rows(self.store, record, inventory_timestamp_required=False)
 
     def test_revoked_execution_lease_cannot_publish_or_update_custody(self) -> None:
         reservation = self.store.reserve_mutation(
