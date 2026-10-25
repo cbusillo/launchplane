@@ -1086,10 +1086,11 @@ for a failed promotion. An admin override never starts a release; it stays a han
 promotion from the Release panel. No automated identity gains a promote right,
 and an automation token still cannot submit a decision.
 
-Accepted-release advancement has its own serial worker loop at the existing
-30-second cadence. An unrelated Odoo reconciliation, provider wait or preview
-sweep cannot delay its next pass. A pass that is still running finishes before
-another begins, and shutdown joins admitted promotion or rollback work.
+Accepted-release advancement has its own serial worker loop. An unrelated Odoo
+reconciliation, provider wait or preview sweep cannot delay its next pass. A pass
+that is still running finishes before another begins, and shutdown joins admitted
+promotion or rollback work. Queued Odoo operations still use their normal worker;
+generic-web steps executed by the release pass can continue independently.
 
 For Odoo, promotion admission pins the checklist's production artifact and its
 passing deployment in the operation's initial checkpoint. The worker verifies

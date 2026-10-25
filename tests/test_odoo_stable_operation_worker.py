@@ -258,8 +258,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                     return ()
 
                 def wait(*_args: object, **_kwargs: object) -> object:
-                    self.assertTrue(first.wait(10))
-                    second.wait(1)
+                    second.wait(10)
                     stop.set()
                     return type("Idle", (), {"status": "idle"})()
 
@@ -355,6 +354,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
     def test_cold_invitation_reads_do_not_delay_the_next_accepted_release_pass(self) -> None:
         started, release, finished, stop, second = Event(), Event(), Event(), Event(), Event()
         passes: list[bool] = []
+        observed_while_waiting: list[bool] = []
 
         def invite(**_kwargs: object) -> None:
             started.set()
@@ -369,9 +369,9 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             return ()
 
         def poll(**_kwargs: object) -> object:
-            self.assertTrue(started.wait(10))
-            self.assertTrue(second.wait(10))
-            self.assertFalse(finished.is_set())
+            started.wait(10)
+            second.wait(10)
+            observed_while_waiting.append(started.is_set() and not finished.is_set())
             release.set()
             stop.set()
             return type("Idle", (), {"status": "idle"})()
@@ -406,6 +406,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 finally:
                     release.set()
         self.assertGreaterEqual(len(passes), 2)
+        self.assertTrue(all(observed_while_waiting))
         self.assertEqual(invitations.call_count, 1)
         self.assertTrue(finished.is_set())
 

@@ -983,7 +983,7 @@ def run_odoo_stable_operation_worker_loop(
 
     def advance_releases() -> None:
         while not worker_stop_event.is_set() and not client_release_stop_event.is_set():
-            started_at = monotonic()
+            started_at = time.monotonic()
             try:
                 advance_client_releases(
                     store=record_store,
@@ -994,7 +994,7 @@ def run_odoo_stable_operation_worker_loop(
             except Exception:
                 logging.exception("Client release advance failed.")
             client_release_stop_event.wait(
-                max(0.0, CLIENT_RELEASE_ADVANCE_SECONDS - (monotonic() - started_at))
+                max(0.0, CLIENT_RELEASE_ADVANCE_SECONDS - (time.monotonic() - started_at))
             )
 
     def invite_clients() -> None:
