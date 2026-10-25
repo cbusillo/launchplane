@@ -102,6 +102,11 @@ including the runtime environment file, and binds the compared source bytes into
 the resource evidence before requesting the actual provider render. A saved provider configuration alone never
 qualifies the recipient.
 
+Dokploy conversion may declare its standard external network without attaching
+a service. Verification ignores only that exact unused declaration when the
+reviewed source has no networks. Service attachments, other network definitions
+and every other part of the render must still match the reviewed source.
+
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
 plan and a new key only when its reservation is gone and it has no provider IDs.
 The compare-and-write retains the complete prior attempt in custody history.

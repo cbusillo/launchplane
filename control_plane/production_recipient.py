@@ -716,6 +716,19 @@ class ProductionRecipientAdapter:
             raise RecipientSourceNotMaterialized("The recipient source is not materialized.")
         actual = read_provider_compose(converted)
         actual.pop("name", None)
+        provider_networks = actual.get("networks")
+        unused_provider_network = (
+            expected.get("networks") in (None, {})
+            and isinstance(provider_networks, dict)
+            and set(provider_networks) == {"dokploy-network"}
+            and isinstance(provider_network := provider_networks["dokploy-network"], dict)
+            and set(provider_network) == {"external"}
+            and provider_network["external"] is True
+            and all(not service.get("networks") for service in actual["services"].values())
+        )
+        if unused_provider_network:
+            actual.pop("networks")
+            expected.pop("networks", None)
         for name, service in actual.get("services", {}).items():
             labels = service.pop("labels", {})
             if isinstance(labels, list):
