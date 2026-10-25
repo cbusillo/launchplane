@@ -7,7 +7,10 @@ from typing import Annotated
 import click
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
-from fastapi import Depends, Header, Path as PathParameter
+from fastapi import Depends, Header, Path as PathParameter, Request, Response
+from pydantic import BaseModel
+from control_plane.contracts.production_consumer_reads import ProductionConsumerReadResult
+from control_plane.production_consumer_reads import qualify_consumer_reads
 
 from control_plane.contracts.production_recipient import (
     ProductionRecipientPlan,
@@ -41,6 +44,11 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import PostgresRecordStore
 
 
+class ProductionConsumerReadResponse(BaseModel):
+    trace_id: str
+    result: ProductionConsumerReadResult
+
+
 def register_production_recipient_routes(
     app: ApiRouteRegistrar,
     *,
@@ -50,6 +58,78 @@ def register_production_recipient_routes(
     root: Path,
     run_provider_mutation: Callable[..., Awaitable[AcceptedEvidenceResponse]],
 ) -> None:
+    async def consumer_reads(
+        product: str,
+        context: str,
+        request: Request,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> ProductionConsumerReadResponse:
+        trace = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if (
+            list(request.query_params) != ["context"]
+            or len(request.query_params.getlist("context")) != 1
+        ):
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace,
+                code="invalid_request",
+                message="Consumer reads accept only the published context.",
+            )
+
+        def can_read(selected_product: str, selected_context: str, instance: str) -> bool:
+            return dependencies.authorization_allows(
+                identity=identity,
+                action="operations.read",
+                product=selected_product,
+                context=selected_context,
+                target=AuthorizationTarget(scope="instance", instances=(instance,)),
+            )
+
+        if not can_read(product, context, "prod"):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Current production read authority is required.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="database_storage_required",
+                message="Current service-owned recipient custody is required.",
+            )
+        try:
+            result = await run_in_worker_thread(
+                lambda: qualify_consumer_reads(
+                    store=record_store,
+                    root=root,
+                    product=product,
+                    context=context,
+                    can_read=can_read,
+                )
+            )
+        except NativeSourceAuthorizationDenied as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The provider refused the consumer qualification read.",
+            ) from error
+        return ProductionConsumerReadResponse(trace_id=trace, result=result)
+
+    app.add_api_route(
+        "/v1/products/{product}/production-recipient/consumer-reads",
+        consumer_reads,
+        methods=["GET"],
+        response_model=ProductionConsumerReadResponse,
+        operation_id="read_production_recipient_consumers",
+        summary="Qualify every reviewed consumer against the current published recipient",
+    )
+
     async def prepare(
         product: Annotated[str, PathParameter(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")],
         body: ProductionRecipientRequest,

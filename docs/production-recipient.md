@@ -513,3 +513,49 @@ A writer dispatch with no terminal host witness stays unknown, including a
 pre-witness host refusal after schedule dispatch. Its reserved target cannot be
 reused or abandoned by guessing that the queued job will never run. The narrower
 per-operation host-fence recovery is tracked in [#3811](https://github.com/cbusillo/launchplane/issues/3811).
+
+## Actual consumer reads before retirement
+
+The cutover review can include `consumer_review`: up to sixteen required Odoo
+consumers (`product` plus either a stable `environment` or `preview_id`) and a
+`coordination_reference` for external tools and agents. This list belongs to the
+reviewed cutover intent. Missing review authority keeps qualification unknown;
+discovering fewer accessible consumers never reduces the reviewed set. The
+reference records separately owned external coordination, not an external query.
+
+`GET /v1/products/{product}/production-recipient/consumer-reads?context=...`
+performs fresh service qualification. It requires `operations.read` on the source
+production lane and each consumer's exact runtime instance. It accepts no SQL,
+endpoint, account, password or runtime override. Deleted, inaccessible,
+unsupported or changed members remain unknown. The uncached, value-free result
+includes service start/end times, publication and source observation references,
+and one closed result per reviewed consumer. It grants no retirement permission;
+a replayed response cannot substitute for a fresh read.
+
+The reader verifies the installed artifact, importer/settings/payload and TLS
+source. It uses the installed pure settings resolver and connection method
+without loading Odoo or running an importer. Current managed password/version
+and desired, delivered and applied settings are compared privately. Only the
+selected source's managed inputs reach the consumer. The existing account must
+have read-only grants. A read-only transaction checks the selected database and
+queries one constant from every required product-owned table with `LIMIT 1`.
+Query capability and populated data have separate results; empty tables do not
+certify populated data.
+
+A fresh nonce stays on that same connection in a bounded SELECT while the
+service checks the published recipient's MariaDB process list through the
+existing provider terminal transport. Matching the live connection, database and
+nonce on the verified recipient/storage corroborates the destination independently
+of DNS, configuration equality or copied rows. Missing transport corroboration
+leaves destination unknown. Each successful read takes about 30 seconds for this
+witness. Container, transport and statement deadlines bound execution; connections
+roll back and close in every outcome. Raw rows, database names, accounts,
+credentials, grants and driver messages never reach the response.
+
+Qualification also requires a fresh service health observation of the exact
+published runtime and a successful incremental cycle started after publication.
+Source authority, observation, runtime, artifact and consumer applied settings
+are rechecked around I/O. Drift invalidates evidence. This proves neither
+universal invoice history nor unique-ID/parent reconciliation, accepted bootstrap,
+post-cutover elapsed time, recovery eligibility or exclusive old-resource custody.
+Those remain the retirement and source-data validation gates' responsibilities.

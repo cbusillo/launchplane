@@ -46,7 +46,7 @@ def validate_result(value, names):
         raise ValueError()
 """
 
-CONTAINER_PROGRAM = (
+CONTAINER_LIBRARY = (
     _VALIDATOR
     + r"""
 import configparser, contextlib, hashlib, hmac, itertools, json, os, re, sys, types
@@ -318,6 +318,12 @@ def source_result(name,module,payload_producer,payload,applied):
             'applied_settings':'valid' if full_p is not None else 'unknown',
             'applied_delivered_password':password,**spec['metadata'][name]}
 
+"""
+)
+
+CONTAINER_PROGRAM = (
+    CONTAINER_LIBRARY
+    + r"""
 def run():
     if os.environ.get('PLATFORM_INSTANCE')!='testing' or json.loads(os.environ[__IDENTITY_KEY__])!=spec['identity']:
         raise ValueError()
@@ -377,7 +383,7 @@ print(json.dumps(result))
 """
 )
 
-HOST_PROGRAM = (
+HOST_LIBRARY = (
     _VALIDATOR
     + r"""
 import base64,json,re,subprocess,sys
@@ -386,7 +392,7 @@ prefix=sys.argv[2]
 names=tuple(spec['addons'])
 result={'runtime':'unknown','sources':[{'source':name} for name in names]}
 
-def inspect():
+def inspect(instance="testing"):
     raw=subprocess.run(['docker','inspect','--type','container',spec['container']],capture_output=True,check=True,timeout=5)
     if len(raw.stdout)>262144:
         raise ValueError()
@@ -402,7 +408,7 @@ def inspect():
         or value['State'].get('Running') is not True
         or config['Image']!=spec['identity']['image_reference']
         or labels.get('com.docker.compose.project')!=spec['project']
-        or labels.get('com.docker.compose.service')!='web' or env.get('PLATFORM_INSTANCE')!='testing'
+        or labels.get('com.docker.compose.service')!='web' or env.get('PLATFORM_INSTANCE')!=instance
         or json.loads(env[__IDENTITY_KEY__])!=spec['identity']):
         raise ValueError()
     image=value['Image']
@@ -419,6 +425,12 @@ def inspect():
         'State':{key:value['State'].get(key) for key in ('Running','StartedAt','Pid')},
         'VerifiedImage':{'Id':image,'RepoDigests':images[0]['RepoDigests']}}
 
+"""
+)
+
+HOST_PROGRAM = (
+    HOST_LIBRARY
+    + r"""
 try:
     before=inspect()
     mounts=before['Mounts']
