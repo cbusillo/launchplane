@@ -92,12 +92,12 @@ class OdooPreviewProviderMutationAdapter:
         execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result,
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
         pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
-        qualify_existing_refresh: bool = False,
+        qualify_existing_preview: bool = False,
         disposable_cleanup: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
-        self._qualify_existing_refresh = qualify_existing_refresh
+        self._qualify_existing_preview = qualify_existing_preview
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -286,7 +286,7 @@ class OdooPreviewProviderMutationAdapter:
             nonlocal effect_started
             self.execution_check()
             if (
-                not effect_started or self._qualify_existing_refresh
+                not effect_started or self._qualify_existing_preview
             ) and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
@@ -344,8 +344,8 @@ class OdooPreviewProviderMutationAdapter:
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
                 **(
-                    {"qualify_existing_refresh": True, "provider_mutation_guard": mutation_guard}
-                    if self._qualify_existing_refresh
+                    {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
+                    if self._qualify_existing_preview
                     else {}
                 ),
             )
@@ -399,7 +399,7 @@ class OdooPreviewProviderMutationAdapter:
         records: dict[str, object] = {}
         lifecycle_finalized = driver_status == "pass"
         if lifecycle_finalized:
-            if self._qualify_existing_refresh and self._pre_mutation_guard is not None:
+            if self._qualify_existing_preview and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
@@ -590,7 +590,7 @@ def prepare_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     disposable_cleanup: bool = False,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
@@ -616,7 +616,7 @@ def prepare_odoo_preview_apply_operation(
         execute_apply=execute_apply,
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
-        qualify_existing_refresh=qualify_existing_refresh,
+        qualify_existing_preview=qualify_existing_preview,
         disposable_cleanup=disposable_cleanup,
     )
 

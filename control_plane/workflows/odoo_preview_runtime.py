@@ -1142,7 +1142,7 @@ def execute_odoo_preview_dokploy_apply(
     expected_runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     restore_upstream: bool = False,
     restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
@@ -1182,6 +1182,8 @@ def execute_odoo_preview_dokploy_apply(
             request=request,
             provider_effect_checkpoint=provider_effect_checkpoint,
             propagate_domain_lookup_error=propagate_domain_lookup_error,
+            provider_mutation_guard=provider_mutation_guard,
+            provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
         database_url=database_url,
@@ -1193,7 +1195,7 @@ def execute_odoo_preview_dokploy_apply(
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=expected_runtime_identity,
         integration_allowances=integration_allowances,
-        qualify_existing_refresh=qualify_existing_refresh,
+        qualify_existing_preview=qualify_existing_preview,
         restore_upstream=restore_upstream,
         restore_clean_snapshot=restore_clean_snapshot,
         preserve_existing_data=preserve_existing_data,
@@ -1427,16 +1429,15 @@ def _original_compose_id_from_complete_inventory(
     return matches[0] if matches else ""
 
 
-def _destroyed_preview_absence_verified(
+def _read_absent_preview_compose_inventory(
     *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
-) -> bool:
-    """A missing lookup is insufficient: require stable inventory and removed domains."""
+) -> tuple[tuple[str, str, str], ...] | None:
     inventory = _complete_preview_compose_inventory(host=host, token=token)
     if any(
         identifier == plan.compose_ref or name == plan.compose_name
         for _, identifier, name in inventory
     ):
-        return False
+        return None
     searched = dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -1452,7 +1453,7 @@ def _destroyed_preview_absence_verified(
         if total is not None and (
             type(total) is not int or not isinstance(searched, list) or total != len(searched)
         ):
-            return False
+            return None
     if (
         not isinstance(searched, list)
         or len(searched) >= 25
@@ -1465,6 +1466,19 @@ def _destroyed_preview_absence_verified(
             for item in searched
         )
     ):
+        return None
+    return (
+        inventory
+        if _complete_preview_compose_inventory(host=host, token=token) == inventory
+        else None
+    )
+
+
+def _destroyed_preview_absence_verified(
+    *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
+) -> bool:
+    inventory = _read_absent_preview_compose_inventory(host=host, token=token, plan=plan)
+    if inventory is None:
         return False
     try:
         domains = (
@@ -1618,7 +1632,7 @@ def _execute_refresh(
     provider_lease_check: Callable[[], None] | None,
     expected_runtime_identity: RuntimeIdentity | None,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     restore_upstream: bool = False,
     restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
@@ -1654,7 +1668,7 @@ def _execute_refresh(
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
-        if qualify_existing_refresh and creating_compose:
+        if qualify_existing_preview and creating_compose:
             raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
@@ -1697,7 +1711,7 @@ def _execute_refresh(
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_refresh or preserve_existing_data:
+            if qualify_existing_preview or preserve_existing_data:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(
@@ -1940,6 +1954,8 @@ def _execute_destroy(
     request: OdooPreviewDokployApplyRequest,
     provider_effect_checkpoint: Callable[[str], None] | None,
     propagate_domain_lookup_error: bool,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None,
+    provider_lease_check: Callable[[], None] | None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
@@ -1951,6 +1967,60 @@ def _execute_destroy(
             compose_id="",
             error_message="" if absent else "Preview provider absence is unknown.",
         )
+
+    from control_plane.odoo_preview_resources import (
+        preview_resource_environment,
+        require_existing_preview_resources,
+        require_preview_resource_binding,
+    )
+
+    environment = preview_resource_environment(plan.compose_name)
+    binding: str | None = None
+    if plan.delete_volumes:
+        try:
+            try:
+                binding = require_existing_preview_resources(
+                    host=host,
+                    token=token,
+                    compose_id=compose_id,
+                    compose_name=plan.compose_name,
+                    context=context,
+                    instance=plan.preview_slug,
+                    environment=environment,
+                    checkpoint=provider_lease_check or (lambda: None),
+                    operation=plan.operation,
+                )
+            except dokploy_api.DokployRequestFailed as error:
+                if (
+                    error.status_code != 404
+                    or _read_absent_preview_compose_inventory(host=host, token=token, plan=plan)
+                    is None
+                ):
+                    raise
+        except click.ClickException as error:
+            return _apply_result(
+                request=request, status="blocked", compose_id=compose_id, error_message=str(error)
+            )
+
+    effect_attempted = False
+
+    def checkpoint_destroy_effect(phase: str) -> None:
+        nonlocal effect_attempted
+        if plan.delete_volumes:
+            if binding is not None:
+                require_preview_resource_binding(
+                    host=host,
+                    token=token,
+                    compose_id=compose_id,
+                    environment=environment,
+                    binding=binding,
+                )
+            elif _read_absent_preview_compose_inventory(host=host, token=token, plan=plan) is None:
+                raise click.ClickException("Preview provider absence changed before teardown.")
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+        effect_attempted = True
+
     destroy_result = destroy_dokploy_preview_resource(
         record_store=record_store,
         context=context,
@@ -1964,7 +2034,8 @@ def _execute_destroy(
         continue_after_domain_cleanup_error=False,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         missing_resource_is_clean=True,
-        before_provider_mutation=provider_effect_checkpoint,
+        before_provider_mutation=checkpoint_destroy_effect,
+        provider_mutation_guard=provider_mutation_guard,
     )
     if destroy_result.cleanup_errors and destroy_result.cleanup_errors[0].startswith(
         f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
@@ -1992,17 +2063,17 @@ def _execute_destroy(
             status="pass",
             compose_id=compose_id,
             domain_id=domain_id,
-            provider_effect_attempted=True,
+            provider_effect_attempted=effect_attempted,
             steps=steps,
         )
     return _apply_result(
         request=request,
-        status="fail",
+        status="fail" if effect_attempted else "blocked",
         error_message="; ".join(destroy_result.cleanup_errors)
         or "Preview provider absence is unknown.",
         compose_id=compose_id,
         domain_id=domain_id,
-        provider_effect_attempted=True,
+        provider_effect_attempted=effect_attempted,
         steps=steps,
     )
 

@@ -7,7 +7,6 @@ import binascii
 import hashlib
 from pathlib import Path
 from typing import Any, cast
-import re
 
 import click
 from pydantic import Field, model_validator
@@ -455,7 +454,7 @@ def execute_odoo_preview_apply_result(
     deployment_record_id: str,
     runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, object]:
     current_request = refresh_odoo_preview_issued_plan(
@@ -551,7 +550,7 @@ def execute_odoo_preview_apply_result(
         expected_runtime_identity=resolved_runtime_identity,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
-        qualify_existing_refresh=qualify_existing_refresh,
+        qualify_existing_preview=qualify_existing_preview,
         restore_upstream=upstream_source and not retained_copy,
         restore_clean_snapshot=snapshot_source and not retained_copy,
         preserve_existing_data=retained_copy,
@@ -1224,16 +1223,9 @@ def _odoo_preview_service_environment(
         environment_values.update(preview_bootstrap_environment.inline_environment)
     environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
     environment_values["ODOO_STACK_NAME"] = plan.compose_name
-    environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
-    environment_values["ODOO_DATA_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="data"
-    )
-    environment_values["ODOO_LOG_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="logs"
-    )
-    environment_values["ODOO_DB_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="db-volume"
-    )
+    from control_plane.odoo_preview_resources import preview_resource_environment
+
+    environment_values.update(preview_resource_environment(plan.compose_name))
     for key in preview_profile.preview_url_env_keys:
         environment_values[key] = plan.preview_url
     for key in preview_profile.preview_domain_env_keys:
@@ -1471,11 +1463,3 @@ def _copied_integration_credentials_to_omit(
     refused_keys = {finding.binding_key for finding in evaluation.findings if finding.binding_key}
     # A failure not tied to a key leaves every copied credential out.
     return tuple(sorted(refused_keys)) if refused_keys else copied_keys
-
-
-def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
-    if not normalized:
-        normalized = "odoo_preview"
-    suffix_identifier = re.sub(r"[^a-zA-Z0-9]+", "_", suffix.strip()).strip("_").lower()
-    return f"{normalized}_{suffix_identifier}" if suffix_identifier else normalized

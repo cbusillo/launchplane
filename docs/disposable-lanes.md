@@ -584,6 +584,15 @@ For testing, caller-supplied usage, custody and isolation values are stored as
 unknown. Observations retain their actor as provenance;
 historical observer names confer no permission. Preview refresh and retirement
 keep their existing protective-report rules.
+Explicit Director-agent teardown of an exact owned Odoo preview uses the same
+protective-report qualification as refresh. Known use, a needed copy or shared
+resources remain holds even after a report expires. Missing positive preview
+observations alone do not block teardown; reviewed-plan, target ownership,
+executor fences and provider-resource guards still apply before every effect.
+Odoo teardown inspects its generated storage once outside the mutation lock,
+then rechecks placement, volume environment and raw compose binding inside the lock
+before each deletion. Missing owned resources can converge; foreign volume
+declarations, shared consumers and incomplete inventories remain held.
 
 Scheduled preview cleanup tears down a preview when its PR is confirmed closed
 or merged, without usage, custody, data-origin or isolation observations. An

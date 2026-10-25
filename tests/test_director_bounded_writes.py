@@ -233,7 +233,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
                         context=self.preview.context,
                         instance=scope["instance"],
                         preview=self.preview,
-                        preview_refresh=True,
+                        preview_operation="refresh",
                     )
 
     async def test_reviewed_never_live_correction_is_atomic_replayed_and_bounded(self) -> None:
@@ -443,48 +443,65 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
 
     async def test_protected_preview_refuses_even_when_report_is_expired(self) -> None:
         with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
-            for changes in (
-                {"usage": "in_use"},
-                {"data": "only_copy"},
-                {"production_resources": "shared"},
-                {
-                    "usage": "in_use",
-                    "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
-                    "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
-                },
-            ):
-                self.safety(**changes)
-                result = await self.preview_apply()
-                self.assertEqual(result.status_code, 409, result.text)
+            for operation in ("refresh", "destroy"):
+                self.payload["apply"]["dry_run_plan"]["operation"] = operation
+                self.plan_id = f"protected-{operation}"
+                self.issue_preview()
+                for changes in (
+                    {"usage": "in_use"},
+                    {"data": "only_copy"},
+                    {"production_resources": "shared"},
+                    {
+                        "usage": "in_use",
+                        "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
+                        "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+                    },
+                ):
+                    self.safety(**changes)
+                    result = await self.preview_apply()
+                    self.assertEqual(result.status_code, 409, result.text)
             execute.assert_not_called()
 
-    async def test_refresh_does_not_require_invented_positive_usage_or_custody(self) -> None:
-        with patch(
-            "control_plane.http_app.execute_odoo_preview_apply_result",
-            return_value={"status": "blocked"},
-        ) as execute:
-            response = await self.preview_apply()
-        self.assertEqual(response.status_code, 202, response.text)
-        self.assertTrue(execute.call_args.kwargs["qualify_existing_refresh"])
+    async def test_existing_preview_operations_need_no_invented_usage_or_custody(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                self.payload["apply"]["dry_run_plan"]["operation"] = operation
+                self.plan_id = f"no-observation-{operation}"
+                self.issue_preview()
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value={"status": "blocked"},
+                ) as execute:
+                    response = await self.preview_apply()
+                self.assertEqual(response.status_code, 202, response.text)
+                execute.assert_called_once()
         self.assertIsNone(
             self.store.read_disposable_lane_safety(
                 self.profile.product, self.preview.context, "pr-42"
             )
         )
 
-    async def test_refresh_rechecks_protected_use_after_first_provider_effect(self) -> None:
-        def execute(**kwargs: Any) -> Any:
-            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
-            self.safety(usage="in_use")
-            kwargs["provider_effect_checkpoint"]("fixture-second-effect")
-            self.fail("The second effect must not run")
+    async def test_existing_preview_rechecks_protection_between_effects(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                fixture = DirectorBoundedWritesFixture(self)
+                fixture.payload["apply"]["dry_run_plan"]["operation"] = operation
+                fixture.issue_preview()
 
-        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
-            response = await self.preview_apply()
-        self.assertEqual(response.status_code, 409, response.text)
-        # A refusal after an effect retains uncertainty; it cannot release the
-        # reservation as though the first effect never happened.
-        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+                def execute(**kwargs: Any) -> Any:
+                    kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                    fixture.safety(usage="in_use")
+                    kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+                    self.fail("The second effect must not run")
+
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute
+                ):
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mutation_reconciliation_required"
+                )
 
     async def test_lifecycle_progress_during_refresh_does_not_create_a_false_fence(self) -> None:
         def execute(**kwargs: Any) -> Any:
