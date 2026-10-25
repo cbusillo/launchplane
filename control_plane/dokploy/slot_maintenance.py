@@ -47,12 +47,12 @@ def payload_digest(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def slot_run_directory(plan: OdooCutoverPlan) -> str:
+    return "/volumes/data/.launchplane-cutovers/" + payload_digest(maintenance_payload(plan))
+
+
 def slot_run_marker(plan: OdooCutoverPlan) -> str:
-    return (
-        "/volumes/data/.launchplane-cutovers/"
-        + payload_digest(maintenance_payload(plan))
-        + "/web-ready"
-    )
+    return slot_run_directory(plan) + "/web-ready"
 
 
 def slot_run_stamp(plan: OdooCutoverPlan) -> str:
@@ -87,7 +87,7 @@ def run_planned_slot_maintenance(
         raise ValueError("maintenance runner is not the candidate's immutable image")
     payload = maintenance_payload(plan)
     digest = payload_digest(payload)
-    directory = "/volumes/data/.launchplane-cutovers/" + digest
+    directory = slot_run_directory(plan)
     request = json.dumps({"directory": directory, "payload": payload})
     # This script does not import Odoo or load a registry. It owns a durable
     # attempt marker before the child, and exposes only its receipt/guard ID.

@@ -69,6 +69,8 @@ from control_plane.dokploy.slot_maintenance import (
     maintenance_payload,
     payload_digest,
     run_planned_slot_maintenance,
+    slot_run_directory,
+    slot_run_marker,
 )
 from control_plane.dokploy.slot_readiness import verify_odoo_slot_readiness
 from control_plane.dokploy.traefik_cutover import (
@@ -968,7 +970,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             }
         )
         payload = maintenance_payload(fake)
-        directory = "/volumes/data/.launchplane-cutovers/" + payload_digest(payload)
+        directory = slot_run_directory(fake)
         self.execute(
             (
                 "docker",
@@ -986,7 +988,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
                 fake, runner_container=self.new_runner, execute=self.execute
             )
         self.assertFalse(
-            (self.data / ".launchplane-cutovers" / payload_digest(payload) / "web-ready").exists()
+            (self.data / Path(slot_run_marker(fake)).relative_to("/volumes/data")).exists()
         )
         self.assertEqual(
             self.sql("SELECT count(*) FROM cutover_hook_events", database="postgres"), events

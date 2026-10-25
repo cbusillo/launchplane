@@ -367,12 +367,15 @@ class SlotStartupTests(unittest.TestCase):
 
     def recover(self, *, jobs: int = 0) -> None:
         assert self.plan.rollback_website_settings is not None
+        hidden = next(target for target in self.writers.targets if target.writer.kind != "web")
         self.startup.recover(
             self.plan,
             self.plan.old,
             self.plan.rollback_website_settings,
             verify_guard=lambda plan: self.assertEqual(plan, self.plan),
-            active_jobs=lambda slot, writer: jobs,
+            active_jobs=lambda slot, writer: (
+                jobs if slot.slot_id == hidden.slot_id and writer == hidden.writer else 0
+            ),
         )
 
     def test_recovery_after_restart_converges_zero_and_multiple_without_old_ids(self) -> None:

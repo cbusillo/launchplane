@@ -56,10 +56,10 @@ class SlotComposeTests(unittest.TestCase):
                     )
                     processes.append((service, process))
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        process.communicate(timeout=0.1)
+                        process.communicate(timeout=1.5)
                 marker.write_text(slot_run_stamp(plan))
                 launched = []
-                for service, process in processes:
+                for _, process in processes:
                     output, error = process.communicate(timeout=5)
                     self.assertEqual(process.returncode, 0, error)
                     launched.append(json.loads(output))
