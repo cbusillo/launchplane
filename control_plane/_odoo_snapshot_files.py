@@ -10,6 +10,8 @@ import subprocess
 import json
 import tempfile
 
+inherited_lock_descriptors = ()
+
 
 def snapshot_file_digest(path):
     digest = hashlib.sha256()
@@ -20,7 +22,8 @@ def snapshot_file_digest(path):
 
 
 def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
-    process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        pass_fds=inherited_lock_descriptors)
     errors = b''
     error_bytes = 0
     size = 0
