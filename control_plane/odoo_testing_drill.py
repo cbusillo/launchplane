@@ -323,6 +323,9 @@ def prepare_drill(
     )
     if not lane.odoo_testing_drill_enabled:
         raise DrillSkipped("drill_disabled")
+    from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
+    snapshot_storage_budget(profile, context)
     production = [candidate for candidate in profile.lanes if candidate.instance == "prod"]
     if (
         len(production) != 1

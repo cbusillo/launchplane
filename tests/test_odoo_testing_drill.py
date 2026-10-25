@@ -308,6 +308,19 @@ class TestingDrillScenario(unittest.TestCase):
 
 
 class TestingDrillTests(TestingDrillScenario):
+    def test_snapshot_hold_without_budget_never_queues_an_invalid_generation(self) -> None:
+        self.profile.preview.clean_testing_snapshot = True
+        testing = next(lane for lane in self.profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = None
+        self.store.write_product_profile_record(self.profile)
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        self.assertEqual(self.evidence().operation_id, "")
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+
     def test_snapshot_publication_is_atomic_with_successful_worker_completion(self) -> None:
         self.snapshot_completion_case(capture_passed=True)
 

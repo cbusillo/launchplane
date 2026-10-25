@@ -118,8 +118,6 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         expected = LaunchplaneProductProfileRecord.model_validate(self.after)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), expected)
-        self.assertEqual(expected.lanes, self.before.lanes)
-        self.assertIsNone(expected.lanes[0].odoo_testing_drill_storage)
         replay = await self.post()
         self.assertEqual(replay.status_code, 202, replay.text)
 

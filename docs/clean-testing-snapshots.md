@@ -23,6 +23,9 @@ existing admission checks.
 `preview.clean_testing_snapshot` opts a product into clean snapshots. It can
 be enabled before storage qualification to hold new preview copies. Snapshot
 capture and use require the testing lane's reviewed `odoo_testing_drill_storage` budget.
+With this mode enabled, a missing budget also refuses testing rebuild/capture
+planning before source probes or planned-generation receipts. Qualify the budget
+before rebuilding testing; opting in does not authorize a budgetless restore.
 Scheduled refresh remains separately enabled by `odoo_testing_drill_enabled`.
 Snapshot products are staggered inside the scheduler's 5:00–6:00 AM UTC nightly window.
 A missed slot can catch up when the scheduler resumes. The same

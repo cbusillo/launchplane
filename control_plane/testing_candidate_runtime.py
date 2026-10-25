@@ -229,6 +229,12 @@ def candidate_runtime_inputs(
         ):
             raise CandidateRuntimeInputsChanged("The admitted testing runtime profile changed.")
         profile = admitted_profile
+    try:
+        snapshot_budget = (
+            snapshot_storage_budget(profile, allocation.context) if source != "empty" else None
+        )
+    except ValueError as error:
+        raise CandidateRuntimeInputsChanged(str(error)) from error
     lane = next(
         lane
         for lane in profile.lanes
@@ -317,7 +323,7 @@ def candidate_runtime_inputs(
             source_mode="container-export" if source == "production" else "ssh",
             source_binding_sha256=source_binding,
             clean_snapshot_enabled=profile.preview.clean_testing_snapshot,
-            drill_storage_budget=snapshot_storage_budget(profile, allocation.context),
+            drill_storage_budget=snapshot_budget,
         )
     )
     runtime_selection = RuntimeEnvironmentSetExpectation(
