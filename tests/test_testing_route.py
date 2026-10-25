@@ -296,12 +296,12 @@ class TestingRouteTests(unittest.TestCase):
 
     def test_aliases_share_the_required_csp_without_losing_individual_drift_checks(self) -> None:
         original = deepcopy(self.raw)
-        for alias_first in (False, True):
-            with self.subTest(alias_first=alias_first):
+        for alias_has_csp in (False, True):
+            with self.subTest(alias_has_csp=alias_has_csp):
                 self.raw = deepcopy(original)
                 for name, router in list(self.raw["routers"].items()):
                     self.raw["routers"]["alias-" + name] = {**deepcopy(router), "middlewares": []}
-                    if not alias_first:
+                    if alias_has_csp:
                         self.raw["routers"][name]["middlewares"] = []
                         self.raw["routers"]["alias-" + name]["middlewares"] = [
                             "old-connections@docker"
