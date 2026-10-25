@@ -169,8 +169,7 @@ def _pages(token: str, path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for page in range(1, MAX_PROVIDER_PAGES + 1):
         response = github_api_request(
-            path=f"{path}{'&' if '?' in path else '?'}per_page={PROVIDER_PAGE_SIZE}&page={page}",
-            token=token,
+            path=f"{path}?per_page={PROVIDER_PAGE_SIZE}&page={page}", token=token
         )
         if not isinstance(response, list):
             raise PlanningCompletionReview("Planning completion list read was incomplete.")
