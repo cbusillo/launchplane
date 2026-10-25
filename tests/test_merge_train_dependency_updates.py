@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from control_plane.merge_train_dependency_updates import classify_dependency_update
@@ -144,3 +145,66 @@ class DependencyUpdateClassificationTests(unittest.TestCase):
             with self.subTest(message=message.splitlines()[0]):
                 self.assertEqual(classify_dependency_update([message]), "needs_review")
         self.assertEqual(classify_dependency_update([]), "needs_review")
+
+
+def renovate_message(**updates: str) -> str:
+    entry = {
+        "depName": "example/package",
+        "updateType": "minor",
+        "currentVersion": "2.1.0",
+        "newVersion": "2.2.0",
+        "currentValue": "main",
+        "newValue": "main",
+        "currentDigest": "a" * 40,
+        "newDigest": "b" * 40,
+    } | updates
+    return "Update dependency\n\nRenovate-Updates: " + json.dumps([entry])
+
+
+class RenovateClassificationTests(unittest.TestCase):
+    def test_same_safety_rule_for_versions_and_digest_pins(self) -> None:
+        for changes, expected in (
+            ({}, "patch_or_minor"),
+            ({"updateType": "patch", "newVersion": "2.1.1"}, "patch_or_minor"),
+            ({"updateType": "digest"}, "patch_or_minor"),
+            ({"updateType": "major", "newVersion": "3.0.0"}, "needs_review"),
+            ({"newVersion": "3.0.0"}, "needs_review"),
+            ({"updateType": "unknown"}, "needs_review"),
+            ({"currentVersion": "0.1.0", "newVersion": "0.2.0"}, "needs_review"),
+            ({"updateType": "digest", "newValue": "other-branch"}, "needs_review"),
+            ({"updateType": "digest", "currentValue": ""}, "needs_review"),
+            ({"updateType": "digest", "newDigest": "missing"}, "needs_review"),
+        ):
+            with self.subTest(changes=changes):
+                self.assertEqual(
+                    classify_dependency_update(
+                        [renovate_message(**changes)], author_login="renovate[bot]"
+                    ),
+                    expected,
+                )
+
+    def test_all_updates_and_commits_need_complete_metadata(self) -> None:
+        safe = renovate_message()
+        major = renovate_message(updateType="major")
+        for messages in (
+            [safe, major],
+            [safe, "Update dependency"],
+            [safe + "\nRenovate-Updates: []"],
+            ["Renovate-Updates: invalid"],
+            ["Renovate-Updates: [{}]"],
+            ["Renovate-Updates: [null]"],
+            ['Renovate-Updates: [{"depName": 3}]'],
+            [safe[:-1] + "," + major.split("Renovate-Updates: [")[1]],
+        ):
+            with self.subTest(messages=messages):
+                self.assertEqual(
+                    classify_dependency_update(messages, author_login="renovate[bot]"),
+                    "needs_review",
+                )
+        self.assertEqual(
+            classify_dependency_update([safe], author_login="someone[bot]"), "needs_review"
+        )
+        self.assertEqual(
+            classify_dependency_update([INDIRECT_PATCH], author_login="renovate[bot]"),
+            "needs_review",
+        )

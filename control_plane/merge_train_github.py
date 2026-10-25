@@ -70,7 +70,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.contracts.text_fields import require_text
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.release_review_shared import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
@@ -3760,6 +3760,7 @@ class GitHubMergeTrainSnapshotReader:
                     pull_request.get("number"), "GitHub pull request requires number."
                 ),
                 author_id=_required_int(user.get("id"), "GitHub pull request user requires id."),
+                pull_request=pull_request,
                 head_sha=_required_text(head.get("sha"), "GitHub pull request head requires sha."),
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
@@ -3934,6 +3935,7 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=actor_id,
+                pull_request=source,
                 head_sha=head_sha,
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
@@ -4386,6 +4388,7 @@ class GitHubMergeTrainSnapshotReader:
         repository_path: str,
         pull_request_number: int,
         author_id: int,
+        pull_request: dict[str, object],
         head_sha: str,
         base_branch: str,
         base_sha: str,
@@ -4400,6 +4403,7 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=author_id,
+                pull_request=pull_request,
                 head_sha=head_sha,
                 base_branch=base_branch,
                 base_sha=base_sha,
@@ -4417,6 +4421,7 @@ class GitHubMergeTrainSnapshotReader:
         repository_path: str,
         pull_request_number: int,
         author_id: int,
+        pull_request: dict[str, object],
         head_sha: str,
         base_branch: str,
         base_sha: str,
@@ -4459,13 +4464,20 @@ class GitHubMergeTrainSnapshotReader:
             if not isinstance(author, dict) or author.get("id") != author_id:
                 return "needs_review"
             messages.append(str(detail.get("message") or ""))
-        update_class = classify_dependency_update(messages)
+        user = _json_object(pull_request.get("user"), "GitHub pull request user")
+        update_class = classify_dependency_update(
+            messages, author_login=str(user.get("login") or "")
+        )
         if update_class != "patch_or_minor":
             return update_class
         if self._force_pushed_by_other(
             repository_path=repository_path,
             pull_request_number=pull_request_number,
             author_id=author_id,
+        ):
+            return "needs_review"
+        if not pure_dependency_update(
+            pull_request, read=lambda path: self.transport.request(method="GET", path=path)
         ):
             return "needs_review"
         return update_class
@@ -4688,7 +4700,7 @@ class GitHubMergeTrainSnapshotReader:
         dependency_only = (
             bool(profiles)
             and pull_request is not None
-            and pure_dependabot_update(
+            and pure_dependency_update(
                 pull_request, read=lambda path: self.transport.request(method="GET", path=path)
             )
         )

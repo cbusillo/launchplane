@@ -103,7 +103,7 @@ class DependencyRefreshTests(unittest.TestCase):
                     result = (
                         next(comparisons)
                         if path.endswith(f"...{BASE}")
-                        else (next(change_comparisons) if changes else _change())
+                        else (next(change_comparisons, _change()) if changes else _change())
                     )
                     if isinstance(result, Exception):
                         raise result

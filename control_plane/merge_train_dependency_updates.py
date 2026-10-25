@@ -5,8 +5,9 @@ updated dependency moves within one major version. Anything the messages do not
 prove, including a missing or unparseable version, is left for agent review.
 """
 
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 DependencyUpdateClass = Literal["patch_or_minor", "needs_review"]
@@ -19,31 +20,78 @@ _VERSION = re.compile(
 )
 
 
-def classify_dependency_update(commit_messages: Sequence[str]) -> DependencyUpdateClass:
-    """Return patch_or_minor only when every commit proves a within-major update."""
-    if not commit_messages:
+def classify_dependency_update(
+    commit_messages: Sequence[str], *, author_login: str = "dependabot[bot]"
+) -> DependencyUpdateClass:
+    read_updates = DEPENDENCY_UPDATE_BOTS.get(author_login)
+    if not commit_messages or read_updates is None:
         return "needs_review"
     for message in commit_messages:
-        if not _message_is_patch_or_minor(message):
+        updates = read_updates(message)
+        if not updates or not all(_update_is_patch_or_minor(update) for update in updates):
             return "needs_review"
     return "patch_or_minor"
 
 
-def _message_is_patch_or_minor(message: str) -> bool:
+def _dependabot_updates(message: str) -> list[dict[str, str]]:
     trailer = _TRAILER.search(message)
     if trailer is None:
+        return []
+    return [
+        {
+            "depName": name,
+            "updateType": "major"
+            if fields.get("update-type") == "version-update:semver-major"
+            else "patch",
+            "currentVersion": _previous_version(
+                message, name=name, new_version=fields.get("dependency-version", "")
+            ),
+            "newVersion": fields.get("dependency-version", ""),
+        }
+        for name, fields in _trailer_entries(trailer.group("body"))
+    ]
+
+
+def _renovate_updates(message: str) -> list[dict[str, str]]:
+    trailers = re.findall(r"^Renovate-Updates: (.+)$", message, re.M)
+    if len(trailers) != 1:
+        return []
+    try:
+        updates = json.loads(trailers[0])
+    except ValueError:
+        return []
+    if not isinstance(updates, list) or not updates:
+        return []
+    if any(
+        not isinstance(update, dict)
+        or any(value is not None and not isinstance(value, str) for value in update.values())
+        for update in updates
+    ):
+        return []
+    return [{key: value or "" for key, value in update.items()} for update in updates]
+
+
+DEPENDENCY_UPDATE_BOTS: dict[str, Callable[[str], list[dict[str, str]]]] = {
+    "dependabot[bot]": _dependabot_updates,
+    "renovate[bot]": _renovate_updates,
+}
+_DIGEST = re.compile(r"(?:[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})")
+
+
+def _update_is_patch_or_minor(update: dict[str, str]) -> bool:
+    if not update.get("depName"):
         return False
-    entries = _trailer_entries(trailer.group("body"))
-    if not entries:
-        return False
-    for name, fields in entries:
-        if fields.get("update-type") == "version-update:semver-major":
-            return False
-        new_version = fields.get("dependency-version", "")
-        old_version = _previous_version(message, name=name, new_version=new_version)
-        if not old_version or not _within_major(old_version, new_version):
-            return False
-    return True
+    if update.get("updateType") == "digest":
+        old_value, new_value = update.get("currentValue", ""), update.get("newValue", "")
+        return bool(
+            old_value
+            and old_value == new_value
+            and _DIGEST.fullmatch(update.get("currentDigest", ""))
+            and _DIGEST.fullmatch(update.get("newDigest", ""))
+        )
+    return update.get("updateType") in {"patch", "minor"} and _within_major(
+        update.get("currentVersion", ""), update.get("newVersion", "")
+    )
 
 
 def _trailer_entries(body: str) -> list[tuple[str, dict[str, str]]]:

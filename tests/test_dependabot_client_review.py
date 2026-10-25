@@ -35,11 +35,16 @@ class DependabotClientReviewTests(unittest.TestCase):
         self.assertFalse(snapshot.owner_review_required)
 
     def test_only_complete_dependency_changes_qualify(self) -> None:
-        from control_plane.dependency_update_review import pure_dependabot_update
+        for login in ("dependabot[bot]", "renovate[bot]"):
+            with self.subTest(login=login):
+                self._check_complete_dependency_changes(login)
+
+    def _check_complete_dependency_changes(self, login: str) -> None:
+        from control_plane.dependency_update_review import pure_dependency_update
 
         pull = _github_pull_request(16)
         pull["labels"] = []
-        pull["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+        pull["user"] = {"id": 49699333, "login": login, "type": "Bot"}
         good = [
             {"filename": "frontend/package.json", "status": "modified"},
             {"filename": "frontend/pnpm-lock.yaml", "status": "modified"},
@@ -55,30 +60,54 @@ class DependabotClientReviewTests(unittest.TestCase):
                 [{"filename": "package.json", "status": "renamed", "previous_filename": "app.py"}],
                 False,
             ),
+            (
+                [
+                    {
+                        "filename": "workspace.toml",
+                        "status": "modified",
+                        "additions": 1,
+                        "deletions": 1,
+                        "patch": '-ref = "' + "a" * 40 + '"\n+ref = "' + "b" * 40 + '"',
+                    }
+                ],
+                True,
+            ),
+            (
+                [
+                    {
+                        "filename": "workspace.toml",
+                        "status": "modified",
+                        "patch": '-command = "old"\n+command = "new"',
+                    }
+                ],
+                False,
+            ),
+            ([{"filename": "workspace.toml", "status": "modified"}], False),
             ([], False),
             (good * 150, False),
             ([{"filename": "package.json"}], False),
         ):
             with self.subTest(changes=changes[:2], count=len(changes)):
                 self.assertEqual(
-                    pure_dependabot_update(pull, read=lambda _: {"files": changes}), expected
+                    pure_dependency_update(pull, read=lambda _: {"files": changes}), expected
                 )
         for update in (
             {"user": {"login": "agent[bot]", "type": "Bot"}},
             {"user": {"login": "person", "type": "User"}},
+            {"user": {"login": login, "type": "User"}},
             {"head": {"sha": "new", "repo": {"full_name": "someone/fork"}}},
             {"changed_files": 3},
         ):
             with self.subTest(update=update):
                 self.assertFalse(
-                    pure_dependabot_update(pull | update, read=lambda _: {"files": good})
+                    pure_dependency_update(pull | update, read=lambda _: {"files": good})
                 )
 
         def refused(_: str) -> object:
             raise ValueError("read refused")
 
-        self.assertFalse(pure_dependabot_update(pull, read=refused))
-        self.assertFalse(pure_dependabot_update(pull, read=lambda _: {"message": "unavailable"}))
+        self.assertFalse(pure_dependency_update(pull, read=refused))
+        self.assertFalse(pure_dependency_update(pull, read=lambda _: {"message": "unavailable"}))
 
     def test_configured_review_override_still_requires_notes(self) -> None:
         from control_plane.client_test_notes import change_client_review

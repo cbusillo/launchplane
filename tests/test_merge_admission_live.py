@@ -593,6 +593,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                             _change(),
                             _change(),
                             [],
+                            _change(),
                             pull_request,
                             {"permission": "read"},
                             _protected_branch_with_checks("ci-status", app_id=None),

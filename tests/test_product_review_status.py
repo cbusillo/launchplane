@@ -826,7 +826,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 )
                 self.assertEqual(result.state, "pending")
 
-    def test_pure_dependabot_update_publishes_neutral_without_inviting_client(self) -> None:
+    def test_pure_dependency_update_publishes_neutral_without_inviting_client(self) -> None:
         class DependabotGitHub(_GitHub):
             def __call__(self, **kwargs: object) -> object:
                 if "/compare/" in str(kwargs["path"]):
