@@ -852,11 +852,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 or self.preview.template_instance != "testing"
                 or len(testing) != 1
                 or testing[0].context != self.preview.context
-                or testing[0].odoo_testing_drill_storage is None
             ):
-                raise ValueError(
-                    "Clean snapshots require an owned Odoo testing lane and reviewed storage headroom."
-                )
+                raise ValueError("Clean snapshots require an owned Odoo testing lane.")
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")

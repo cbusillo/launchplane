@@ -20,8 +20,9 @@ existing restore, sanitizer and independent integration readback. Holds,
 staff use, needed-copy custody and uncertain original effects retain their
 existing admission checks.
 
-`preview.clean_testing_snapshot` opts a product into clean snapshots. It
-requires the testing lane's reviewed `odoo_testing_drill_storage` budget.
+`preview.clean_testing_snapshot` opts a product into clean snapshots. It can
+be enabled before storage qualification to hold new preview copies. Snapshot
+capture and use require the testing lane's reviewed `odoo_testing_drill_storage` budget.
 Scheduled refresh remains separately enabled by `odoo_testing_drill_enabled`.
 Snapshot products are staggered inside the scheduler's 5:00–6:00 AM UTC nightly window.
 A missed slot can catch up when the scheduler resumes. The same
@@ -101,13 +102,13 @@ refresh. A Director agent may conditionally set only `preview.clean_testing_snap
 from false to true through the existing `POST /v1/product-profiles` route. Read the
 current profile and strong `ETag`, preserve every other field, and submit that
 exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
-profile after acceptance or an uncertain response. The reviewed testing storage
-budget must already exist. This path cannot install or change a budget, retention
+profile after acceptance or an uncertain response. This path cannot install or change a budget, retention
 bindings, drill state, source settings, Client or release authority. The agent rebuilding
 testing qualifies the budget through its existing configuration path. A missing
-budget remains a legitimate refusal, and the opt-in does not admit headroom or
-start a refresh. Opt-out still requires full profile authority and custody review.
-New preview creation refuses until that refresh publishes a clean snapshot. Existing preview data remains intact. Enable the existing daily
+budget refuses snapshot use before reading a completed snapshot; opting in does
+not admit headroom or start a refresh. Opt-out still requires full profile authority and custody review.
+New preview copies refuse until a reviewed budget exists and an admitted refresh
+publishes a clean snapshot. Existing preview data remains intact. Enable the existing daily
 drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
 
 CM first needs CMSEED's qualified Fishbowl/RepairShopr fill and supported

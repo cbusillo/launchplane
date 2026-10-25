@@ -111,6 +111,18 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
 
+    async def test_snapshot_opt_in_can_hold_copies_before_budget_qualification(self) -> None:
+        self.after = self.before.model_dump(mode="json")
+        self.after["preview"]["clean_testing_snapshot"] = True
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        expected = LaunchplaneProductProfileRecord.model_validate(self.after)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), expected)
+        self.assertEqual(expected.lanes, self.before.lanes)
+        self.assertIsNone(expected.lanes[0].odoo_testing_drill_storage)
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+
     async def test_snapshot_opt_in_preserves_budget_retention_drill_and_profile_authority(
         self,
     ) -> None:

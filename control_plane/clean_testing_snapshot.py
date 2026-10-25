@@ -71,6 +71,8 @@ def preview_snapshot(
         or profile.preview.template_instance != "testing"
     ):
         raise ValueError("Preview requires an opted-in clean snapshot source.")
+    if snapshot_storage_budget(profile, profile.preview.context) is None:
+        raise ValueError("Clean snapshot use requires reviewed testing storage headroom.")
     snapshot = store.read_clean_testing_snapshot(profile.product, profile.preview.context)
     if snapshot is None:
         raise ValueError("No completed clean snapshot is available for this product.")

@@ -42,6 +42,15 @@ class CleanTestingSnapshotTests(unittest.TestCase):
             filestore_sha256="c" * 64,
             captured_at=self.now,
         )
+        self.profile.lanes[0].odoo_testing_drill_storage = self.snapshot.storage_budget
+
+    def test_missing_current_budget_refuses_even_a_completed_snapshot_before_read(self) -> None:
+        self.profile.lanes[0].odoo_testing_drill_storage = None
+        store = Mock(spec=["read_clean_testing_snapshot"])
+        store.read_clean_testing_snapshot.return_value = self.snapshot
+        with self.assertRaises(ValueError):
+            preview_snapshot(store, self.profile)
+        store.read_clean_testing_snapshot.assert_not_called()
 
     def test_preview_reads_only_the_completed_snapshot_without_a_live_source_fallback(self) -> None:
         store = Mock(spec=["read_clean_testing_snapshot"])
