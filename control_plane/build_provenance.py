@@ -70,6 +70,10 @@ class BuildProvenanceError(Exception):
         self.run_id = run_id
 
 
+class BuildNotPublished(BuildProvenanceError):
+    pass
+
+
 class BuildProvenanceTransport(Protocol):
     def get_json(self, path: str) -> object: ...
 
@@ -563,6 +567,18 @@ def _download_manifest(
         for artifact in (_object(item, "artifact") for item in _list(payload.get("artifacts")))
         if artifact.get("name") == name
     ]
+    inventory = payload.get("artifacts")
+    total_count = payload.get("total_count")
+    if (
+        not artifacts
+        and isinstance(inventory, list)
+        and type(total_count) is int
+        and total_count == len(inventory)
+    ):
+        raise BuildNotPublished(
+            f"Run {run_id} uploaded no {name} artifact.",
+            code="manifest_artifact_missing",
+        )
     if len(artifacts) != 1:
         raise BuildProvenanceError(
             f"Run {run_id} must upload exactly one {name} artifact.",

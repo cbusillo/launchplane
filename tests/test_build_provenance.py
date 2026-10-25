@@ -8,6 +8,7 @@ from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     MAX_MANIFEST_BYTES,
     BuildProvenanceError,
+    BuildNotPublished,
     VerifiedBuildArtifact,
     record_verified_build_artifact,
     verify_build_artifact,
@@ -291,6 +292,42 @@ def _generic_web_manifest(**changes: object) -> dict[str, object]:
 
 
 class GenericWebBuildProvenanceTests(unittest.TestCase):
+    def test_only_complete_artifact_absence_is_not_a_publication(self) -> None:
+        github = FakeGitHub(runs=[_run()], manifest=_generic_web_manifest())
+        read = github.get_json
+
+        def inventory(payload: dict[str, object], path: str) -> object:
+            return payload if "/artifacts?" in path else read(path)
+
+        with (
+            patch.object(
+                github,
+                "get_json",
+                side_effect=lambda path: inventory({"total_count": 0, "artifacts": []}, path),
+            ),
+            self.assertRaises(BuildNotPublished) as caught,
+        ):
+            self.verify(github)
+        self.assertEqual(caught.exception.run_id, 7)
+        self.assertEqual(caught.exception.code, "manifest_artifact_missing")
+
+        manifest = {"id": 70, "name": "artifact-manifest-1", "expired": False}
+        for payload in (
+            {"total_count": 1, "artifacts": []},
+            {"total_count": 0},
+            {"total_count": False, "artifacts": []},
+            {"artifacts": []},
+            {"total_count": 2, "artifacts": [manifest, manifest]},
+            {"total_count": 1, "artifacts": [{**manifest, "expired": True}]},
+        ):
+            with (
+                self.subTest(payload=payload),
+                patch.object(github, "get_json", side_effect=lambda path: inventory(payload, path)),
+                self.assertRaises(BuildProvenanceError) as rejected,
+            ):
+                self.verify(github)
+            self.assertNotIsInstance(rejected.exception, BuildNotPublished)
+
     def test_historical_preview_proof_requires_the_exact_recorded_image(self) -> None:
         image = f"{IMAGE_REPOSITORY}@sha256:{'c' * 64}"
         github = FakeGitHub(

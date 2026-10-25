@@ -102,6 +102,7 @@ from control_plane.product_review import resolve_serving_preview
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
+    TESTING_VERIFY_LIMIT,
     PLAN_BLOCKER_DESCRIPTIONS,
     _fingerprint,
     PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
@@ -1819,6 +1820,64 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def test_validation_only_builds_do_not_hide_a_runtime_publication(self) -> None:
+        docs = [f"{index:040x}" for index in range(1, TESTING_VERIFY_LIMIT + 2)]
+        chain = [*docs, DEPLOYABLE, OLDER]
+        self.github.first_parents = dict(zip(chain, [*chain[1:], ""], strict=True))
+        self.github.add_run(10, DEPLOYABLE)
+        validation_runs = {index + 20 for index in range(len(docs))}
+        for run_id, commit in zip(sorted(validation_runs, reverse=True), docs, strict=True):
+            self.github.add_run(run_id, commit)
+        get_json = self.github.get_json
+
+        def publications(path: str) -> object:
+            if "/artifacts?" in path:
+                run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+                if run_id in validation_runs:
+                    return {"total_count": 0, "artifacts": []}
+            return get_json(path)
+
+        with patch.object(self.github, "get_json", publications):
+            plan, desired = _plan_testing_target(
+                record_store=self.store,
+                profile=_generic_web_profile(),
+                repository_id=REPOSITORY_ID,
+                transport=self.github,
+            )
+        self.assertEqual(plan["action"], "deploy", plan)
+        self.assertEqual(plan["desired_commit"], DEPLOYABLE)
+        self.assertIsNotNone(desired)
+        self.assertNotIn("rejected_builds", plan)
+
+        for expired in (False, True):
+
+            def broken_publications(path: str) -> object:
+                if "/artifacts?" in path:
+                    run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+                    if run_id in validation_runs:
+                        manifest = {
+                            "id": run_id * 10,
+                            "name": "artifact-manifest-1",
+                            "expired": expired,
+                        }
+                        artifacts = [manifest] if expired else [manifest, manifest]
+                        return {"total_count": len(artifacts), "artifacts": artifacts}
+                return get_json(path)
+
+            with (
+                self.subTest(expired=expired),
+                patch.object(self.github, "get_json", broken_publications),
+            ):
+                plan, desired = _plan_testing_target(
+                    record_store=self.store,
+                    profile=_generic_web_profile(),
+                    repository_id=REPOSITORY_ID,
+                    transport=self.github,
+                )
+            self.assertIsNone(desired)
+            self.assertEqual(plan["reason"], "no_verified_build")
+            self.assertEqual(len(cast(list[object], plan["rejected_builds"])), TESTING_VERIFY_LIMIT)
+
     def settle_terminal_testing_original(self) -> DeploymentRecord:
         from tests.test_generic_web_deploy_recovery import _create_recovery_app, _OPERATOR_TOKEN
         from tests.support.auth import local_operator_policy

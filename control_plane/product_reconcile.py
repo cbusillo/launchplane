@@ -68,6 +68,7 @@ from control_plane.contracts.host_network_capacity import PREVIEW_MEMORY_FAILURE
 from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
+    BuildNotPublished,
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
     BuildProvenanceTransport,
@@ -3492,7 +3493,7 @@ def _desired_release(
     if built_commits and not current_seen:
         return None, [], "incomplete_commit_history"
     rejected: list[dict[str, object]] = []
-    for commit in ordered[:TESTING_VERIFY_LIMIT]:
+    for commit in ordered:
         try:
             verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
                 verify_generic_web_build(
@@ -3515,10 +3516,14 @@ def _desired_release(
                 )
             )
             return verified, rejected, ""
+        except BuildNotPublished:
+            continue
         except BuildProvenanceError as error:
             rejected.append(
                 {"commit": commit, "run_id": error.run_id, "code": error.code, "error": str(error)}
             )
+            if len(rejected) >= TESTING_VERIFY_LIMIT:
+                break
     return None, rejected, "no_verified_build"
 
 
