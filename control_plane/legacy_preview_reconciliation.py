@@ -257,6 +257,18 @@ def _require_no_held_odoo_work(
             continue
         if held.provider_target_key not in {key, target_key} and held.reconciliation_key != key:
             try:
+                from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
+
+                if held.route_path == PREVIEW_IDLE_ROUTE:
+                    from control_plane.preview_idle import original_idle_intent
+
+                    idle = original_idle_intent(store, held, profile.product)
+                    if any(
+                        item.preview_id == idle["preview_id"]
+                        and item.anchor_pr_number in other_numbers
+                        for item in previews
+                    ):
+                        continue
                 intent = original_preview_intent(held, profile=profile, store=store)
             except ValueError:
                 pass

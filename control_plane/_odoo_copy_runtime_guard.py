@@ -5,6 +5,7 @@ import inspect
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
 from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
+from control_plane.preview_gateway import PREVIEW_GATEWAY_INSPECTION_LIBRARY
 
 COPY_WEB_GATE_READ_PROGRAM = r"""
 import hashlib,os,sys
@@ -99,6 +100,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
+    + PREVIEW_GATEWAY_INSPECTION_LIBRARY
     + "\nCOPY_WEB_GATE_READ_PROGRAM="
     + repr(COPY_WEB_GATE_READ_PROGRAM)
     + "\n"
@@ -121,7 +123,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
             raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
         volumes = set(names.values())
     containers = {}
-    optional_services = {'pre-switch-web'} if expected_instance == 'rehearsal' else set()
+    optional_services = {'pre-switch-web'} if expected_instance == 'rehearsal' else {'preview-router'} if expected_instance == 'preview' else set()
     all_containers = []
     for identifier in docker("ps", "-aq").decode().splitlines():
         container = one_inspection(identifier)
@@ -134,6 +136,12 @@ def inspect_copy_runtime(spec, *, expected_instance):
             containers[service] = (identifier, container)
     if set(containers) - optional_services != {"web", "database", "script-runner"}:
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
+    gateway = containers.pop('preview-router', None)
+    if gateway is not None:
+        try:
+            inspect_preview_gateway(gateway[1], containers['web'][1])
+        except (RuntimeError, KeyError, TypeError, ValueError):
+            raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
     filestore_name = names['data'] + '-filestore'
     overlay_filestore = expected_instance == 'preview' and any(
         mount.get('Name') == filestore_name for _, item in containers.values() for mount in item.get('Mounts', []))
@@ -192,6 +200,8 @@ def inspect_copy_runtime(spec, *, expected_instance):
         raise CopyReadbackRefused(ReadbackPredicate.NETWORK_REACH)
     if expected_instance in {'rehearsal', 'preview'}:
         own={item[1]['Id'] for item in containers.values()}
+        if gateway is not None:
+            own.add(gateway[1]['Id'])
         network=one_inspection(next(iter(data_networks)))
         members=network.get('Containers')
         if not isinstance(members,dict) or not set(members)<=own:

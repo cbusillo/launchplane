@@ -1740,14 +1740,24 @@ def _execute_refresh(
         retained_filestore = isinstance(current_compose, dict) and "odoo_filestore" in (
             current_compose.get("volumes") or {}
         )
+        if restore_clean_snapshot or (
+            expected_runtime_identity is not None and not creating_compose and not restore_upstream
+        ):
+            memory_capacity.require_preview_host_memory_capacity(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                database_url=database_url,
+                running_preview={
+                    "project": str(target_payload.get("appName") or ""),
+                    "identity": dokploy_api.parse_dokploy_env_text(
+                        str(target_payload.get("env") or "")
+                    ).get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+                }
+                if not restore_clean_snapshot
+                else None,
+            )
         if restore_clean_snapshot or retained_filestore:
-            if restore_clean_snapshot:
-                memory_capacity.require_preview_host_memory_capacity(
-                    host=host,
-                    token=token,
-                    server_id=str(target_payload.get("serverId") or ""),
-                    database_url=database_url,
-                )
             filestore = filestore_for_mode(apply=False)
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
@@ -1761,6 +1771,7 @@ def _execute_refresh(
             protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
             preview_filestore=filestore,
+            preview_identity=expected_runtime_identity if not restore_upstream else None,
         )
 
         def qualify_resources() -> None:
@@ -1830,6 +1841,9 @@ def _execute_refresh(
                 domain_host=plan.domain_host,
                 runtime_port=plan.runtime_port,
                 certificate_type=plan.domain_certificate_type,
+                service_name="preview-router"
+                if expected_runtime_identity is not None and not restore_upstream
+                else "web",
             )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
