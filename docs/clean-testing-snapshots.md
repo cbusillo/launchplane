@@ -78,8 +78,17 @@ database copy-on-write.
 OPW's preview repair landed in PR4734. Its transition still needs the Director's
 actual testing hold lift and the existing source/artifact/custody qualification.
 After source deployment, opt the product in and run its first admitted
-refresh. New preview creation refuses until that refresh publishes a clean
-snapshot. Existing preview data remains intact. Enable the existing daily
+refresh. A Director agent may conditionally set only `preview.clean_testing_snapshot`
+from false to true through the existing `POST /v1/product-profiles` route. Read the
+current profile and strong `ETag`, preserve every other field, and submit that
+exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
+profile after acceptance or an uncertain response. The reviewed testing storage
+budget must already exist. This path cannot install or change a budget, retention
+bindings, drill state, source settings, Client or release authority. The agent rebuilding
+testing qualifies the budget through its existing configuration path. A missing
+budget remains a legitimate refusal, and the opt-in does not admit headroom or
+start a refresh. Opt-out still requires full profile authority and custody review.
+New preview creation refuses until that refresh publishes a clean snapshot. Existing preview data remains intact. Enable the existing daily
 drill only with its qualified source, storage budget and custody checks. This changes no production key or access grant.
 
 CM first needs CMSEED's qualified Fishbowl/RepairShopr fill and supported
