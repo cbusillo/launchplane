@@ -121,8 +121,8 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 "fail",
             )
             human_session = sessions.issue(_github_human_identity(role="read_only"))
-            human_headers = _browser_mutation_headers(sessions, human_session)
             for product in (fixture.profile.product, "missing-product"):
+                human_headers = _browser_mutation_headers(sessions, human_session)
                 human_path = (
                     f"/v1/products/{product}/releases/{accepted.record_id}/backup-continuation"
                 )
@@ -130,6 +130,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                     app, "POST", human_path, headers=human_headers, payload=body
                 )
                 self.assertEqual(denied_human.status_code, 403, denied_human.text)
+                self.assertEqual(denied_human.json()["error"]["code"], "authorization_denied")
             applied = await request(app, "POST", path, headers=headers, payload=body)
             self.assertEqual(applied.status_code, 200, applied.text)
             self.assertEqual(applied.json()["status"], "queued")
