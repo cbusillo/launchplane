@@ -83,9 +83,20 @@ def advance_release_invitations(
                 backoff=backoff,
                 stop_event=stop_event,
             )
-            publish_release_invitation(
-                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
-            )
+            if (
+                profile.is_active
+                and profile.production_use != "prelaunch"
+                and profile.release_on_acceptance != "director_standing"
+                and profile.owner.is_set
+            ):
+                _settle_completed_invitation(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=profile,
+                    production=release_version(store=store, profile=profile, instance="prod"),
+                    candidate=release_version(store=store, profile=profile, instance="testing"),
+                    backoff=backoff,
+                )
         except Exception as error:
             now = monotonic()
             previous, next_log = (

@@ -86,6 +86,23 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 
 class ReleaseInvitationTests(unittest.TestCase):
+    review: ReleaseReviewStatus
+
+    def test_merges_without_release_request_never_notify_the_client(self) -> None:
+        original: ReleaseReviewStatus = self.review
+        for change in ("docs", "engineering", "client_accepted"):
+            with self.subTest(change=change):
+                self.posts.clear()
+                self.comments.clear()
+                self.issues.clear()
+                self.review = original
+                if change != "client_accepted":
+                    self.make_engineering_only()
+                advance_release_invitations(store=self.store, control_plane_root=self.root)
+                self.assertEqual(self.posts, [])
+                self.assertEqual(self.comments, [])
+                self.assertEqual(self.issues, [])
+
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
         self.prepare_settings()
         release_test_change = self.add_release_test_change()
@@ -202,7 +219,7 @@ class ReleaseInvitationTests(unittest.TestCase):
     def test_missing_lane_diagnostics_are_bounded_without_hiding_recovery(self) -> None:
         backoff = ReleaseInvitationBackoff()
         with patch(
-            "control_plane.release_invitation.publish_release_invitation",
+            "control_plane.release_invitation._settle_completed_invitation",
             side_effect=FileNotFoundError,
         ):
             with self.assertLogs("control_plane.release_invitation", level="WARNING") as logs:
@@ -212,7 +229,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     )
             self.assertEqual(len(logs.records), 1)
         with patch(
-            "control_plane.release_invitation.publish_release_invitation", return_value=False
+            "control_plane.release_invitation._settle_completed_invitation", return_value=None
         ):
             advance_release_invitations(
                 store=self.store, control_plane_root=self.root, backoff=backoff
@@ -883,13 +900,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn("#43", self.review.invitation_notes_error)
         self.assertNotIn(self.review.invitation_notes_error, self.review.blockers)
         backoff = ReleaseInvitationBackoff()
-        with self.assertLogs("control_plane.release_invitation", level="WARNING") as logs:
-            for _ in range(3):
-                advance_release_invitations(
-                    store=self.store, control_plane_root=self.root, backoff=backoff
-                )
-        self.assertEqual(len(logs.output), 1)
-        self.assertIn(self.review.invitation_notes_error, logs.output[0])
+        with self.assertRaises(ReleaseInvitationNotesUnavailable):
+            self.publish(backoff)
         self.assertEqual(self.posts, [])
         self.store.close()
         self.store = PostgresRecordStore(
@@ -2290,7 +2302,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         original = self.comments[0]["body"]
         accepted, _ = self.complete_release()
         posts = self.posts.copy()
-        self.assertFalse(self.publish())
+        advance_release_invitations(store=self.store, control_plane_root=self.root)
         self.assertEqual(self.issues[0]["state"], "closed")
         for line in original.splitlines():
             if "@" not in line:

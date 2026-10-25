@@ -247,7 +247,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             patch("control_plane.release_invitation.publish_release_invitation") as publish,
         ):
             self.advance()
-            publish.assert_called_once()
+            publish.assert_not_called()
         self.assertEqual(self.issue["state"], "closed")
 
     def test_temporary_hotfix_keeps_its_pending_client_review_open(self) -> None:

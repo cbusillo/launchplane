@@ -192,52 +192,35 @@ changes the digest and requires review of the displayed checklist. Unaffected
 items omit the false marker, preserving historical digests. Prior preview
 acceptance annotations still do not change the digest.
 
-When the checklist is complete and only the Client's approval remains, the
-stable worker posts a release-review request mentioning the recorded Client,
-through the existing Launchplane Delivery App's release-record access. It links
-the Client review page and explains whether Accept starts the gated production
-release or records approval while releases are held. Incomplete or unavailable
-checklists, prelaunch/retired products, standing Director acceptance and candidates
-with a recorded decision receive no request. Qualified engineering-only candidates
-also open a request automatically. Its **Why now:** line explains that engineering
-updates are ready for production and need release acceptance. Release-only test
-steps still appear when present; otherwise it says there is nothing new to test.
-An admin can also open a qualified request from the review page's **Ask the Client now** section
-(`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound to the
-checklist digest) with a plain-language reason. The invitation shows that reason
-on a **Why now:** line, kept through later silent updates, and the Client accepts
-it like any other release. Opening records no decision and starts nothing; an
-already open request keeps its original reason without a new notification. The
-page confirms that a request is open; a delivery error asks the admin to reload
-and retry because the request may already have reached the Client. The urgent
-opening control is hidden while a temporary hotfix awaits review or production
-already runs the testing version. Missing access is reported; no grant
-or credential is created. The worker uses Launchplane's own bootstrap
-`LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
-per unchanged profile and lane versions until delivery. After a confirmed receipt,
-the worker remembers delivery in memory until the reminder is due or the candidate
-changes; a replica restart reads the durable receipt again. Once the single
-reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
-lane versions is settled only while its checklist digest matches the current checklist; each worker
-rechecks that at most every 30 minutes. Edited test notes that change the checklist send the
-Client a fresh request, including engineering-only candidates. This cache never
-supplies acceptance or bypasses release checks.
+A merge never asks the Client to release. Docs-only changes, engineering changes,
+and Client-accepted changes wait for a decided release. A differing testing
+artifact is not a release decision. The stable worker settles completed
+invitations and release records; it does not open requests, refresh them or send
+reminders based on lane changes.
 
-An accepted release sends no new request or reminder while it waits on its
-unchanged production/testing versions or has started and still awaits a step
-or reconciliation. Before any step starts, a change to the accepted production
-or testing version permits a request for the newer qualified release snapshot.
-Temporary calendar, deploy-drain or acceptance-publication waits with unchanged
-versions keep the original acceptance and produce no new request.
-The acceptance covers the entire started run, including its rollback
-drill and re-promotion, even when production temporarily differs from testing or
-testing advances. A started run whose continuation needs its accepted testing
-version waits for that version to be re-qualified instead of asking again.
-Publication rechecks the run after looking up its destination.
-Once the run finishes, the existing settle path reconciles all invitations for
-that released version, including a stray request posted after acceptance.
-An automatic engineering why-now line is refreshed as the release contents change;
-an admin-supplied reason on an existing request stays unchanged.
+An admin can open a qualified request from the review page's **Ask the Client now**
+section (`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound
+to the checklist digest) with a plain-language reason. The shared publisher uses
+the Launchplane Delivery App's existing release-record access, links the Client
+review page and explains whether Accept starts the gated production release or
+records approval while releases are held. The invitation keeps the reason on a
+**Why now:** line. Opening starts no release; an already open request keeps its
+original reason without a new notification. Delivery errors ask the admin to
+reload because the request may already have reached the Client. The control is
+hidden while a temporary hotfix awaits review or production already runs the
+testing version. Missing access is reported; no grant or credential is created.
+The public review link uses Launchplane's own bootstrap `LAUNCHPLANE_PUBLIC_URL`.
+Durable Director and finish-line request records are the remaining Q882 source
+slice tracked by #4898.
+
+The publisher refuses incomplete or unavailable checklists, prelaunch/retired
+products, standing Director acceptance and candidates with a current Client
+decision. An accepted release sends no new request or reminder while it waits
+on unchanged production/testing versions or has started and still awaits a step
+or reconciliation. The acceptance covers its entire started run, including its
+rollback drill and re-promotion. Publication rechecks the run after looking up
+its destination. Once the run finishes, the worker reconciles invitations for
+that released version without asking the Client again.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
@@ -326,8 +309,8 @@ working with these changes so they can go live. This is the site's release
 decision, separate from the one-change preview decision described in
 [Client review](owner-acceptance.md).
 
-Before the Client decides, a candidate containing new Client-facing changes posts
-one new invitation mentioning the Client and naming only the additions. A batch
+On a deliberate publication before the Client decides, a candidate containing
+new Client-facing changes posts one new invitation mentioning the Client and naming only the additions. A batch
 of changes gets one invitation. Client-facing evidence is an existing product
 preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
@@ -336,7 +319,8 @@ Valid engineering release-test notes under the
 also appear in an existing mixed request or a deliberately opened urgent request.
 The Client sees the real test steps and the source change, without the engineering
 directive. Those steps alone never open an automatic request or send a new ping;
-only the preview-review evidence above supplies that notification trigger.
+preview-review evidence classifies additions within a deliberate publication.
+Neither kind of change starts publication from the worker.
 An addition note still names only the Client-facing additions; the next silent
 update restores the full testing list, including the release-test steps.
 Existing requests refresh missing or corrected release-test steps silently before
