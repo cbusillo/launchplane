@@ -3067,50 +3067,10 @@ preflights.
   the same transaction. Same-key retries replay the original response, changed
   payloads conflict, and a lost HTTP response does not permit a second claim or
   rerun mutation.
-- The local worker handoff is `uv run launchplane every-code run` for polling or
-  `uv run launchplane every-code run-once` for a single scan. Each pass applies
-  trusted PR feedback, routes failed checks back to the owning session, then claims
-  at most one queued request. Request handoff terminates any stale deterministic
-  tmux session before launching a newly claimed attempt, records `running` or
-  immediate `blocked` status, and wraps the visible command so terminal success
-  or failure calls `uv run launchplane every-code finish` with the fencing token
-  captured at launch. A recovered or superseded session therefore cannot read a
-  newer token and finish as the new holder.
-- A Mac host can leave the poller running with
-  `uv run launchplane every-code start`, inspect it with
-  `uv run launchplane every-code status`, and stop it with
-  `uv run launchplane every-code stop`. The supervisor writes a pid file and log
-  under `state/every-code-worker/` by default while the worker-created tmux
-  sessions remain visible and independently attachable.
-- Worker prompts require closeout hygiene, including the Love Gate, before a PR
-  can be merged or an issue can close. After a terminal session is gone, worker
-  maintenance removes clean Every Code worktrees and their local `every-code/*`
-  branches from the source checkout. Dirty or suspicious worktrees are left in
-  place for admin inspection.
-- Admins can reconcile older local cleanup residue with
-  `uv run launchplane every-code reconcile-cleanup`. The command inventories
-  saved session JSON, worker worktree directories, registered Git worktrees, and
-  linked local `every-code/*` branches. It defaults to dry-run/report mode;
-  `--apply` is required before it removes terminal, worker-owned, clean state.
-  Missing records, active tmux sessions, dirty or uninspectable worktrees,
-  unknown source checkouts, unlinked branches, and paths outside the worker
-  state root are preserved and reported with skip reasons.
-- For a remote Launchplane database, run the Mac worker through the service API
-  instead of sharing DB credentials with the local host. Configure the service
-  and worker with the same `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`, then start the
-  worker with `uv run launchplane every-code start --service-url https://...`.
-  The foreground `run`, `run-once`, and `finish` commands support the same
-  `--service-url` mode. Direct `--database-url` and file-backed state remain
-  local/dev fallbacks.
-- Missed or manually inspected issue labels can be reconciled without polling by
-  running `uv run launchplane every-code reconcile-issue` with the known issue
-  repository, number, URL, title, and current labels. Reconciliation creates the
-  same deterministic request id when the trigger label is present, dedupes an
-  existing request without overwriting worker state, and skips issues that do
-  not currently carry the trigger label.
-- Launchplane owns this coordination record so GitHub webhooks, reconciliation,
-  local Mac workers, and the future Launchplane UI share one inspectable source of
-  truth instead of relying on GitHub API polling or local shell lock files.
+- The retired worker runner, daemon, session launchers, reconciliation and
+  completion CLI commands are removed. `launchplane every-code review-run-once`
+  remains the advisory engineering-review entrypoint. Historical record reads,
+  workspace paths and preview branch matching remain available.
 - The retired `POST /v1/every-code/github-webhook` route is removed. Label,
   feedback, and close deliveries cannot change these records through it.
   Existing persisted records are retained until the separately authorized
