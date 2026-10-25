@@ -117,10 +117,12 @@ def destroy_dokploy_resource(
                 cleanup_errors=tuple(cleanup_errors),
             )
 
+    resource_mutation_attempted = False
     try:
         with guard():
             if before_provider_mutation is not None:
                 before_provider_mutation(f"{resource_type}_destroy")
+            resource_mutation_attempted = True
             _delete_preview_resource(
                 host=host,
                 token=token,
@@ -130,7 +132,11 @@ def destroy_dokploy_resource(
             )
         steps.append(PreviewResourceDestroyStep(f"{resource_type}_delete", normalized_resource_id))
     except click.ClickException as exc:
-        if not (missing_resource_is_clean and _is_resource_delete_not_found(exc)):
+        if not (
+            missing_resource_is_clean
+            and resource_mutation_attempted
+            and _is_resource_delete_not_found(exc)
+        ):
             cleanup_errors.append(f"{resource_type} cleanup failed: {exc}")
         else:
             steps.append(
