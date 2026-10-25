@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 from types import SimpleNamespace
@@ -441,6 +442,68 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
     def test_module_update_does_not_hold_the_shared_source_lock(self) -> None:
         self.run_script()
         self.assertTrue(self.module_lock_available)
+
+    def test_same_target_refuses_another_snapshot_before_inspecting_runtime(self) -> None:
+        command = self.command
+        checked = False
+
+        def concurrent(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal checked
+            if not checked:
+                checked = True
+                with self.assertRaises(BlockingIOError):
+                    self.run_script(
+                        snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+                    )
+                self.assertFalse(self.calls)
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=concurrent):
+            self.run_script()
+        self.assertTrue(checked)
+
+    def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
+        command = self.command
+        child: subprocess.Popen[bytes] | None = None
+        self.runner_failure = True
+
+        def inherited(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal child
+            descriptors = kwargs.get("pass_fds", ())
+            self.assertTrue(descriptors, arguments)
+            if arguments[-1:] == ["clean-snapshot"]:
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; print('ready', flush=True); sys.stdin.read()",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    pass_fds=descriptors,
+                )
+                self.assertIsNotNone(child.stdout)
+                assert child.stdout is not None
+                self.assertEqual(child.stdout.readline(), b"ready\n")
+            return command(arguments, **kwargs)
+
+        try:
+            with (
+                patch.object(self, "command", side_effect=inherited),
+                self.assertRaises(RuntimeError),
+            ):
+                self.run_script()
+            self.assertIsNotNone(child)
+            self.calls.clear()
+            with self.assertRaises(BlockingIOError):
+                self.run_script()
+            self.assertFalse(self.calls)
+        finally:
+            if child is not None:
+                child.communicate(timeout=10)
+        self.runner_failure = False
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_abandoned_attempt_releases_snapshot_only_after_every_backing_is_gone(self) -> None:
         self.runner_failure = True

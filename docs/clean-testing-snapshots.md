@@ -87,6 +87,13 @@ data. Later builds keep Client edits. The marker inherited from testing cannot
 prove a preview restore. Retry evidence records both the requested snapshot and
 the original snapshot retained by the attempt.
 
+Each preview restore takes a nonblocking exclusive lock for its Compose project
+before runtime inspection. The lock spans copying, restore, sanitization, module
+work and cleanup. Every host subprocess inherits its descriptor, so a retry
+refuses while an earlier run or its surviving children still hold it. Different
+preview targets can restore concurrently. The persistent target lock is separate
+from the shared snapshot read lock, which is released after copying.
+
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. The #4057 capability provides filestore reflinks where the
 actual filesystem supports them, with full-copy fallback. It does not provide

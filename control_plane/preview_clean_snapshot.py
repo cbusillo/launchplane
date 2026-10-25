@@ -80,7 +80,7 @@ import uuid
 
 def command(arguments, *, stdin=None):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         raise RuntimeError('Clean snapshot preview operation failed')
     return result.stdout
@@ -240,9 +240,21 @@ def restore_preview_snapshot(containers, source_lock):
 
 
 import fcntl
-containers = inspect_copy_runtime(spec, expected_instance='preview')
-with (clean_snapshot_root(spec['snapshot']['snapshot_id']).parent / 'snapshot.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_SH)
-    restore_preview_snapshot(containers, lock)
+root = clean_snapshot_root(spec['snapshot']['snapshot_id']).parent
+locks = root / 'preview-locks'
+locks.mkdir(mode=0o700, exist_ok=True)
+if locks.resolve() != locks.absolute():
+    raise RuntimeError('Preview target lock custody is aliased')
+target = hashlib.sha256(spec['compose_project'].encode()).hexdigest()
+descriptor = os.open(locks / (target + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    inherited_lock_descriptors = (descriptor,)
+    containers = inspect_copy_runtime(spec, expected_instance='preview')
+    with (root / 'snapshot.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        restore_preview_snapshot(containers, lock)
+finally:
+    os.close(descriptor)
 """
 )
