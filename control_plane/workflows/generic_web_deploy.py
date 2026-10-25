@@ -809,6 +809,7 @@ def _execute_generic_web_deploy_unserialized(
     application_lifecycle: GenericWebApplicationLifecycle | None = None
     runtime_deadline: float | None = None
     runtime_failure_proved = False
+    runtime_failure_evidence: dict[str, str] = {}
 
     def write_pending(record: DeploymentRecord) -> None:
         if execution_recorder is not None:
@@ -1099,6 +1100,7 @@ def _execute_generic_web_deploy_unserialized(
                 deployment_record_id=record_id,
                 wait=True,
                 deadline=runtime_deadline,
+                failure_evidence=runtime_failure_evidence,
             )
             if qualified.outcome != "present":
                 raise click.ClickException("Application testing runtime rollout is not qualified.")
@@ -1240,12 +1242,11 @@ def _execute_generic_web_deploy_unserialized(
                         deployment_record_id=record_id,
                         wait=True,
                         deadline=runtime_deadline,
+                        failure_evidence=runtime_failure_evidence,
                     )
                     provider_failure_observed = failed.outcome == "present" and not (
                         generic_web_provider_deployment_succeeded(failed.deployment_status)
                     )
-                    if provider_failure_observed:
-                        provider_deployment_observation = failed
         if (
             execution_recorder is not None
             and runtime_deadline is not None
@@ -1314,11 +1315,11 @@ def _execute_generic_web_deploy_unserialized(
                 detail=str(exc),
                 evidence=post_deploy_update.evidence,
             )
-        if provider_failure_observed and provider_deployment_observation is not None:
+        if provider_failure_observed:
             post_deploy_update = post_deploy_update.model_copy(
                 update={
                     "evidence": {
-                        **provider_deployment_observation.runtime_failure_evidence,
+                        **runtime_failure_evidence,
                         **post_deploy_update.evidence,
                     }
                 }

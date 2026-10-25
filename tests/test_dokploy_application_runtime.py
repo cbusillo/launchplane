@@ -14,6 +14,7 @@ from control_plane.dokploy.application_runtime import (
     application_runtime_matches,
     fetch_application_runtime,
     MAX_APPLICATION_ENVIRONMENT_KEYS,
+    MAX_APPLICATION_TASK_DETAIL_LENGTH,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 from datetime import datetime, timezone
@@ -426,7 +427,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertIsNone(malformed["status_timestamp"])
         message = malformed["message"]
         assert isinstance(message, str)
-        self.assertLess(len(message), len(long_message))
+        self.assertLessEqual(len(message), MAX_APPLICATION_TASK_DETAIL_LENGTH)
         self.assertNotIn("synthetic-private", str(malformed))
 
     def test_exact_convergence_proves_actual_image_digest_and_exposes_no_values(self) -> None:
@@ -814,7 +815,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                     )
                 self.assertEqual(result.outcome, expected)
                 if expected == "present":
-                    self.assertEqual(result.model_dump(), job.model_dump())
+                    self.assertEqual(result, job)
         self.service.pop("UpdateStatus")
         spec = self.service["Spec"]
         assert isinstance(spec, dict)
@@ -839,7 +840,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 observation=initial_job,
                 deployment_record_id="deployment-1",
             )
-        self.assertEqual(result.model_dump(), initial_job.model_dump())
+        self.assertEqual(result, initial_job)
         with patch.object(
             provider,
             "observe_testing_application_runtime",

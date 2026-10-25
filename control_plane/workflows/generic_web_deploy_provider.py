@@ -112,6 +112,7 @@ class GenericWebApplicationExecutionProvider(Protocol):
 
 
 _GENERIC_WEB_RECONCILIATION_KEY_PREFIX = "generic-web-provider-target:"
+APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY = "application_runtime_failure"
 _GENERIC_WEB_PROVIDER_SUCCESS_STATUSES = frozenset(
     {"success", "succeeded", "done", "completed", "healthy", "finished"}
 )
@@ -371,19 +372,6 @@ class GenericWebProviderDeploymentObservation(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     error_message: str = ""
-    runtime_failure_evidence: dict[str, str] = Field(default_factory=dict, exclude=True)
-
-    def with_application_failure(
-        self, runtime: ApplicationRuntimeObservation, expected_image: str
-    ) -> GenericWebProviderDeploymentObservation:
-        evidence = summarize_application_runtime(
-            runtime, expected_image=expected_image, observed_at=datetime.now(UTC)
-        )
-        return self.model_copy(
-            update={
-                "runtime_failure_evidence": {"application_runtime_failure": json.dumps(evidence)}
-            }
-        )
 
     @model_validator(mode="after")
     def _validate_terminal_evidence(self) -> "GenericWebProviderDeploymentObservation":
@@ -701,6 +689,7 @@ def qualify_testing_application_observation(
     deployment_record_id: str,
     wait: bool = False,
     deadline: float | None = None,
+    failure_evidence: dict[str, str] | None = None,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
@@ -716,6 +705,33 @@ def qualify_testing_application_observation(
         return GenericWebProviderDeploymentObservation(outcome="unknown")
     if wait and deadline is None:
         deadline = monotonic() + target.deploy_timeout_seconds
+
+    def retain_failure(runtime: ApplicationRuntimeObservation) -> None:
+        if failure_evidence is None:
+            return
+        summary = summarize_application_runtime(
+            runtime,
+            expected_image=target.ship_request.artifact_id,
+            observed_at=datetime.now(UTC),
+        )
+        snapshot = {
+            key: summary[key]
+            for key in (
+                "application_id",
+                "expected_image",
+                "observed_at",
+                "rollout_state",
+                "rollout_started_at",
+                "service_image",
+                "service_deployment_record_id",
+                "tasks",
+                "task_count",
+                "task_evidence_complete",
+                "details_truncated",
+            )
+        }
+        failure_evidence.setdefault(APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY, json.dumps(snapshot))
+
     while True:
         runtime: ApplicationRuntimeObservation | None
         try:
@@ -728,9 +744,8 @@ def qualify_testing_application_observation(
             if observation.deployment_status in {"error", "failed"} and runtime.rollout_settled:
                 # A pull/login failure can end before any service update. This
                 # proves a failed, currently settled effect, never its absence.
-                return GenericWebProviderDeploymentFailed(
-                    observation
-                ).observation.with_application_failure(runtime, target.ship_request.artifact_id)
+                retain_failure(runtime)
+                return GenericWebProviderDeploymentFailed(observation).observation
             if application_runtime_matches(
                 runtime,
                 artifact_reference=target.ship_request.artifact_id,
@@ -762,6 +777,7 @@ def qualify_testing_application_observation(
                     )
                     belongs_to_attempt = started <= rollout_started <= finished
                 if belongs_to_attempt:
+                    retain_failure(runtime)
                     return observation.model_copy(
                         update={
                             "deployment_status": "unhealthy",
@@ -770,7 +786,7 @@ def qualify_testing_application_observation(
                                 f"provider job status={observation.deployment_status}."
                             ),
                         }
-                    ).with_application_failure(runtime, target.ship_request.artifact_id)
+                    )
         except (ValueError, RuntimeError, click.ClickException):
             runtime = None
         remaining = deadline - monotonic() if deadline is not None else 0
@@ -790,6 +806,7 @@ def qualify_testing_application_observation(
                     deployment_record_id=deployment_record_id,
                 )
             ):
+                retain_failure(runtime)
                 return observation.model_copy(
                     update={
                         "deployment_status": "unhealthy",
@@ -798,7 +815,7 @@ def qualify_testing_application_observation(
                             f"deployment deadline; provider job status={observation.deployment_status}."
                         ),
                     }
-                ).with_application_failure(runtime, target.ship_request.artifact_id)
+                )
             return GenericWebProviderDeploymentObservation(outcome="unknown")
         sleep(min(1.0, remaining))
 

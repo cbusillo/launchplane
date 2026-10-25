@@ -685,7 +685,15 @@ class GenericWebDeployTests(unittest.TestCase):
                 deployment_record_id=record_id,
             )
         saved = store.deployments[0]
-        evidence = json.loads(saved.post_deploy_update.evidence["application_runtime_failure"])
+        from control_plane.workflows.generic_web_deploy_provider import (
+            APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY,
+        )
+
+        evidence = json.loads(
+            saved.post_deploy_update.evidence[APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY]
+        )
+        self.assertNotIn("environment_keys", str(evidence))
+        self.assertNotIn("containers", evidence)
         self.assertEqual(evidence["tasks"][0]["deployment_record_id"], record_id)
         self.assertEqual(evidence["tasks"][0]["task_id"], "candidate-task")
         self.assertEqual(evidence["tasks"][0]["exit_code"], 23)

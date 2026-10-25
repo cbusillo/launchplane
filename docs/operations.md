@@ -2724,6 +2724,9 @@ record, before task churn can erase the candidate. Existing failure evidence is
 preserved on recovery. Diagnostics do not enter recovery digests or alter rollout
 qualification. Application log tails have no task attribution or complete-history
 guarantee, so old-image output must not be assigned to a failed candidate.
+Bind each task error with that task's own deployment record ID and image.
+Unknown or unqualified outcomes may have no retained failure snapshot; missing
+evidence does not prove that no task failed.
 
 The read rechecks provider placement and the tracked lane binding before
 returning. `diagnostic_complete`, task coverage, observation time and
