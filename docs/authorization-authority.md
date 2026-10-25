@@ -437,8 +437,11 @@ preview, with evidence and binding checks. These observations qualify cleanup
 only; they cannot admit runtime sync or another preview mutation. Unknown facts hold cleanup. Testing
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
-An active, unique service
-preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
+A unique service preview is required. A fresh issued refresh plan can rebuild
+an owned destroyed preview, retaining its history until the new generation
+passes. The issued plan must postdate the completed teardown; unknown teardown
+authority and stale plans still refuse. Other disposable-lane operations do not
+gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
 `/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.

@@ -339,8 +339,12 @@ def require_disposable_lane(
     if preview_operation:
         if not owned_preview or profile.driver_id != "odoo":
             raise DisposableLaneSafetyUnknown("Preview operations require an owned Odoo preview.")
-        if preview_operation == "refresh" and preview is not None and preview.state != "active":
-            raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
+        if (
+            preview_operation == "refresh"
+            and preview is not None
+            and preview.state not in {"active", "destroyed"}
+        ):
+            raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
         if evidence is not None and (
             usage.protected
             or evidence.data == "only_copy"
@@ -430,6 +434,8 @@ def resolve_disposable_preview(
     profile: LaunchplaneProductProfileRecord,
     context: str,
     instance: str,
+    *,
+    allow_destroyed: bool = False,
 ) -> PreviewRecord:
     """Resolve an actual uniquely owned preview; a slug alone is never authority."""
     if instance == "prod" or context != profile.preview.context:
@@ -457,7 +463,7 @@ def resolve_disposable_preview(
             profile.repository,
             profile.repository.partition("/")[2],
         }
-        or matches[0].state == "destroyed"
+        or (matches[0].state == "destroyed" and not allow_destroyed)
     ):
         raise DisposableLaneSafetyUnknown(
             "The preview is absent, ambiguous or owned by another product."

@@ -7397,7 +7397,11 @@ def create_launchplane_fastapi_app(
                 if current_profile != product_profile:
                     raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
                 preview = resolve_disposable_preview(
-                    lane_store, current_profile, issued_plan.context, issued_plan.preview_slug
+                    lane_store,
+                    current_profile,
+                    issued_plan.context,
+                    issued_plan.preview_slug,
+                    allow_destroyed=issued_plan.operation == "refresh",
                 )
                 compose_id = issued_plan.dry_run_plan.compose_ref
                 if not compose_id or compose_id.startswith("${created."):

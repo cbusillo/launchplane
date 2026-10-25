@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
+    _odoo_preview_destroy_reason,
     issue_odoo_preview_apply_plan,
 )
 from control_plane.service_auth import (
@@ -480,6 +481,53 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
                 self.profile.product, self.preview.context, "pr-42"
             )
         )
+
+    async def test_destroyed_preview_can_refresh_without_rewriting_its_history(self) -> None:
+        generation = self.store.read_preview_generation_record(self.preview.latest_generation_id)
+        self.preview = self.preview.model_copy(
+            update={
+                "state": "destroyed",
+                "serving_generation_id": "",
+                "destroy_reason": _odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=generation.requested_at
+                ),
+            }
+        )
+        self.store.write_preview_record(self.preview)
+        self.issue_preview()
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={"status": "blocked"},
+        ) as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        execute.assert_called_once()
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+
+    async def test_destroyed_preview_refresh_preserves_recorded_protection(self) -> None:
+        generation = self.store.read_preview_generation_record(self.preview.latest_generation_id)
+        self.preview = self.preview.model_copy(
+            update={
+                "state": "destroyed",
+                "serving_generation_id": "",
+                "destroy_reason": _odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=generation.requested_at
+                ),
+            }
+        )
+        self.store.write_preview_record(self.preview)
+        self.issue_preview()
+        for protection in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(protection=protection):
+                self.safety(**protection)
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await self.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                execute.assert_not_called()
 
     async def test_existing_preview_rechecks_protection_between_effects(self) -> None:
         for operation in ("refresh", "destroy"):
